@@ -1,8 +1,8 @@
-# 🔮 Meteoracle
+# 🌩️ Meteoracle
 
-A strategy-driven LP automation bot for [Meteora DLMM](https://meteora.ag) on Solana.
+> Multi-strategy Meteora DLMM LP automation bot with live dashboard
 
-Meteoracle scans memecoins and DeFi tokens, classifies them into strategy buckets, opens Meteora DLMM positions when filters match, monitors range/fees/risk, and closes or rebalances automatically when conditions break.
+Meteoracle is a strategy-driven liquidity providing bot for [Meteora DLMM](https://meteora.ag) on Solana. It scans memecoins, classifies them into strategy buckets, deploys positions automatically when filters match, monitors range health, and closes or rebalances positions when exit conditions trigger.
 
 ---
 
@@ -10,61 +10,62 @@ Meteoracle scans memecoins and DeFi tokens, classifies them into strategy bucket
 
 ```
 meteoracle/
-├── app/                     ← Next.js 14 App Router (dashboard + API routes)
-├── bot/                     ← Scanner, scorer, executor, monitor (worker logic)
-├── strategies/              ← Strategy registry (evil-panda, scalp-spike, etc.)
-├── components/              ← Dashboard UI components
-├── lib/                     ← Supabase, Redis, shared types
-└── supabase/migrations/     ← DB schema
+├── app/                    ← Next.js 14 App Router
+│   ├── page.tsx            ← Dashboard home
+│   ├── globals.css
+│   ├── layout.tsx
+│   └── api/
+│       ├── bot/tick/       ← Cron endpoint
+│       ├── positions/      ← REST stubs
+│       ├── candidates/
+│       └── strategies/
+├── bot/
+│   ├── scanner.ts          ← DexScreener polling
+│   ├── scorer.ts           ← Filter + score logic
+│   ├── executor.ts         ← Meteora SDK calls
+│   └── monitor.ts          ← Position range checks
+├── components/
+│   ├── layout/
+│   ├── dashboard/
+│   └── ui/
+├── lib/
+│   ├── types.ts            ← Shared interfaces
+│   ├── supabase.ts
+│   └── redis.ts            ← Vercel KV wrapper
+├── strategies/
+│   ├── index.ts            ← Strategy registry
+│   └── evil-panda.ts       ← Evil Panda strategy
+└── supabase/
+    └── migrations/
+        └── 001_initial_schema.sql
 ```
-
-### Layers
-
-| Layer | What it does |
-|---|---|
-| **Bot Engine** | Background worker: scans tokens, scores, opens/closes positions |
-| **API Routes** | Next.js edge functions bridging bot state and dashboard |
-| **Dashboard** | Real-time position monitor, candidate feed, strategy config |
 
 ---
 
 ## Tech Stack
 
-| Tool | Purpose | Cost |
+| Layer | Tool | Cost |
 |---|---|---|
-| [Vercel](https://vercel.com) | Hosting + Cron Jobs | Free |
-| [Supabase](https://supabase.com) | Postgres DB + Realtime | Free (500MB) |
-| [Vercel KV](https://vercel.com/storage/kv) | Redis cache + pub/sub | Free tier |
-| [Helius](https://helius.dev) | Solana RPC | Free (100k req/day) |
-| [DexScreener API](https://docs.dexscreener.com) | Token scanning | Free, no key |
-| [Rugcheck.xyz](https://rugcheck.xyz) | Rug risk scoring | Free |
-| Meteora DLMM SDK | On-chain LP execution | Open-source |
-
----
-
-## Strategies
-
-Each strategy is a self-contained TypeScript config in `strategies/`. A token is matched to at most one strategy per scan cycle — the highest-scoring match wins.
-
-| Strategy | Target | Range | Bias |
-|---|---|---|---|
-| **Evil Panda** | High-volume memecoins | −70% to −95% wide | SOL-sided |
-| **Scalp Spike** | New launches with spike | ±10% narrow | Neutral |
-| **Stable Farm** | Stable/blue-chip pairs | ±2% tight | Balanced |
+| Frontend + API | Next.js 14 on Vercel | Free |
+| Database | Supabase (Postgres) | Free tier |
+| Cache / KV | Vercel KV (Redis) | Free tier |
+| Solana RPC | Helius | Free tier |
+| Token scanning | DexScreener API | Free, no key |
+| Rug checks | rugcheck.xyz API | Free |
+| Alerts | Telegram Bot API | Free |
+| LP execution | `@meteora-ag/dlmm` SDK | Open-source |
 
 ---
 
 ## Branch Strategy
 
-```
-main              ← Production dashboard (always deployable)
-feat/scanner      ← DexScreener + Helius scanner
-feat/strategies   ← Strategy engine + scorer
-feat/executor     ← Meteora SDK execution layer
-feat/monitor      ← Position range check + auto-close
-```
-
-Every feature is built on a branch, reviewed, then merged to `main`.
+| Branch | Purpose |
+|---|---|
+| `main` | Production dashboard |
+| `feat/scanner` | DexScreener scanner module |
+| `feat/strategies` | Strategy engine + filters |
+| `feat/executor` | Meteora SDK position execution |
+| `feat/monitor` | Position monitoring + auto-close |
 
 ---
 
@@ -78,51 +79,52 @@ cd meteoracle
 npm install
 ```
 
-### 2. Create accounts (all free)
+### 2. Environment variables
 
-- [Helius](https://helius.dev) — Solana RPC key
-- [Supabase](https://supabase.com) — new project
-- [Vercel](https://vercel.com) — connect repo, enable KV storage
-
-### 3. Configure environment
-
-Copy `.env.example` to `.env.local` and fill in your values.
-
-### 4. Run database migrations
+Copy `.env.example` to `.env.local` and fill in your keys:
 
 ```bash
-# In Supabase SQL editor, run:
-supabase/migrations/001_initial_schema.sql
+cp .env.example .env.local
 ```
 
-### 5. Run locally
+### 3. Set up Supabase
+
+Run the migration in `supabase/migrations/001_initial_schema.sql` via the Supabase SQL editor.
+
+### 4. Run locally
 
 ```bash
 npm run dev
 ```
 
----
+### 5. Deploy to Vercel
 
-## Environment Variables
+```bash
+npx vercel --prod
+```
 
-See `.env.example` for all required variables.
-
-| Variable | Description |
-|---|---|
-| `HELIUS_RPC_URL` | Solana RPC endpoint from Helius |
-| `WALLET_PRIVATE_KEY` | Bot wallet private key (base58) — keep secret! |
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_SERVICE_KEY` | Supabase service role key (server-side only) |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase URL (client-safe) |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key (client-safe) |
-| `KV_URL` | Vercel KV Redis URL |
-| `KV_REST_API_URL` | Vercel KV REST URL |
-| `KV_REST_API_TOKEN` | Vercel KV token |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token (optional alerts) |
-| `TELEGRAM_CHAT_ID` | Telegram chat ID (optional alerts) |
+Add all env vars from `.env.example` in the Vercel dashboard.
 
 ---
 
-## ⚠️ Disclaimer
+## Required Accounts (all free)
 
-This is experimental software. Trading and LP provision carry significant financial risk. Always test on devnet before using real funds. Never commit your private key.
+- [ ] [Helius](https://helius.dev) — Solana RPC key
+- [ ] [Supabase](https://supabase.com) — Postgres DB
+- [ ] [Vercel](https://vercel.com) — Hosting + KV + Cron
+- [ ] Telegram — Bot token via @BotFather
+
+---
+
+## Strategies
+
+### Evil Panda
+Wide-range (−70% to −95%) fee farming on high-volume memecoins. Accumulates SOL via fees even during price drawdowns. Uses single-sided SOL deposits and holds through volatility.
+
+More strategies will be added in `feat/strategies`.
+
+---
+
+## Disclaimer
+
+This is experimental software. Trading and LP automation carries significant financial risk. Never deposit funds you cannot afford to lose. Always test on devnet first.
