@@ -28,7 +28,24 @@ export interface Candidate {
   mcAtScan: number
   volume24h: number
   holderCount: number
+  rugcheckScore?: number
+  topHolderPct?: number
   scannedAt: string
+}
+
+export interface TokenMetrics {
+  address: string
+  symbol: string
+  mcUsd: number
+  volume24h: number
+  liquidityUsd: number
+  topHolderPct: number
+  holderCount: number
+  ageHours: number
+  rugcheckScore: number
+  priceUsd: number
+  poolAddress: string
+  dexId: string
 }
 
 export interface TokenFilters {
@@ -48,7 +65,7 @@ export interface PositionConfig {
   rangeDownPct: number
   rangeUpPct: number
   distributionType: 'spot' | 'curve' | 'bid-ask'
-  solBias: number // 0 = 50/50, 1 = 100% SOL
+  solBias: number
   maxSolPerPosition: number
 }
 
@@ -77,4 +94,24 @@ export interface BotLog {
   event: string
   payload?: Record<string, unknown>
   createdAt: string
+}
+
+// ---------------------------------------------------------------------------
+// DexScreener API types
+// ---------------------------------------------------------------------------
+
+export interface DexScreenerPair {
+  chainId: string
+  dexId: string
+  pairAddress: string
+  baseToken: { address: string; name: string; symbol: string }
+  quoteToken: { address: string; name: string; symbol: string }
+  priceUsd?: string
+  priceNative?: string
+  volume?: { h24: number; h6: number; h1: number; m5: number }
+  liquidity?: { usd: number; base: number; quote: number }
+  marketCap?: number
+  pairCreatedAt?: number  // unix ms
+  labels?: string[]
+  url?: string
 }
