@@ -177,16 +177,18 @@ export async function closePosition(
     const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
     const positionPubKey = new PublicKey(position.metadata?.positionPubKey ?? '')
 
-    // 1. Claim all fees first (if strategy says to)
+    // 1. Claim all fees first — claimAllRewards returns Transaction[]
     let feesClaimedSol = 0
     if (position.strategy_id) {
       try {
-        const claimTx = await dlmmPool.claimAllRewards({
+        const claimTxs = await dlmmPool.claimAllRewards({
           owner: wallet.publicKey,
           positions: [{ publicKey: positionPubKey } as never],
         })
-        const claimSig = await sendLegacyTx(claimTx, [wallet])
-        console.log(`${label} fees claimed ✔ sig: ${claimSig}`)
+        for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
+          const claimSig = await sendLegacyTx(tx, [wallet])
+          console.log(`${label} fees claimed ✔ sig: ${claimSig}`)
+        }
         // TODO: parse actual fee amounts from tx logs
         feesClaimedSol = position.fees_earned_sol ?? 0
       } catch (err) {
