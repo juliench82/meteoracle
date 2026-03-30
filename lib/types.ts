@@ -108,6 +108,7 @@ export interface DexScreenerPair {
   volume?: { h24: number; h6: number; h1: number; m5: number }
   liquidity?: { usd: number; base: number; quote: number }
   marketCap?: number
+  fdv?: number
   pairCreatedAt?: number
   labels?: string[]
   url?: string
