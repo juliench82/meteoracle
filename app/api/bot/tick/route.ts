@@ -1,8 +1,12 @@
 import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
+import { monitorPositions } from '@/bot/monitor'
 import { createServerClient } from '@/lib/supabase'
 
-// Cron endpoint — called every minute by Vercel Cron (vercel.json)
+/**
+ * Main bot tick — called every minute by Vercel Cron.
+ * Order: monitor first (time-sensitive exits), then scan for new candidates.
+ */
 export async function POST() {
   const botEnabled = process.env.BOT_ENABLED === 'true'
 
@@ -17,37 +21,35 @@ export async function POST() {
   const supabase = createServerClient()
 
   try {
-    const result = await runScanner()
+    // 1. Monitor open positions first — exits are time-sensitive
+    const monitorResult = await monitorPositions()
 
-    // Log the tick to Supabase
+    // 2. Scan for new candidates
+    const scanResult = await runScanner()
+
+    const payload = {
+      monitor: monitorResult,
+      scanner: scanResult,
+      durationMs: Date.now() - startedAt,
+    }
+
     await supabase.from('bot_logs').insert({
       level: 'info',
-      event: 'scanner_tick',
-      payload: {
-        ...result,
-        durationMs: Date.now() - startedAt,
-      },
+      event: 'bot_tick',
+      payload,
     })
 
-    return NextResponse.json({
-      status: 'ok',
-      ts: new Date().toISOString(),
-      durationMs: Date.now() - startedAt,
-      ...result,
-    })
+    return NextResponse.json({ status: 'ok', ts: new Date().toISOString(), ...payload })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
 
     await supabase.from('bot_logs').insert({
       level: 'error',
-      event: 'scanner_tick_failed',
+      event: 'bot_tick_failed',
       payload: { error: message, durationMs: Date.now() - startedAt },
     })
 
-    return NextResponse.json(
-      { status: 'error', error: message },
-      { status: 500 }
-    )
+    return NextResponse.json({ status: 'error', error: message }, { status: 500 })
   }
 }
 
