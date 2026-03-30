@@ -11,11 +11,6 @@ import type { DexScreenerPair, TokenMetrics } from '@/lib/types'
 /**
  * Pre-filter thresholds — applied to raw DexScreener data BEFORE
  * any Helius calls. Keeps credit usage well within free tier.
- *
- * Conservative estimate:
- *   DexScreener returns ~500 new Solana pairs/hour
- *   Pre-filter keeps ~5% = ~25 tokens/hour passing to Helius
- *   25 * 3 credits * 24h = 1,800 credits/day (well under 100k limit)
  */
 const PRE_FILTER = {
   minVolume24hUsd: 50_000,
@@ -31,18 +26,11 @@ const MIN_SCORE_TO_OPEN = parseInt(process.env.MIN_SCORE_TO_OPEN ?? '65')
 /** Maximum concurrent open positions across all strategies */
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 
-/**
- * Main scanner — fetches new Solana pairs from DexScreener,
- * applies pre-filter, enriches survivors with Helius + Rugcheck,
- * matches to a strategy, scores, persists candidates,
- * and opens a position if score threshold is met.
- */
 export async function runScanner(): Promise<{ scanned: number; candidates: number; opened: number }> {
   console.log('[scanner] tick started')
 
   const supabase = createServerClient()
 
-  // Guard: check current open position count before doing any work
   const { count: openCount } = await supabase
     .from('positions')
     .select('id', { count: 'exact', head: true })
@@ -53,11 +41,9 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
     return { scanned: 0, candidates: 0, opened: 0 }
   }
 
-  // 1. Fetch new/trending Solana pairs from DexScreener
   const pairs = await fetchDexScreenerPairs()
   console.log(`[scanner] fetched ${pairs.length} pairs from DexScreener`)
 
-  // 2. Pre-filter using DexScreener data only (no API credits spent)
   const preFiltered = pairs.filter(applyPreFilter)
   console.log(`[scanner] ${preFiltered.length} passed pre-filter`)
 
@@ -65,7 +51,6 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
   let openedCount = 0
 
   for (const pair of preFiltered) {
-    // Stop opening more if we hit the cap mid-loop
     const { count: currentOpen } = await supabase
       .from('positions')
       .select('id', { count: 'exact', head: true })
@@ -75,7 +60,6 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
     try {
       const tokenAddress = pair.baseToken.address
 
-      // 3. Skip if already scanned recently (within 1h)
       const { data: existing } = await supabase
         .from('candidates')
         .select('id')
@@ -85,7 +69,6 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
 
       if (existing && existing.length > 0) continue
 
-      // 4. Skip if we already have an open position for this token
       const { data: existingPosition } = await supabase
         .from('positions')
         .select('id')
@@ -95,18 +78,15 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
 
       if (existingPosition && existingPosition.length > 0) continue
 
-      // 5. Helius: fetch holder data (credits spent here)
       const holderData = await checkHolders(tokenAddress)
       if (!holderData) continue
 
-      // 6. Rugcheck score (free)
       const rugScore = await checkRugscore(tokenAddress)
 
-      // 7. Build full token metrics
       const metrics: TokenMetrics = {
         address: tokenAddress,
         symbol: pair.baseToken.symbol,
-        mcUsd: pair.marketCap ?? 0,
+        mcUsd: pair.marketCap ?? pair.fdv ?? 0,
         volume24h: pair.volume?.h24 ?? 0,
         liquidityUsd: pair.liquidity?.usd ?? 0,
         topHolderPct: holderData.topHolderPct,
@@ -118,14 +98,11 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
         dexId: pair.dexId,
       }
 
-      // 8. Match to a strategy
       const strategy = getStrategyForToken(metrics)
       if (!strategy) continue
 
-      // 9. Score the candidate
       const score = scoreCandidate(metrics)
 
-      // 10. Persist candidate regardless of score
       await supabase.from('candidates').insert({
         token_address: metrics.address,
         symbol: metrics.symbol,
@@ -142,7 +119,6 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
       candidateCount++
       console.log(`[scanner] candidate: ${metrics.symbol} → ${strategy.id} (score: ${score})`)
 
-      // 11. Alert on new candidate
       await sendAlert({
         type: 'candidate_found',
         symbol: metrics.symbol,
@@ -152,7 +128,6 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
         volume24h: metrics.volume24h,
       })
 
-      // 12. Open position if score is high enough
       if (score >= MIN_SCORE_TO_OPEN) {
         console.log(`[scanner] score ${score} >= ${MIN_SCORE_TO_OPEN} — opening position for ${metrics.symbol}`)
         const positionId = await openPosition(metrics, strategy)
@@ -183,29 +158,38 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
 
 async function fetchDexScreenerPairs(): Promise<DexScreenerPair[]> {
   try {
+    // These endpoints return proper pair objects with volume/liquidity/marketCap
     const [newPairsRes, trendingRes] = await Promise.allSettled([
+      // New pairs on Solana (Meteora + Raydium)
       axios.get<{ pairs: DexScreenerPair[] }>(
-        'https://api.dexscreener.com/token-profiles/latest/v1',
+        'https://api.dexscreener.com/latest/dex/pairs/solana',
         { timeout: 10_000 }
       ),
+      // Trending Solana tokens by volume
       axios.get<{ pairs: DexScreenerPair[] }>(
-        'https://api.dexscreener.com/latest/dex/search?q=SOL&chainId=solana',
+        'https://api.dexscreener.com/latest/dex/search?q=solana&chainId=solana',
         { timeout: 10_000 }
       ),
     ])
 
     const pairs: DexScreenerPair[] = []
 
-    if (newPairsRes.status === 'fulfilled' && newPairsRes.value.data?.pairs) {
-      pairs.push(...newPairsRes.value.data.pairs.filter((p) => p.chainId === 'solana'))
+    if (newPairsRes.status === 'fulfilled') {
+      const data = newPairsRes.value.data
+      // endpoint returns { pairs: [...] } or an array directly
+      const list = Array.isArray(data) ? data : (data?.pairs ?? [])
+      pairs.push(...list.filter((p: DexScreenerPair) => p.chainId === 'solana'))
     }
-    if (trendingRes.status === 'fulfilled' && trendingRes.value.data?.pairs) {
-      pairs.push(...trendingRes.value.data.pairs)
+    if (trendingRes.status === 'fulfilled') {
+      const data = trendingRes.value.data
+      const list = Array.isArray(data) ? data : (data?.pairs ?? [])
+      pairs.push(...list.filter((p: DexScreenerPair) => p.chainId === 'solana'))
     }
 
+    // Deduplicate by pairAddress
     const seen = new Set<string>()
     return pairs.filter((p) => {
-      if (seen.has(p.pairAddress)) return false
+      if (!p?.pairAddress || seen.has(p.pairAddress)) return false
       seen.add(p.pairAddress)
       return true
     })
@@ -222,7 +206,7 @@ async function fetchDexScreenerPairs(): Promise<DexScreenerPair[]> {
 function applyPreFilter(pair: DexScreenerPair): boolean {
   const vol24h = pair.volume?.h24 ?? 0
   const liquidity = pair.liquidity?.usd ?? 0
-  const mc = pair.marketCap ?? 0
+  const mc = pair.marketCap ?? pair.fdv ?? 0
   const ageHours = getAgeHours(pair.pairCreatedAt)
 
   return (
