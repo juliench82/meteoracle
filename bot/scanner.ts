@@ -13,7 +13,8 @@ import type { TokenMetrics } from '@/lib/types'
 // Base:  https://dlmm.datapi.meteora.ag
 // Docs:  https://docs.meteora.ag/api-reference/dlmm
 // ---------------------------------------------------------------------------
-const METEORA_API = 'https://dlmm.datapi.meteora.ag'
+const METEORA_API  = 'https://dlmm.datapi.meteora.ag'
+const DEXSCREENER  = 'https://api.dexscreener.com/latest/dex/tokens'
 
 const PRE_FILTER = {
   minVolume24hUsd: 50_000,
@@ -48,20 +49,20 @@ interface MeteoraPool {
     base_fee_pct:  number
   }
   token_x: {
-    address:   string
-    symbol:    string
-    decimals:  number
-    holders:   number
+    address:    string
+    symbol:     string
+    decimals:   number
+    holders:    number
     market_cap: number
-    price:     number
+    price:      number
   }
   token_y: {
-    address:   string
-    symbol:    string
-    decimals:  number
-    holders:   number
+    address:    string
+    symbol:     string
+    decimals:   number
+    holders:    number
     market_cap: number
-    price:     number
+    price:      number
   }
   is_blacklisted: boolean
 }
@@ -113,8 +114,8 @@ export async function runScanner(): Promise<{
 
     try {
       // Identify the non-SOL token side
-      const isXSol    = pool.token_x.address === WSOL
-      const token     = isXSol ? pool.token_y : pool.token_x
+      const isXSol       = pool.token_x.address === WSOL
+      const token        = isXSol ? pool.token_y : pool.token_x
       const tokenAddress = token.address
       const symbol       = token.symbol
 
@@ -136,22 +137,57 @@ export async function runScanner(): Promise<{
         .limit(1)
       if (existingPosition && existingPosition.length > 0) continue
 
-      // Holder data (Helius) — API already has `holders` but we still need topHolderPct
+      // ── Holder data (Helius) ─────────────────────────────────────────────
+      // checkHolders() NEVER returns null; it always returns a HolderData
+      // with reliable=false on partial failure instead of null.
+      // We only fall back to token.holders (Meteora field) when Helius
+      // is entirely unreliable AND Meteora has a value.
       const holderData = await checkHolders(tokenAddress)
-      if (!holderData) continue
+
+      let holderCount   = holderData.holderCount
+      let topHolderPct  = holderData.topHolderPct
+
+      if (!holderData.reliable) {
+        // Use Meteora's holder count if DAS/RPC both failed
+        const meteoraHolders = token.holders ?? 0
+        if (meteoraHolders > holderCount) {
+          console.warn(
+            `[scanner] ${symbol} — using Meteora holder count (${meteoraHolders}) ` +
+            `because Helius was unreliable (got ${holderCount})`
+          )
+          holderCount = meteoraHolders
+        }
+      }
+
+      // ── Market cap ──────────────────────────────────────────────────────
+      // Meteora datapi may return market_cap=0 for some tokens.
+      // Primary: token.market_cap from Meteora
+      // Fallback: price × circulating supply from DexScreener
+      let mcUsd = token.market_cap ?? 0
+
+      if (!mcUsd || mcUsd < 1) {
+        mcUsd = await fetchMcFromDexScreener(tokenAddress, token.price)
+        if (!mcUsd || mcUsd < 1) {
+          console.log(
+            `[scanner] ${symbol} (${tokenAddress}) — skipped: could not resolve market_cap ` +
+            `(Meteora=${token.market_cap ?? 0}, DexScreener=${mcUsd})`
+          )
+          continue
+        }
+        console.log(`[scanner] ${symbol} — market_cap from DexScreener: $${mcUsd.toFixed(0)}`)
+      }
 
       const rugScore = await checkRugscore(tokenAddress)
-
       const ageHours = (Date.now() / 1000 - pool.created_at) / 3600
 
       const metrics: TokenMetrics = {
         address:       tokenAddress,
         symbol,
-        mcUsd:         token.market_cap ?? 0,
+        mcUsd,
         volume24h:     pool.volume['24h'],
         liquidityUsd:  pool.tvl,
-        topHolderPct:  holderData.topHolderPct,
-        holderCount:   holderData.holderCount,
+        topHolderPct,
+        holderCount,
         ageHours,
         rugcheckScore: rugScore,
         priceUsd:      token.price,
@@ -164,7 +200,7 @@ export async function runScanner(): Promise<{
         console.log(
           `[scanner] ${symbol} — no strategy matched` +
           ` (mc=$${metrics.mcUsd.toFixed(0)}, vol=$${metrics.volume24h.toFixed(0)},` +
-          ` holders=${metrics.holderCount}, rug=${rugScore}, age=${ageHours.toFixed(1)}h)`
+          ` holders=${metrics.holderCount}${!holderData.reliable ? '(est)' : ''}, rug=${rugScore}, age=${ageHours.toFixed(1)}h)`
         )
         continue
       }
@@ -218,6 +254,26 @@ export async function runScanner(): Promise<{
     `[scanner] done — scanned: ${pools.length}, candidates: ${candidateCount}, opened: ${openedCount}`
   )
   return { scanned: pools.length, candidates: candidateCount, opened: openedCount }
+}
+
+// ---------------------------------------------------------------------------
+// Market cap fallback via DexScreener
+// We compute mcUsd = priceUsd × fdv from DexScreener.  If the token has a
+// known FDV we use it directly; otherwise we skip (rather than invent a value).
+// ---------------------------------------------------------------------------
+async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Promise<number> {
+  try {
+    const res = await axios.get(`${DEXSCREENER}/${mint}`, { timeout: 6_000 })
+    const pairs: Array<{ fdv?: number; marketCap?: number }> = res.data?.pairs ?? []
+    if (pairs.length === 0) return 0
+
+    // Prefer the pair with the highest liquidity (first result is usually best)
+    const best = pairs[0]
+    return best.marketCap ?? best.fdv ?? 0
+  } catch (err) {
+    console.warn(`[scanner] DexScreener MC fallback failed for ${mint}:`, err)
+    return 0
+  }
 }
 
 // ---------------------------------------------------------------------------
