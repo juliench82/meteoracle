@@ -7,7 +7,7 @@ import { BotLogsPanel } from '@/components/dashboard/BotLogsPanel'
 import { createServerClient } from '@/lib/supabase'
 import type { Position, Candidate } from '@/lib/types'
 
-export const revalidate = 30 // revalidate every 30s
+export const dynamic = 'force-dynamic'
 
 export default async function DashboardPage() {
   const supabase = createServerClient()

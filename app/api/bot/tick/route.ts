@@ -3,6 +3,8 @@ import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { createServerClient } from '@/lib/supabase'
 
+export const dynamic = 'force-dynamic'
+
 /**
  * Main bot tick — called every minute by Vercel Cron.
  * Order: monitor first (time-sensitive exits), then scan for new candidates.
