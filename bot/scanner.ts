@@ -2,6 +2,8 @@ import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { getStrategyForToken } from '@/strategies'
 import { scoreCandidate } from './scorer'
+import { openPosition } from './executor'
+import { sendAlert } from './alerter'
 import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
 import type { DexScreenerPair, TokenMetrics } from '@/lib/types'
@@ -16,20 +18,40 @@ import type { DexScreenerPair, TokenMetrics } from '@/lib/types'
  *   25 * 3 credits * 24h = 1,800 credits/day (well under 100k limit)
  */
 const PRE_FILTER = {
-  minVolume24hUsd: 50_000,    // must have real trading activity
-  minLiquidityUsd: 20_000,    // enough liquidity to enter without slippage
-  maxMcUsd: 100_000_000,      // ignore mega-caps (not our target)
-  minMcUsd: 10_000,           // ignore dust/dead tokens
-  maxAgeHours: 72,            // ignore old tokens (strategies cap at 72h max)
+  minVolume24hUsd: 50_000,
+  minLiquidityUsd: 20_000,
+  maxMcUsd: 100_000_000,
+  minMcUsd: 10_000,
+  maxAgeHours: 72,
 }
+
+/** Minimum score a candidate must reach before opening a position */
+const MIN_SCORE_TO_OPEN = parseInt(process.env.MIN_SCORE_TO_OPEN ?? '65')
+
+/** Maximum concurrent open positions across all strategies */
+const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 
 /**
  * Main scanner — fetches new Solana pairs from DexScreener,
  * applies pre-filter, enriches survivors with Helius + Rugcheck,
- * matches to a strategy, and persists candidates to Supabase.
+ * matches to a strategy, scores, persists candidates,
+ * and opens a position if score threshold is met.
  */
-export async function runScanner(): Promise<{ scanned: number; candidates: number }> {
+export async function runScanner(): Promise<{ scanned: number; candidates: number; opened: number }> {
   console.log('[scanner] tick started')
+
+  const supabase = createServerClient()
+
+  // Guard: check current open position count before doing any work
+  const { count: openCount } = await supabase
+    .from('positions')
+    .select('id', { count: 'exact', head: true })
+    .in('status', ['active', 'out_of_range'])
+
+  if ((openCount ?? 0) >= MAX_CONCURRENT_POSITIONS) {
+    console.log(`[scanner] max concurrent positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS}) — skipping scan`)
+    return { scanned: 0, candidates: 0, opened: 0 }
+  }
 
   // 1. Fetch new/trending Solana pairs from DexScreener
   const pairs = await fetchDexScreenerPairs()
@@ -40,12 +62,20 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
   console.log(`[scanner] ${preFiltered.length} passed pre-filter`)
 
   let candidateCount = 0
-  const supabase = createServerClient()
+  let openedCount = 0
 
   for (const pair of preFiltered) {
+    // Stop opening more if we hit the cap mid-loop
+    const { count: currentOpen } = await supabase
+      .from('positions')
+      .select('id', { count: 'exact', head: true })
+      .in('status', ['active', 'out_of_range'])
+    if ((currentOpen ?? 0) >= MAX_CONCURRENT_POSITIONS) break
+
     try {
-      // 3. Skip if we've already scanned this token recently (within 1h)
       const tokenAddress = pair.baseToken.address
+
+      // 3. Skip if already scanned recently (within 1h)
       const { data: existing } = await supabase
         .from('candidates')
         .select('id')
@@ -55,14 +85,24 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
 
       if (existing && existing.length > 0) continue
 
-      // 4. Helius: fetch holder data (credits spent here)
+      // 4. Skip if we already have an open position for this token
+      const { data: existingPosition } = await supabase
+        .from('positions')
+        .select('id')
+        .eq('token_address', tokenAddress)
+        .in('status', ['active', 'out_of_range'])
+        .limit(1)
+
+      if (existingPosition && existingPosition.length > 0) continue
+
+      // 5. Helius: fetch holder data (credits spent here)
       const holderData = await checkHolders(tokenAddress)
       if (!holderData) continue
 
-      // 5. Rugcheck score (free, no rate limit concerns)
+      // 6. Rugcheck score (free)
       const rugScore = await checkRugscore(tokenAddress)
 
-      // 6. Build full token metrics
+      // 7. Build full token metrics
       const metrics: TokenMetrics = {
         address: tokenAddress,
         symbol: pair.baseToken.symbol,
@@ -78,14 +118,14 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
         dexId: pair.dexId,
       }
 
-      // 7. Match to a strategy
+      // 8. Match to a strategy
       const strategy = getStrategyForToken(metrics)
       if (!strategy) continue
 
-      // 8. Score the candidate
+      // 9. Score the candidate
       const score = scoreCandidate(metrics)
 
-      // 9. Persist to Supabase candidates table
+      // 10. Persist candidate regardless of score
       await supabase.from('candidates').insert({
         token_address: metrics.address,
         symbol: metrics.symbol,
@@ -101,13 +141,40 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
 
       candidateCount++
       console.log(`[scanner] candidate: ${metrics.symbol} → ${strategy.id} (score: ${score})`)
+
+      // 11. Alert on new candidate
+      await sendAlert({
+        type: 'candidate_found',
+        symbol: metrics.symbol,
+        strategy: strategy.id,
+        score,
+        mcUsd: metrics.mcUsd,
+        volume24h: metrics.volume24h,
+      })
+
+      // 12. Open position if score is high enough
+      if (score >= MIN_SCORE_TO_OPEN) {
+        console.log(`[scanner] score ${score} >= ${MIN_SCORE_TO_OPEN} — opening position for ${metrics.symbol}`)
+        const positionId = await openPosition(metrics, strategy)
+
+        if (positionId) {
+          openedCount++
+          await sendAlert({
+            type: 'position_opened',
+            symbol: metrics.symbol,
+            strategy: strategy.id,
+            solDeposited: strategy.position.maxSolPerPosition,
+            entryPrice: metrics.priceUsd,
+          })
+        }
+      }
     } catch (err) {
       console.error(`[scanner] error processing ${pair.baseToken.symbol}:`, err)
     }
   }
 
-  console.log(`[scanner] done. ${candidateCount} new candidates from ${preFiltered.length} pre-filtered`)
-  return { scanned: preFiltered.length, candidates: candidateCount }
+  console.log(`[scanner] done. candidates: ${candidateCount}, opened: ${openedCount}`)
+  return { scanned: preFiltered.length, candidates: candidateCount, opened: openedCount }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +183,6 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
 
 async function fetchDexScreenerPairs(): Promise<DexScreenerPair[]> {
   try {
-    // Primary: latest Solana pairs sorted by creation time
     const [newPairsRes, trendingRes] = await Promise.allSettled([
       axios.get<{ pairs: DexScreenerPair[] }>(
         'https://api.dexscreener.com/token-profiles/latest/v1',
@@ -131,17 +197,12 @@ async function fetchDexScreenerPairs(): Promise<DexScreenerPair[]> {
     const pairs: DexScreenerPair[] = []
 
     if (newPairsRes.status === 'fulfilled' && newPairsRes.value.data?.pairs) {
-      const solanaPairs = newPairsRes.value.data.pairs.filter(
-        (p) => p.chainId === 'solana'
-      )
-      pairs.push(...solanaPairs)
+      pairs.push(...newPairsRes.value.data.pairs.filter((p) => p.chainId === 'solana'))
     }
-
     if (trendingRes.status === 'fulfilled' && trendingRes.value.data?.pairs) {
       pairs.push(...trendingRes.value.data.pairs)
     }
 
-    // Deduplicate by pairAddress
     const seen = new Set<string>()
     return pairs.filter((p) => {
       if (seen.has(p.pairAddress)) return false
@@ -155,7 +216,7 @@ async function fetchDexScreenerPairs(): Promise<DexScreenerPair[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-filter (DexScreener data only, zero API credits)
+// Pre-filter
 // ---------------------------------------------------------------------------
 
 function applyPreFilter(pair: DexScreenerPair): boolean {
@@ -170,7 +231,6 @@ function applyPreFilter(pair: DexScreenerPair): boolean {
     mc >= PRE_FILTER.minMcUsd &&
     mc <= PRE_FILTER.maxMcUsd &&
     ageHours <= PRE_FILTER.maxAgeHours &&
-    // Must be a real token pair (not a honeypot flag from DexScreener)
     !pair.labels?.includes('honeypot')
   )
 }
