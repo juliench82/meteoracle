@@ -205,14 +205,13 @@ export async function closePosition(
     )
 
     if (userPosition) {
-      const binIdsToRemove = userPosition.positionData.positionBinData.map(
-        (b: { binId: number }) => b.binId
-      )
+      const { lowerBinId, upperBinId } = userPosition.positionData
       const removeTx = await dlmmPool.removeLiquidity({
         position: positionPubKey,
         user: wallet.publicKey,
-        binIds: binIdsToRemove,
-        liquiditiesBpsToRemove: binIdsToRemove.map(() => new BN(10_000)), // 100%
+        fromBinId: lowerBinId,
+        toBinId: upperBinId,
+        bps: new BN(10_000), // 100%
         shouldClaimAndClose: true,
       })
 
