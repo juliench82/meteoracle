@@ -20,10 +20,7 @@ const PRE_FILTER = {
   maxAgeHours: 72,
 }
 
-/** Minimum score a candidate must reach before opening a position */
 const MIN_SCORE_TO_OPEN = parseInt(process.env.MIN_SCORE_TO_OPEN ?? '65')
-
-/** Maximum concurrent open positions across all strategies */
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 
 export async function runScanner(): Promise<{ scanned: number; candidates: number; opened: number }> {
@@ -37,7 +34,7 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
     .in('status', ['active', 'out_of_range'])
 
   if ((openCount ?? 0) >= MAX_CONCURRENT_POSITIONS) {
-    console.log(`[scanner] max concurrent positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS}) — skipping scan`)
+    console.log(`[scanner] max positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS})`)
     return { scanned: 0, candidates: 0, opened: 0 }
   }
 
@@ -66,7 +63,6 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
         .eq('token_address', tokenAddress)
         .gte('scanned_at', new Date(Date.now() - 60 * 60 * 1000).toISOString())
         .limit(1)
-
       if (existing && existing.length > 0) continue
 
       const { data: existingPosition } = await supabase
@@ -75,7 +71,6 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
         .eq('token_address', tokenAddress)
         .in('status', ['active', 'out_of_range'])
         .limit(1)
-
       if (existingPosition && existingPosition.length > 0) continue
 
       const holderData = await checkHolders(tokenAddress)
@@ -129,9 +124,7 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
       })
 
       if (score >= MIN_SCORE_TO_OPEN) {
-        console.log(`[scanner] score ${score} >= ${MIN_SCORE_TO_OPEN} — opening position for ${metrics.symbol}`)
         const positionId = await openPosition(metrics, strategy)
-
         if (positionId) {
           openedCount++
           await sendAlert({
@@ -144,7 +137,7 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
         }
       }
     } catch (err) {
-      console.error(`[scanner] error processing ${pair.baseToken.symbol}:`, err)
+      console.error(`[scanner] error processing ${pair.baseToken?.symbol}:`, err)
     }
   }
 
@@ -154,41 +147,49 @@ export async function runScanner(): Promise<{ scanned: number; candidates: numbe
 
 // ---------------------------------------------------------------------------
 // DexScreener fetcher
+// Step 1: get new/boosted Solana token addresses from token-profiles endpoint
+// Step 2: batch-fetch actual pair data for those tokens (has vol/liquidity/MC)
 // ---------------------------------------------------------------------------
 
 async function fetchDexScreenerPairs(): Promise<DexScreenerPair[]> {
   try {
-    // These endpoints return proper pair objects with volume/liquidity/marketCap
-    const [newPairsRes, trendingRes] = await Promise.allSettled([
-      // New pairs on Solana (Meteora + Raydium)
-      axios.get<{ pairs: DexScreenerPair[] }>(
-        'https://api.dexscreener.com/latest/dex/pairs/solana',
-        { timeout: 10_000 }
-      ),
-      // Trending Solana tokens by volume
-      axios.get<{ pairs: DexScreenerPair[] }>(
-        'https://api.dexscreener.com/latest/dex/search?q=solana&chainId=solana',
-        { timeout: 10_000 }
-      ),
-    ])
+    // Step 1: get latest new Solana token addresses (up to 30)
+    const profilesRes = await axios.get<{ tokenAddress: string; chainId: string }[]>(
+      'https://api.dexscreener.com/token-profiles/latest/v1',
+      { timeout: 10_000 }
+    )
 
-    const pairs: DexScreenerPair[] = []
+    const solanaAddresses = (profilesRes.data ?? [])
+      .filter((t) => t.chainId === 'solana')
+      .map((t) => t.tokenAddress)
+      .slice(0, 30)
 
-    if (newPairsRes.status === 'fulfilled') {
-      const data = newPairsRes.value.data
-      // endpoint returns { pairs: [...] } or an array directly
-      const list = Array.isArray(data) ? data : (data?.pairs ?? [])
-      pairs.push(...list.filter((p: DexScreenerPair) => p.chainId === 'solana'))
+    if (solanaAddresses.length === 0) return []
+
+    // Step 2: batch fetch pair data in groups of 30 (API limit per call)
+    // /tokens/{addresses} accepts comma-separated addresses
+    const chunks: string[][] = []
+    for (let i = 0; i < solanaAddresses.length; i += 30) {
+      chunks.push(solanaAddresses.slice(i, i + 30))
     }
-    if (trendingRes.status === 'fulfilled') {
-      const data = trendingRes.value.data
-      const list = Array.isArray(data) ? data : (data?.pairs ?? [])
-      pairs.push(...list.filter((p: DexScreenerPair) => p.chainId === 'solana'))
-    }
+
+    const allPairs: DexScreenerPair[] = []
+
+    await Promise.allSettled(
+      chunks.map(async (chunk) => {
+        const res = await axios.get<{ pairs: DexScreenerPair[] }>(
+          `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`,
+          { timeout: 10_000 }
+        )
+        const pairs = res.data?.pairs ?? []
+        // Keep only Solana pairs, prefer Meteora DLMM pools
+        allPairs.push(...pairs.filter((p) => p.chainId === 'solana'))
+      })
+    )
 
     // Deduplicate by pairAddress
     const seen = new Set<string>()
-    return pairs.filter((p) => {
+    return allPairs.filter((p) => {
       if (!p?.pairAddress || seen.has(p.pairAddress)) return false
       seen.add(p.pairAddress)
       return true
