@@ -8,11 +8,16 @@ import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
 import type { TokenMetrics } from '@/lib/types'
 
-// ---------------------------------------------------------------------------
-// Meteora DLMM API — confirmed working endpoint (no query params)
-// Returns full list of all pairs as a flat array
-// ---------------------------------------------------------------------------
 const METEORA_PAIR_ALL = 'https://dlmm-api.meteora.ag/pair/all'
+
+// Meteora blocks serverless egress IPs without a browser-like User-Agent
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Origin': 'https://app.meteora.ag',
+  'Referer': 'https://app.meteora.ag/',
+}
 
 const PRE_FILTER = {
   minVolume24hUsd: 50_000,
@@ -24,15 +29,12 @@ const PRE_FILTER = {
 const MIN_SCORE_TO_OPEN = parseInt(process.env.MIN_SCORE_TO_OPEN ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 
-// ---------------------------------------------------------------------------
-// Meteora pair shape
-// ---------------------------------------------------------------------------
 interface MeteoraPair {
   address: string
   name: string
   mint_x: string
   mint_y: string
-  liquidity: string   // comes back as string in API response
+  liquidity: string
   current_price: number
   trade_volume_24h: string
   fees_24h: string
@@ -61,7 +63,6 @@ export async function runScanner(): Promise<{
     return { scanned: 0, candidates: 0, opened: 0 }
   }
 
-  // 1. Fetch all Meteora pairs
   const { pairs, error: fetchError } = await fetchMeteoraPairs()
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
@@ -69,7 +70,6 @@ export async function runScanner(): Promise<{
   }
   console.log(`[scanner] fetched ${pairs.length} pairs from Meteora`)
 
-  // 2. Pre-filter using Meteora data only (no external calls)
   const preFiltered = pairs.filter(applyPreFilter)
   console.log(`[scanner] ${preFiltered.length} passed pre-filter`)
 
@@ -87,7 +87,6 @@ export async function runScanner(): Promise<{
       const tokenAddress = pair.mint_x
       const symbol = pair.name.split('-')[0] ?? pair.name
 
-      // Skip if scanned recently
       const { data: existing } = await supabase
         .from('candidates')
         .select('id')
@@ -96,7 +95,6 @@ export async function runScanner(): Promise<{
         .limit(1)
       if (existing && existing.length > 0) continue
 
-      // Skip if already have open position
       const { data: existingPosition } = await supabase
         .from('positions')
         .select('id')
@@ -105,14 +103,10 @@ export async function runScanner(): Promise<{
         .limit(1)
       if (existingPosition && existingPosition.length > 0) continue
 
-      // 3. DexScreener enrichment (MC + token age)
       const dexData = await fetchDexScreenerEnrichment(tokenAddress)
-
-      // 4. Helius holder data
       const holderData = await checkHolders(tokenAddress)
       if (!holderData) continue
 
-      // 5. Rugcheck
       const rugScore = await checkRugscore(tokenAddress)
 
       const liquidityUsd = parseFloat(pair.liquidity)
@@ -137,7 +131,6 @@ export async function runScanner(): Promise<{
         dexId: 'meteora',
       }
 
-      // 6. Match strategy
       const strategy = getStrategyForToken(metrics)
       if (!strategy) {
         console.log(
@@ -148,10 +141,8 @@ export async function runScanner(): Promise<{
         continue
       }
 
-      // 7. Score
       const score = scoreCandidate(metrics)
 
-      // 8. Persist candidate
       await supabase.from('candidates').insert({
         token_address: metrics.address,
         symbol: metrics.symbol,
@@ -177,7 +168,6 @@ export async function runScanner(): Promise<{
         volume24h: metrics.volume24h,
       })
 
-      // 9. Open position if score clears threshold
       if (score >= MIN_SCORE_TO_OPEN) {
         const positionId = await openPosition(metrics, strategy)
         if (positionId) {
@@ -200,13 +190,12 @@ export async function runScanner(): Promise<{
   return { scanned: preFiltered.length, candidates: candidateCount, opened: openedCount }
 }
 
-// ---------------------------------------------------------------------------
-// Meteora fetcher — GET /pair/all (no query params, returns flat array)
-// Confirmed working in live bots against this exact URL
-// ---------------------------------------------------------------------------
 async function fetchMeteoraPairs(): Promise<{ pairs: MeteoraPair[]; error?: string }> {
   try {
-    const res = await axios.get<MeteoraPair[]>(METEORA_PAIR_ALL, { timeout: 20_000 })
+    const res = await axios.get<MeteoraPair[]>(METEORA_PAIR_ALL, {
+      headers: BROWSER_HEADERS,
+      timeout: 20_000,
+    })
     const pairs = Array.isArray(res.data) ? res.data : []
     console.log(`[scanner] Meteora returned ${pairs.length} raw pairs`)
     return { pairs }
@@ -218,9 +207,6 @@ async function fetchMeteoraPairs(): Promise<{ pairs: MeteoraPair[]; error?: stri
   }
 }
 
-// ---------------------------------------------------------------------------
-// DexScreener enrichment — MC and token age only
-// ---------------------------------------------------------------------------
 async function fetchDexScreenerEnrichment(
   tokenAddress: string
 ): Promise<{ mcUsd: number; ageHours: number } | null> {
@@ -248,14 +234,9 @@ async function fetchDexScreenerEnrichment(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Pre-filter — Meteora data only, zero external calls
-// Note: liquidity and trade_volume_24h are strings in the API response
-// ---------------------------------------------------------------------------
 function applyPreFilter(pair: MeteoraPair): boolean {
   const liquidity = parseFloat(pair.liquidity)
   const volume = parseFloat(pair.trade_volume_24h)
-
   const ageHours = pair.created_at
     ? (Date.now() - new Date(pair.created_at).getTime()) / (1000 * 60 * 60)
     : 0
