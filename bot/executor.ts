@@ -96,7 +96,7 @@ export async function openPosition(
     })
 
     // 8. Send transaction
-    tx.sign([wallet, positionKeypair])
+    tx.sign(wallet, positionKeypair)
     const sig = await connection.sendTransaction(tx, { maxRetries: 3 })
     await connection.confirmTransaction(sig, 'confirmed')
 
@@ -200,7 +200,7 @@ export async function closePosition(
       })
 
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
-        tx.sign([wallet])
+        tx.sign(wallet)
         const sig = await connection.sendTransaction(tx, { maxRetries: 3 })
         await connection.confirmTransaction(sig, 'confirmed')
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
