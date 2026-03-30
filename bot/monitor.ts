@@ -81,7 +81,6 @@ async function checkPosition(
   // 3. Check exit conditions
   const openedAt = new Date(position.opened_at).getTime()
   const ageHours = (now - openedAt) / (1000 * 60 * 60)
-  const ageMinutes = ageHours * 60
   const entryPrice = position.entry_price
   const pricePct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0
 
@@ -182,8 +181,8 @@ async function fetchPositionState(
     )
     if (!pos) return { ...fallback, currentPrice }
 
-    const { minBinId, maxBinId } = pos.positionData
-    const inRange = activeBin.binId >= minBinId && activeBin.binId <= maxBinId
+    const { lowerBinId, upperBinId } = pos.positionData
+    const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId
 
     // Sum unclaimed fees across all bins
     const feesEarnedSol = pos.positionData.positionBinData.reduce(
