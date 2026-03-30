@@ -285,7 +285,7 @@ async function markPositionClosed(
       status: 'closed',
       closed_at: new Date().toISOString(),
       fees_earned_sol: feesEarnedSol,
-      metadata: supabase.rpc ? undefined : { closeReason: reason }, // merge in monitor
+      metadata: { closeReason: reason },
     })
     .eq('id', positionId)
 }
