@@ -3,21 +3,74 @@ import { Header } from '@/components/layout/Header'
 import { KPIBar } from '@/components/dashboard/KPIBar'
 import { PositionsTable } from '@/components/dashboard/PositionsTable'
 import { CandidateFeed } from '@/components/dashboard/CandidateFeed'
+import { BotLogsPanel } from '@/components/dashboard/BotLogsPanel'
+import { createServerClient } from '@/lib/supabase'
+import type { Position, Candidate } from '@/lib/types'
 
-export default function DashboardPage() {
+export const revalidate = 30 // revalidate every 30s
+
+export default async function DashboardPage() {
+  const supabase = createServerClient()
+
+  // Fetch all data in parallel
+  const [positionsRes, candidatesRes, logsRes, closedRes] = await Promise.allSettled([
+    supabase
+      .from('positions')
+      .select('*')
+      .in('status', ['active', 'out_of_range'])
+      .order('opened_at', { ascending: false }),
+    supabase
+      .from('candidates')
+      .select('*')
+      .order('scanned_at', { ascending: false })
+      .limit(20),
+    supabase
+      .from('bot_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(30),
+    supabase
+      .from('positions')
+      .select('sol_deposited, fees_earned_sol, status')
+      .eq('status', 'closed'),
+  ])
+
+  const positions: Position[] =
+    positionsRes.status === 'fulfilled' ? (positionsRes.value.data ?? []) : []
+  const candidates: Candidate[] =
+    candidatesRes.status === 'fulfilled' ? (candidatesRes.value.data ?? []) : []
+  const logs =
+    logsRes.status === 'fulfilled' ? (logsRes.value.data ?? []) : []
+  const closed =
+    closedRes.status === 'fulfilled' ? (closedRes.value.data ?? []) : []
+
+  // Compute KPIs
+  const solDeployed = positions.reduce((acc, p) => acc + (p.solDeposited ?? 0), 0)
+  const feesEarned24h = positions.reduce((acc, p) => acc + (p.feesEarnedSol ?? 0), 0)
+  const totalClosed = closed.length
+  const wins = closed.filter((p) => (p.fees_earned_sol ?? 0) > 0).length
+  const winRate = totalClosed > 0 ? Math.round((wins / totalClosed) * 100) : null
+
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />
       <div className="flex flex-col flex-1 overflow-hidden">
         <Header />
         <main className="flex-1 overflow-y-auto p-6 space-y-6">
-          <KPIBar />
+          <KPIBar
+            solDeployed={solDeployed}
+            activePositions={positions.length}
+            feesEarned24h={feesEarned24h}
+            winRate={winRate}
+            candidatesScanned={candidates.length}
+          />
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-            <div className="xl:col-span-2">
-              <PositionsTable />
+            <div className="xl:col-span-2 space-y-6">
+              <PositionsTable positions={positions} />
+              <BotLogsPanel logs={logs} />
             </div>
             <div>
-              <CandidateFeed />
+              <CandidateFeed candidates={candidates} />
             </div>
           </div>
         </main>
