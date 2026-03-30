@@ -1,13 +1,196 @@
-/**
- * Monitor — checks open positions for exit conditions
- * TODO: implement in feat/monitor branch
- */
-export async function monitorPositions(): Promise<void> {
-  // For each active position in Supabase:
-  // 1. Fetch current bin from Meteora SDK
-  // 2. Check if in range
-  // 3. Check exit rules (OOR duration, stop loss, take profit, max duration)
-  // 4. If exit triggered: call closePosition()
-  // 5. Claim fees if threshold met
-  console.log('[monitor] stub — implement in feat/monitor')
+import DLMM from '@meteora-ag/dlmm'
+import { PublicKey } from '@solana/web3.js'
+import { getConnection } from '@/lib/solana'
+import { createServerClient } from '@/lib/supabase'
+import { closePosition } from '@/bot/executor'
+import { sendAlert } from '@/bot/alerter'
+import { STRATEGIES } from '@/strategies'
+import type { Strategy } from '@/lib/types'
+
+// ---------------------------------------------------------------------------
+// Main monitor loop
+// ---------------------------------------------------------------------------
+
+export async function monitorPositions(): Promise<{
+  checked: number
+  closed: number
+  claimed: number
+}> {
+  const supabase = createServerClient()
+  const stats = { checked: 0, closed: 0, claimed: 0 }
+
+  // Fetch all active + out_of_range positions
+  const { data: positions, error } = await supabase
+    .from('positions')
+    .select('*')
+    .in('status', ['active', 'out_of_range'])
+
+  if (error || !positions?.length) return stats
+
+  for (const position of positions) {
+    try {
+      stats.checked++
+      const strategy = STRATEGIES.find((s) => s.id === position.strategy_id)
+      if (!strategy) continue
+
+      await checkPosition(position, strategy, stats)
+    } catch (err) {
+      console.error(`[monitor] error checking position ${position.id}:`, err)
+      await supabase.from('bot_logs').insert({
+        level: 'error',
+        event: 'monitor_check_failed',
+        payload: { positionId: position.id, error: String(err) },
+      })
+    }
+  }
+
+  return stats
+}
+
+// ---------------------------------------------------------------------------
+// Per-position check
+// ---------------------------------------------------------------------------
+
+async function checkPosition(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  position: Record<string, any>,
+  strategy: Strategy,
+  stats: { checked: number; closed: number; claimed: number }
+): Promise<void> {
+  const supabase = createServerClient()
+  const label = `[monitor][${position.token_symbol}][${strategy.id}]`
+  const now = Date.now()
+
+  // 1. Fetch current on-chain state from Meteora
+  const { inRange, currentPrice, feesEarnedSol } = await fetchPositionState(
+    position.pool_address,
+    position.metadata?.positionPubKey
+  )
+
+  // 2. Update DB with latest state
+  await supabase
+    .from('positions')
+    .update({
+      current_price: currentPrice,
+      in_range: inRange,
+      fees_earned_sol: feesEarnedSol,
+      status: inRange ? 'active' : 'out_of_range',
+    })
+    .eq('id', position.id)
+
+  // 3. Check exit conditions
+  const openedAt = new Date(position.opened_at).getTime()
+  const ageHours = (now - openedAt) / (1000 * 60 * 60)
+  const ageMinutes = ageHours * 60
+  const entryPrice = position.entry_price
+  const pricePct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0
+
+  // Time out of range (only if currently OOR)
+  const oorSince = position.status === 'out_of_range'
+    ? (now - new Date(position.updated_at ?? position.opened_at).getTime()) / 60_000
+    : 0
+
+  let closeReason: string | null = null
+
+  if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
+    closeReason = `out_of_range_${Math.round(oorSince)}min`
+  } else if (pricePct <= strategy.exits.stopLossPct) {
+    closeReason = `stop_loss_${pricePct.toFixed(1)}pct`
+  } else if (pricePct >= strategy.exits.takeProfitPct) {
+    closeReason = `take_profit_${pricePct.toFixed(1)}pct`
+  } else if (ageHours >= strategy.exits.maxDurationHours) {
+    closeReason = `max_duration_${Math.round(ageHours)}h`
+  }
+
+  if (closeReason) {
+    console.log(`${label} EXIT triggered → ${closeReason}`)
+    const closed = await closePosition(position.id, closeReason)
+    if (closed) {
+      stats.closed++
+      await sendAlert({
+        type: 'position_closed',
+        symbol: position.token_symbol,
+        strategy: strategy.id,
+        reason: closeReason,
+        feesEarnedSol,
+        ageHours: Math.round(ageHours * 10) / 10,
+      })
+    }
+    return
+  }
+
+  // 4. Claim fees if above threshold (even if still open)
+  if (
+    strategy.exits.claimFeesBeforeClose &&
+    feesEarnedSol >= strategy.exits.minFeesToClaim
+  ) {
+    console.log(`${label} claiming fees: ${feesEarnedSol.toFixed(4)} SOL`)
+    // Fee claiming is handled inside closePosition when triggered,
+    // for in-range positions we log intent — standalone claim tx in feat/optimizer
+    stats.claimed++
+    await supabase.from('bot_logs').insert({
+      level: 'info',
+      event: 'fees_claimable',
+      payload: {
+        positionId: position.id,
+        symbol: position.token_symbol,
+        feesEarnedSol,
+      },
+    })
+  }
+
+  // 5. Alert if newly out of range
+  if (!inRange && position.status === 'active') {
+    await sendAlert({
+      type: 'position_oor',
+      symbol: position.token_symbol,
+      strategy: strategy.id,
+      currentPrice,
+      binRangeLower: position.bin_range_lower,
+      binRangeUpper: position.bin_range_upper,
+      oorExitMinutes: strategy.exits.outOfRangeMinutes,
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fetch live position state from Meteora DLMM
+// ---------------------------------------------------------------------------
+
+async function fetchPositionState(
+  poolAddress: string,
+  positionPubKeyStr?: string
+): Promise<{ inRange: boolean; currentPrice: number; feesEarnedSol: number }> {
+  const fallback = { inRange: true, currentPrice: 0, feesEarnedSol: 0 }
+
+  try {
+    const connection = getConnection()
+    const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddress))
+    const activeBin = await dlmmPool.getActiveBin()
+    const currentPrice = parseFloat(activeBin.pricePerToken)
+
+    if (!positionPubKeyStr) return { ...fallback, currentPrice }
+
+    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(
+      new PublicKey(positionPubKeyStr)
+    )
+
+    const pos = userPositions[0]
+    if (!pos) return { ...fallback, currentPrice }
+
+    const { minBinId, maxBinId } = pos.positionData
+    const inRange = activeBin.binId >= minBinId && activeBin.binId <= maxBinId
+
+    // Sum unclaimed fees across all bins
+    const feesEarnedSol = pos.positionData.positionBinData.reduce(
+      (acc: number, bin: { feeYPending: { toNumber: () => number } }) =>
+        acc + bin.feeYPending.toNumber() / 1e9,
+      0
+    )
+
+    return { inRange, currentPrice, feesEarnedSol }
+  } catch (err) {
+    console.error(`[monitor] fetchPositionState failed for pool ${poolAddress}:`, err)
+    return fallback
+  }
 }
