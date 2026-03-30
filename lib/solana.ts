@@ -2,6 +2,7 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
   ComputeBudgetProgram,
@@ -76,7 +77,7 @@ export async function getPriorityFee(accountKeys: string[]): Promise<number> {
 // ---------------------------------------------------------------------------
 
 export async function buildAndSendTx(
-  instructions: Parameters<typeof TransactionMessage>[0]['instructions'],
+  instructions: TransactionInstruction[],
   signers: Keypair[],
   priorityFee: number
 ): Promise<string> {
