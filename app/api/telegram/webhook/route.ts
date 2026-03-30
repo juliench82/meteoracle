@@ -2,43 +2,52 @@ import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState, setBotState } from '@/lib/botState'
 import axios from 'axios'
 
 export const dynamic = 'force-dynamic'
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID
+const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID
 
 async function reply(chatId: number | string, text: string) {
   if (!TELEGRAM_BOT_TOKEN) return
   await axios.post(
     `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
     { chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true },
-    { timeout: 5_000 }
+    { timeout: 5_000 },
   ).catch(() => {})
 }
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json()
+    const body    = await req.json()
     const message = body?.message
     if (!message) return NextResponse.json({ ok: true })
 
-    const chatId = message.chat?.id
+    const chatId  = message.chat?.id
     const text: string = message.text ?? ''
     const command = text.split(' ')[0].toLowerCase()
 
-    // Security: only allow commands from the configured chat
+    // Security: only respond to the configured owner chat
     if (String(chatId) !== String(TELEGRAM_CHAT_ID)) {
       return NextResponse.json({ ok: true })
     }
 
+    // ------------------------------------------------------------------
+    // /tick  — run one full monitor + scanner cycle
+    // ------------------------------------------------------------------
     if (command === '/tick' || command === '/scan') {
       await reply(chatId, '⏳ Running scanner...')
 
-      const botEnabled = process.env.BOT_ENABLED === 'true'
-      if (!botEnabled) {
-        await reply(chatId, '⚠️ Bot is disabled. Set `BOT_ENABLED=true` in Vercel env vars.')
+      if (process.env.BOT_ENABLED !== 'true') {
+        await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
+        return NextResponse.json({ ok: true })
+      }
+
+      const state = await getBotState()
+      if (!state.enabled) {
+        await reply(chatId, '🛑 Bot is stopped.\nSend /start to resume.')
         return NextResponse.json({ ok: true })
       }
 
@@ -47,16 +56,17 @@ export async function POST(req: Request) {
         monitorPositions(),
         runScanner(),
       ])
+      const durationMs = Date.now() - startedAt
 
       const supabase = createServerClient()
       await supabase.from('bot_logs').insert({
-        level: 'info',
-        event: 'bot_tick',
-        payload: { monitor: monitorResult, scanner: scanResult, durationMs: Date.now() - startedAt, source: 'telegram' },
+        level:   'info',
+        event:   'bot_tick',
+        payload: { monitor: monitorResult, scanner: scanResult, durationMs, source: 'telegram' },
       })
 
       await reply(chatId, [
-        `✅ *Tick complete* (${Date.now() - startedAt}ms)`,
+        `✅ *Tick complete* (${durationMs}ms)`,
         `📡 Scanned: ${scanResult.scanned} pairs`,
         `🎯 Candidates: ${scanResult.candidates}`,
         `📂 Opened: ${scanResult.opened} positions`,
@@ -65,32 +75,111 @@ export async function POST(req: Request) {
       ].join('\n'))
     }
 
+    // ------------------------------------------------------------------
+    // /stop  — pause the bot (tick becomes a no-op)
+    // ------------------------------------------------------------------
+    else if (command === '/stop') {
+      await setBotState({ enabled: false })
+      await reply(chatId, [
+        `🛑 *Bot stopped.*`,
+        `• New ticks will be ignored until you send /start`,
+        `• Open positions will NOT be monitored while stopped`,
+        `• Send /start to resume`,
+      ].join('\n'))
+    }
+
+    // ------------------------------------------------------------------
+    // /start — resume the bot
+    // ------------------------------------------------------------------
+    else if (command === '/start') {
+      await setBotState({ enabled: true })
+      const state = await getBotState()
+      await reply(chatId, [
+        `✅ *Bot started.*`,
+        `• Enabled: ✅`,
+        `• Dry run: ${state.dry_run ? '🟡 ON (no real trades)' : '🟢 OFF (live trading)'}`,
+        `Send /tick to run a scan immediately.`,
+      ].join('\n'))
+    }
+
+    // ------------------------------------------------------------------
+    // /dry  — switch to dry-run (no on-chain transactions)
+    // ------------------------------------------------------------------
+    else if (command === '/dry') {
+      await setBotState({ dry_run: true })
+      await reply(chatId, [
+        `🟡 *Dry-run mode enabled.*`,
+        `• Scanner and monitor will run normally`,
+        `• No real on-chain transactions will be sent`,
+        `• Candidates and positions are still written to Supabase`,
+      ].join('\n'))
+    }
+
+    // ------------------------------------------------------------------
+    // /live — switch to live trading
+    // ------------------------------------------------------------------
+    else if (command === '/live') {
+      await setBotState({ dry_run: false })
+      await reply(chatId, [
+        `🟢 *Live trading enabled.*`,
+        `⚠️ Real SOL transactions will be sent when a candidate scores above threshold.`,
+        `• Make sure WALLET\_PRIVATE\_KEY is set correctly`,
+        `• Make sure MIN\_SCORE\_TO\_OPEN is tuned to your risk tolerance`,
+        `• Send /dry at any time to switch back to dry-run`,
+      ].join('\n'))
+    }
+
+    // ------------------------------------------------------------------
+    // /status — current bot state (reads from DB, not env vars)
+    // ------------------------------------------------------------------
     else if (command === '/status') {
       const supabase = createServerClient()
-      const [openRes, lastTickRes] = await Promise.allSettled([
-        supabase.from('positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
-        supabase.from('bot_logs').select('created_at').eq('event', 'bot_tick').order('created_at', { ascending: false }).limit(1).single(),
+      const [stateRes, openRes, lastTickRes] = await Promise.allSettled([
+        getBotState(),
+        supabase
+          .from('positions')
+          .select('id', { count: 'exact', head: true })
+          .in('status', ['active', 'out_of_range']),
+        supabase
+          .from('bot_logs')
+          .select('created_at')
+          .eq('event', 'bot_tick')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single(),
       ])
 
+      const state     = stateRes.status === 'fulfilled' ? stateRes.value : { enabled: false, dry_run: true }
       const openCount = openRes.status === 'fulfilled' ? openRes.value.count : '?'
-      const lastTick = lastTickRes.status === 'fulfilled' ? lastTickRes.value.data?.created_at : null
+      const lastTick  = lastTickRes.status === 'fulfilled' ? lastTickRes.value.data?.created_at : null
       const lastTickStr = lastTick ? new Date(lastTick).toUTCString() : 'Never'
 
       await reply(chatId, [
         `📊 *Bot Status*`,
-        `Enabled: ${process.env.BOT_ENABLED === 'true' ? '✅' : '❌'}`,
-        `Dry run: ${process.env.BOT_DRY_RUN === 'true' ? '✅' : '❌'}`,
+        `Enabled:        ${state.enabled  ? '✅ Running' : '🛑 Stopped'}`,
+        `Mode:           ${state.dry_run  ? '🟡 Dry run' : '🟢 Live trading'}`,
         `Open positions: ${openCount}`,
-        `Last tick: ${lastTickStr}`,
+        `Last tick:      ${lastTickStr}`,
       ].join('\n'))
     }
 
+    // ------------------------------------------------------------------
+    // /help
+    // ------------------------------------------------------------------
     else if (command === '/help') {
       await reply(chatId, [
-        `🤖 *Meteoracle Bot Commands*`,
-        `/tick — run scanner + monitor now`,
-        `/status — show current bot status`,
-        `/help — show this message`,
+        `🤖 *Meteoracle Commands*`,
+        ``,
+        `*Control*`,
+        `/stop  — pause all scanning & monitoring`,
+        `/start — resume the bot`,
+        `/dry   — switch to dry-run (no real trades)`,
+        `/live  — switch to live trading ⚠️`,
+        ``,
+        `*Info*`,
+        `/tick   — run one scan + monitor cycle now`,
+        `/status — current state, positions, last tick`,
+        `/help   — show this message`,
       ].join('\n'))
     }
 

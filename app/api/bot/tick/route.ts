@@ -2,20 +2,33 @@ import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 
 export const dynamic = 'force-dynamic'
 
 /**
- * Main bot tick — called every minute by Vercel Cron.
- * Order: monitor first (time-sensitive exits), then scan for new candidates.
+ * Main bot tick — called by Vercel Cron (and manually via Telegram /tick).
+ * Order of checks:
+ *  1. BOT_ENABLED env var — hard kill-switch, survives DB outages
+ *  2. bot_state.enabled  — soft runtime toggle via /stop and /start
+ *  3. monitor first (time-sensitive exits), then scanner
  */
 export async function POST() {
-  const botEnabled = process.env.BOT_ENABLED === 'true'
-
-  if (!botEnabled) {
+  // 1. Hard kill-switch — env var must be 'true'
+  if (process.env.BOT_ENABLED !== 'true') {
     return NextResponse.json({
       status: 'disabled',
-      message: 'Set BOT_ENABLED=true to activate',
+      reason: 'BOT_ENABLED env var is not true',
+    })
+  }
+
+  // 2. Runtime toggle — reads from Supabase bot_state table
+  const state = await getBotState()
+  if (!state.enabled) {
+    return NextResponse.json({
+      status: 'stopped',
+      reason: 'bot_state.enabled=false — send /start in Telegram to resume',
+      ts: new Date().toISOString(),
     })
   }
 
@@ -23,10 +36,10 @@ export async function POST() {
   const supabase = createServerClient()
 
   try {
-    // 1. Monitor open positions first — exits are time-sensitive
+    // 3. Monitor open positions first — exits are time-sensitive
     const monitorResult = await monitorPositions()
 
-    // 2. Scan for new candidates
+    // 4. Scan for new candidates
     const scanResult = await runScanner()
 
     const payload = {
