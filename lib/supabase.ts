@@ -8,7 +8,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 // Server client (full access — only use in API routes / server components)
 export function createServerClient() {
-  const serviceKey = process.env.SUPABASE_SERVICE_KEY!
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
   return createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false },
   })
