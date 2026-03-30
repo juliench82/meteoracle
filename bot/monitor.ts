@@ -1,6 +1,6 @@
 import DLMM from '@meteora-ag/dlmm'
 import { PublicKey } from '@solana/web3.js'
-import { getConnection } from '@/lib/solana'
+import { getConnection, getWallet } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { closePosition } from '@/bot/executor'
 import { sendAlert } from '@/bot/alerter'
@@ -165,17 +165,21 @@ async function fetchPositionState(
 
   try {
     const connection = getConnection()
+    const wallet = getWallet()
     const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddress))
     const activeBin = await dlmmPool.getActiveBin()
     const currentPrice = parseFloat(activeBin.pricePerToken)
 
     if (!positionPubKeyStr) return { ...fallback, currentPrice }
 
+    // Pass the wallet owner pubkey — not the position pubkey
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(
-      new PublicKey(positionPubKeyStr)
+      wallet.publicKey
     )
 
-    const pos = userPositions[0]
+    const pos = userPositions.find(
+      (p) => p.publicKey.toBase58() === positionPubKeyStr
+    )
     if (!pos) return { ...fallback, currentPrice }
 
     const { minBinId, maxBinId } = pos.positionData
