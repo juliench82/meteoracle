@@ -9,44 +9,76 @@ import { checkRugscore } from '@/lib/rugcheck'
 import type { TokenMetrics } from '@/lib/types'
 
 // ---------------------------------------------------------------------------
-// DexScreener — Meteora DLMM pairs via token search on WSOL
-// This bypasses the dlmm-api.meteora.ag endpoint which blocks Vercel IPs.
-// We query DexScreener for all pairs on Meteora that include WSOL, then
-// use the liquidity/volume data already present in the response.
+// Meteora DLMM Data API  (NEW — as of 2025)
+// Base:  https://dlmm.datapi.meteora.ag
+// Docs:  https://docs.meteora.ag/api-reference/dlmm
 // ---------------------------------------------------------------------------
-const WSOL = 'So11111111111111111111111111111111111111112'
-const DEXSCREENER_SEARCH = 'https://api.dexscreener.com/latest/dex/tokens/'
-const DEXSCREENER_PAIRS  = 'https://api.dexscreener.com/latest/dex/pairs/solana/'
+const METEORA_API = 'https://dlmm.datapi.meteora.ag'
 
 const PRE_FILTER = {
   minVolume24hUsd: 50_000,
   minLiquidityUsd: 20_000,
   maxLiquidityUsd: 50_000_000,
-  maxAgeHours: 72,
+  maxAgeHours:     72,
 }
 
-const MIN_SCORE_TO_OPEN       = parseInt(process.env.MIN_SCORE_TO_OPEN       ?? '65')
+const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
+const WSOL = 'So11111111111111111111111111111111111111112'
 
-// DexScreener pair shape (subset we use)
-interface DexPair {
-  pairAddress: string
-  baseToken:   { address: string; symbol: string }
-  quoteToken:  { address: string; symbol: string }
-  priceUsd?:   string
-  liquidity?:  { usd?: number }
-  volume?:     { h24?: number }
-  pairCreatedAt?: number
-  marketCap?:  number
-  fdv?:        number
-  dexId:       string
+// Shape returned by GET /pools (subset we use)
+interface MeteoraPool {
+  address:       string
+  name:          string
+  created_at:    number          // unix seconds
+  tvl:           number
+  current_price: number
+  volume: {
+    '24h': number
+    '1h':  number
+  }
+  fees: {
+    '24h': number
+  }
+  fee_tvl_ratio: {
+    '24h': number
+  }
+  pool_config: {
+    bin_step:      number
+    base_fee_pct:  number
+  }
+  token_x: {
+    address:   string
+    symbol:    string
+    decimals:  number
+    holders:   number
+    market_cap: number
+    price:     number
+  }
+  token_y: {
+    address:   string
+    symbol:    string
+    decimals:  number
+    holders:   number
+    market_cap: number
+    price:     number
+  }
+  is_blacklisted: boolean
+}
+
+interface PoolsResponse {
+  current_page: number
+  pages:        number
+  page_size:    number
+  total:        number
+  data:         MeteoraPool[]
 }
 
 export async function runScanner(): Promise<{
-  scanned: number
+  scanned:    number
   candidates: number
-  opened: number
-  error?: string
+  opened:     number
+  error?:     string
 }> {
   console.log('[scanner] tick started')
 
@@ -62,22 +94,17 @@ export async function runScanner(): Promise<{
     return { scanned: 0, candidates: 0, opened: 0 }
   }
 
-  // 1. Pull all Meteora DLMM pairs that contain WSOL from DexScreener
-  const { pairs, error: fetchError } = await fetchMeteoraPairs()
+  const { pools, error: fetchError } = await fetchMeteoraPools()
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
     return { scanned: 0, candidates: 0, opened: 0, error: fetchError }
   }
-  console.log(`[scanner] fetched ${pairs.length} Meteora/WSOL pairs from DexScreener`)
-
-  // 2. Pre-filter by liquidity / volume / age
-  const preFiltered = pairs.filter(applyPreFilter)
-  console.log(`[scanner] ${preFiltered.length} passed pre-filter`)
+  console.log(`[scanner] fetched ${pools.length} pools from Meteora datapi`)
 
   let candidateCount = 0
   let openedCount    = 0
 
-  for (const pair of preFiltered) {
+  for (const pool of pools) {
     const { count: currentOpen } = await supabase
       .from('positions')
       .select('id', { count: 'exact', head: true })
@@ -85,13 +112,11 @@ export async function runScanner(): Promise<{
     if ((currentOpen ?? 0) >= MAX_CONCURRENT_POSITIONS) break
 
     try {
-      // The "token" is whichever side is NOT WSOL
-      const tokenAddress = pair.baseToken.address === WSOL
-        ? pair.quoteToken.address
-        : pair.baseToken.address
-      const symbol = pair.baseToken.address === WSOL
-        ? pair.quoteToken.symbol
-        : pair.baseToken.symbol
+      // Identify the non-SOL token side
+      const isXSol    = pool.token_x.address === WSOL
+      const token     = isXSol ? pool.token_y : pool.token_x
+      const tokenAddress = token.address
+      const symbol       = token.symbol
 
       // Skip if scanned recently
       const { data: existing } = await supabase
@@ -111,33 +136,26 @@ export async function runScanner(): Promise<{
         .limit(1)
       if (existingPosition && existingPosition.length > 0) continue
 
-      // Holder data from Helius
+      // Holder data (Helius) — API already has `holders` but we still need topHolderPct
       const holderData = await checkHolders(tokenAddress)
       if (!holderData) continue
 
-      // Rugcheck score
       const rugScore = await checkRugscore(tokenAddress)
 
-      const liquidityUsd = pair.liquidity?.usd ?? 0
-      const volume24h    = pair.volume?.h24    ?? 0
-      const mcUsd        = pair.marketCap      ?? pair.fdv ?? 0
-      const priceUsd     = parseFloat(pair.priceUsd ?? '0')
-      const ageHours     = pair.pairCreatedAt
-        ? (Date.now() - pair.pairCreatedAt) / (1000 * 60 * 60)
-        : 999
+      const ageHours = (Date.now() / 1000 - pool.created_at) / 3600
 
       const metrics: TokenMetrics = {
         address:       tokenAddress,
         symbol,
-        mcUsd,
-        volume24h,
-        liquidityUsd,
+        mcUsd:         token.market_cap ?? 0,
+        volume24h:     pool.volume['24h'],
+        liquidityUsd:  pool.tvl,
         topHolderPct:  holderData.topHolderPct,
         holderCount:   holderData.holderCount,
         ageHours,
         rugcheckScore: rugScore,
-        priceUsd,
-        poolAddress:   pair.pairAddress,
+        priceUsd:      token.price,
+        poolAddress:   pool.address,
         dexId:         'meteora',
       }
 
@@ -145,8 +163,8 @@ export async function runScanner(): Promise<{
       if (!strategy) {
         console.log(
           `[scanner] ${symbol} — no strategy matched` +
-          ` (mc=$${mcUsd.toFixed(0)}, vol=$${volume24h.toFixed(0)},` +
-          ` holders=${holderData.holderCount}, rug=${rugScore}, age=${ageHours.toFixed(1)}h)`
+          ` (mc=$${metrics.mcUsd.toFixed(0)}, vol=$${metrics.volume24h.toFixed(0)},` +
+          ` holders=${metrics.holderCount}, rug=${rugScore}, age=${ageHours.toFixed(1)}h)`
         )
         continue
       }
@@ -170,11 +188,11 @@ export async function runScanner(): Promise<{
       console.log(`[scanner] candidate: ${symbol} → ${strategy.id} (score: ${score})`)
 
       await sendAlert({
-        type:     'candidate_found',
+        type:      'candidate_found',
         symbol,
-        strategy: strategy.id,
+        strategy:  strategy.id,
         score,
-        mcUsd:    metrics.mcUsd,
+        mcUsd:     metrics.mcUsd,
         volume24h: metrics.volume24h,
       })
 
@@ -183,61 +201,74 @@ export async function runScanner(): Promise<{
         if (positionId) {
           openedCount++
           await sendAlert({
-            type:          'position_opened',
+            type:         'position_opened',
             symbol,
-            strategy:      strategy.id,
-            solDeposited:  strategy.position.maxSolPerPosition,
-            entryPrice:    metrics.priceUsd,
+            strategy:     strategy.id,
+            solDeposited: strategy.position.maxSolPerPosition,
+            entryPrice:   metrics.priceUsd,
           })
         }
       }
     } catch (err) {
-      console.error(`[scanner] error processing ${pair.pairAddress}:`, err)
+      console.error(`[scanner] error processing pool ${pool.address}:`, err)
     }
   }
 
   console.log(
-    `[scanner] done — scanned: ${preFiltered.length}, candidates: ${candidateCount}, opened: ${openedCount}`
+    `[scanner] done — scanned: ${pools.length}, candidates: ${candidateCount}, opened: ${openedCount}`
   )
-  return { scanned: preFiltered.length, candidates: candidateCount, opened: openedCount }
+  return { scanned: pools.length, candidates: candidateCount, opened: openedCount }
 }
 
 // ---------------------------------------------------------------------------
-// Fetch Meteora DLMM pairs via DexScreener token search on WSOL
-// DexScreener returns up to 30 pairs per token; we filter to dexId=meteora
+// Fetch pools from Meteora datapi with server-side filtering
+// We push as much work as possible to the API to minimise payload size:
+//   - is_blacklisted=false
+//   - volume_24h >= minVolume24hUsd
+//   - tvl >= minLiquidityUsd && tvl <= maxLiquidityUsd
+//   - token_y = WSOL  (SOL-quote pools only)
+// Age filter is applied client-side since created_at is unix seconds, not a
+// range filter supported by the current filter_by syntax.
 // ---------------------------------------------------------------------------
-async function fetchMeteoraPairs(): Promise<{ pairs: DexPair[]; error?: string }> {
+async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: string }> {
+  const filterBy = [
+    'is_blacklisted=false',
+    `volume_24h>=${PRE_FILTER.minVolume24hUsd}`,
+    `tvl>=${PRE_FILTER.minLiquidityUsd}`,
+    `tvl<=${PRE_FILTER.maxLiquidityUsd}`,
+    `token_y=${WSOL}`,
+  ].join(' && ')
+
+  const params = {
+    page:      1,
+    page_size: 1000,
+    sort_by:   'volume_24h:desc',
+    filter_by: filterBy,
+  }
+
   try {
-    const res = await axios.get<{ pairs: DexPair[] }>(
-      `${DEXSCREENER_SEARCH}${WSOL}`,
-      { timeout: 15_000 }
+    const res = await axios.get<PoolsResponse>(`${METEORA_API}/pools`, {
+      params,
+      timeout: 20_000,
+    })
+
+    const allPools = res.data?.data ?? []
+
+    // Client-side age filter (created_at is unix seconds)
+    const maxAgeSeconds = PRE_FILTER.maxAgeHours * 3600
+    const now = Date.now() / 1000
+    const pools = allPools.filter(
+      (p) => p.created_at && (now - p.created_at) <= maxAgeSeconds
     )
-    const all = Array.isArray(res.data?.pairs) ? res.data.pairs : []
-    const meteora = all.filter((p) => p.dexId === 'meteora')
-    console.log(`[scanner] DexScreener returned ${all.length} total, ${meteora.length} Meteora`)
-    return { pairs: meteora }
+
+    console.log(
+      `[scanner] datapi returned ${allPools.length} pools; ${pools.length} within ${PRE_FILTER.maxAgeHours}h age window`
+    )
+    return { pools }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     const status  = (err as { response?: { status?: number } })?.response?.status
     const detail  = status ? `HTTP ${status}: ${message}` : message
-    return { pairs: [], error: `DexScreener API failed — ${detail}` }
+    return { pools: [], error: `Meteora datapi failed — ${detail}` }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Pre-filter using DexScreener liquidity/volume/age
-// ---------------------------------------------------------------------------
-function applyPreFilter(pair: DexPair): boolean {
-  const liquidity = pair.liquidity?.usd  ?? 0
-  const volume    = pair.volume?.h24     ?? 0
-  const ageHours  = pair.pairCreatedAt
-    ? (Date.now() - pair.pairCreatedAt) / (1000 * 60 * 60)
-    : 0
-
-  return (
-    volume    >= PRE_FILTER.minVolume24hUsd &&
-    liquidity >= PRE_FILTER.minLiquidityUsd &&
-    liquidity <= PRE_FILTER.maxLiquidityUsd &&
-    (ageHours === 0 || ageHours <= PRE_FILTER.maxAgeHours)
-  )
 }
