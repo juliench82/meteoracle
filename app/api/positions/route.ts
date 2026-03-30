@@ -1,24 +1,28 @@
 import { NextResponse } from 'next/server'
+import { createServerClient } from '@/lib/supabase'
 
-// TODO: wire to Supabase in feat/scanner branch
-export async function GET() {
-  const mockPositions = [
-    {
-      id: '1',
-      tokenSymbol: 'BONK',
-      tokenAddress: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
-      poolAddress: '...',
-      strategyId: 'evil-panda',
-      binRangeLower: 0.000018,
-      binRangeUpper: 0.000026,
-      entryPrice: 0.000022,
-      currentPrice: 0.000021,
-      solDeposited: 0.5,
-      feesEarnedSol: 0.012,
-      status: 'active',
-      inRange: true,
-      openedAt: new Date(Date.now() - 3600000).toISOString(),
-    },
-  ]
-  return NextResponse.json({ positions: mockPositions })
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url)
+  const status = searchParams.get('status') ?? 'active'
+  const limit = Math.min(parseInt(searchParams.get('limit') ?? '50'), 100)
+
+  const supabase = createServerClient()
+
+  let query = supabase
+    .from('positions')
+    .select('*')
+    .order('opened_at', { ascending: false })
+    .limit(limit)
+
+  if (status !== 'all') {
+    query = query.eq('status', status)
+  }
+
+  const { data, error } = await query
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+
+  return NextResponse.json({ positions: data ?? [] })
 }
