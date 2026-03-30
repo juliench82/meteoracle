@@ -8,6 +8,24 @@ import type { Strategy, TokenMetrics } from '@/lib/types'
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 
 // ---------------------------------------------------------------------------
+// Helper: sign and send a legacy Transaction
+// ---------------------------------------------------------------------------
+
+async function sendLegacyTx(
+  tx: import('@solana/web3.js').Transaction,
+  signers: import('@solana/web3.js').Signer[]
+): Promise<string> {
+  const connection = getConnection()
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
+  tx.recentBlockhash = blockhash
+  tx.feePayer = signers[0].publicKey
+  tx.sign(...signers)
+  const sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 })
+  await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
+  return sig
+}
+
+// ---------------------------------------------------------------------------
 // Open a new DLMM position
 // ---------------------------------------------------------------------------
 
@@ -96,9 +114,7 @@ export async function openPosition(
     })
 
     // 8. Send transaction
-    tx.sign(wallet, positionKeypair)
-    const sig = await connection.sendTransaction(tx, { maxRetries: 3 })
-    await connection.confirmTransaction(sig, 'confirmed')
+    const sig = await sendLegacyTx(tx, [wallet, positionKeypair])
 
     console.log(`${label} position opened ✔ sig: ${sig}`)
 
@@ -169,8 +185,7 @@ export async function closePosition(
           owner: wallet.publicKey,
           positions: [{ publicKey: positionPubKey } as never],
         })
-        const claimSig = await connection.sendTransaction(claimTx, { maxRetries: 3 })
-        await connection.confirmTransaction(claimSig, 'confirmed')
+        const claimSig = await sendLegacyTx(claimTx, [wallet])
         console.log(`${label} fees claimed ✔ sig: ${claimSig}`)
         // TODO: parse actual fee amounts from tx logs
         feesClaimedSol = position.fees_earned_sol ?? 0
@@ -200,9 +215,7 @@ export async function closePosition(
       })
 
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
-        tx.sign(wallet)
-        const sig = await connection.sendTransaction(tx, { maxRetries: 3 })
-        await connection.confirmTransaction(sig, 'confirmed')
+        const sig = await sendLegacyTx(tx, [wallet])
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
       }
     }
