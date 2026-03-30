@@ -17,6 +17,7 @@ export interface Position {
   openedAt: string
   closedAt?: string
   pnlSol?: number
+  metadata?: Record<string, unknown>
 }
 
 export interface Candidate {
@@ -96,10 +97,6 @@ export interface BotLog {
   createdAt: string
 }
 
-// ---------------------------------------------------------------------------
-// DexScreener API types
-// ---------------------------------------------------------------------------
-
 export interface DexScreenerPair {
   chainId: string
   dexId: string
@@ -111,7 +108,7 @@ export interface DexScreenerPair {
   volume?: { h24: number; h6: number; h1: number; m5: number }
   liquidity?: { usd: number; base: number; quote: number }
   marketCap?: number
-  pairCreatedAt?: number  // unix ms
+  pairCreatedAt?: number
   labels?: string[]
   url?: string
 }

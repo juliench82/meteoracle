@@ -1,36 +1,68 @@
 import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
+import type { Candidate } from '@/lib/types'
 
-const MOCK_CANDIDATES = [
-  { symbol: 'PEPE2', score: 87, strategy: 'evil-panda', volume: '1.2M', mc: '450K', age: '4h' },
-  { symbol: 'MDOG', score: 72, strategy: 'evil-panda', volume: '680K', mc: '280K', age: '1h' },
-  { symbol: 'KEKE', score: 61, strategy: 'evil-panda', volume: '310K', mc: '190K', age: '22m' },
-]
+function formatNum(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
+  return String(n)
+}
 
-export function CandidateFeed() {
+function scoreColor(score: number): string {
+  if (score >= 80) return 'text-green-400'
+  if (score >= 65) return 'text-brand-light'
+  if (score >= 50) return 'text-yellow-400'
+  return 'text-slate-500'
+}
+
+const STRATEGY_LABELS: Record<string, string> = {
+  'evil-panda': 'Evil Panda',
+  'scalp-spike': 'Scalp Spike',
+  'stable-farm': 'Stable Farm',
+}
+
+export function CandidateFeed({ candidates }: { candidates: Candidate[] }) {
   return (
     <Card>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-sm font-semibold text-slate-200">Candidate Feed</h2>
-        <Badge variant="neutral">Mock data</Badge>
+        <Badge variant="neutral">{candidates.length}</Badge>
       </div>
-      <div className="space-y-3">
-        {MOCK_CANDIDATES.map((c) => (
-          <div
-            key={c.symbol}
-            className="flex items-center justify-between p-3 rounded-lg bg-surface border border-surface-border hover:border-brand/30 transition-colors"
-          >
-            <div>
-              <p className="text-sm font-mono font-semibold text-white">{c.symbol}</p>
-              <p className="text-xs text-slate-500 mt-0.5">Vol {c.volume} · MC {c.mc} · {c.age}</p>
-            </div>
-            <div className="text-right space-y-1">
-              <p className="text-lg font-bold font-mono text-brand-light">{c.score}</p>
-              <Badge variant="brand">{c.strategy}</Badge>
-            </div>
-          </div>
-        ))}
-      </div>
+
+      {candidates.length === 0 ? (
+        <p className="text-slate-600 text-sm py-8 text-center">No candidates yet</p>
+      ) : (
+        <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+          {candidates.map((c) => {
+            const age = Math.round(
+              (Date.now() - new Date(c.scannedAt).getTime()) / 60000
+            )
+            return (
+              <div
+                key={c.id}
+                className="flex items-center justify-between p-3 rounded-lg bg-surface border border-surface-border hover:border-brand/30 transition-colors"
+              >
+                <div>
+                  <p className="text-sm font-mono font-semibold text-white">
+                    {c.symbol}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Vol {formatNum(c.volume24h)} · MC {formatNum(c.mcAtScan)} · {age}m ago
+                  </p>
+                </div>
+                <div className="text-right space-y-1">
+                  <p className={`text-lg font-bold font-mono ${scoreColor(c.score)}`}>
+                    {c.score}
+                  </p>
+                  <Badge variant="brand">
+                    {STRATEGY_LABELS[c.strategyMatched] ?? c.strategyMatched}
+                  </Badge>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </Card>
   )
 }
