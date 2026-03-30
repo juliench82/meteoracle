@@ -1,5 +1,5 @@
 import DLMM, { StrategyType } from '@meteora-ag/dlmm'
-import { PublicKey } from '@solana/web3.js'
+import { Keypair, PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
@@ -81,9 +81,10 @@ export async function openPosition(
       wallet.publicKey.toBase58(),
     ])
 
-    // 7. Build position transaction
-    const { tx, positionPubKey } = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
-      positionPubKey: wallet.publicKey, // will be overridden by SDK
+    // 7. Generate position keypair and build position transaction
+    const positionKeypair = new Keypair()
+    const tx = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+      positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
       totalXAmount: totalX,
       totalYAmount: totalY,
@@ -95,7 +96,7 @@ export async function openPosition(
     })
 
     // 8. Send transaction
-    tx.sign([wallet])
+    tx.sign([wallet, positionKeypair])
     const sig = await connection.sendTransaction(tx, { maxRetries: 3 })
     await connection.confirmTransaction(sig, 'confirmed')
 
@@ -108,7 +109,7 @@ export async function openPosition(
       sig,
       poolPriceUsd,
       solAmount,
-      positionPubKey?.toBase58()
+      positionKeypair.publicKey.toBase58()
     )
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
