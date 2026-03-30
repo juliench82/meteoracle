@@ -181,15 +181,11 @@ async function fetchPositionState(
     )
     if (!pos) return { ...fallback, currentPrice }
 
-    const { lowerBinId, upperBinId } = pos.positionData
+    const { lowerBinId, upperBinId, feeY } = pos.positionData
     const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId
 
-    // Sum unclaimed fees across all bins
-    const feesEarnedSol = pos.positionData.positionBinData.reduce(
-      (acc: number, bin: { feeYPending: { toNumber: () => number } }) =>
-        acc + bin.feeYPending.toNumber() / 1e9,
-      0
-    )
+    // feeY is total unclaimed SOL-side fees as a BN (lamports)
+    const feesEarnedSol = feeY.toNumber() / 1e9
 
     return { inRange, currentPrice, feesEarnedSol }
   } catch (err) {
