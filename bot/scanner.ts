@@ -9,10 +9,10 @@ import { checkRugscore } from '@/lib/rugcheck'
 import type { TokenMetrics } from '@/lib/types'
 
 // ---------------------------------------------------------------------------
-// Meteora DLMM Data API — confirmed live endpoint (referenced in official SDK docs)
-// https://dlmm.datapi.meteora.ag/pair/all
+// Meteora DLMM API — confirmed working endpoint (no query params)
+// Returns full list of all pairs as a flat array
 // ---------------------------------------------------------------------------
-const METEORA_API = 'https://dlmm.datapi.meteora.ag'
+const METEORA_PAIR_ALL = 'https://dlmm-api.meteora.ag/pair/all'
 
 const PRE_FILTER = {
   minVolume24hUsd: 50_000,
@@ -25,25 +25,19 @@ const MIN_SCORE_TO_OPEN = parseInt(process.env.MIN_SCORE_TO_OPEN ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 
 // ---------------------------------------------------------------------------
-// Meteora pair shape — /pair/all response
+// Meteora pair shape
 // ---------------------------------------------------------------------------
 interface MeteoraPair {
   address: string
   name: string
   mint_x: string
   mint_y: string
-  reserve_x_amount: number
-  reserve_y_amount: number
-  liquidity: number
+  liquidity: string   // comes back as string in API response
   current_price: number
-  apr: number
-  apy: number
-  base_fee_percentage: string
-  max_fee_percentage: string
-  trade_volume_24h: number
-  fees_24h: number
-  today_fees: number
+  trade_volume_24h: string
+  fees_24h: string
   bin_step: number
+  base_fee_percentage: string
   created_at?: string
 }
 
@@ -67,7 +61,7 @@ export async function runScanner(): Promise<{
     return { scanned: 0, candidates: 0, opened: 0 }
   }
 
-  // 1. Fetch Meteora pairs
+  // 1. Fetch all Meteora pairs
   const { pairs, error: fetchError } = await fetchMeteoraPairs()
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
@@ -75,7 +69,7 @@ export async function runScanner(): Promise<{
   }
   console.log(`[scanner] fetched ${pairs.length} pairs from Meteora`)
 
-  // 2. Pre-filter using Meteora data only
+  // 2. Pre-filter using Meteora data only (no external calls)
   const preFiltered = pairs.filter(applyPreFilter)
   console.log(`[scanner] ${preFiltered.length} passed pre-filter`)
 
@@ -121,6 +115,9 @@ export async function runScanner(): Promise<{
       // 5. Rugcheck
       const rugScore = await checkRugscore(tokenAddress)
 
+      const liquidityUsd = parseFloat(pair.liquidity)
+      const volume24h = parseFloat(pair.trade_volume_24h)
+
       const ageHours = pair.created_at
         ? (Date.now() - new Date(pair.created_at).getTime()) / (1000 * 60 * 60)
         : (dexData?.ageHours ?? 999)
@@ -129,8 +126,8 @@ export async function runScanner(): Promise<{
         address: tokenAddress,
         symbol,
         mcUsd: dexData?.mcUsd ?? 0,
-        volume24h: pair.trade_volume_24h,
-        liquidityUsd: pair.liquidity,
+        volume24h,
+        liquidityUsd,
         topHolderPct: holderData.topHolderPct,
         holderCount: holderData.holderCount,
         ageHours,
@@ -145,7 +142,7 @@ export async function runScanner(): Promise<{
       if (!strategy) {
         console.log(
           `[scanner] ${symbol} — no strategy matched` +
-          ` (mc=$${metrics.mcUsd.toFixed(0)}, vol=$${metrics.volume24h.toFixed(0)},` +
+          ` (mc=$${metrics.mcUsd.toFixed(0)}, vol=$${volume24h.toFixed(0)},` +
           ` holders=${metrics.holderCount}, rug=${rugScore}, age=${ageHours.toFixed(1)}h)`
         )
         continue
@@ -204,23 +201,14 @@ export async function runScanner(): Promise<{
 }
 
 // ---------------------------------------------------------------------------
-// Meteora pair fetcher
-// GET /pair/all?sort_key=volume&order_by=desc — no pagination needed, returns full list
+// Meteora fetcher — GET /pair/all (no query params, returns flat array)
+// Confirmed working in live bots against this exact URL
 // ---------------------------------------------------------------------------
 async function fetchMeteoraPairs(): Promise<{ pairs: MeteoraPair[]; error?: string }> {
   try {
-    const res = await axios.get<MeteoraPair[]>(
-      `${METEORA_API}/pair/all`,
-      {
-        params: {
-          sort_key: 'volume',
-          order_by: 'desc',
-        },
-        timeout: 20_000,
-      }
-    )
-
+    const res = await axios.get<MeteoraPair[]>(METEORA_PAIR_ALL, { timeout: 20_000 })
     const pairs = Array.isArray(res.data) ? res.data : []
+    console.log(`[scanner] Meteora returned ${pairs.length} raw pairs`)
     return { pairs }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
@@ -262,16 +250,20 @@ async function fetchDexScreenerEnrichment(
 
 // ---------------------------------------------------------------------------
 // Pre-filter — Meteora data only, zero external calls
+// Note: liquidity and trade_volume_24h are strings in the API response
 // ---------------------------------------------------------------------------
 function applyPreFilter(pair: MeteoraPair): boolean {
+  const liquidity = parseFloat(pair.liquidity)
+  const volume = parseFloat(pair.trade_volume_24h)
+
   const ageHours = pair.created_at
     ? (Date.now() - new Date(pair.created_at).getTime()) / (1000 * 60 * 60)
     : 0
 
   return (
-    pair.trade_volume_24h >= PRE_FILTER.minVolume24hUsd &&
-    pair.liquidity >= PRE_FILTER.minLiquidityUsd &&
-    pair.liquidity <= PRE_FILTER.maxLiquidityUsd &&
+    volume >= PRE_FILTER.minVolume24hUsd &&
+    liquidity >= PRE_FILTER.minLiquidityUsd &&
+    liquidity <= PRE_FILTER.maxLiquidityUsd &&
     (ageHours === 0 || ageHours <= PRE_FILTER.maxAgeHours)
   )
 }
