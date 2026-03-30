@@ -9,10 +9,10 @@ import { checkRugscore } from '@/lib/rugcheck'
 import type { TokenMetrics } from '@/lib/types'
 
 // ---------------------------------------------------------------------------
-// Meteora API — current live base (dlmm-api.meteora.ag is deprecated)
-// Docs: https://docs.meteora.ag/api-reference/dlmm/overview
+// Meteora DLMM Data API — confirmed live endpoint (referenced in official SDK docs)
+// https://dlmm.datapi.meteora.ag/pair/all
 // ---------------------------------------------------------------------------
-const METEORA_API = 'https://app.meteora.ag/clmm-api'
+const METEORA_API = 'https://dlmm.datapi.meteora.ag'
 
 const PRE_FILTER = {
   minVolume24hUsd: 50_000,
@@ -25,30 +25,26 @@ const MIN_SCORE_TO_OPEN = parseInt(process.env.MIN_SCORE_TO_OPEN ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 
 // ---------------------------------------------------------------------------
-// Meteora pool shape — /pools response
+// Meteora pair shape — /pair/all response
 // ---------------------------------------------------------------------------
-interface MeteoraPool {
-  pool_address: string
-  pool_name: string          // e.g. "BONK-SOL"
-  token_a_mint: string       // base token
-  token_b_mint: string       // quote token
-  token_a_symbol: string
-  token_b_symbol: string
-  pool_tvl: number           // USD liquidity
-  trading_volume: number     // 24h volume USD
-  fee_rate: number           // e.g. 0.003
+interface MeteoraPair {
+  address: string
+  name: string
+  mint_x: string
+  mint_y: string
+  reserve_x_amount: number
+  reserve_y_amount: number
+  liquidity: number
   current_price: number
-  pool_apr: number
-  pool_apy: number
+  apr: number
+  apy: number
+  base_fee_percentage: string
+  max_fee_percentage: string
+  trade_volume_24h: number
+  fees_24h: number
+  today_fees: number
+  bin_step: number
   created_at?: string
-  bin_step?: number
-}
-
-interface MeteoraPoolsResponse {
-  data: MeteoraPool[]
-  total: number
-  page: number
-  page_size: number
 }
 
 export async function runScanner(): Promise<{
@@ -71,22 +67,22 @@ export async function runScanner(): Promise<{
     return { scanned: 0, candidates: 0, opened: 0 }
   }
 
-  // 1. Fetch Meteora pools
-  const { pools, error: fetchError } = await fetchMeteoraPools()
+  // 1. Fetch Meteora pairs
+  const { pairs, error: fetchError } = await fetchMeteoraPairs()
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
     return { scanned: 0, candidates: 0, opened: 0, error: fetchError }
   }
-  console.log(`[scanner] fetched ${pools.length} pools from Meteora`)
+  console.log(`[scanner] fetched ${pairs.length} pairs from Meteora`)
 
-  // 2. Pre-filter
-  const preFiltered = pools.filter(applyPreFilter)
+  // 2. Pre-filter using Meteora data only
+  const preFiltered = pairs.filter(applyPreFilter)
   console.log(`[scanner] ${preFiltered.length} passed pre-filter`)
 
   let candidateCount = 0
   let openedCount = 0
 
-  for (const pool of preFiltered) {
+  for (const pair of preFiltered) {
     const { count: currentOpen } = await supabase
       .from('positions')
       .select('id', { count: 'exact', head: true })
@@ -94,8 +90,8 @@ export async function runScanner(): Promise<{
     if ((currentOpen ?? 0) >= MAX_CONCURRENT_POSITIONS) break
 
     try {
-      const tokenAddress = pool.token_a_mint
-      const symbol = pool.token_a_symbol ?? pool.pool_name.split('-')[0]
+      const tokenAddress = pair.mint_x
+      const symbol = pair.name.split('-')[0] ?? pair.name
 
       // Skip if scanned recently
       const { data: existing } = await supabase
@@ -125,22 +121,22 @@ export async function runScanner(): Promise<{
       // 5. Rugcheck
       const rugScore = await checkRugscore(tokenAddress)
 
-      const ageHours = pool.created_at
-        ? (Date.now() - new Date(pool.created_at).getTime()) / (1000 * 60 * 60)
+      const ageHours = pair.created_at
+        ? (Date.now() - new Date(pair.created_at).getTime()) / (1000 * 60 * 60)
         : (dexData?.ageHours ?? 999)
 
       const metrics: TokenMetrics = {
         address: tokenAddress,
         symbol,
         mcUsd: dexData?.mcUsd ?? 0,
-        volume24h: pool.trading_volume,
-        liquidityUsd: pool.pool_tvl,
+        volume24h: pair.trade_volume_24h,
+        liquidityUsd: pair.liquidity,
         topHolderPct: holderData.topHolderPct,
         holderCount: holderData.holderCount,
         ageHours,
         rugcheckScore: rugScore,
-        priceUsd: pool.current_price,
-        poolAddress: pool.pool_address,
+        priceUsd: pair.current_price,
+        poolAddress: pair.address,
         dexId: 'meteora',
       }
 
@@ -199,7 +195,7 @@ export async function runScanner(): Promise<{
         }
       }
     } catch (err) {
-      console.error(`[scanner] error processing ${pool.pool_name}:`, err)
+      console.error(`[scanner] error processing ${pair.name}:`, err)
     }
   }
 
@@ -208,50 +204,29 @@ export async function runScanner(): Promise<{
 }
 
 // ---------------------------------------------------------------------------
-// Meteora pool fetcher
-// GET /pools?page=0&page_size=100&sort_key=trading_volume&order_by=desc
+// Meteora pair fetcher
+// GET /pair/all?sort_key=volume&order_by=desc — no pagination needed, returns full list
 // ---------------------------------------------------------------------------
-async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: string }> {
-  const allPools: MeteoraPool[] = []
-  let page = 0
-  const pageSize = 100
-
+async function fetchMeteoraPairs(): Promise<{ pairs: MeteoraPair[]; error?: string }> {
   try {
-    while (true) {
-      const res = await axios.get<MeteoraPoolsResponse>(
-        `${METEORA_API}/pools`,
-        {
-          params: {
-            page,
-            page_size: pageSize,
-            sort_key: 'trading_volume',
-            order_by: 'desc',
-          },
-          timeout: 15_000,
-        }
-      )
+    const res = await axios.get<MeteoraPair[]>(
+      `${METEORA_API}/pair/all`,
+      {
+        params: {
+          sort_key: 'volume',
+          order_by: 'desc',
+        },
+        timeout: 20_000,
+      }
+    )
 
-      const pools: MeteoraPool[] = res.data?.data ?? []
-      allPools.push(...pools)
-
-      // Early exit: sorted by volume, stop when volume drops below minimum
-      const lastPool = pools[pools.length - 1]
-      if (
-        pools.length < pageSize ||
-        allPools.length >= 500 ||
-        (lastPool?.trading_volume ?? 0) < PRE_FILTER.minVolume24hUsd
-      ) break
-
-      page++
-    }
-
-    return { pools: allPools }
+    const pairs = Array.isArray(res.data) ? res.data : []
+    return { pairs }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    // Surface the HTTP status if available
     const status = (err as { response?: { status?: number } })?.response?.status
     const detail = status ? `HTTP ${status}: ${message}` : message
-    return { pools: [], error: `Meteora API failed — ${detail}` }
+    return { pairs: [], error: `Meteora API failed — ${detail}` }
   }
 }
 
@@ -286,17 +261,17 @@ async function fetchDexScreenerEnrichment(
 }
 
 // ---------------------------------------------------------------------------
-// Pre-filter — uses Meteora data only, zero external calls
+// Pre-filter — Meteora data only, zero external calls
 // ---------------------------------------------------------------------------
-function applyPreFilter(pool: MeteoraPool): boolean {
-  const ageHours = pool.created_at
-    ? (Date.now() - new Date(pool.created_at).getTime()) / (1000 * 60 * 60)
-    : 0 // unknown age — let through, DexScreener will validate
+function applyPreFilter(pair: MeteoraPair): boolean {
+  const ageHours = pair.created_at
+    ? (Date.now() - new Date(pair.created_at).getTime()) / (1000 * 60 * 60)
+    : 0
 
   return (
-    pool.trading_volume >= PRE_FILTER.minVolume24hUsd &&
-    pool.pool_tvl >= PRE_FILTER.minLiquidityUsd &&
-    pool.pool_tvl <= PRE_FILTER.maxLiquidityUsd &&
+    pair.trade_volume_24h >= PRE_FILTER.minVolume24hUsd &&
+    pair.liquidity >= PRE_FILTER.minLiquidityUsd &&
+    pair.liquidity <= PRE_FILTER.maxLiquidityUsd &&
     (ageHours === 0 || ageHours <= PRE_FILTER.maxAgeHours)
   )
 }
