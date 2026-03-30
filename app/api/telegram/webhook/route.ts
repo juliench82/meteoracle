@@ -38,8 +38,7 @@ export async function POST(req: Request) {
     // /tick  — run one full monitor + scanner cycle
     // ------------------------------------------------------------------
     if (command === '/tick' || command === '/scan') {
-      await reply(chatId, '⏳ Running scanner...')
-
+      // Gate checks FIRST — before sending any message to Telegram
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
         return NextResponse.json({ ok: true })
@@ -50,6 +49,9 @@ export async function POST(req: Request) {
         await reply(chatId, '🛑 Bot is stopped.\nSend /start to resume.')
         return NextResponse.json({ ok: true })
       }
+
+      // Only send the "running" message once we know the bot is actually going to work
+      await reply(chatId, '⏳ Running scanner...')
 
       const startedAt = Date.now()
       const [monitorResult, scanResult] = await Promise.all([
