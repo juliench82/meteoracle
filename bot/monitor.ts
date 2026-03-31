@@ -9,11 +9,11 @@ import type { Strategy } from '@/lib/types'
 
 const SUPABASE_TIMEOUT_MS = 5_000
 
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
+async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
   const timer = new Promise<null>((resolve) =>
     setTimeout(() => { console.warn(`[monitor] timeout (${ms}ms): ${label}`); resolve(null) }, ms)
   )
-  return Promise.race([promise, timer])
+  return Promise.race([Promise.resolve(promise), timer])
 }
 
 export async function monitorPositions(): Promise<{
