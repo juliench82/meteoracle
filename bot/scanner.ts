@@ -50,46 +50,25 @@ function toUnixSeconds(ts: number): number {
   return ts > 1e10 ? ts / 1000 : ts
 }
 
-/** Wraps any promise with a timeout. Returns null if it times out. */
 async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
   const timer = new Promise<null>((resolve) =>
     setTimeout(() => { console.warn(`[scanner] timeout (${ms}ms): ${label}`); resolve(null) }, ms)
   )
-  const result = await Promise.race([promise, timer])
-  return result
+  return Promise.race([promise, timer])
 }
 
 export async function runScanner(): Promise<{
   scanned: number; candidates: number; opened: number; error?: string
 }> {
-  console.log('[scanner] step 1/5 — started')
-  const supabase = createServerClient()
-
-  console.log('[scanner] step 2/5 — checking open positions')
-  const countResult = await withTimeout(
-    supabase.from('positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
-    SUPABASE_TIMEOUT_MS,
-    'positions count'
-  )
-  const openCount = countResult?.count ?? 0
-  if (countResult === null) console.warn('[scanner] Supabase timed out at step 2 — assuming 0 open positions')
-  else if (countResult.error) console.warn('[scanner] Supabase error at step 2:', countResult.error.message)
-  console.log(`[scanner] step 2/5 — open positions: ${openCount}`)
-
-  if (openCount >= MAX_CONCURRENT_POSITIONS) {
-    console.log(`[scanner] max positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS})`)
-    return { scanned: 0, candidates: 0, opened: 0 }
-  }
-
-  console.log('[scanner] step 3/5 — fetching Meteora pools')
+  console.log('[scanner] step 1/4 — fetching Meteora pools')
   const { pools, error: fetchError } = await fetchMeteoraPools()
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
     return { scanned: 0, candidates: 0, opened: 0, error: fetchError }
   }
-  console.log(`[scanner] step 3/5 — got ${pools.length} pools`)
+  console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
 
-  console.log('[scanner] step 4/5 — cheap pre-screen')
+  console.log('[scanner] step 2/4 — cheap pre-screen')
   const survivors: Array<{ pool: MeteoraPool; mcUsd: number; ageHours: number }> = []
 
   for (const pool of pools) {
@@ -101,18 +80,37 @@ export async function runScanner(): Promise<{
     const mcUsd    = token.market_cap ?? 0
     const ageHours = (Date.now() / 1000 - toUnixSeconds(pool.created_at)) / 3600
 
-    if (mcUsd    < CHEAP_FILTER.minMcUsd)    { console.log(`[scanner] ${symbol} — cheap skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
-    if (mcUsd    > CHEAP_FILTER.maxMcUsd)    { console.log(`[scanner] ${symbol} — cheap skip: mc=$${mcUsd.toFixed(0)} > $50M`); continue }
-    if (vol24h   < CHEAP_FILTER.minVol24h)   { console.log(`[scanner] ${symbol} — cheap skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
-    if (liqUsd   < CHEAP_FILTER.minLiqUsd)   { console.log(`[scanner] ${symbol} — cheap skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
-    if (ageHours > CHEAP_FILTER.maxAgeHours) { console.log(`[scanner] ${symbol} — cheap skip: age=${ageHours.toFixed(1)}h > ${CHEAP_FILTER.maxAgeHours}h`); continue }
+    if (mcUsd    < CHEAP_FILTER.minMcUsd)    { console.log(`[scanner] ${symbol} — skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
+    if (mcUsd    > CHEAP_FILTER.maxMcUsd)    { console.log(`[scanner] ${symbol} — skip: mc too high`); continue }
+    if (vol24h   < CHEAP_FILTER.minVol24h)   { console.log(`[scanner] ${symbol} — skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
+    if (liqUsd   < CHEAP_FILTER.minLiqUsd)   { console.log(`[scanner] ${symbol} — skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
+    if (ageHours > CHEAP_FILTER.maxAgeHours) { console.log(`[scanner] ${symbol} — skip: age=${ageHours.toFixed(1)}h > ${CHEAP_FILTER.maxAgeHours}h`); continue }
 
     console.log(`[scanner] ${symbol} — passed cheap filter (mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, age=${ageHours.toFixed(1)}h)`)
     survivors.push({ pool, mcUsd, ageHours })
   }
-  console.log(`[scanner] step 4/5 — ${survivors.length}/${pools.length} passed cheap filter`)
+  console.log(`[scanner] step 2/4 — ${survivors.length}/${pools.length} passed cheap filter`)
 
-  console.log('[scanner] step 5/5 — deep checks on survivors')
+  if (survivors.length === 0) {
+    console.log('[scanner] done — no survivors')
+    return { scanned: pools.length, candidates: 0, opened: 0 }
+  }
+
+  console.log('[scanner] step 3/4 — Supabase dedup check')
+  const supabase = createServerClient()
+
+  // Check max positions once here (with timeout)
+  const countResult = await withTimeout(
+    supabase.from('positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
+    SUPABASE_TIMEOUT_MS, 'positions count'
+  )
+  const openCount = countResult?.count ?? 0
+  if (openCount >= MAX_CONCURRENT_POSITIONS) {
+    console.log(`[scanner] max positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS})`)
+    return { scanned: pools.length, candidates: 0, opened: 0 }
+  }
+
+  console.log('[scanner] step 4/4 — deep checks on survivors')
   let candidateCount = 0
   let openedCount    = 0
 
@@ -124,18 +122,17 @@ export async function runScanner(): Promise<{
     const vol24h       = pool.volume['24h']
     const liqUsd       = pool.tvl
 
-    // Skip if scanned recently
     const recentResult = await withTimeout(
       supabase.from('candidates').select('id').eq('token_address', tokenAddress)
         .gte('scanned_at', new Date(Date.now() - 60 * 60 * 1000).toISOString()).limit(1),
-      SUPABASE_TIMEOUT_MS, `candidates recent check ${symbol}`
+      SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
     )
     if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last 1h`); continue }
 
     const posResult = await withTimeout(
       supabase.from('positions').select('id').eq('token_address', tokenAddress)
         .in('status', ['active', 'out_of_range']).limit(1),
-      SUPABASE_TIMEOUT_MS, `positions check ${symbol}`
+      SUPABASE_TIMEOUT_MS, `positions dedup ${symbol}`
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open position exists`); continue }
 
@@ -172,12 +169,11 @@ export async function runScanner(): Promise<{
       if (topHolderPct > 15)  reasons.push(`topHolder=${topHolderPct.toFixed(1)}% > 15%`)
       if (holderCount  < 500) reasons.push(`holders=${holderCount} < 500`)
       if (rugScore     < 60)  reasons.push(`rug=${rugScore} < 60`)
-      console.log(`[scanner] ${symbol} — no strategy after deep check: ${reasons.join(', ') || 'unknown'}`)
+      console.log(`[scanner] ${symbol} — no strategy: ${reasons.join(', ') || 'unknown'}`)
       continue
     }
 
     const score = scoreCandidate(metrics)
-
     await withTimeout(
       supabase.from('candidates').insert({
         token_address: metrics.address, symbol: metrics.symbol, score,

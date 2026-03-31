@@ -22,13 +22,10 @@ async function reply(chatId: number | string, text: string) {
 async function runTick(chatId: number | string) {
   const startedAt = Date.now()
   try {
-    // Run sequentially — prevents monitor hang from killing scanner
-    console.log('[tick] starting monitor')
-    const monitorResult = await monitorPositions()
-    console.log('[tick] monitor done, starting scanner')
-    const scanResult = await runScanner()
-    console.log('[tick] scanner done')
-
+    const [monitorResult, scanResult] = await Promise.all([
+      monitorPositions(),
+      runScanner(),
+    ])
     const durationMs = Date.now() - startedAt
 
     const supabase = createServerClient()
