@@ -8,11 +8,6 @@ import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
 import type { TokenMetrics } from '@/lib/types'
 
-// ---------------------------------------------------------------------------
-// Meteora DLMM Data API  (NEW — as of 2025)
-// Base:  https://dlmm.datapi.meteora.ag
-// Docs:  https://docs.meteora.ag/api-reference/dlmm
-// ---------------------------------------------------------------------------
 const METEORA_API  = 'https://dlmm.datapi.meteora.ag'
 const DEXSCREENER  = 'https://api.dexscreener.com/latest/dex/tokens'
 
@@ -27,43 +22,18 @@ const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 const WSOL = 'So11111111111111111111111111111111111111112'
 
-// Shape returned by GET /pools (subset we use)
 interface MeteoraPool {
   address:       string
   name:          string
-  created_at:    number          // unix seconds
+  created_at:    number
   tvl:           number
   current_price: number
-  volume: {
-    '24h': number
-    '1h':  number
-  }
-  fees: {
-    '24h': number
-  }
-  fee_tvl_ratio: {
-    '24h': number
-  }
-  pool_config: {
-    bin_step:      number
-    base_fee_pct:  number
-  }
-  token_x: {
-    address:    string
-    symbol:     string
-    decimals:   number
-    holders:    number
-    market_cap: number
-    price:      number
-  }
-  token_y: {
-    address:    string
-    symbol:     string
-    decimals:   number
-    holders:    number
-    market_cap: number
-    price:      number
-  }
+  volume: { '24h': number; '1h': number }
+  fees:   { '24h': number }
+  fee_tvl_ratio: { '24h': number }
+  pool_config: { bin_step: number; base_fee_pct: number }
+  token_x: { address: string; symbol: string; decimals: number; holders: number; market_cap: number; price: number }
+  token_y: { address: string; symbol: string; decimals: number; holders: number; market_cap: number; price: number }
   is_blacklisted: boolean
 }
 
@@ -113,11 +83,10 @@ export async function runScanner(): Promise<{
     if ((currentOpen ?? 0) >= MAX_CONCURRENT_POSITIONS) break
 
     try {
-      // Identify the non-SOL token side
       const isXSol       = pool.token_x.address === WSOL
       const token        = isXSol ? pool.token_y : pool.token_x
       const tokenAddress = token.address
-      const symbol       = token.symbol
+      const symbol       = pool.name ?? token.symbol
 
       // Skip if scanned recently
       const { data: existing } = await supabase
@@ -126,7 +95,10 @@ export async function runScanner(): Promise<{
         .eq('token_address', tokenAddress)
         .gte('scanned_at', new Date(Date.now() - 60 * 60 * 1000).toISOString())
         .limit(1)
-      if (existing && existing.length > 0) continue
+      if (existing && existing.length > 0) {
+        console.log(`[scanner] ${symbol} — skip: scanned in last 1h`)
+        continue
+      }
 
       // Skip if already have open position
       const { data: existingPosition } = await supabase
@@ -135,57 +107,44 @@ export async function runScanner(): Promise<{
         .eq('token_address', tokenAddress)
         .in('status', ['active', 'out_of_range'])
         .limit(1)
-      if (existingPosition && existingPosition.length > 0) continue
-
-      // ── Holder data (Helius) ─────────────────────────────────────────────
-      // checkHolders() NEVER returns null; it always returns a HolderData
-      // with reliable=false on partial failure instead of null.
-      // We only fall back to token.holders (Meteora field) when Helius
-      // is entirely unreliable AND Meteora has a value.
-      const holderData = await checkHolders(tokenAddress)
-
-      let holderCount   = holderData.holderCount
-      let topHolderPct  = holderData.topHolderPct
-
-      if (!holderData.reliable) {
-        // Use Meteora's holder count if DAS/RPC both failed
-        const meteoraHolders = token.holders ?? 0
-        if (meteoraHolders > holderCount) {
-          console.warn(
-            `[scanner] ${symbol} — using Meteora holder count (${meteoraHolders}) ` +
-            `because Helius was unreliable (got ${holderCount})`
-          )
-          holderCount = meteoraHolders
-        }
+      if (existingPosition && existingPosition.length > 0) {
+        console.log(`[scanner] ${symbol} — skip: open position exists`)
+        continue
       }
 
       // ── Market cap ──────────────────────────────────────────────────────
-      // Meteora datapi may return market_cap=0 for some tokens.
-      // Primary: token.market_cap from Meteora
-      // Fallback: price × circulating supply from DexScreener
       let mcUsd = token.market_cap ?? 0
-
       if (!mcUsd || mcUsd < 1) {
         mcUsd = await fetchMcFromDexScreener(tokenAddress, token.price)
         if (!mcUsd || mcUsd < 1) {
-          console.log(
-            `[scanner] ${symbol} (${tokenAddress}) — skipped: could not resolve market_cap ` +
-            `(Meteora=${token.market_cap ?? 0}, DexScreener=${mcUsd})`
-          )
+          console.log(`[scanner] ${symbol} — skip: could not resolve market_cap`)
           continue
         }
         console.log(`[scanner] ${symbol} — market_cap from DexScreener: $${mcUsd.toFixed(0)}`)
       }
 
+      // ── Holder data (Helius) ─────────────────────────────────────────────
+      const holderData = await checkHolders(tokenAddress)
+      let holderCount  = holderData.holderCount
+      let topHolderPct = holderData.topHolderPct
+
+      if (!holderData.reliable) {
+        const meteoraHolders = token.holders ?? 0
+        if (meteoraHolders > holderCount) holderCount = meteoraHolders
+      }
+
       const rugScore = await checkRugscore(tokenAddress)
       const ageHours = (Date.now() / 1000 - pool.created_at) / 3600
+      const vol24h   = pool.volume['24h']
+      const liqUsd   = pool.tvl
 
+      // ── Strategy match with per-field rejection logging ──────────────────
       const metrics: TokenMetrics = {
         address:       tokenAddress,
         symbol,
         mcUsd,
-        volume24h:     pool.volume['24h'],
-        liquidityUsd:  pool.tvl,
+        volume24h:     vol24h,
+        liquidityUsd:  liqUsd,
         topHolderPct,
         holderCount,
         ageHours,
@@ -196,12 +155,21 @@ export async function runScanner(): Promise<{
       }
 
       const strategy = getStrategyForToken(metrics)
+
       if (!strategy) {
-        console.log(
-          `[scanner] ${symbol} — no strategy matched` +
-          ` (mc=$${metrics.mcUsd.toFixed(0)}, vol=$${metrics.volume24h.toFixed(0)},` +
-          ` holders=${metrics.holderCount}${!holderData.reliable ? '(est)' : ''}, rug=${rugScore}, age=${ageHours.toFixed(1)}h)`
-        )
+        // Log exactly which filters each pool fails so we can tune them
+        const reasons: string[] = []
+        // Evil Panda thresholds (hard-coded here for debug visibility)
+        if (mcUsd   < 200_000)   reasons.push(`mc=$${mcUsd.toFixed(0)} < $200K`)
+        if (mcUsd   > 50_000_000) reasons.push(`mc=$${mcUsd.toFixed(0)} > $50M`)
+        if (vol24h  < 300_000)   reasons.push(`vol=$${vol24h.toFixed(0)} < $300K`)
+        if (liqUsd  < 50_000)    reasons.push(`liq=$${liqUsd.toFixed(0)} < $50K`)
+        if (topHolderPct > 15)   reasons.push(`topHolder=${topHolderPct.toFixed(1)}% > 15%`)
+        if (holderCount  < 500)  reasons.push(`holders=${holderCount} < 500`)
+        if (ageHours     > 72)   reasons.push(`age=${ageHours.toFixed(1)}h > 72h`)
+        if (rugScore     < 60)   reasons.push(`rug=${rugScore} < 60`)
+        const why = reasons.length > 0 ? reasons.join(', ') : 'unknown (check strategy router)'
+        console.log(`[scanner] ${symbol} — no strategy: ${why}`)
         continue
       }
 
@@ -221,7 +189,7 @@ export async function runScanner(): Promise<{
       })
 
       candidateCount++
-      console.log(`[scanner] candidate: ${symbol} → ${strategy.id} (score: ${score})`)
+      console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score: ${score}, mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCount}, rug=${rugScore})`)
 
       await sendAlert({
         type:      'candidate_found',
@@ -250,24 +218,15 @@ export async function runScanner(): Promise<{
     }
   }
 
-  console.log(
-    `[scanner] done — scanned: ${pools.length}, candidates: ${candidateCount}, opened: ${openedCount}`
-  )
+  console.log(`[scanner] done — scanned: ${pools.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
   return { scanned: pools.length, candidates: candidateCount, opened: openedCount }
 }
 
-// ---------------------------------------------------------------------------
-// Market cap fallback via DexScreener
-// We compute mcUsd = priceUsd × fdv from DexScreener.  If the token has a
-// known FDV we use it directly; otherwise we skip (rather than invent a value).
-// ---------------------------------------------------------------------------
 async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Promise<number> {
   try {
     const res = await axios.get(`${DEXSCREENER}/${mint}`, { timeout: 6_000 })
     const pairs: Array<{ fdv?: number; marketCap?: number }> = res.data?.pairs ?? []
     if (pairs.length === 0) return 0
-
-    // Prefer the pair with the highest liquidity (first result is usually best)
     const best = pairs[0]
     return best.marketCap ?? best.fdv ?? 0
   } catch (err) {
@@ -276,16 +235,6 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
   }
 }
 
-// ---------------------------------------------------------------------------
-// Fetch pools from Meteora datapi with server-side filtering
-// We push as much work as possible to the API to minimise payload size:
-//   - is_blacklisted=false
-//   - volume_24h >= minVolume24hUsd
-//   - tvl >= minLiquidityUsd && tvl <= maxLiquidityUsd
-//   - token_y = WSOL  (SOL-quote pools only)
-// Age filter is applied client-side since created_at is unix seconds, not a
-// range filter supported by the current filter_by syntax.
-// ---------------------------------------------------------------------------
 async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: string }> {
   const filterBy = [
     'is_blacklisted=false',
@@ -309,8 +258,6 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
     })
 
     const allPools = res.data?.data ?? []
-
-    // Client-side age filter (created_at is unix seconds)
     const maxAgeSeconds = PRE_FILTER.maxAgeHours * 3600
     const now = Date.now() / 1000
     const pools = allPools.filter(

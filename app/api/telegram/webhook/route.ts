@@ -19,6 +19,41 @@ async function reply(chatId: number | string, text: string) {
   ).catch(() => {})
 }
 
+// ---------------------------------------------------------------------------
+// runTick — the actual monitor + scanner work, called async after we have
+// already returned 200 OK to Telegram.  This prevents Telegram from retrying
+// the webhook when the scan takes longer than ~30 s.
+// ---------------------------------------------------------------------------
+async function runTick(chatId: number | string) {
+  const startedAt = Date.now()
+  try {
+    const [monitorResult, scanResult] = await Promise.all([
+      monitorPositions(),
+      runScanner(),
+    ])
+    const durationMs = Date.now() - startedAt
+
+    const supabase = createServerClient()
+    await supabase.from('bot_logs').insert({
+      level:   'info',
+      event:   'bot_tick',
+      payload: { monitor: monitorResult, scanner: scanResult, durationMs, source: 'telegram' },
+    })
+
+    await reply(chatId, [
+      `✅ *Tick complete* (${durationMs}ms)`,
+      `📡 Scanned: ${scanResult.scanned} pairs`,
+      `🎯 Candidates: ${scanResult.candidates}`,
+      `📂 Opened: ${scanResult.opened} positions`,
+      `👁 Monitored: ${monitorResult.checked} positions`,
+      `🔒 Closed: ${monitorResult.closed}`,
+    ].join('\n'))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    await reply(chatId, `❌ Tick failed: ${msg}`)
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const body    = await req.json()
@@ -35,10 +70,10 @@ export async function POST(req: Request) {
     }
 
     // ------------------------------------------------------------------
-    // /tick  — run one full monitor + scanner cycle
+    // /tick  — run one full monitor + scanner cycle (fire-and-forget)
     // ------------------------------------------------------------------
     if (command === '/tick' || command === '/scan') {
-      // Gate checks FIRST — before sending any message to Telegram
+      // Gate checks FIRST
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
         return NextResponse.json({ ok: true })
@@ -50,35 +85,33 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true })
       }
 
-      // Only send the "running" message once we know the bot is actually going to work
+      // Send the "running" reply immediately so the user gets feedback
       await reply(chatId, '⏳ Running scanner...')
 
-      const startedAt = Date.now()
-      const [monitorResult, scanResult] = await Promise.all([
-        monitorPositions(),
-        runScanner(),
-      ])
-      const durationMs = Date.now() - startedAt
+      // Return 200 OK to Telegram NOW — before the scan starts.
+      // This prevents Telegram from retrying the webhook after 30 s.
+      // The scan continues in the background via waitUntil (Vercel Edge)
+      // or a detached Promise (Node runtime).
+      const res = NextResponse.json({ ok: true })
 
-      const supabase = createServerClient()
-      await supabase.from('bot_logs').insert({
-        level:   'info',
-        event:   'bot_tick',
-        payload: { monitor: monitorResult, scanner: scanResult, durationMs, source: 'telegram' },
-      })
+      const tickPromise = runTick(chatId)
 
-      await reply(chatId, [
-        `✅ *Tick complete* (${durationMs}ms)`,
-        `📡 Scanned: ${scanResult.scanned} pairs`,
-        `🎯 Candidates: ${scanResult.candidates}`,
-        `📂 Opened: ${scanResult.opened} positions`,
-        `👁 Monitored: ${monitorResult.checked} positions`,
-        `🔒 Closed: ${monitorResult.closed}`,
-      ].join('\n'))
+      // Use waitUntil if available (Vercel Edge / Cloudflare Workers)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ctx = (globalThis as any)[Symbol.for('vercel.wait_until_ctx')]
+      if (ctx?.waitUntil) {
+        ctx.waitUntil(tickPromise)
+      } else {
+        // Node.js runtime: detach the promise (Vercel will keep the
+        // function warm long enough to finish on Pro/hobby with 60s limit)
+        tickPromise.catch((err) => console.error('[tick] background error:', err))
+      }
+
+      return res
     }
 
     // ------------------------------------------------------------------
-    // /stop  — pause the bot (tick becomes a no-op)
+    // /stop  — pause the bot
     // ------------------------------------------------------------------
     else if (command === '/stop') {
       await setBotState({ enabled: false })
@@ -105,7 +138,7 @@ export async function POST(req: Request) {
     }
 
     // ------------------------------------------------------------------
-    // /dry  — switch to dry-run (no on-chain transactions)
+    // /dry  — switch to dry-run
     // ------------------------------------------------------------------
     else if (command === '/dry') {
       await setBotState({ dry_run: true })
@@ -132,7 +165,7 @@ export async function POST(req: Request) {
     }
 
     // ------------------------------------------------------------------
-    // /status — current bot state (reads from DB, not env vars)
+    // /status — live state from DB
     // ------------------------------------------------------------------
     else if (command === '/status') {
       const supabase = createServerClient()
@@ -151,9 +184,9 @@ export async function POST(req: Request) {
           .single(),
       ])
 
-      const state     = stateRes.status === 'fulfilled' ? stateRes.value : { enabled: false, dry_run: true }
-      const openCount = openRes.status === 'fulfilled' ? openRes.value.count : '?'
-      const lastTick  = lastTickRes.status === 'fulfilled' ? lastTickRes.value.data?.created_at : null
+      const state       = stateRes.status === 'fulfilled' ? stateRes.value : { enabled: false, dry_run: true }
+      const openCount   = openRes.status === 'fulfilled' ? openRes.value.count : '?'
+      const lastTick    = lastTickRes.status === 'fulfilled' ? lastTickRes.value.data?.created_at : null
       const lastTickStr = lastTick ? new Date(lastTick).toUTCString() : 'Never'
 
       await reply(chatId, [
@@ -188,6 +221,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true })
   } catch (err) {
     console.error('[telegram webhook] error:', err)
-    return NextResponse.json({ ok: true }) // always 200 to Telegram
+    return NextResponse.json({ ok: true })
   }
 }
