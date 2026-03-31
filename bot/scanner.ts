@@ -211,24 +211,31 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
 }
 
 async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: string }> {
-  const filterBy = [
-    'is_blacklisted=false',
-    `volume_24h>=${PRE_FILTER.minVolume24hUsd}`,
-    `tvl>=${PRE_FILTER.minLiquidityUsd}`,
-    `tvl<=${PRE_FILTER.maxLiquidityUsd}`,
-    `token_y=${WSOL}`,
-  ].join(' && ')
-
   try {
     const res = await axios.get<PoolsResponse>(`${METEORA_API}/pools`, {
-      params: { page: 1, page_size: 1000, sort_by: 'volume_24h:desc', filter_by: filterBy },
+      params: { page: 1, page_size: 1000, sort_by: 'volume_24h:desc' },
       timeout: 20_000,
     })
     const allPools = res.data?.data ?? []
     const maxAgeSec = PRE_FILTER.maxAgeHours * 3600
     const now = Date.now() / 1000
-    const pools = allPools.filter((p) => p.created_at && (now - toUnixSeconds(p.created_at)) <= maxAgeSec)
-    console.log(`[scanner] datapi returned ${allPools.length} pools; ${pools.length} within ${PRE_FILTER.maxAgeHours}h age window`)
+
+    // Filter in JS — the API filter_by param is unreliable
+    const pools = allPools.filter((p) => {
+      if (p.is_blacklisted) return false
+      if (p.volume['24h'] < PRE_FILTER.minVolume24hUsd) return false
+      if (p.tvl < PRE_FILTER.minLiquidityUsd) return false
+      if (p.tvl > PRE_FILTER.maxLiquidityUsd) return false
+      // Must be a SOL pair (WSOL on either side)
+      const hasSol = p.token_x.address === WSOL || p.token_y.address === WSOL
+      if (!hasSol) return false
+      // Age filter (skip pools with created_at=0 — they're old established pools)
+      if (!p.created_at || p.created_at === 0) return false
+      if ((now - toUnixSeconds(p.created_at)) > maxAgeSec) return false
+      return true
+    })
+
+    console.log(`[scanner] datapi returned ${allPools.length} pools; ${pools.length} passed JS pre-filter`)
     return { pools }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
