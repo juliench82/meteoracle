@@ -29,11 +29,14 @@ async function runTick(chatId: number | string) {
     const durationMs = Date.now() - startedAt
 
     const supabase = createServerClient()
-    supabase.from('bot_logs').insert({
-      level:   'info',
-      event:   'bot_tick',
-      payload: { monitor: monitorResult, scanner: scanResult, durationMs, source: 'telegram' },
-    }).then(() => {}).catch(() => {})
+    // fire-and-forget — void cast avoids PromiseLike TS error
+    void Promise.resolve(
+      supabase.from('bot_logs').insert({
+        level:   'info',
+        event:   'bot_tick',
+        payload: { monitor: monitorResult, scanner: scanResult, durationMs, source: 'telegram' },
+      })
+    ).catch(() => {})
 
     await reply(chatId, [
       `✅ *Tick complete* (${durationMs}ms)`,
