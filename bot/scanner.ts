@@ -50,11 +50,11 @@ function toUnixSeconds(ts: number): number {
   return ts > 1e10 ? ts / 1000 : ts
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
+async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
   const timer = new Promise<null>((resolve) =>
     setTimeout(() => { console.warn(`[scanner] timeout (${ms}ms): ${label}`); resolve(null) }, ms)
   )
-  return Promise.race([promise, timer])
+  return Promise.race([Promise.resolve(promise), timer])
 }
 
 export async function runScanner(): Promise<{
@@ -99,7 +99,6 @@ export async function runScanner(): Promise<{
   console.log('[scanner] step 3/4 — Supabase dedup check')
   const supabase = createServerClient()
 
-  // Check max positions once here (with timeout)
   const countResult = await withTimeout(
     supabase.from('positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
     SUPABASE_TIMEOUT_MS, 'positions count'
