@@ -6,6 +6,7 @@ import { getBotState, setBotState } from '@/lib/botState'
 import axios from 'axios'
 
 export const dynamic = 'force-dynamic'
+export const maxDuration = 60 // seconds — required for scanner + monitor to complete
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID
@@ -29,7 +30,6 @@ async function runTick(chatId: number | string) {
     const durationMs = Date.now() - startedAt
 
     const supabase = createServerClient()
-    // fire-and-forget — void cast avoids PromiseLike TS error
     void Promise.resolve(
       supabase.from('bot_logs').insert({
         level:   'info',
