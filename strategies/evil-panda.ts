@@ -14,32 +14,32 @@ export const evilPandaStrategy: Strategy = {
   enabled: true,
 
   filters: {
-    minMcUsd: 200_000,      // $200K min market cap
-    maxMcUsd: 50_000_000,   // $50M max (avoid overextended)
-    minVolume24h: 300_000,  // $300K min 24h volume
-    minLiquidityUsd: 50_000,
-    maxTopHolderPct: 15,    // top holder ≤ 15% of supply
-    minHolderCount: 500,
-    maxAgeHours: 72,        // token ≤ 3 days old
-    minRugcheckScore: 60,   // rugcheck.xyz score
-    requireSocialSignal: false,
+    minMcUsd:          200_000,   // $200K min market cap
+    maxMcUsd:       50_000_000,   // $50M max
+    minVolume24h:      100_000,   // $100K min 24h volume (lowered from $300K)
+    minLiquidityUsd:    50_000,   // $50K min liquidity
+    maxTopHolderPct:        15,   // top holder ≤ 15% of supply
+    minHolderCount:        500,   // at least 500 holders
+    maxAgeHours:            72,   // token ≤ 3 days old
+    minRugcheckScore:       60,   // rugcheck safety score (0–100, 100=safest)
+    requireSocialSignal:  false,
   },
 
   position: {
-    binStep: 100,           // 100 bps — wide bins for volatile pairs
-    rangeDownPct: -80,      // −80% below entry price
-    rangeUpPct: 20,         // +20% above
+    binStep:            100,
+    rangeDownPct:       -80,
+    rangeUpPct:          20,
     distributionType: 'spot',
-    solBias: 0.8,           // 80% SOL-sided deposit
-    maxSolPerPosition: 0.5, // override with MAX_SOL_PER_POSITION env
+    solBias:            0.8,
+    maxSolPerPosition:  0.5,
   },
 
   exits: {
-    stopLossPct: -90,               // exit if down >90% from entry
-    takeProfitPct: 300,             // take profit at 3x
-    outOfRangeMinutes: 120,         // close if OOR for >2h
-    maxDurationHours: 48,           // hard 48h limit
-    claimFeesBeforeClose: true,
-    minFeesToClaim: 0.001,          // only claim if >0.001 SOL fees
+    stopLossPct:           -90,
+    takeProfitPct:         300,
+    outOfRangeMinutes:     120,
+    maxDurationHours:       48,
+    claimFeesBeforeClose:  true,
+    minFeesToClaim:       0.001,
   },
 }

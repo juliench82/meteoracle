@@ -21,7 +21,7 @@ const PRE_FILTER = {
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 const WSOL = 'So11111111111111111111111111111111111111112'
-const BATCH_SIZE = 8  // process N pools concurrently
+const BATCH_SIZE = 8
 
 interface MeteoraPool {
   address:       string
@@ -44,6 +44,13 @@ interface PoolsResponse {
   page_size:    number
   total:        number
   data:         MeteoraPool[]
+}
+
+/** Normalise a Meteora created_at timestamp to unix seconds.
+ *  The API has been observed returning both seconds and milliseconds. */
+function toUnixSeconds(ts: number): number {
+  // If ts > 1e10, it's almost certainly milliseconds (year 2001+ in ms = ~1e12)
+  return ts > 1e10 ? ts / 1000 : ts
 }
 
 export async function runScanner(): Promise<{
@@ -75,7 +82,6 @@ export async function runScanner(): Promise<{
   let candidateCount = 0
   let openedCount    = 0
 
-  // Process pools in parallel batches to stay well within 60s timeout
   for (let i = 0; i < pools.length; i += BATCH_SIZE) {
     const { count: currentOpen } = await supabase
       .from('positions')
@@ -84,7 +90,6 @@ export async function runScanner(): Promise<{
     if ((currentOpen ?? 0) >= MAX_CONCURRENT_POSITIONS) break
 
     const batch = pools.slice(i, i + BATCH_SIZE)
-
     const results = await Promise.allSettled(
       batch.map((pool) => processPool(pool, supabase))
     )
@@ -101,9 +106,6 @@ export async function runScanner(): Promise<{
   return { scanned: pools.length, candidates: candidateCount, opened: openedCount }
 }
 
-// ---------------------------------------------------------------------------
-// processPool — evaluate one pool, returns { opened } if it became a candidate
-// ---------------------------------------------------------------------------
 async function processPool(
   pool:     MeteoraPool,
   supabase: ReturnType<typeof createServerClient>,
@@ -113,7 +115,6 @@ async function processPool(
   const tokenAddress = token.address
   const symbol       = pool.name ?? token.symbol
 
-  // Skip if scanned recently
   const { data: existing } = await supabase
     .from('candidates')
     .select('id')
@@ -125,7 +126,6 @@ async function processPool(
     return null
   }
 
-  // Skip if already have open position
   const { data: existingPosition } = await supabase
     .from('positions')
     .select('id')
@@ -137,7 +137,6 @@ async function processPool(
     return null
   }
 
-  // Resolve market cap
   let mcUsd = token.market_cap ?? 0
   if (!mcUsd || mcUsd < 1) {
     mcUsd = await fetchMcFromDexScreener(tokenAddress, token.price)
@@ -147,7 +146,6 @@ async function processPool(
     }
   }
 
-  // Helius + Rugcheck in parallel
   const [holderData, rugScore] = await Promise.all([
     checkHolders(tokenAddress),
     checkRugscore(tokenAddress),
@@ -160,9 +158,11 @@ async function processPool(
     if (meteoraHolders > holderCount) holderCount = meteoraHolders
   }
 
-  const ageHours = (Date.now() / 1000 - pool.created_at) / 3600
-  const vol24h   = pool.volume['24h']
-  const liqUsd   = pool.tvl
+  // Normalise created_at: Meteora returns seconds OR milliseconds
+  const createdAtSec = toUnixSeconds(pool.created_at)
+  const ageHours     = (Date.now() / 1000 - createdAtSec) / 3600
+  const vol24h       = pool.volume['24h']
+  const liqUsd       = pool.tvl
 
   const metrics: TokenMetrics = {
     address:       tokenAddress,
@@ -185,7 +185,7 @@ async function processPool(
     const reasons: string[] = []
     if (mcUsd    < 200_000)    reasons.push(`mc=$${mcUsd.toFixed(0)} < $200K`)
     if (mcUsd    > 50_000_000) reasons.push(`mc=$${mcUsd.toFixed(0)} > $50M`)
-    if (vol24h   < 300_000)    reasons.push(`vol=$${vol24h.toFixed(0)} < $300K`)
+    if (vol24h   < 100_000)    reasons.push(`vol=$${vol24h.toFixed(0)} < $100K`)
     if (liqUsd   < 50_000)     reasons.push(`liq=$${liqUsd.toFixed(0)} < $50K`)
     if (topHolderPct > 15)     reasons.push(`topHolder=${topHolderPct.toFixed(1)}% > 15%`)
     if (holderCount  < 500)    reasons.push(`holders=${holderCount} < 500`)
@@ -211,7 +211,7 @@ async function processPool(
     scanned_at:       new Date().toISOString(),
   })
 
-  console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score=${score}, mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCount}, rug=${rugScore})`)
+  console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score=${score}, mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCount}, rug=${rugScore}, age=${ageHours.toFixed(1)}h)`)
 
   await sendAlert({
     type:      'candidate_found',
@@ -223,8 +223,7 @@ async function processPool(
   })
 
   let opened = false
-  const MIN_SCORE_TO_OPEN_VAL = parseInt(process.env.MIN_SCORE_TO_OPEN ?? '65')
-  if (score >= MIN_SCORE_TO_OPEN_VAL) {
+  if (score >= MIN_SCORE_TO_OPEN) {
     const positionId = await openPosition(metrics, strategy)
     if (positionId) {
       opened = true
@@ -279,9 +278,11 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
     const allPools = res.data?.data ?? []
     const maxAgeSeconds = PRE_FILTER.maxAgeHours * 3600
     const now = Date.now() / 1000
-    const pools = allPools.filter(
-      (p) => p.created_at && (now - p.created_at) <= maxAgeSeconds
-    )
+    const pools = allPools.filter((p) => {
+      if (!p.created_at) return false
+      const createdSec = toUnixSeconds(p.created_at)
+      return (now - createdSec) <= maxAgeSeconds
+    })
 
     console.log(`[scanner] datapi returned ${allPools.length} pools; ${pools.length} within ${PRE_FILTER.maxAgeHours}h age window`)
     return { pools }
