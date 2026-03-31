@@ -8,8 +8,8 @@ import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
 import type { TokenMetrics } from '@/lib/types'
 
-const METEORA_API  = 'https://dlmm.datapi.meteora.ag'
-const DEXSCREENER  = 'https://api.dexscreener.com/latest/dex/tokens'
+const METEORA_API = 'https://dlmm.datapi.meteora.ag'
+const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
 
 const PRE_FILTER = {
   minVolume24hUsd: 50_000,
@@ -21,6 +21,7 @@ const PRE_FILTER = {
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 const WSOL = 'So11111111111111111111111111111111111111112'
+const BATCH_SIZE = 8  // process N pools concurrently
 
 interface MeteoraPool {
   address:       string
@@ -52,7 +53,6 @@ export async function runScanner(): Promise<{
   error?:     string
 }> {
   console.log('[scanner] tick started')
-
   const supabase = createServerClient()
 
   const { count: openCount } = await supabase
@@ -75,151 +75,170 @@ export async function runScanner(): Promise<{
   let candidateCount = 0
   let openedCount    = 0
 
-  for (const pool of pools) {
+  // Process pools in parallel batches to stay well within 60s timeout
+  for (let i = 0; i < pools.length; i += BATCH_SIZE) {
     const { count: currentOpen } = await supabase
       .from('positions')
       .select('id', { count: 'exact', head: true })
       .in('status', ['active', 'out_of_range'])
     if ((currentOpen ?? 0) >= MAX_CONCURRENT_POSITIONS) break
 
-    try {
-      const isXSol       = pool.token_x.address === WSOL
-      const token        = isXSol ? pool.token_y : pool.token_x
-      const tokenAddress = token.address
-      const symbol       = pool.name ?? token.symbol
+    const batch = pools.slice(i, i + BATCH_SIZE)
 
-      // Skip if scanned recently
-      const { data: existing } = await supabase
-        .from('candidates')
-        .select('id')
-        .eq('token_address', tokenAddress)
-        .gte('scanned_at', new Date(Date.now() - 60 * 60 * 1000).toISOString())
-        .limit(1)
-      if (existing && existing.length > 0) {
-        console.log(`[scanner] ${symbol} — skip: scanned in last 1h`)
-        continue
+    const results = await Promise.allSettled(
+      batch.map((pool) => processPool(pool, supabase))
+    )
+
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value) {
+        candidateCount++
+        if (result.value.opened) openedCount++
       }
-
-      // Skip if already have open position
-      const { data: existingPosition } = await supabase
-        .from('positions')
-        .select('id')
-        .eq('token_address', tokenAddress)
-        .in('status', ['active', 'out_of_range'])
-        .limit(1)
-      if (existingPosition && existingPosition.length > 0) {
-        console.log(`[scanner] ${symbol} — skip: open position exists`)
-        continue
-      }
-
-      // ── Market cap ──────────────────────────────────────────────────────
-      let mcUsd = token.market_cap ?? 0
-      if (!mcUsd || mcUsd < 1) {
-        mcUsd = await fetchMcFromDexScreener(tokenAddress, token.price)
-        if (!mcUsd || mcUsd < 1) {
-          console.log(`[scanner] ${symbol} — skip: could not resolve market_cap`)
-          continue
-        }
-        console.log(`[scanner] ${symbol} — market_cap from DexScreener: $${mcUsd.toFixed(0)}`)
-      }
-
-      // ── Holder data (Helius) ─────────────────────────────────────────────
-      const holderData = await checkHolders(tokenAddress)
-      let holderCount  = holderData.holderCount
-      let topHolderPct = holderData.topHolderPct
-
-      if (!holderData.reliable) {
-        const meteoraHolders = token.holders ?? 0
-        if (meteoraHolders > holderCount) holderCount = meteoraHolders
-      }
-
-      const rugScore = await checkRugscore(tokenAddress)
-      const ageHours = (Date.now() / 1000 - pool.created_at) / 3600
-      const vol24h   = pool.volume['24h']
-      const liqUsd   = pool.tvl
-
-      // ── Strategy match with per-field rejection logging ──────────────────
-      const metrics: TokenMetrics = {
-        address:       tokenAddress,
-        symbol,
-        mcUsd,
-        volume24h:     vol24h,
-        liquidityUsd:  liqUsd,
-        topHolderPct,
-        holderCount,
-        ageHours,
-        rugcheckScore: rugScore,
-        priceUsd:      token.price,
-        poolAddress:   pool.address,
-        dexId:         'meteora',
-      }
-
-      const strategy = getStrategyForToken(metrics)
-
-      if (!strategy) {
-        // Log exactly which filters each pool fails so we can tune them
-        const reasons: string[] = []
-        // Evil Panda thresholds (hard-coded here for debug visibility)
-        if (mcUsd   < 200_000)   reasons.push(`mc=$${mcUsd.toFixed(0)} < $200K`)
-        if (mcUsd   > 50_000_000) reasons.push(`mc=$${mcUsd.toFixed(0)} > $50M`)
-        if (vol24h  < 300_000)   reasons.push(`vol=$${vol24h.toFixed(0)} < $300K`)
-        if (liqUsd  < 50_000)    reasons.push(`liq=$${liqUsd.toFixed(0)} < $50K`)
-        if (topHolderPct > 15)   reasons.push(`topHolder=${topHolderPct.toFixed(1)}% > 15%`)
-        if (holderCount  < 500)  reasons.push(`holders=${holderCount} < 500`)
-        if (ageHours     > 72)   reasons.push(`age=${ageHours.toFixed(1)}h > 72h`)
-        if (rugScore     < 60)   reasons.push(`rug=${rugScore} < 60`)
-        const why = reasons.length > 0 ? reasons.join(', ') : 'unknown (check strategy router)'
-        console.log(`[scanner] ${symbol} — no strategy: ${why}`)
-        continue
-      }
-
-      const score = scoreCandidate(metrics)
-
-      await supabase.from('candidates').insert({
-        token_address:    metrics.address,
-        symbol:           metrics.symbol,
-        score,
-        strategy_matched: strategy.id,
-        mc_at_scan:       metrics.mcUsd,
-        volume_24h:       metrics.volume24h,
-        holder_count:     metrics.holderCount,
-        rugcheck_score:   metrics.rugcheckScore,
-        top_holder_pct:   metrics.topHolderPct,
-        scanned_at:       new Date().toISOString(),
-      })
-
-      candidateCount++
-      console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score: ${score}, mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCount}, rug=${rugScore})`)
-
-      await sendAlert({
-        type:      'candidate_found',
-        symbol,
-        strategy:  strategy.id,
-        score,
-        mcUsd:     metrics.mcUsd,
-        volume24h: metrics.volume24h,
-      })
-
-      if (score >= MIN_SCORE_TO_OPEN) {
-        const positionId = await openPosition(metrics, strategy)
-        if (positionId) {
-          openedCount++
-          await sendAlert({
-            type:         'position_opened',
-            symbol,
-            strategy:     strategy.id,
-            solDeposited: strategy.position.maxSolPerPosition,
-            entryPrice:   metrics.priceUsd,
-          })
-        }
-      }
-    } catch (err) {
-      console.error(`[scanner] error processing pool ${pool.address}:`, err)
     }
   }
 
   console.log(`[scanner] done — scanned: ${pools.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
   return { scanned: pools.length, candidates: candidateCount, opened: openedCount }
+}
+
+// ---------------------------------------------------------------------------
+// processPool — evaluate one pool, returns { opened } if it became a candidate
+// ---------------------------------------------------------------------------
+async function processPool(
+  pool:     MeteoraPool,
+  supabase: ReturnType<typeof createServerClient>,
+): Promise<{ opened: boolean } | null> {
+  const isXSol       = pool.token_x.address === WSOL
+  const token        = isXSol ? pool.token_y : pool.token_x
+  const tokenAddress = token.address
+  const symbol       = pool.name ?? token.symbol
+
+  // Skip if scanned recently
+  const { data: existing } = await supabase
+    .from('candidates')
+    .select('id')
+    .eq('token_address', tokenAddress)
+    .gte('scanned_at', new Date(Date.now() - 60 * 60 * 1000).toISOString())
+    .limit(1)
+  if (existing && existing.length > 0) {
+    console.log(`[scanner] ${symbol} — skip: scanned in last 1h`)
+    return null
+  }
+
+  // Skip if already have open position
+  const { data: existingPosition } = await supabase
+    .from('positions')
+    .select('id')
+    .eq('token_address', tokenAddress)
+    .in('status', ['active', 'out_of_range'])
+    .limit(1)
+  if (existingPosition && existingPosition.length > 0) {
+    console.log(`[scanner] ${symbol} — skip: open position exists`)
+    return null
+  }
+
+  // Resolve market cap
+  let mcUsd = token.market_cap ?? 0
+  if (!mcUsd || mcUsd < 1) {
+    mcUsd = await fetchMcFromDexScreener(tokenAddress, token.price)
+    if (!mcUsd || mcUsd < 1) {
+      console.log(`[scanner] ${symbol} — skip: could not resolve market_cap`)
+      return null
+    }
+  }
+
+  // Helius + Rugcheck in parallel
+  const [holderData, rugScore] = await Promise.all([
+    checkHolders(tokenAddress),
+    checkRugscore(tokenAddress),
+  ])
+
+  let holderCount  = holderData.holderCount
+  let topHolderPct = holderData.topHolderPct
+  if (!holderData.reliable) {
+    const meteoraHolders = token.holders ?? 0
+    if (meteoraHolders > holderCount) holderCount = meteoraHolders
+  }
+
+  const ageHours = (Date.now() / 1000 - pool.created_at) / 3600
+  const vol24h   = pool.volume['24h']
+  const liqUsd   = pool.tvl
+
+  const metrics: TokenMetrics = {
+    address:       tokenAddress,
+    symbol,
+    mcUsd,
+    volume24h:     vol24h,
+    liquidityUsd:  liqUsd,
+    topHolderPct,
+    holderCount,
+    ageHours,
+    rugcheckScore: rugScore,
+    priceUsd:      token.price,
+    poolAddress:   pool.address,
+    dexId:         'meteora',
+  }
+
+  const strategy = getStrategyForToken(metrics)
+
+  if (!strategy) {
+    const reasons: string[] = []
+    if (mcUsd    < 200_000)    reasons.push(`mc=$${mcUsd.toFixed(0)} < $200K`)
+    if (mcUsd    > 50_000_000) reasons.push(`mc=$${mcUsd.toFixed(0)} > $50M`)
+    if (vol24h   < 300_000)    reasons.push(`vol=$${vol24h.toFixed(0)} < $300K`)
+    if (liqUsd   < 50_000)     reasons.push(`liq=$${liqUsd.toFixed(0)} < $50K`)
+    if (topHolderPct > 15)     reasons.push(`topHolder=${topHolderPct.toFixed(1)}% > 15%`)
+    if (holderCount  < 500)    reasons.push(`holders=${holderCount} < 500`)
+    if (ageHours     > 72)     reasons.push(`age=${ageHours.toFixed(1)}h > 72h`)
+    if (rugScore     < 60)     reasons.push(`rug=${rugScore} < 60`)
+    const why = reasons.length > 0 ? reasons.join(', ') : 'unknown (check strategy router)'
+    console.log(`[scanner] ${symbol} — no strategy: ${why}`)
+    return null
+  }
+
+  const score = scoreCandidate(metrics)
+
+  await supabase.from('candidates').insert({
+    token_address:    metrics.address,
+    symbol:           metrics.symbol,
+    score,
+    strategy_matched: strategy.id,
+    mc_at_scan:       metrics.mcUsd,
+    volume_24h:       metrics.volume24h,
+    holder_count:     metrics.holderCount,
+    rugcheck_score:   metrics.rugcheckScore,
+    top_holder_pct:   metrics.topHolderPct,
+    scanned_at:       new Date().toISOString(),
+  })
+
+  console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score=${score}, mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCount}, rug=${rugScore})`)
+
+  await sendAlert({
+    type:      'candidate_found',
+    symbol,
+    strategy:  strategy.id,
+    score,
+    mcUsd:     metrics.mcUsd,
+    volume24h: metrics.volume24h,
+  })
+
+  let opened = false
+  const MIN_SCORE_TO_OPEN_VAL = parseInt(process.env.MIN_SCORE_TO_OPEN ?? '65')
+  if (score >= MIN_SCORE_TO_OPEN_VAL) {
+    const positionId = await openPosition(metrics, strategy)
+    if (positionId) {
+      opened = true
+      await sendAlert({
+        type:         'position_opened',
+        symbol,
+        strategy:     strategy.id,
+        solDeposited: strategy.position.maxSolPerPosition,
+        entryPrice:   metrics.priceUsd,
+      })
+    }
+  }
+
+  return { opened }
 }
 
 async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Promise<number> {
@@ -264,9 +283,7 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
       (p) => p.created_at && (now - p.created_at) <= maxAgeSeconds
     )
 
-    console.log(
-      `[scanner] datapi returned ${allPools.length} pools; ${pools.length} within ${PRE_FILTER.maxAgeHours}h age window`
-    )
+    console.log(`[scanner] datapi returned ${allPools.length} pools; ${pools.length} within ${PRE_FILTER.maxAgeHours}h age window`)
     return { pools }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
