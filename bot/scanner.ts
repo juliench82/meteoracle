@@ -12,24 +12,24 @@ const METEORA_API = 'https://dlmm.datapi.meteora.ag'
 const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
 
 const PRE_FILTER = {
-  minVolume24hUsd: 50_000,
-  minLiquidityUsd: 20_000,
+  minVolume24hUsd: 10_000,
+  minLiquidityUsd: 10_000,
   maxLiquidityUsd: 50_000_000,
-  maxAgeHours:     72,
+  maxAgeHours:     168,
 }
 
 const CHEAP_FILTER = {
-  minMcUsd:    200_000,
+  minMcUsd:    100_000,
   maxMcUsd: 50_000_000,
-  minVol24h:   100_000,
-  minLiqUsd:    50_000,
-  maxAgeHours:      72,
+  minVol24h:    50_000,
+  minLiqUsd:    20_000,
+  maxAgeHours:     168,
 }
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 const WSOL = 'So11111111111111111111111111111111111111112'
-const SUPABASE_TIMEOUT_MS = 5_000
+const SUPABASE_TIMEOUT_MS = 10_000
 
 interface MeteoraPool {
   address: string; name: string; created_at: number; tvl: number; current_price: number
@@ -226,10 +226,8 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
       if (p.volume['24h'] < PRE_FILTER.minVolume24hUsd) return false
       if (p.tvl < PRE_FILTER.minLiquidityUsd) return false
       if (p.tvl > PRE_FILTER.maxLiquidityUsd) return false
-      // Must be a SOL pair (WSOL on either side)
       const hasSol = p.token_x.address === WSOL || p.token_y.address === WSOL
       if (!hasSol) return false
-      // Age filter (skip pools with created_at=0 — they're old established pools)
       if (!p.created_at || p.created_at === 0) return false
       if ((now - toUnixSeconds(p.created_at)) > maxAgeSec) return false
       return true
