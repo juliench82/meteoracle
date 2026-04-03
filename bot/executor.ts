@@ -7,10 +7,6 @@ import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 
-// ---------------------------------------------------------------------------
-// Helper: sign and send a legacy Transaction
-// ---------------------------------------------------------------------------
-
 async function sendLegacyTx(
   tx: import('@solana/web3.js').Transaction,
   signers: import('@solana/web3.js').Signer[]
@@ -24,10 +20,6 @@ async function sendLegacyTx(
   await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
   return sig
 }
-
-// ---------------------------------------------------------------------------
-// Open a new DLMM position
-// ---------------------------------------------------------------------------
 
 export async function openPosition(
   metrics: TokenMetrics,
@@ -48,24 +40,10 @@ export async function openPosition(
   try {
     // 1. Load the DLMM pool
     const dlmmPool = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
-
-    // 2. Verify pool price is in sync (anti-arb check)
     const activeBin = await dlmmPool.getActiveBin()
-    const poolPriceUsd = parseFloat(activeBin.pricePerToken)
-    const priceDriftPct = Math.abs((poolPriceUsd - metrics.priceUsd) / metrics.priceUsd) * 100
-
-    if (priceDriftPct > 2) {
-      console.warn(`${label} pool price drifted ${priceDriftPct.toFixed(2)}% from market — skipping`)
-      await supabase.from('bot_logs').insert({
-        level: 'warn',
-        event: 'position_skipped_price_drift',
-        payload: { symbol: metrics.symbol, priceDriftPct },
-      })
-      return null
-    }
-
-    // 3. Calculate bin range from strategy config
     const activeBinId = activeBin.binId
+
+    // 2. Calculate bin range from strategy config
     const binStep = dlmmPool.lbPair.binStep
     const binsDown = Math.abs(
       Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000))
@@ -76,16 +54,15 @@ export async function openPosition(
     const minBinId = activeBinId - binsDown
     const maxBinId = activeBinId + binsUp
 
-    // 4. Calculate SOL amount
-    const maxSol = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.5')
+    // 3. Calculate SOL amount
+    const maxSol = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.1')
     const solAmount = Math.min(strategy.position.maxSolPerPosition, maxSol)
     const lamports = Math.floor(solAmount * 1e9)
 
-    // Split between X (token) and Y (SOL/quote) based on solBias
     const totalX = new BN(Math.floor(lamports * (1 - strategy.position.solBias)))
     const totalY = new BN(Math.floor(lamports * strategy.position.solBias))
 
-    // 5. Map strategy distribution type
+    // 4. Map strategy distribution type
     const strategyTypeMap: Record<string, StrategyType> = {
       spot: StrategyType.Spot,
       curve: StrategyType.Curve,
@@ -93,55 +70,43 @@ export async function openPosition(
     }
     const strategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyType.Spot
 
-    // 6. Get priority fee
+    // 5. Get priority fee
     const priorityFee = await getPriorityFee([
       metrics.poolAddress,
       wallet.publicKey.toBase58(),
     ])
+    console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // 7. Generate position keypair and build position transaction
+    // 6. Generate position keypair and build tx
     const positionKeypair = new Keypair()
     const tx = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
       totalXAmount: totalX,
       totalYAmount: totalY,
-      strategy: {
-        maxBinId,
-        minBinId,
-        strategyType,
-      },
+      strategy: { maxBinId, minBinId, strategyType },
     })
 
-    // 8. Send transaction
+    // 7. Send transaction
     const sig = await sendLegacyTx(tx, [wallet, positionKeypair])
-
     console.log(`${label} position opened ✔ sig: ${sig}`)
 
-    // 9. Persist to Supabase
+    // 8. Persist to Supabase
     return await persistPosition(
-      metrics,
-      strategy,
-      sig,
-      poolPriceUsd,
-      solAmount,
+      metrics, strategy, sig,
+      metrics.priceUsd, solAmount,
       positionKeypair.publicKey.toBase58()
     )
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} failed:`, message)
     await supabase.from('bot_logs').insert({
-      level: 'error',
-      event: 'open_position_failed',
+      level: 'error', event: 'open_position_failed',
       payload: { symbol: metrics.symbol, strategy: strategy.id, error: message },
     })
     return null
   }
 }
-
-// ---------------------------------------------------------------------------
-// Close a position (claim fees + remove liquidity)
-// ---------------------------------------------------------------------------
 
 export async function closePosition(
   positionId: string,
@@ -149,7 +114,6 @@ export async function closePosition(
 ): Promise<boolean> {
   const supabase = createServerClient()
 
-  // Fetch position from DB
   const { data: position, error } = await supabase
     .from('positions')
     .select('*')
@@ -177,29 +141,24 @@ export async function closePosition(
     const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
     const positionPubKey = new PublicKey(position.metadata?.positionPubKey ?? '')
 
-    // 1. Claim all fees first — claimAllRewards returns Transaction[]
+    // 1. Claim fees
     let feesClaimedSol = 0
-    if (position.strategy_id) {
-      try {
-        const claimTxs = await dlmmPool.claimAllRewards({
-          owner: wallet.publicKey,
-          positions: [{ publicKey: positionPubKey } as never],
-        })
-        for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
-          const claimSig = await sendLegacyTx(tx, [wallet])
-          console.log(`${label} fees claimed ✔ sig: ${claimSig}`)
-        }
-        // TODO: parse actual fee amounts from tx logs
-        feesClaimedSol = position.fees_earned_sol ?? 0
-      } catch (err) {
-        console.warn(`${label} fee claim failed (continuing with close):`, err)
+    try {
+      const claimTxs = await dlmmPool.claimAllRewards({
+        owner: wallet.publicKey,
+        positions: [{ publicKey: positionPubKey } as never],
+      })
+      for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
+        const claimSig = await sendLegacyTx(tx, [wallet])
+        console.log(`${label} fees claimed ✔ sig: ${claimSig}`)
       }
+      feesClaimedSol = position.fees_earned_sol ?? 0
+    } catch (err) {
+      console.warn(`${label} fee claim failed (continuing with close):`, err)
     }
 
     // 2. Remove all liquidity
-    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(
-      wallet.publicKey
-    )
+    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const userPosition = userPositions.find(
       (p) => p.publicKey.toBase58() === positionPubKey.toBase58()
     )
@@ -211,10 +170,9 @@ export async function closePosition(
         user: wallet.publicKey,
         fromBinId: lowerBinId,
         toBinId: upperBinId,
-        bps: new BN(10_000), // 100%
+        bps: new BN(10_000),
         shouldClaimAndClose: true,
       })
-
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
         const sig = await sendLegacyTx(tx, [wallet])
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
@@ -227,17 +185,12 @@ export async function closePosition(
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} close failed:`, message)
     await supabase.from('bot_logs').insert({
-      level: 'error',
-      event: 'close_position_failed',
+      level: 'error', event: 'close_position_failed',
       payload: { positionId, reason, error: message },
     })
     return false
   }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 async function persistPosition(
   metrics: TokenMetrics,
@@ -248,7 +201,6 @@ async function persistPosition(
   positionPubKey?: string
 ): Promise<string> {
   const supabase = createServerClient()
-
   const { data, error } = await supabase
     .from('positions')
     .insert({
@@ -268,7 +220,6 @@ async function persistPosition(
     })
     .select('id')
     .single()
-
   if (error) throw new Error(`Failed to persist position: ${error.message}`)
   return data.id
 }
