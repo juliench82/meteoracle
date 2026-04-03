@@ -1,6 +1,5 @@
 import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
-import type { Position } from '@/lib/types'
 
 const STRATEGY_LABELS: Record<string, string> = {
   'evil-panda': 'Evil Panda',
@@ -8,7 +7,8 @@ const STRATEGY_LABELS: Record<string, string> = {
   'stable-farm': 'Stable Farm',
 }
 
-export function PositionsTable({ positions }: { positions: Position[] }) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function PositionsTable({ positions }: { positions: any[] }) {
   return (
     <Card>
       <div className="flex items-center justify-between mb-4">
@@ -34,10 +34,12 @@ export function PositionsTable({ positions }: { positions: Position[] }) {
             </thead>
             <tbody>
               {positions.map((p) => {
-                const ageMs = Date.now() - new Date(p.openedAt).getTime()
+                const ageMs = Date.now() - new Date(p.opened_at).getTime()
                 const ageLabel = ageMs < 3600000
                   ? `${Math.round(ageMs / 60000)}m`
                   : `${Math.round(ageMs / 3600000)}h`
+                const entryPrice: number = p.entry_price ?? 0
+                const currentPrice: number | null = p.current_price ?? null
 
                 return (
                   <tr
@@ -45,29 +47,29 @@ export function PositionsTable({ positions }: { positions: Position[] }) {
                     className="border-b border-surface-border/50 hover:bg-surface-border/30 transition-colors"
                   >
                     <td className="py-3 pr-4 font-mono font-semibold text-white">
-                      {p.tokenSymbol}
+                      {p.token_symbol}
                     </td>
                     <td className="py-3 pr-4">
                       <Badge variant="brand">
-                        {STRATEGY_LABELS[p.strategyId] ?? p.strategyId}
+                        {STRATEGY_LABELS[p.strategy_id] ?? p.strategy_id}
                       </Badge>
                     </td>
                     <td className="py-3 pr-4 font-mono text-slate-400">
-                      ${p.entryPrice.toFixed(7)}
+                      ${entryPrice.toFixed(7)}
                     </td>
                     <td className="py-3 pr-4 font-mono text-slate-300">
-                      {p.currentPrice ? `$${p.currentPrice.toFixed(7)}` : '—'}
+                      {currentPrice !== null ? `$${currentPrice.toFixed(7)}` : '—'}
                     </td>
                     <td className="py-3 pr-4">
-                      <Badge variant={p.inRange ? 'success' : 'danger'}>
-                        {p.inRange ? '✓ In range' : '✗ OOR'}
+                      <Badge variant={p.in_range ? 'success' : 'danger'}>
+                        {p.in_range ? '✓ In range' : '✗ OOR'}
                       </Badge>
                     </td>
                     <td className="py-3 pr-4 font-mono text-green-400">
-                      +{(p.feesEarnedSol ?? 0).toFixed(4)} SOL
+                      +{(p.fees_earned_sol ?? 0).toFixed(4)} SOL
                     </td>
                     <td className="py-3 pr-4 font-mono text-slate-400">
-                      {p.solDeposited} SOL
+                      {(p.sol_deposited ?? 0)} SOL
                     </td>
                     <td className="py-3 text-slate-500">{ageLabel}</td>
                   </tr>
