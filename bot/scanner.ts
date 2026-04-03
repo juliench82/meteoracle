@@ -51,10 +51,16 @@ function toUnixSeconds(ts: number): number {
 }
 
 async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
-  const timer = new Promise<null>((resolve) =>
-    setTimeout(() => { console.warn(`[scanner] timeout (${ms}ms): ${label}`); resolve(null) }, ms)
-  )
-  return Promise.race([Promise.resolve(promise), timer])
+  let timerId: ReturnType<typeof setTimeout>
+  const timer = new Promise<null>((resolve) => {
+    timerId = setTimeout(() => {
+      console.warn(`[scanner] timeout (${ms}ms): ${label}`)
+      resolve(null)
+    }, ms)
+  })
+  const result = await Promise.race([Promise.resolve(promise), timer])
+  clearTimeout(timerId!)
+  return result
 }
 
 export async function runScanner(): Promise<{
@@ -220,7 +226,6 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
     const maxAgeSec = PRE_FILTER.maxAgeHours * 3600
     const now = Date.now() / 1000
 
-    // Filter in JS — the API filter_by param is unreliable
     const pools = allPools.filter((p) => {
       if (p.is_blacklisted) return false
       if (p.volume['24h'] < PRE_FILTER.minVolume24hUsd) return false
