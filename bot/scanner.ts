@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
-import { getStrategyForToken } from '@/strategies'
+import { STRATEGIES, getStrategyForToken } from '@/strategies'
 import { scoreCandidate } from './scorer'
 import { openPosition } from './executor'
 import { sendAlert } from './alerter'
@@ -61,6 +61,24 @@ async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string
   const result = await Promise.race([Promise.resolve(promise), timer])
   clearTimeout(timerId!)
   return result
+}
+
+function explainNoStrategy(t: TokenMetrics): string {
+  // For each strategy, collect what it would need that the token doesn't meet
+  const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
+    const f = s.filters
+    const fails: string[] = []
+    if (t.mcUsd        < f.minMcUsd)          fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
+    if (t.mcUsd        > f.maxMcUsd)          fails.push(`mc too high`)
+    if (t.volume24h    < f.minVolume24h)       fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
+    if (t.liquidityUsd < f.minLiquidityUsd)   fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
+    if (t.topHolderPct > f.maxTopHolderPct)   fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
+    if (t.holderCount  < f.minHolderCount)    fails.push(`holders=${t.holderCount}<${f.minHolderCount}`)
+    if (t.ageHours     > f.maxAgeHours)       fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
+    if (t.rugcheckScore < f.minRugcheckScore) fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
+    return fails.length === 0 ? null : `[${s.id}: ${fails.join(', ')}]`
+  }).filter(Boolean)
+  return perStrat.join(' | ') || 'all strategies disabled'
 }
 
 export async function runScanner(): Promise<{
@@ -170,11 +188,7 @@ export async function runScanner(): Promise<{
 
     const strategy = getStrategyForToken(metrics)
     if (!strategy) {
-      const reasons: string[] = []
-      if (topHolderPct > 15)  reasons.push(`topHolder=${topHolderPct.toFixed(1)}% > 15%`)
-      if (holderCount  < 500) reasons.push(`holders=${holderCount} < 500`)
-      if (rugScore     < 60)  reasons.push(`rug=${rugScore} < 60`)
-      console.log(`[scanner] ${symbol} — no strategy: ${reasons.join(', ') || 'unknown'}`)
+      console.log(`[scanner] ${symbol} — no strategy: ${explainNoStrategy(metrics)}`)
       continue
     }
 
