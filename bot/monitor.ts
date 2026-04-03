@@ -163,13 +163,21 @@ async function checkPosition(
 
         // Reopen centered on current price
         try {
-          await openPosition({
-            tokenAddress: position.token_address,
-            tokenSymbol: position.token_symbol,
+          const metrics = {
+            address: position.token_address,
+            symbol: position.token_symbol,
             poolAddress: position.pool_address,
-            strategyId: strategy.id,
-            entryPrice: currentPrice,
-          })
+            priceUsd: currentPrice,
+            // remaining TokenMetrics fields — sensible defaults for reopen
+            marketCapUsd: 0,
+            liquidityUsd: 0,
+            volume1hUsd,
+            volume24hUsd: 0,
+            priceChange1h: 0,
+            holderCount: 0,
+            rugcheckScore: 0,
+          }
+          await openPosition(metrics, strategy)
           console.log(`${label} reopened centered at $${currentPrice}`)
         } catch (reopenErr) {
           console.error(`${label} reopen after rebalance failed:`, reopenErr)
