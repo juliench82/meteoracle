@@ -14,14 +14,14 @@ export const evilPandaStrategy: Strategy = {
   enabled: true,
 
   filters: {
-    minMcUsd:          200_000,   // $200K min market cap
-    maxMcUsd:       50_000_000,   // $50M max
-    minVolume24h:       40_000,   // $40K min 24h volume
-    minLiquidityUsd:    20_000,   // $20K min liquidity
-    maxTopHolderPct:        25,   // top holder ≤ 25% of supply
-    minHolderCount:        200,   // at least 200 holders
-    maxAgeHours:           120,   // token ≤ 5 days old
-    minRugcheckScore:       30,   // rugcheck safety score
+    minMcUsd:          200_000,
+    maxMcUsd:       50_000_000,
+    minVolume24h:       40_000,
+    minLiquidityUsd:    20_000,
+    maxTopHolderPct:        25,
+    minHolderCount:        200,
+    maxAgeHours:           120,
+    minRugcheckScore:       40,   // raised from 30
     requireSocialSignal:  false,
   },
 
