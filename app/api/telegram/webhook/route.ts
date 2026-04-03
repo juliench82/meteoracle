@@ -20,6 +20,10 @@ async function reply(chatId: number | string, text: string) {
   ).catch(() => {})
 }
 
+function logToDB(supabase: ReturnType<typeof createServerClient>, payload: object) {
+  void Promise.resolve(supabase.from('bot_logs').insert(payload)).catch(() => {})
+}
+
 async function runTick(chatId: number | string) {
   const startedAt = Date.now()
   try {
@@ -28,11 +32,10 @@ async function runTick(chatId: number | string) {
       runScanner(),
     ])
     const durationMs = Date.now() - startedAt
-    const supabase = createServerClient()
-    void supabase.from('bot_logs').insert({
+    logToDB(createServerClient(), {
       level: 'info', event: 'bot_tick',
       payload: { monitor: monitorResult, scanner: scanResult, durationMs, source: 'telegram' },
-    }).catch(() => {})
+    })
     await reply(chatId, [
       `✅ *Tick complete* (${durationMs}ms)`,
       `📡 Scanned: ${scanResult.scanned} pairs`,
@@ -53,11 +56,10 @@ async function runScanOnly(chatId: number | string) {
   try {
     const scanResult = await runScanner()
     const durationMs = Date.now() - startedAt
-    const supabase = createServerClient()
-    void supabase.from('bot_logs').insert({
+    logToDB(createServerClient(), {
       level: 'info', event: 'bot_scan',
       payload: { scanner: scanResult, durationMs, source: 'telegram' },
-    }).catch(() => {})
+    })
     await reply(chatId, [
       `📡 *Scan complete* (${durationMs}ms)`,
       `Scanned: ${scanResult.scanned} pairs`,
@@ -76,11 +78,10 @@ async function runMonitorOnly(chatId: number | string) {
   try {
     const monitorResult = await monitorPositions()
     const durationMs = Date.now() - startedAt
-    const supabase = createServerClient()
-    void supabase.from('bot_logs').insert({
+    logToDB(createServerClient(), {
       level: 'info', event: 'bot_monitor',
       payload: { monitor: monitorResult, durationMs, source: 'telegram' },
-    }).catch(() => {})
+    })
     await reply(chatId, [
       `👁 *Monitor complete* (${durationMs}ms)`,
       `Checked: ${monitorResult.checked} positions`,
@@ -113,7 +114,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true })
     }
 
-    // --- /scan ---
     if (command === '/scan') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -129,7 +129,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true })
     }
 
-    // --- /monitor ---
     if (command === '/monitor') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -145,7 +144,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true })
     }
 
-    // --- /tick ---
     if (command === '/tick') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -161,7 +159,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true })
     }
 
-    else if (command === '/stop') {
+    if (command === '/stop') {
       await setBotState({ enabled: false })
       await reply(chatId, [
         `🛑 *Bot stopped.*`,
