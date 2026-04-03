@@ -8,8 +8,9 @@ import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
 import type { TokenMetrics } from '@/lib/types'
 
-const METEORA_API = 'https://dlmm.datapi.meteora.ag'
-const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
+const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
+const METEORA_DLMM    = 'https://dlmm-api.meteora.ag'
+const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
 const PRE_FILTER = {
   minVolume24hUsd: 10_000,
@@ -30,6 +31,8 @@ const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 const WSOL = 'So11111111111111111111111111111111111111112'
 const SUPABASE_TIMEOUT_MS = 10_000
+// Generous fetch timeout — Vercel cold starts add ~5s overhead
+const METEORA_FETCH_TIMEOUT_MS = 45_000
 
 interface MeteoraPool {
   address: string; name: string; created_at: number; tvl: number; current_price: number
@@ -64,7 +67,6 @@ async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string
 }
 
 function explainNoStrategy(t: TokenMetrics): string {
-  // For each strategy, collect what it would need that the token doesn't meet
   const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
     const f = s.filters
     const fails: string[] = []
@@ -230,33 +232,53 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
   } catch { return 0 }
 }
 
+async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPool[]> {
+  const res = await axios.get<PoolsResponse>(`${baseUrl}/pools`, {
+    params: { page: 1, page_size: 1000, sort_by: 'volume_24h:desc' },
+    timeout: METEORA_FETCH_TIMEOUT_MS,
+  })
+  return res.data?.data ?? []
+}
+
 async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: string }> {
-  try {
-    const res = await axios.get<PoolsResponse>(`${METEORA_API}/pools`, {
-      params: { page: 1, page_size: 1000, sort_by: 'volume_24h:desc' },
-      timeout: 20_000,
-    })
-    const allPools = res.data?.data ?? []
-    const maxAgeSec = PRE_FILTER.maxAgeHours * 3600
-    const now = Date.now() / 1000
+  const maxAgeSec = PRE_FILTER.maxAgeHours * 3600
+  const now = Date.now() / 1000
 
-    const pools = allPools.filter((p) => {
-      if (p.is_blacklisted) return false
-      if (p.volume['24h'] < PRE_FILTER.minVolume24hUsd) return false
-      if (p.tvl < PRE_FILTER.minLiquidityUsd) return false
-      if (p.tvl > PRE_FILTER.maxLiquidityUsd) return false
-      const hasSol = p.token_x.address === WSOL || p.token_y.address === WSOL
-      if (!hasSol) return false
-      if (!p.created_at || p.created_at === 0) return false
-      if ((now - toUnixSeconds(p.created_at)) > maxAgeSec) return false
-      return true
-    })
+  let allPools: MeteoraPool[] = []
 
-    console.log(`[scanner] datapi returned ${allPools.length} pools; ${pools.length} passed JS pre-filter`)
-    return { pools }
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    const status  = (err as { response?: { status?: number } })?.response?.status
-    return { pools: [], error: `Meteora datapi failed — ${status ? `HTTP ${status}: ` : ''}${message}` }
+  // Try primary endpoint first, fall back to secondary
+  for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
+    try {
+      console.log(`[scanner] trying Meteora endpoint: ${endpoint}`)
+      allPools = await fetchMeteoraPoolsFromEndpoint(endpoint)
+      if (allPools.length > 0) {
+        console.log(`[scanner] ${endpoint} returned ${allPools.length} pools`)
+        break
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      const status  = (err as { response?: { status?: number } })?.response?.status
+      console.warn(`[scanner] endpoint ${endpoint} failed: ${status ? `HTTP ${status}: ` : ''}${message}`)
+      // continue to next endpoint
+    }
   }
+
+  if (allPools.length === 0) {
+    return { pools: [], error: 'All Meteora endpoints failed or returned empty' }
+  }
+
+  const pools = allPools.filter((p) => {
+    if (p.is_blacklisted) return false
+    if (p.volume['24h'] < PRE_FILTER.minVolume24hUsd) return false
+    if (p.tvl < PRE_FILTER.minLiquidityUsd) return false
+    if (p.tvl > PRE_FILTER.maxLiquidityUsd) return false
+    const hasSol = p.token_x.address === WSOL || p.token_y.address === WSOL
+    if (!hasSol) return false
+    if (!p.created_at || p.created_at === 0) return false
+    if ((now - toUnixSeconds(p.created_at)) > maxAgeSec) return false
+    return true
+  })
+
+  console.log(`[scanner] ${allPools.length} pools fetched; ${pools.length} passed JS pre-filter`)
+  return { pools }
 }
