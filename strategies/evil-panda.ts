@@ -16,12 +16,12 @@ export const evilPandaStrategy: Strategy = {
   filters: {
     minMcUsd:          200_000,   // $200K min market cap
     maxMcUsd:       50_000_000,   // $50M max
-    minVolume24h:       60_000,   // $60K min 24h volume
-    minLiquidityUsd:    50_000,   // $50K min liquidity
-    maxTopHolderPct:        15,   // top holder ≤ 15% of supply
-    minHolderCount:        350,   // at least 350 holders
+    minVolume24h:       40_000,   // $40K min 24h volume (testing)
+    minLiquidityUsd:    20_000,   // $20K min liquidity (testing)
+    maxTopHolderPct:        25,   // top holder ≤ 25% of supply (testing)
+    minHolderCount:        200,   // at least 200 holders (testing)
     maxAgeHours:           168,   // token ≤ 7 days old
-    minRugcheckScore:       55,   // rugcheck safety score (0–100, 100=safest)
+    minRugcheckScore:       30,   // rugcheck safety score (testing)
     requireSocialSignal:  false,
   },
 
