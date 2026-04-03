@@ -29,12 +29,10 @@ async function runTick(chatId: number | string) {
     ])
     const durationMs = Date.now() - startedAt
     const supabase = createServerClient()
-    void Promise.resolve(
-      supabase.from('bot_logs').insert({
-        level: 'info', event: 'bot_tick',
-        payload: { monitor: monitorResult, scanner: scanResult, durationMs, source: 'telegram' },
-      })
-    ).catch(() => {})
+    void supabase.from('bot_logs').insert({
+      level: 'info', event: 'bot_tick',
+      payload: { monitor: monitorResult, scanner: scanResult, durationMs, source: 'telegram' },
+    }).catch(() => {})
     await reply(chatId, [
       `✅ *Tick complete* (${durationMs}ms)`,
       `📡 Scanned: ${scanResult.scanned} pairs`,
@@ -56,12 +54,10 @@ async function runScanOnly(chatId: number | string) {
     const scanResult = await runScanner()
     const durationMs = Date.now() - startedAt
     const supabase = createServerClient()
-    void Promise.resolve(
-      supabase.from('bot_logs').insert({
-        level: 'info', event: 'bot_scan',
-        payload: { scanner: scanResult, durationMs, source: 'telegram' },
-      })
-    ).catch(() => {})
+    void supabase.from('bot_logs').insert({
+      level: 'info', event: 'bot_scan',
+      payload: { scanner: scanResult, durationMs, source: 'telegram' },
+    }).catch(() => {})
     await reply(chatId, [
       `📡 *Scan complete* (${durationMs}ms)`,
       `Scanned: ${scanResult.scanned} pairs`,
@@ -81,12 +77,10 @@ async function runMonitorOnly(chatId: number | string) {
     const monitorResult = await monitorPositions()
     const durationMs = Date.now() - startedAt
     const supabase = createServerClient()
-    void Promise.resolve(
-      supabase.from('bot_logs').insert({
-        level: 'info', event: 'bot_monitor',
-        payload: { monitor: monitorResult, durationMs, source: 'telegram' },
-      })
-    ).catch(() => {})
+    void supabase.from('bot_logs').insert({
+      level: 'info', event: 'bot_monitor',
+      payload: { monitor: monitorResult, durationMs, source: 'telegram' },
+    }).catch(() => {})
     await reply(chatId, [
       `👁 *Monitor complete* (${durationMs}ms)`,
       `Checked: ${monitorResult.checked} positions`,
@@ -119,7 +113,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true })
     }
 
-    // --- /scan (scan only, no monitor) ---
+    // --- /scan ---
     if (command === '/scan') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -131,15 +125,11 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true })
       }
       await reply(chatId, '⏳ Running scanner...')
-      const res = NextResponse.json({ ok: true })
-      const p = runScanOnly(chatId)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ctx = (globalThis as any)[Symbol.for('vercel.wait_until_ctx')]
-      ctx?.waitUntil ? ctx.waitUntil(p) : p.catch((e) => console.error('[scan] bg error:', e))
-      return res
+      await runScanOnly(chatId)
+      return NextResponse.json({ ok: true })
     }
 
-    // --- /monitor (monitor only, no scan) ---
+    // --- /monitor ---
     if (command === '/monitor') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -151,15 +141,11 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true })
       }
       await reply(chatId, '⏳ Running monitor...')
-      const res = NextResponse.json({ ok: true })
-      const p = runMonitorOnly(chatId)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ctx = (globalThis as any)[Symbol.for('vercel.wait_until_ctx')]
-      ctx?.waitUntil ? ctx.waitUntil(p) : p.catch((e) => console.error('[monitor] bg error:', e))
-      return res
+      await runMonitorOnly(chatId)
+      return NextResponse.json({ ok: true })
     }
 
-    // --- /tick (scan + monitor together) ---
+    // --- /tick ---
     if (command === '/tick') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -171,12 +157,8 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true })
       }
       await reply(chatId, '⏳ Running scan + monitor...')
-      const res = NextResponse.json({ ok: true })
-      const p = runTick(chatId)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ctx = (globalThis as any)[Symbol.for('vercel.wait_until_ctx')]
-      ctx?.waitUntil ? ctx.waitUntil(p) : p.catch((e) => console.error('[tick] bg error:', e))
-      return res
+      await runTick(chatId)
+      return NextResponse.json({ ok: true })
     }
 
     else if (command === '/stop') {
