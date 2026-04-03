@@ -20,7 +20,7 @@ export const evilPandaStrategy: Strategy = {
     minLiquidityUsd:    50_000,   // $50K min liquidity
     maxTopHolderPct:        15,   // top holder ≤ 15% of supply
     minHolderCount:        350,   // at least 350 holders
-    maxAgeHours:            72,   // token ≤ 3 days old
+    maxAgeHours:           168,   // token ≤ 7 days old
     minRugcheckScore:       55,   // rugcheck safety score (0–100, 100=safest)
     requireSocialSignal:  false,
   },
