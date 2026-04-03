@@ -21,7 +21,7 @@ export const evilPandaStrategy: Strategy = {
     maxTopHolderPct:        25,
     minHolderCount:        200,
     maxAgeHours:           120,
-    minRugcheckScore:       40,   // raised from 30
+    minRugcheckScore:       40,
     requireSocialSignal:  false,
   },
 
@@ -31,7 +31,7 @@ export const evilPandaStrategy: Strategy = {
     rangeUpPct:          20,
     distributionType: 'spot',
     solBias:            0.8,
-    maxSolPerPosition:  0.5,
+    maxSolPerPosition:  0.1,   // reduced from 0.5 for live testing
   },
 
   exits: {
