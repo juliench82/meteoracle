@@ -5,12 +5,13 @@ import { getConnection, getWallet } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { redis } from '@/lib/redis'
 
+export const runtime = 'nodejs'
+export const maxDuration = 30
+export const dynamic = 'force-dynamic'
+
 const CACHE_TTL = 20 // seconds
 const RATE_LIMIT_WINDOW = 60
 const RATE_LIMIT_MAX = 30
-
-export const runtime = 'nodejs'
-export const maxDuration = 30
 
 export async function GET() {
   // Rate limiting via Vercel KV
