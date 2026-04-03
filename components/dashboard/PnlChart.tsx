@@ -11,7 +11,6 @@ import {
   Cell,
   Legend,
 } from 'recharts'
-import type { ValueType, NameType } from 'recharts/types/component/DefaultTooltipContent'
 
 interface PositionPnl {
   id: string
@@ -30,6 +29,17 @@ interface PnlSnapshot {
   totalPnlSol: number
   totalFeesSol: number
   cachedAt: string
+}
+
+// Recharts Formatter has a known type variance issue — cast to any is the accepted workaround
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function tooltipFormatter(value: any, name: any): [string, string] {
+  const n = String(name ?? '')
+  const v = typeof value === 'number' ? value : parseFloat(String(value ?? 0))
+  return [
+    n === 'il' ? `${v.toFixed(2)}%` : `${v.toFixed(6)} SOL`,
+    n === 'pnl' ? 'PNL' : n === 'fees' ? 'Fees' : 'IL%',
+  ]
 }
 
 export function PnlChart() {
@@ -68,15 +78,6 @@ export function PnlChart() {
     il: Math.abs(p.ilPct),
   }))
 
-  const tooltipFormatter = (value: ValueType, name: NameType): [string, string] => {
-    const n = String(name)
-    const v = typeof value === 'number' ? value : parseFloat(String(value ?? 0))
-    return [
-      n === 'il' ? `${v.toFixed(2)}%` : `${v.toFixed(6)} SOL`,
-      n === 'pnl' ? 'PNL' : n === 'fees' ? 'Fees' : 'IL%',
-    ]
-  }
-
   return (
     <div className="rounded-xl bg-zinc-900 p-4 space-y-3">
       <div className="flex items-center justify-between">
@@ -94,7 +95,7 @@ export function PnlChart() {
           <Tooltip
             contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8 }}
             labelStyle={{ color: '#e4e4e7' }}
-            formatter={tooltipFormatter}
+            formatter={tooltipFormatter as never}
           />
           <Legend formatter={(v) => v === 'pnl' ? 'PNL (SOL)' : v === 'fees' ? 'Fees (SOL)' : 'IL%'} />
           <Bar dataKey="pnl" radius={[4, 4, 0, 0]}>
