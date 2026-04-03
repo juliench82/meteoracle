@@ -6,7 +6,7 @@ import { CandidateFeed } from '@/components/dashboard/CandidateFeed'
 import { BotLogsPanel } from '@/components/dashboard/BotLogsPanel'
 import { PnlChart } from '@/components/dashboard/PnlChart'
 import { createServerClient } from '@/lib/supabase'
-import type { Position, Candidate } from '@/lib/types'
+import type { Candidate } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -35,19 +35,22 @@ export default async function DashboardPage() {
       .eq('status', 'closed'),
   ])
 
-  const positions: Position[] =
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const positions: any[] =
     positionsRes.status === 'fulfilled' ? (positionsRes.value.data ?? []) : []
   const candidates: Candidate[] =
     candidatesRes.status === 'fulfilled' ? (candidatesRes.value.data ?? []) : []
   const logs =
     logsRes.status === 'fulfilled' ? (logsRes.value.data ?? []) : []
-  const closed =
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const closed: any[] =
     closedRes.status === 'fulfilled' ? (closedRes.value.data ?? []) : []
 
-  const solDeployed = positions.reduce((acc, p) => acc + (p.solDeposited ?? 0), 0)
-  const feesEarned24h = positions.reduce((acc, p) => acc + (p.feesEarnedSol ?? 0), 0)
+  // Supabase returns snake_case column names
+  const solDeployed = positions.reduce((acc: number, p: any) => acc + (p.sol_deposited ?? 0), 0)
+  const feesEarned24h = positions.reduce((acc: number, p: any) => acc + (p.fees_earned_sol ?? 0), 0)
   const totalClosed = closed.length
-  const wins = closed.filter((p) => (p.fees_earned_sol ?? 0) > 0).length
+  const wins = closed.filter((p: any) => (p.fees_earned_sol ?? 0) > 0).length
   const winRate = totalClosed > 0 ? Math.round((wins / totalClosed) * 100) : null
 
   return (
