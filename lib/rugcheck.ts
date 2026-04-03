@@ -3,12 +3,9 @@ import axios from 'axios'
 /**
  * Fetches a rugcheck.xyz risk score for a Solana token.
  *
- * The API returns both:
- *   score            — raw risk score (higher = riskier, can exceed 10000)
- *   score_normalised — already a 0–100 safety-ish scale provided by rugcheck
- *
- * We prefer score_normalised when available.
- * Fallback: raw > 1000 → 0, else max(0, 100 − raw/10)
+ * Scoring logic:
+ *   score_normalised > 30 → safetyScore = 15 (risky)
+ *   score_normalised ≤ 30 → safetyScore = max(0, 100 − raw/10)
  *
  * Returns 50 (neutral) on API failure so we don’t block the pipeline.
  */
@@ -23,10 +20,9 @@ export async function checkRugscore(mintAddress: string): Promise<number> {
     const normalised = res.data?.score_normalised
     console.log(`[rugcheck] ${mintAddress} raw score: ${raw}, normalised: ${normalised}`)
 
-    // Prefer the API’s own normalised score (0–100, lower = safer on their scale)
-    // Their scale: 1 = very safe, 100 = very risky — invert to our safety scale
-    if (typeof normalised === 'number') {
-      return Math.min(100, Math.max(0, 100 - normalised))
+    if (typeof raw === 'number' && typeof normalised === 'number') {
+      const safetyScore = normalised > 30 ? 15 : Math.round(Math.max(0, 100 - (raw / 10)))
+      return Math.min(100, Math.max(0, safetyScore))
     }
 
     if (typeof raw === 'number') {
