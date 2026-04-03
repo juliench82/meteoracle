@@ -5,7 +5,7 @@ import { createServerClient } from '@/lib/supabase'
 import { closePosition, openPosition } from '@/bot/executor'
 import { sendAlert } from '@/bot/alerter'
 import { STRATEGIES } from '@/strategies'
-import type { Strategy } from '@/lib/types'
+import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const SUPABASE_TIMEOUT_MS = 5_000
 // Smart rebalance: trigger if price has moved more than this % within the active range
@@ -163,18 +163,18 @@ async function checkPosition(
 
         // Reopen centered on current price
         try {
-          const metrics = {
+          const metrics: TokenMetrics = {
             address: position.token_address,
             symbol: position.token_symbol,
             poolAddress: position.pool_address,
             priceUsd: currentPrice,
-            // remaining TokenMetrics fields — sensible defaults for reopen
-            marketCapUsd: 0,
+            dexId: position.metadata?.dexId ?? 'meteora',
+            mcUsd: 0,
+            volume24h: 0,
             liquidityUsd: 0,
-            volume1hUsd,
-            volume24hUsd: 0,
-            priceChange1h: 0,
+            topHolderPct: 0,
             holderCount: 0,
+            ageHours,
             rugcheckScore: 0,
           }
           await openPosition(metrics, strategy)
