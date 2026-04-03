@@ -30,7 +30,7 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
   ])
 
   let topHolderPct = 0
-  let rpcAccounts: Array<{ amount: string }> = []
+  let rpcAccounts: Array<{ uiAmount: number | null }> = []
   if (rpcResult.status === 'fulfilled' && rpcResult.value) {
     rpcAccounts  = rpcResult.value.accounts
     topHolderPct = rpcResult.value.topHolderPct
@@ -53,7 +53,7 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
 }
 
 async function fetchTopAccountsAndSupply(mint: string): Promise<{
-  accounts:     Array<{ amount: string }>
+  accounts:     Array<{ uiAmount: number | null }>
   topHolderPct: number
 } | null> {
   const [largestRes, supplyRes] = await Promise.all([
@@ -61,11 +61,12 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
     rpcCall('getTokenSupply',          [mint]),
   ])
 
-  const accounts: Array<{ amount: string }> = largestRes?.value ?? []
+  const accounts: Array<{ uiAmount: number | null }> = largestRes?.value ?? []
   const totalSupply = parseFloat(supplyRes?.value?.uiAmountString ?? '0')
   if (!totalSupply || accounts.length === 0) return null
 
-  const topAmount    = parseFloat(accounts[0]?.amount ?? '0')
+  // uiAmount is already decimal-adjusted — same scale as totalSupply
+  const topAmount    = accounts[0]?.uiAmount ?? 0
   const topHolderPct = (topAmount / totalSupply) * 100
   return { accounts, topHolderPct }
 }
