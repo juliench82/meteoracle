@@ -4,6 +4,7 @@ import { KPIBar } from '@/components/dashboard/KPIBar'
 import { PositionsTable } from '@/components/dashboard/PositionsTable'
 import { CandidateFeed } from '@/components/dashboard/CandidateFeed'
 import { BotLogsPanel } from '@/components/dashboard/BotLogsPanel'
+import { PnlChart } from '@/components/dashboard/PnlChart'
 import { createServerClient } from '@/lib/supabase'
 import type { Position, Candidate } from '@/lib/types'
 
@@ -12,7 +13,6 @@ export const dynamic = 'force-dynamic'
 export default async function DashboardPage() {
   const supabase = createServerClient()
 
-  // Fetch all data in parallel
   const [positionsRes, candidatesRes, logsRes, closedRes] = await Promise.allSettled([
     supabase
       .from('positions')
@@ -44,7 +44,6 @@ export default async function DashboardPage() {
   const closed =
     closedRes.status === 'fulfilled' ? (closedRes.value.data ?? []) : []
 
-  // Compute KPIs
   const solDeployed = positions.reduce((acc, p) => acc + (p.solDeposited ?? 0), 0)
   const feesEarned24h = positions.reduce((acc, p) => acc + (p.feesEarnedSol ?? 0), 0)
   const totalClosed = closed.length
@@ -64,6 +63,8 @@ export default async function DashboardPage() {
             winRate={winRate}
             candidatesScanned={candidates.length}
           />
+          {/* Live PNL chart — client component, auto-refreshes every 30s */}
+          <PnlChart />
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
             <div className="xl:col-span-2 space-y-6">
               <PositionsTable positions={positions} />

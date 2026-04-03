@@ -5,7 +5,7 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID
 
 type AlertPayload =
   | { type: 'position_opened'; symbol: string; strategy: string; solDeposited: number; entryPrice: number }
-  | { type: 'position_closed'; symbol: string; strategy: string; reason: string; feesEarnedSol: number; ageHours: number }
+  | { type: 'position_closed'; symbol: string; strategy: string; reason: string; feesEarnedSol: number; ilPct: number; ageHours: number }
   | { type: 'position_oor'; symbol: string; strategy: string; currentPrice: number; binRangeLower: number; binRangeUpper: number; oorExitMinutes: number }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number }
   | { type: 'error'; message: string }
@@ -14,10 +14,6 @@ export async function sendAlert(payload: AlertPayload): Promise<void> {
   const message = formatMessage(payload)
   await sendTelegram(message)
 }
-
-// ---------------------------------------------------------------------------
-// Message formatter
-// ---------------------------------------------------------------------------
 
 function formatMessage(payload: AlertPayload): string {
   switch (payload.type) {
@@ -30,15 +26,24 @@ function formatMessage(payload: AlertPayload): string {
         `Deployed: ${payload.solDeposited.toFixed(3)} SOL`,
       ].join('\n')
 
-    case 'position_closed':
+    case 'position_closed': {
+      const ilSign = payload.ilPct <= 0 ? '' : '+'
+      const feeLine = payload.feesEarnedSol > 0
+        ? `Fees earned: *${payload.feesEarnedSol.toFixed(6)} SOL*`
+        : `Fees earned: 0 SOL`
+      const ilLine = `IL: ${ilSign}${payload.ilPct.toFixed(2)}%`
+      const isSmartRebalance = payload.reason.startsWith('smart_rebalance')
+      const header = isSmartRebalance ? `🔄 *Smart Rebalance*` : `✅ *Position Closed*`
       return [
-        `✅ *Position Closed*`,
+        header,
         `Token: \`${payload.symbol}\``,
         `Strategy: ${payload.strategy}`,
         `Reason: ${payload.reason}`,
-        `Fees earned: ${payload.feesEarnedSol.toFixed(4)} SOL`,
+        feeLine,
+        ilLine,
         `Duration: ${payload.ageHours}h`,
       ].join('\n')
+    }
 
     case 'position_oor':
       return [
@@ -68,10 +73,6 @@ function formatMessage(payload: AlertPayload): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Telegram sender
-// ---------------------------------------------------------------------------
-
 async function sendTelegram(text: string): Promise<void> {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.log('[alerter] Telegram not configured — message:', text)
@@ -90,7 +91,6 @@ async function sendTelegram(text: string): Promise<void> {
       { timeout: 5_000 }
     )
   } catch (err) {
-    // Never let alerter failures crash the bot
     console.error('[alerter] Telegram send failed:', err)
   }
 }
