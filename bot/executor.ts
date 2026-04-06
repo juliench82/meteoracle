@@ -1,5 +1,14 @@
 import DLMM, { StrategyType } from '@meteora-ag/dlmm'
-import { Keypair, PublicKey, Transaction } from '@solana/web3.js'
+import {
+  Keypair, PublicKey, Transaction,
+  ComputeBudgetProgram,
+} from '@solana/web3.js'
+import {
+  getAssociatedTokenAddressSync,
+  createAssociatedTokenAccountIdempotentInstruction,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+} from '@solana/spl-token'
 import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
@@ -55,24 +64,56 @@ export async function openPosition(
       return null
     }
 
-    // 2. Load pool + bin range
+    // 2. Load pool + derive token mints
     const dlmmPool = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
     const binStep = dlmmPool.lbPair.binStep
 
+    const mintX = dlmmPool.tokenX.publicKey
+    const mintY = dlmmPool.tokenY.publicKey
+
+    // 3. Ensure both ATAs exist (idempotent — no-op if already created)
+    const ataX = getAssociatedTokenAddressSync(mintX, wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID)
+    const ataY = getAssociatedTokenAddressSync(mintY, wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID)
+
+    const ataXInfo = await connection.getAccountInfo(ataX)
+    const ataYInfo = await connection.getAccountInfo(ataY)
+    const ataIxs = []
+    if (!ataXInfo) {
+      console.log(`${label} creating ATA for token X (${mintX.toBase58().slice(0, 8)}...)`)
+      ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
+        wallet.publicKey, ataX, wallet.publicKey, mintX, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+      ))
+    }
+    if (!ataYInfo) {
+      console.log(`${label} creating ATA for token Y (${mintY.toBase58().slice(0, 8)}...)`)
+      ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
+        wallet.publicKey, ataY, wallet.publicKey, mintY, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+      ))
+    }
+    if (ataIxs.length > 0) {
+      const ataTx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }),
+        ...ataIxs
+      )
+      const ataSig = await sendLegacyTx(ataTx, [wallet])
+      console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
+    }
+
+    // 4. Bin range
     const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
     const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
     const minBinId = activeBinId - binsDown
     const maxBinId = activeBinId + binsUp
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
 
-    // 3. Liquidity amounts
+    // 5. Liquidity amounts
     const lamports = Math.floor(solAmount * 1e9)
     const totalX = new BN(Math.floor(lamports * (1 - strategy.position.solBias)))
     const totalY = new BN(Math.floor(lamports * strategy.position.solBias))
 
-    // 4. Strategy type
+    // 6. Strategy type
     const strategyTypeMap: Record<string, StrategyType> = {
       spot: StrategyType.Spot,
       curve: StrategyType.Curve,
@@ -80,12 +121,11 @@ export async function openPosition(
     }
     const strategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyType.Spot
 
-    // 5. Priority fee
+    // 7. Priority fee
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // 6. Use initializeMultiplePositionAndAddLiquidityByStrategy — handles wide ranges that
-    //    exceed a single position's width (which causes InvalidRealloc in the single-position variant)
+    // 8. Build multi-position tx(s)
     const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
       async (count) => Array.from({ length: count }, () => new Keypair()),
       totalX,
@@ -96,7 +136,7 @@ export async function openPosition(
       1 // 1% slippage
     )
 
-    // 7. Send all position txs in sequence
+    // 9. Send each segment's init + liquidity txs
     let lastSig = ''
     let posIndex = 0
     const total = response.instructionsByPositions.length
@@ -105,12 +145,10 @@ export async function openPosition(
     for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
       posIndex++
 
-      // Build and send initializePosition tx
       const initTx = new Transaction().add(...(Array.isArray(initializePositionIx) ? initializePositionIx : [initializePositionIx]))
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      // Build and send addLiquidity tx(s)
       const liqIxs = Array.isArray(addLiquidityIxs) ? addLiquidityIxs : [addLiquidityIxs]
       for (let i = 0; i < liqIxs.length; i++) {
         const liqTx = new Transaction().add(...(Array.isArray(liqIxs[i]) ? liqIxs[i] : [liqIxs[i]]))
@@ -120,7 +158,6 @@ export async function openPosition(
     }
 
     console.log(`${label} position opened ✔`)
-    // Store the first position keypair pubkey for monitoring
     const firstPubKey = response.instructionsByPositions[0]?.positionKeypair?.publicKey?.toBase58()
     return await persistPosition(metrics, strategy, lastSig, metrics.priceUsd, solAmount, firstPubKey)
 
