@@ -12,7 +12,7 @@ const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 // Bin array rent:         ~0.024 SOL for ~15 arrays (refunded on close)
 // Priority fee + tx fee:  ~0.005 SOL (not refunded)
 // Safety buffer:          ~0.014 SOL
-const METEORA_RENT_RESERVE_SOL = 0.1  // total upfront reserve on top of liquidity amount
+const METEORA_RENT_RESERVE_SOL = 0.1
 
 async function sendLegacyTx(
   tx: Transaction,
@@ -26,19 +26,6 @@ async function sendLegacyTx(
   const sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 })
   await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
   return sig
-}
-
-// Meteora SDK returns Transaction | Transaction[] — always send all in sequence
-async function sendAll(
-  txOrTxs: Transaction | Transaction[],
-  signers: import('@solana/web3.js').Signer[]
-): Promise<string> {
-  const txs = Array.isArray(txOrTxs) ? txOrTxs : [txOrTxs]
-  let lastSig = ''
-  for (const tx of txs) {
-    lastSig = await sendLegacyTx(tx, signers)
-  }
-  return lastSig
 }
 
 export async function openPosition(
@@ -58,20 +45,18 @@ export async function openPosition(
   const supabase = createServerClient()
 
   try {
-    // 1. Calculate SOL amount first so we can check balance early
+    // 1. Calculate SOL amount and check balance first
     const maxSol = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.1')
     const solAmount = Math.min(strategy.position.maxSolPerPosition, maxSol)
     const requiredLamports = Math.floor((solAmount + METEORA_RENT_RESERVE_SOL) * 1e9)
 
-    // 2. Balance check — abort early if wallet can't cover liquidity + rent + buffer
     const balanceLamports = await connection.getBalance(wallet.publicKey)
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
 
     if (balanceLamports < requiredLamports) {
       console.warn(
-        `${label} insufficient balance — need ${(solAmount + METEORA_RENT_RESERVE_SOL).toFixed(3)} SOL ` +
-        `(${solAmount} liquidity + ${METEORA_RENT_RESERVE_SOL} rent/fees reserve), have ${balanceSol.toFixed(4)} SOL`
+        `${label} insufficient balance — need ${(solAmount + METEORA_RENT_RESERVE_SOL).toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`
       )
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_insufficient_balance',
@@ -80,29 +65,20 @@ export async function openPosition(
       return null
     }
 
-    // 3. Load the DLMM pool
+    // 2. Load DLMM pool
     const dlmmPool = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
 
-    // 4. Calculate bin range
+    // 3. Calculate bin range
     const binStep = dlmmPool.lbPair.binStep
-    const binsDown = Math.abs(
-      Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000))
-    )
-    const binsUp = Math.round(
-      (strategy.position.rangeUpPct / 100) / (binStep / 10_000)
-    )
+    const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
+    const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
     const minBinId = activeBinId - binsDown
     const maxBinId = activeBinId + binsUp
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
 
-    // 5. Split liquidity
-    const lamports = Math.floor(solAmount * 1e9)
-    const totalX = new BN(Math.floor(lamports * (1 - strategy.position.solBias)))
-    const totalY = new BN(Math.floor(lamports * strategy.position.solBias))
-
-    // 6. Map strategy distribution type
+    // 4. Map strategy distribution type
     const strategyTypeMap: Record<string, StrategyType> = {
       spot: StrategyType.Spot,
       curve: StrategyType.Curve,
@@ -110,16 +86,29 @@ export async function openPosition(
     }
     const strategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyType.Spot
 
-    // 7. Get priority fee
-    const priorityFee = await getPriorityFee([
-      metrics.poolAddress,
-      wallet.publicKey.toBase58(),
-    ])
+    // 5. Get priority fee
+    const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // 8. Generate position keypair and build tx(s)
+    // 6. STEP 1 — Initialize position account (separate tx to avoid InvalidRealloc)
     const positionKeypair = new Keypair()
-    const txOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+    const initTx = await dlmmPool.initializePosition({
+      payer: wallet.publicKey,
+      lowerBinId: minBinId,
+      positionWidth: binsDown + binsUp,
+      owner: wallet.publicKey,
+      positionPubKey: positionKeypair.publicKey,
+    })
+    console.log(`${label} tx 1/2 — initializing position account`)
+    const initSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
+    console.log(`${label} tx 1/2 confirmed ✔ sig: ${initSig}`)
+
+    // 7. STEP 2 — Add liquidity (separate tx, no realloc issue)
+    const lamports = Math.floor(solAmount * 1e9)
+    const totalX = new BN(Math.floor(lamports * (1 - strategy.position.solBias)))
+    const totalY = new BN(Math.floor(lamports * strategy.position.solBias))
+
+    const addLiqTxOrTxs = await dlmmPool.addLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
       totalXAmount: totalX,
@@ -127,20 +116,15 @@ export async function openPosition(
       strategy: { maxBinId, minBinId, strategyType },
     })
 
-    const txCount = Array.isArray(txOrTxs) ? txOrTxs.length : 1
-    console.log(`${label} sending ${txCount} transaction(s)`)
-
-    // 9. Send all transactions in sequence (SDK may split into multiple for wide ranges)
-    // First tx needs positionKeypair as signer (initializes account), subsequent ones only wallet
-    let lastSig = ''
-    const txs = Array.isArray(txOrTxs) ? txOrTxs : [txOrTxs]
-    for (let i = 0; i < txs.length; i++) {
-      const signers = i === 0 ? [wallet, positionKeypair] : [wallet]
-      lastSig = await sendLegacyTx(txs[i], signers)
-      console.log(`${label} tx ${i + 1}/${txs.length} confirmed ✔ sig: ${lastSig}`)
+    const addLiqTxs = Array.isArray(addLiqTxOrTxs) ? addLiqTxOrTxs : [addLiqTxOrTxs]
+    console.log(`${label} tx 2/2 — adding liquidity (${addLiqTxs.length} tx(s))`)
+    let lastSig = initSig
+    for (let i = 0; i < addLiqTxs.length; i++) {
+      lastSig = await sendLegacyTx(addLiqTxs[i], [wallet])
+      console.log(`${label} tx 2.${i + 1}/${addLiqTxs.length} confirmed ✔ sig: ${lastSig}`)
     }
 
-    // 10. Persist to Supabase
+    console.log(`${label} position opened ✔`)
     return await persistPosition(
       metrics, strategy, lastSig,
       metrics.priceUsd, solAmount,
