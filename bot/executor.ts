@@ -18,6 +18,7 @@ import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 const METEORA_RENT_RESERVE_SOL = 0.1
+const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
 async function sendLegacyTx(
   tx: Transaction,
@@ -87,9 +88,9 @@ export async function openPosition(
 
     const mintX = dlmmPool.tokenX.publicKey
     const mintY = dlmmPool.tokenY.publicKey
+    const isSolPool = mintY.toBase58() === NATIVE_MINT_STR
 
     // 3. Ensure ATAs exist — skip native SOL mint (SDK handles wSOL internally)
-    const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
     const ataIxs = []
 
     for (const [label_token, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
@@ -127,9 +128,21 @@ export async function openPosition(
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
 
     // 5. Liquidity amounts
+    // For TOKEN-SOL pools we deposit SOL only (one-sided).
+    // totalX = memecoin amount we own = 0
+    // totalY = full SOL deposit in lamports
+    // For TOKEN-TOKEN pools, split by solBias as before.
     const lamports = Math.floor(solAmount * 1e9)
-    const totalX = new BN(Math.floor(lamports * (1 - strategy.position.solBias)))
-    const totalY = new BN(Math.floor(lamports * strategy.position.solBias))
+    let totalX: BN
+    let totalY: BN
+    if (isSolPool) {
+      totalX = new BN(0)
+      totalY = new BN(lamports)
+      console.log(`${label} one-sided SOL deposit: totalX=0, totalY=${lamports} lamports`)
+    } else {
+      totalX = new BN(Math.floor(lamports * (1 - strategy.position.solBias)))
+      totalY = new BN(Math.floor(lamports * strategy.position.solBias))
+    }
 
     // 6. Strategy type
     const strategyTypeMap: Record<string, StrategyType> = {
