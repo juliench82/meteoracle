@@ -7,7 +7,9 @@ import {
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountIdempotentInstruction,
   TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  NATIVE_MINT,
 } from '@solana/spl-token'
 import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
@@ -29,6 +31,19 @@ async function sendLegacyTx(
   const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
   await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
   return sig
+}
+
+/**
+ * Detect whether a mint is owned by Token-2022 or the classic Token program.
+ * Falls back to TOKEN_PROGRAM_ID if the account can't be fetched.
+ */
+async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
+  const connection = getConnection()
+  const info = await connection.getAccountInfo(mint)
+  if (info && info.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+    return TOKEN_2022_PROGRAM_ID
+  }
+  return TOKEN_PROGRAM_ID
 }
 
 export async function openPosition(
@@ -73,25 +88,28 @@ export async function openPosition(
     const mintX = dlmmPool.tokenX.publicKey
     const mintY = dlmmPool.tokenY.publicKey
 
-    // 3. Ensure both ATAs exist (idempotent — no-op if already created)
-    const ataX = getAssociatedTokenAddressSync(mintX, wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID)
-    const ataY = getAssociatedTokenAddressSync(mintY, wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID)
-
-    const ataXInfo = await connection.getAccountInfo(ataX)
-    const ataYInfo = await connection.getAccountInfo(ataY)
+    // 3. Ensure ATAs exist — skip native SOL mint (SDK handles wSOL internally)
+    const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
     const ataIxs = []
-    if (!ataXInfo) {
-      console.log(`${label} creating ATA for token X (${mintX.toBase58().slice(0, 8)}...)`)
-      ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
-        wallet.publicKey, ataX, wallet.publicKey, mintX, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
-      ))
+
+    for (const [label_token, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
+      if (mint.toBase58() === NATIVE_MINT_STR) {
+        console.log(`${label} token ${label_token} is native SOL — skipping ATA creation`)
+        continue
+      }
+
+      const tokenProgramId = await getTokenProgramId(mint)
+      const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID)
+      const ataInfo = await connection.getAccountInfo(ata)
+
+      if (!ataInfo) {
+        console.log(`${label} creating ATA for token ${label_token} (${mint.toBase58().slice(0, 8)}...) program=${tokenProgramId.toBase58().slice(0, 8)}`)
+        ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
+          wallet.publicKey, ata, wallet.publicKey, mint, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
+        ))
+      }
     }
-    if (!ataYInfo) {
-      console.log(`${label} creating ATA for token Y (${mintY.toBase58().slice(0, 8)}...)`)
-      ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
-        wallet.publicKey, ataY, wallet.publicKey, mintY, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
-      ))
-    }
+
     if (ataIxs.length > 0) {
       const ataTx = new Transaction().add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }),
