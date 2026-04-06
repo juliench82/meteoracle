@@ -1,5 +1,5 @@
 import DLMM, { StrategyType } from '@meteora-ag/dlmm'
-import { Keypair, PublicKey } from '@solana/web3.js'
+import { Keypair, PublicKey, Transaction } from '@solana/web3.js'
 import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
@@ -15,7 +15,7 @@ const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 const METEORA_RENT_RESERVE_SOL = 0.1  // total upfront reserve on top of liquidity amount
 
 async function sendLegacyTx(
-  tx: import('@solana/web3.js').Transaction,
+  tx: Transaction,
   signers: import('@solana/web3.js').Signer[]
 ): Promise<string> {
   const connection = getConnection()
@@ -26,6 +26,19 @@ async function sendLegacyTx(
   const sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 })
   await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
   return sig
+}
+
+// Meteora SDK returns Transaction | Transaction[] — always send all in sequence
+async function sendAll(
+  txOrTxs: Transaction | Transaction[],
+  signers: import('@solana/web3.js').Signer[]
+): Promise<string> {
+  const txs = Array.isArray(txOrTxs) ? txOrTxs : [txOrTxs]
+  let lastSig = ''
+  for (const tx of txs) {
+    lastSig = await sendLegacyTx(tx, signers)
+  }
+  return lastSig
 }
 
 export async function openPosition(
@@ -104,9 +117,9 @@ export async function openPosition(
     ])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // 8. Generate position keypair and build tx
+    // 8. Generate position keypair and build tx(s)
     const positionKeypair = new Keypair()
-    const tx = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+    const txOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
       totalXAmount: totalX,
@@ -114,13 +127,22 @@ export async function openPosition(
       strategy: { maxBinId, minBinId, strategyType },
     })
 
-    // 9. Send transaction
-    const sig = await sendLegacyTx(tx, [wallet, positionKeypair])
-    console.log(`${label} position opened ✔ sig: ${sig}`)
+    const txCount = Array.isArray(txOrTxs) ? txOrTxs.length : 1
+    console.log(`${label} sending ${txCount} transaction(s)`)
+
+    // 9. Send all transactions in sequence (SDK may split into multiple for wide ranges)
+    // First tx needs positionKeypair as signer (initializes account), subsequent ones only wallet
+    let lastSig = ''
+    const txs = Array.isArray(txOrTxs) ? txOrTxs : [txOrTxs]
+    for (let i = 0; i < txs.length; i++) {
+      const signers = i === 0 ? [wallet, positionKeypair] : [wallet]
+      lastSig = await sendLegacyTx(txs[i], signers)
+      console.log(`${label} tx ${i + 1}/${txs.length} confirmed ✔ sig: ${lastSig}`)
+    }
 
     // 10. Persist to Supabase
     return await persistPosition(
-      metrics, strategy, sig,
+      metrics, strategy, lastSig,
       metrics.priceUsd, solAmount,
       positionKeypair.publicKey.toBase58()
     )
