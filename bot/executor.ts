@@ -6,23 +6,18 @@ import { createServerClient } from '@/lib/supabase'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
-
 const METEORA_RENT_RESERVE_SOL = 0.1
 
 async function sendLegacyTx(
   tx: Transaction,
-  signers: import('@solana/web3.js').Signer[],
-  skipPreflight = false
+  signers: import('@solana/web3.js').Signer[]
 ): Promise<string> {
   const connection = getConnection()
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
   tx.recentBlockhash = blockhash
   tx.feePayer = signers[0].publicKey
   tx.sign(...signers)
-  const sig = await connection.sendRawTransaction(tx.serialize(), {
-    skipPreflight,
-    maxRetries: 3,
-  })
+  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
   await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
   return sig
 }
@@ -44,16 +39,14 @@ export async function openPosition(
   const supabase = createServerClient()
 
   try {
-    // 1. Check balance
+    // 1. Balance check
     const maxSol = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.1')
     const solAmount = Math.min(strategy.position.maxSolPerPosition, maxSol)
-    const requiredLamports = Math.floor((solAmount + METEORA_RENT_RESERVE_SOL) * 1e9)
-
     const balanceLamports = await connection.getBalance(wallet.publicKey)
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
 
-    if (balanceLamports < requiredLamports) {
+    if (balanceLamports < Math.floor((solAmount + METEORA_RENT_RESERVE_SOL) * 1e9)) {
       console.warn(`${label} insufficient balance — need ${(solAmount + METEORA_RENT_RESERVE_SOL).toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`)
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_insufficient_balance',
@@ -91,46 +84,45 @@ export async function openPosition(
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // 6. Build tx(s) — SDK may throw on internal simulation (known bug), catch and proceed
-    const positionKeypair = new Keypair()
-    let txOrTxs: Transaction | Transaction[]
-    try {
-      txOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
-        positionPubKey: positionKeypair.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalX,
-        totalYAmount: totalY,
-        strategy: { maxBinId, minBinId, strategyType },
-      })
-    } catch (buildErr) {
-      const msg = buildErr instanceof Error ? buildErr.message : String(buildErr)
-      // SDK internally simulates to estimate CU — this simulation can fail with InvalidRealloc
-      // on certain pool configs even though the actual tx lands fine. Skip preflight and retry.
-      if (msg.includes('InvalidRealloc') || msg.includes('Simulation failed')) {
-        console.warn(`${label} SDK simulation failed (known bug) — retrying with skipPreflight`)
-        // Re-build: the SDK threw after building the tx internally, we need to catch what it built.
-        // Since it throws from getEstimatedComputeUnitUsageWithBuffer, the tx object was already
-        // constructed — but we can't access it. Instead, use addLiquidityByStrategy on a fresh
-        // position by calling initializePositionAndAddLiquidityByStrategy with simulateOnly=false
-        // workaround: rebuild with a dummy CU limit by monkey-patching isn't viable.
-        // Real workaround: call lower-level method with manual CU budget.
-        throw new Error(`SDK simulation bug unresolvable without lower-level access: ${msg}`)
-      }
-      throw buildErr
-    }
+    // 6. Use initializeMultiplePositionAndAddLiquidityByStrategy — handles wide ranges that
+    //    exceed a single position's width (which causes InvalidRealloc in the single-position variant)
+    const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
+      async (count) => Array.from({ length: count }, () => new Keypair()),
+      totalX,
+      totalY,
+      { minBinId, maxBinId, strategyType },
+      wallet.publicKey,
+      wallet.publicKey,
+      1 // 1% slippage
+    )
 
-    // 7. Send all txs in sequence, with skipPreflight to bypass local simulation
-    const txs = Array.isArray(txOrTxs) ? txOrTxs : [txOrTxs]
-    console.log(`${label} sending ${txs.length} transaction(s) (skipPreflight=true)`)
+    // 7. Send all position txs in sequence
     let lastSig = ''
-    for (let i = 0; i < txs.length; i++) {
-      const signers = i === 0 ? [wallet, positionKeypair] : [wallet]
-      lastSig = await sendLegacyTx(txs[i], signers, true)
-      console.log(`${label} tx ${i + 1}/${txs.length} confirmed ✔ sig: ${lastSig}`)
+    let posIndex = 0
+    const total = response.instructionsByPositions.length
+    console.log(`${label} opening ${total} position segment(s)`)
+
+    for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
+      posIndex++
+
+      // Build and send initializePosition tx
+      const initTx = new Transaction().add(...(Array.isArray(initializePositionIx) ? initializePositionIx : [initializePositionIx]))
+      lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
+      console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
+
+      // Build and send addLiquidity tx(s)
+      const liqIxs = Array.isArray(addLiquidityIxs) ? addLiquidityIxs : [addLiquidityIxs]
+      for (let i = 0; i < liqIxs.length; i++) {
+        const liqTx = new Transaction().add(...(Array.isArray(liqIxs[i]) ? liqIxs[i] : [liqIxs[i]]))
+        lastSig = await sendLegacyTx(liqTx, [wallet])
+        console.log(`${label} seg ${posIndex}/${total} liq ${i + 1}/${liqIxs.length} confirmed ✔ sig: ${lastSig}`)
+      }
     }
 
     console.log(`${label} position opened ✔`)
-    return await persistPosition(metrics, strategy, lastSig, metrics.priceUsd, solAmount, positionKeypair.publicKey.toBase58())
+    // Store the first position keypair pubkey for monitoring
+    const firstPubKey = response.instructionsByPositions[0]?.positionKeypair?.publicKey?.toBase58()
+    return await persistPosition(metrics, strategy, lastSig, metrics.priceUsd, solAmount, firstPubKey)
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -176,6 +168,7 @@ export async function closePosition(
     const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
     const positionPubKey = new PublicKey(position.metadata?.positionPubKey ?? '')
 
+    // 1. Claim fees
     let feesClaimedSol = 0
     try {
       const claimTxs = await dlmmPool.claimAllRewards({
@@ -191,6 +184,7 @@ export async function closePosition(
       console.warn(`${label} fee claim failed (continuing):`, err)
     }
 
+    // 2. Remove liquidity
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const userPosition = userPositions.find(p => p.publicKey.toBase58() === positionPubKey.toBase58())
 
