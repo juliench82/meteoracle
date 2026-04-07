@@ -4,7 +4,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID
 
 type AlertPayload =
-  | { type: 'position_opened'; symbol: string; strategy: string; solDeposited: number; entryPrice: number }
+  | { type: 'position_opened'; symbol: string; strategy: string; solDeposited: number; entryPrice: number; positionId: string }
   | { type: 'position_closed'; symbol: string; strategy: string; reason: string; feesEarnedSol: number; ilPct: number; ageHours: number }
   | { type: 'position_oor'; symbol: string; strategy: string; currentPrice: number; binRangeLower: number; binRangeUpper: number; oorExitMinutes: number }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number }
@@ -24,6 +24,8 @@ function formatMessage(payload: AlertPayload): string {
         `Strategy: ${payload.strategy}`,
         `Entry: $${payload.entryPrice.toFixed(8)}`,
         `Deployed: ${payload.solDeposited.toFixed(3)} SOL`,
+        `ID: \`${payload.positionId}\``,
+        `→ To close manually: /close ${payload.positionId}`,
       ].join('\n')
 
     case 'position_closed': {

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
+import { closePosition } from '@/bot/executor'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import axios from 'axios'
@@ -108,12 +109,50 @@ export async function POST(req: Request) {
 
     const chatId  = message.chat?.id
     const text: string = message.text ?? ''
-    const command = text.split(' ')[0].toLowerCase()
+    const parts   = text.trim().split(/\s+/)
+    const command = parts[0].toLowerCase()
 
     if (String(chatId) !== String(TELEGRAM_CHAT_ID)) {
       return NextResponse.json({ ok: true })
     }
 
+    // ------------------------------------------------------------------ /close
+    if (command === '/close') {
+      const positionId = parts[1]
+      if (!positionId) {
+        await reply(chatId, '❌ Usage: `/close <position_id>`')
+        return NextResponse.json({ ok: true })
+      }
+      await reply(chatId, `⏳ Closing position \`${positionId}\`...`)
+      try {
+        const supabase = createServerClient()
+        const { data: pos, error } = await supabase
+          .from('positions')
+          .select('id, token_symbol, status')
+          .eq('id', positionId)
+          .single()
+        if (error || !pos) {
+          await reply(chatId, `❌ Position \`${positionId}\` not found.`)
+          return NextResponse.json({ ok: true })
+        }
+        if (pos.status === 'closed') {
+          await reply(chatId, `ℹ️ Position \`${positionId}\` (${pos.token_symbol}) is already closed.`)
+          return NextResponse.json({ ok: true })
+        }
+        const ok = await closePosition(positionId, 'manual_telegram')
+        if (ok) {
+          await reply(chatId, `✅ Position \`${positionId}\` (${pos.token_symbol}) closed successfully.`)
+        } else {
+          await reply(chatId, `❌ Failed to close \`${positionId}\` — check logs.`)
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        await reply(chatId, `❌ Close error: ${msg}`)
+      }
+      return NextResponse.json({ ok: true })
+    }
+
+    // ------------------------------------------------------------------ /scan
     if (command === '/scan') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -129,6 +168,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true })
     }
 
+    // --------------------------------------------------------------- /monitor
     if (command === '/monitor') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -144,6 +184,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true })
     }
 
+    // ------------------------------------------------------------------ /tick
     if (command === '/tick') {
       if (process.env.BOT_ENABLED !== 'true') {
         await reply(chatId, '⚠️ Bot is disabled.\nSet `BOT_ENABLED=true` in Vercel env vars.')
@@ -159,6 +200,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true })
     }
 
+    // ------------------------------------------------------------------ /stop
     if (command === '/stop') {
       await setBotState({ enabled: false })
       await reply(chatId, [
@@ -229,6 +271,9 @@ export async function POST(req: Request) {
         `/scan    — scan for new candidates & open positions`,
         `/monitor — check open positions, trigger exits/rebalances`,
         `/tick    — run scan + monitor together`,
+        ``,
+        `*Positions*`,
+        `/close <id> — manually force-close a position`,
         ``,
         `*Control*`,
         `/stop    — pause all scanning & monitoring`,
