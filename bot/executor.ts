@@ -2,6 +2,7 @@ import DLMM, { StrategyType } from '@meteora-ag/dlmm'
 import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
+  TransactionInstruction,
 } from '@solana/web3.js'
 import {
   getAssociatedTokenAddressSync,
@@ -18,6 +19,7 @@ import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 const METEORA_RENT_RESERVE_SOL = 0.1
+// Native SOL mint address — constant, never changes
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
 async function sendLegacyTx(
@@ -91,7 +93,7 @@ export async function openPosition(
     const isSolPool = mintY.toBase58() === NATIVE_MINT_STR
 
     // 3. Ensure ATAs exist — skip native SOL mint (SDK handles wSOL internally)
-    const ataIxs = []
+    const ataIxs: TransactionInstruction[] = []
 
     for (const [label_token, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
@@ -128,10 +130,9 @@ export async function openPosition(
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
 
     // 5. Liquidity amounts
-    // For TOKEN-SOL pools we deposit SOL only (one-sided).
-    // totalX = memecoin amount we own = 0
-    // totalY = full SOL deposit in lamports
-    // For TOKEN-TOKEN pools, split by solBias as before.
+    // For TOKEN-SOL pools: one-sided SOL deposit only (we hold no memecoin).
+    //   totalX = 0, totalY = all lamports
+    // For TOKEN-TOKEN pools: split by solBias.
     const lamports = Math.floor(solAmount * 1e9)
     let totalX: BN
     let totalY: BN
