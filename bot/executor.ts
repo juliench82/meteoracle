@@ -19,8 +19,12 @@ import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 const METEORA_RENT_RESERVE_SOL = 0.1
-// Native SOL mint address — constant, never changes
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
+
+/** Flatten a single ix or array of ixs into TransactionInstruction[] */
+function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): TransactionInstruction[] {
+  return Array.isArray(ix) ? ix : [ix]
+}
 
 async function sendLegacyTx(
   tx: Transaction,
@@ -130,9 +134,8 @@ export async function openPosition(
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
 
     // 5. Liquidity amounts
-    // For TOKEN-SOL pools: one-sided SOL deposit only (we hold no memecoin).
-    //   totalX = 0, totalY = all lamports
-    // For TOKEN-TOKEN pools: split by solBias.
+    // TOKEN-SOL pools: one-sided SOL deposit only (we hold no memecoin)
+    // TOKEN-TOKEN pools: split by solBias
     const lamports = Math.floor(solAmount * 1e9)
     let totalX: BN
     let totalY: BN
@@ -177,15 +180,21 @@ export async function openPosition(
     for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
       posIndex++
 
-      const initTx = new Transaction().add(...(Array.isArray(initializePositionIx) ? initializePositionIx : [initializePositionIx]))
+      // initializePositionIx may be a single ix or array — flatten before adding
+      const initIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
+      const initTx = new Transaction().add(...initIxs)
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      const liqIxs = Array.isArray(addLiquidityIxs) ? addLiquidityIxs : [addLiquidityIxs]
-      for (let i = 0; i < liqIxs.length; i++) {
-        const liqTx = new Transaction().add(...(Array.isArray(liqIxs[i]) ? liqIxs[i] : [liqIxs[i]]))
+      // addLiquidityIxs may be a single ix, array of ixs, or array of arrays — normalise to ix[][]
+      const liqChunks: TransactionInstruction[][] = Array.isArray(addLiquidityIxs)
+        ? (addLiquidityIxs as (TransactionInstruction | TransactionInstruction[])[]).map(toIxArray)
+        : [toIxArray(addLiquidityIxs as TransactionInstruction | TransactionInstruction[])]
+
+      for (let i = 0; i < liqChunks.length; i++) {
+        const liqTx = new Transaction().add(...liqChunks[i])
         lastSig = await sendLegacyTx(liqTx, [wallet])
-        console.log(`${label} seg ${posIndex}/${total} liq ${i + 1}/${liqIxs.length} confirmed ✔ sig: ${lastSig}`)
+        console.log(`${label} seg ${posIndex}/${total} liq ${i + 1}/${liqChunks.length} confirmed ✔ sig: ${lastSig}`)
       }
     }
 
