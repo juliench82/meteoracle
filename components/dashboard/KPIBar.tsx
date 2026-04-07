@@ -33,6 +33,7 @@ export function KPIBar({
       value: feesEarned24h.toFixed(4),
       unit: 'SOL',
       color: 'text-green-400',
+      title: 'Cumulative fees earned on all active positions',
     },
     {
       label: 'Win Rate',
@@ -51,9 +52,9 @@ export function KPIBar({
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
       {kpis.map((kpi) => (
-        <Card key={kpi.label}>
+        <Card key={kpi.label} title={kpi.title}>
           <p className="text-xs text-slate-500 mb-1">{kpi.label}</p>
-          <p className={`text-2xl font-bold font-mono ${kpi.color}`}>
+          <p className={`text-2xl font-bold font-mono tabular-nums ${kpi.color}`}>
             {kpi.value}
             {kpi.unit && (
               <span className="text-sm ml-1 text-slate-500">{kpi.unit}</span>

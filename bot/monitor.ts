@@ -81,19 +81,11 @@ async function checkPosition(
     position.metadata?.positionPubKey
   )
 
-  // entry_price is stored in USD. currentPriceSol is SOL-per-token from activeBin.
-  // Convert currentPriceSol → USD using the SOL/USD price from the pool's quote token.
-  // For SOL pools, pricePerToken from activeBin is already SOL-denominated.
-  // We compare price movement in SOL terms — entry_price_sol stored separately,
-  // or fall back to using the stored USD entry with a SOL price estimate.
-  // Best approach: store entry_price_sol at open time and compare apples-to-apples.
-  //
-  // For now: use entry_price_sol from metadata if available, else skip pricePct exit
-  // to avoid false stops. This prevents the -98.6% false positive.
+  // Use SOL-denominated entry price stored at open time — avoids USD/SOL mismatch
   const entryPriceSol: number = position.metadata?.entryPriceSol ?? 0
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
-    : 0 // no stop/TP if we don't have a reliable SOL entry price
+    : 0
 
   // IL calculation (in SOL terms)
   const k = entryPriceSol > 0 && currentPriceSol > 0 ? currentPriceSol / entryPriceSol : 1
@@ -101,12 +93,18 @@ async function checkPosition(
     ? Math.round((2 * Math.sqrt(k) / (1 + k) - 1) * 10000) / 100
     : 0
 
+  // pnlSol = price appreciation on deployed capital + fees
+  const pnlSol = entryPriceSol > 0
+    ? Math.round((position.sol_deposited * (pricePct / 100) + feesEarnedSol) * 1e6) / 1e6
+    : Math.round(feesEarnedSol * 1e6) / 1e6
+
   await withTimeout(
     supabase.from('positions').update({
       current_price: currentPriceSol,
       in_range: inRange,
       fees_earned_sol: feesEarnedSol,
       il_pct: ilPct,
+      pnl_sol: pnlSol,
       status: inRange ? 'active' : 'out_of_range',
     }).eq('id', position.id),
     SUPABASE_TIMEOUT_MS, 'positions update'
@@ -233,7 +231,7 @@ async function fetchPositionState(
     const wallet     = getWallet()
     const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
     const activeBin  = await dlmmPool.getActiveBin()
-    // pricePerToken is SOL-per-token (the pool's native quote is SOL)
+    // pricePerToken is SOL-per-token (pool's native quote is SOL)
     const currentPriceSol = parseFloat(activeBin.pricePerToken)
 
     let volume1hUsd = 0

@@ -7,6 +7,13 @@ const STRATEGY_LABELS: Record<string, string> = {
   'stable-farm': 'Stable Farm',
 }
 
+function formatAge(openedAt: string): string {
+  const ms = Date.now() - new Date(openedAt).getTime()
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
+  if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`
+  return `${Math.round(ms / 86_400_000)}d`
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function PositionsTable({ positions }: { positions: any[] }) {
   return (
@@ -23,7 +30,7 @@ export function PositionsTable({ positions }: { positions: any[] }) {
           <table className="w-full text-xs">
             <thead>
               <tr className="text-slate-500 border-b border-surface-border">
-                {['Token', 'Strategy', 'Entry', 'Current', 'Range', 'Fees', 'Deployed', 'Age'].map(
+                {['Token', 'Strategy', 'Entry', 'Current', 'Range', 'PnL', 'Fees', 'Deployed', 'Age'].map(
                   (h) => (
                     <th key={h} className="text-left py-2 pr-4 font-medium">
                       {h}
@@ -34,12 +41,10 @@ export function PositionsTable({ positions }: { positions: any[] }) {
             </thead>
             <tbody>
               {positions.map((p) => {
-                const ageMs = Date.now() - new Date(p.opened_at).getTime()
-                const ageLabel = ageMs < 3600000
-                  ? `${Math.round(ageMs / 60000)}m`
-                  : `${Math.round(ageMs / 3600000)}h`
                 const entryPrice: number = p.entry_price ?? 0
                 const currentPrice: number | null = p.current_price ?? null
+                const pnlSol: number = p.pnl_sol ?? 0
+                const pnlPositive = pnlSol >= 0
 
                 return (
                   <tr
@@ -65,13 +70,18 @@ export function PositionsTable({ positions }: { positions: any[] }) {
                         {p.in_range ? '✓ In range' : '✗ OOR'}
                       </Badge>
                     </td>
-                    <td className="py-3 pr-4 font-mono text-green-400">
+                    <td className={`py-3 pr-4 font-mono tabular-nums ${
+                      pnlPositive ? 'text-green-400' : 'text-red-400'
+                    }`}>
+                      {pnlPositive ? '+' : ''}{pnlSol.toFixed(4)} SOL
+                    </td>
+                    <td className="py-3 pr-4 font-mono text-yellow-400">
                       +{(p.fees_earned_sol ?? 0).toFixed(4)} SOL
                     </td>
                     <td className="py-3 pr-4 font-mono text-slate-400">
                       {(p.sol_deposited ?? 0)} SOL
                     </td>
-                    <td className="py-3 text-slate-500">{ageLabel}</td>
+                    <td className="py-3 text-slate-500">{formatAge(p.opened_at)}</td>
                   </tr>
                 )
               })}

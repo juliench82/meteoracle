@@ -45,28 +45,43 @@ export async function GET() {
       try {
         const dlmmPool = await DLMM.create(connection, new PublicKey(pos.pool_address))
         const activeBin = await dlmmPool.getActiveBin()
-        const currentPrice = parseFloat(activeBin.pricePerToken)
+        // pricePerToken is SOL-per-token — same unit as metadata.entryPriceSol
+        const currentPriceSol = parseFloat(activeBin.pricePerToken)
 
         const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
         const match = userPositions.find(
           (p) => p.publicKey.toBase58() === pos.metadata?.positionPubKey
         )
 
-        const feesSol = match ? match.positionData.feeY.toNumber() / 1e9 : (pos.fees_earned_sol ?? 0)
-        const entryPrice = pos.entry_price ?? 0
-        const pricePct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0
+        const feesSol = match
+          ? match.positionData.feeY.toNumber() / 1e9
+          : (pos.fees_earned_sol ?? 0)
 
-        // Impermanent loss approximation: IL% ≈ 2√k/(1+k) - 1, k = currentPrice/entryPrice
-        const k = entryPrice > 0 ? currentPrice / entryPrice : 1
-        const ilPct = entryPrice > 0 ? (2 * Math.sqrt(k) / (1 + k) - 1) * 100 : 0
+        // Use entryPriceSol from metadata (SOL-denominated) — same as monitor.ts
+        // Fall back to pnl_sol already persisted in DB if no reliable entry price
+        const entryPriceSol: number = pos.metadata?.entryPriceSol ?? 0
+        const pricePct = entryPriceSol > 0
+          ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
+          : 0
 
-        const pnlSol = pos.sol_deposited * (pricePct / 100) + feesSol
+        // Impermanent loss: IL% ≈ 2√k/(1+k) - 1
+        const k = entryPriceSol > 0 && currentPriceSol > 0
+          ? currentPriceSol / entryPriceSol
+          : 1
+        const ilPct = entryPriceSol > 0
+          ? (2 * Math.sqrt(k) / (1 + k) - 1) * 100
+          : 0
+
+        // pnlSol: price appreciation on deployed capital + fees earned
+        const pnlSol = entryPriceSol > 0
+          ? pos.sol_deposited * (pricePct / 100) + feesSol
+          : (pos.pnl_sol ?? feesSol) // fallback to persisted value
 
         return {
           id: pos.id,
           symbol: pos.token_symbol,
           strategy: pos.strategy_id,
-          currentPrice,
+          currentPrice: currentPriceSol,
           pricePct: Math.round(pricePct * 100) / 100,
           feesSol: Math.round(feesSol * 1e6) / 1e6,
           ilPct: Math.round(ilPct * 100) / 100,
@@ -74,6 +89,7 @@ export async function GET() {
           status: pos.status,
         }
       } catch {
+        // On RPC error fall back to DB-persisted values
         return {
           id: pos.id,
           symbol: pos.token_symbol,
@@ -81,7 +97,7 @@ export async function GET() {
           currentPrice: pos.current_price ?? 0,
           pricePct: 0,
           feesSol: pos.fees_earned_sol ?? 0,
-          ilPct: 0,
+          ilPct: pos.il_pct ?? 0,
           pnlSol: pos.pnl_sol ?? 0,
           status: pos.status,
         }
