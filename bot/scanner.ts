@@ -6,6 +6,7 @@ import { openPosition } from './executor'
 import { sendAlert } from './alerter'
 import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
+import { detectOrphanedPositions } from './orphan-detector'
 import type { TokenMetrics } from '@/lib/types'
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
@@ -82,6 +83,8 @@ function explainNoStrategy(t: TokenMetrics): string {
   return perStrat.join(' | ') || 'all strategies disabled'
 }
 
+let _orphanCheckDone = false
+
 export async function runScanner(): Promise<{
   scanned: number; candidates: number; opened: number; error?: string
 }> {
@@ -92,6 +95,15 @@ export async function runScanner(): Promise<{
     return { scanned: 0, candidates: 0, opened: 0, error: fetchError }
   }
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
+
+  // Run orphan detector once per process lifetime (not every scan tick)
+  if (!_orphanCheckDone) {
+    _orphanCheckDone = true
+    const poolAddresses = pools.map(p => p.address)
+    detectOrphanedPositions(poolAddresses).catch(err =>
+      console.warn('[scanner] orphan detector error:', err)
+    )
+  }
 
   console.log('[scanner] step 2/4 — cheap pre-screen')
   const survivors: Array<{ pool: MeteoraPool; mcUsd: number; ageHours: number }> = []

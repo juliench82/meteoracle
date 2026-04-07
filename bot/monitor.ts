@@ -8,9 +8,7 @@ import { STRATEGIES } from '@/strategies'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const SUPABASE_TIMEOUT_MS = 5_000
-// Smart rebalance: trigger if price has moved more than this % within the active range
 const SMART_REBALANCE_THRESHOLD_PCT = 30
-// Minimum volume (USD/h) to justify a rebalance reopen — avoids churning dead pools
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
 
 async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
@@ -78,21 +76,34 @@ async function checkPosition(
   const label = `[monitor][${position.token_symbol}][${strategy.id}]`
   const now = Date.now()
 
-  const { inRange, currentPrice, feesEarnedSol, volume1hUsd } = await fetchPositionState(
+  const { inRange, currentPriceSol, feesEarnedSol, volume1hUsd } = await fetchPositionState(
     position.pool_address,
     position.metadata?.positionPubKey
   )
 
-  // Impermanent loss (%):
-  const entryPrice = position.entry_price ?? 0
-  const k = entryPrice > 0 ? currentPrice / entryPrice : 1
-  const ilPct = entryPrice > 0
+  // entry_price is stored in USD. currentPriceSol is SOL-per-token from activeBin.
+  // Convert currentPriceSol → USD using the SOL/USD price from the pool's quote token.
+  // For SOL pools, pricePerToken from activeBin is already SOL-denominated.
+  // We compare price movement in SOL terms — entry_price_sol stored separately,
+  // or fall back to using the stored USD entry with a SOL price estimate.
+  // Best approach: store entry_price_sol at open time and compare apples-to-apples.
+  //
+  // For now: use entry_price_sol from metadata if available, else skip pricePct exit
+  // to avoid false stops. This prevents the -98.6% false positive.
+  const entryPriceSol: number = position.metadata?.entryPriceSol ?? 0
+  const pricePct = entryPriceSol > 0
+    ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
+    : 0 // no stop/TP if we don't have a reliable SOL entry price
+
+  // IL calculation (in SOL terms)
+  const k = entryPriceSol > 0 && currentPriceSol > 0 ? currentPriceSol / entryPriceSol : 1
+  const ilPct = entryPriceSol > 0
     ? Math.round((2 * Math.sqrt(k) / (1 + k) - 1) * 10000) / 100
     : 0
 
   await withTimeout(
     supabase.from('positions').update({
-      current_price: currentPrice,
+      current_price: currentPriceSol,
       in_range: inRange,
       fees_earned_sol: feesEarnedSol,
       il_pct: ilPct,
@@ -103,17 +114,20 @@ async function checkPosition(
 
   const openedAt   = new Date(position.opened_at).getTime()
   const ageHours   = (now - openedAt) / (1000 * 60 * 60)
-  const pricePct   = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0
   const oorSince   = position.status === 'out_of_range'
     ? (now - new Date(position.updated_at ?? position.opened_at).getTime()) / 60_000
     : 0
 
-  // --- Hard exits ---
+  // Hard exits — only apply pricePct exits if we have a reliable SOL entry price
   let closeReason: string | null = null
-  if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) closeReason = `out_of_range_${Math.round(oorSince)}min`
-  else if (pricePct <= strategy.exits.stopLossPct)              closeReason = `stop_loss_${pricePct.toFixed(1)}pct`
-  else if (pricePct >= strategy.exits.takeProfitPct)            closeReason = `take_profit_${pricePct.toFixed(1)}pct`
-  else if (ageHours >= strategy.exits.maxDurationHours)         closeReason = `max_duration_${Math.round(ageHours)}h`
+  if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes)
+    closeReason = `out_of_range_${Math.round(oorSince)}min`
+  else if (entryPriceSol > 0 && pricePct <= strategy.exits.stopLossPct)
+    closeReason = `stoploss_${pricePct.toFixed(1)}pct`
+  else if (entryPriceSol > 0 && pricePct >= strategy.exits.takeProfitPct)
+    closeReason = `takeprofit_${pricePct.toFixed(1)}pct`
+  else if (ageHours >= strategy.exits.maxDurationHours)
+    closeReason = `max_duration_${Math.round(ageHours)}h`
 
   if (closeReason) {
     console.log(`${label} EXIT triggered → ${closeReason}`)
@@ -133,13 +147,13 @@ async function checkPosition(
     return
   }
 
-  // --- Smart rebalance: price drifted >30% within range but volume still alive ---
+  // Smart rebalance
   if (inRange) {
     const rangeLower = position.bin_range_lower ?? 0
     const rangeUpper = position.bin_range_upper ?? 0
     const rangeWidth = rangeUpper - rangeLower
     const positionInRange = rangeWidth > 0
-      ? ((currentPrice - rangeLower) / rangeWidth) * 100  // 0=bottom, 100=top of range
+      ? ((currentPriceSol - rangeLower) / rangeWidth) * 100
       : 50
 
     const driftedHighInRange = positionInRange > (50 + SMART_REBALANCE_THRESHOLD_PCT / 2)
@@ -161,24 +175,19 @@ async function checkPosition(
           ageHours: Math.round(ageHours * 10) / 10,
         })
 
-        // Reopen centered on current price
         try {
           const metrics: TokenMetrics = {
             address: position.token_address,
             symbol: position.token_symbol,
             poolAddress: position.pool_address,
-            priceUsd: currentPrice,
+            priceUsd: currentPriceSol,
             dexId: position.metadata?.dexId ?? 'meteora',
-            mcUsd: 0,
-            volume24h: 0,
-            liquidityUsd: 0,
-            topHolderPct: 0,
-            holderCount: 0,
-            ageHours,
+            mcUsd: 0, volume24h: 0, liquidityUsd: 0,
+            topHolderPct: 0, holderCount: 0, ageHours,
             rugcheckScore: 0,
           }
           await openPosition(metrics, strategy)
-          console.log(`${label} reopened centered at $${currentPrice}`)
+          console.log(`${label} reopened centered at ${currentPriceSol}`)
         } catch (reopenErr) {
           console.error(`${label} reopen after rebalance failed:`, reopenErr)
         }
@@ -187,55 +196,65 @@ async function checkPosition(
     }
   }
 
-  // --- Fee claiming ---
+  // Fee claiming
   if (strategy.exits.claimFeesBeforeClose && feesEarnedSol >= strategy.exits.minFeesToClaim) {
     console.log(`${label} claiming fees: ${feesEarnedSol.toFixed(4)} SOL`)
     stats.claimed++
     await withTimeout(
-      supabase.from('bot_logs').insert({ level: 'info', event: 'fees_claimable', payload: { positionId: position.id, symbol: position.token_symbol, feesEarnedSol } }),
+      supabase.from('bot_logs').insert({
+        level: 'info', event: 'fees_claimable',
+        payload: { positionId: position.id, symbol: position.token_symbol, feesEarnedSol },
+      }),
       SUPABASE_TIMEOUT_MS, 'bot_logs fees'
     )
   }
 
-  // --- OOR alert ---
+  // OOR alert
   if (!inRange && position.status === 'active') {
-    await sendAlert({ type: 'position_oor', symbol: position.token_symbol, strategy: strategy.id, currentPrice, binRangeLower: position.bin_range_lower, binRangeUpper: position.bin_range_upper, oorExitMinutes: strategy.exits.outOfRangeMinutes })
+    await sendAlert({
+      type: 'position_oor',
+      symbol: position.token_symbol,
+      strategy: strategy.id,
+      currentPrice: currentPriceSol,
+      binRangeLower: position.bin_range_lower,
+      binRangeUpper: position.bin_range_upper,
+      oorExitMinutes: strategy.exits.outOfRangeMinutes,
+    })
   }
 }
 
 async function fetchPositionState(
   poolAddress: string,
   positionPubKeyStr?: string
-): Promise<{ inRange: boolean; currentPrice: number; feesEarnedSol: number; volume1hUsd: number }> {
-  const fallback = { inRange: true, currentPrice: 0, feesEarnedSol: 0, volume1hUsd: 0 }
+): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number }> {
+  const fallback = { inRange: true, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
   try {
     const connection = getConnection()
     const wallet     = getWallet()
     const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
     const activeBin  = await dlmmPool.getActiveBin()
-    const currentPrice = parseFloat(activeBin.pricePerToken)
+    // pricePerToken is SOL-per-token (the pool's native quote is SOL)
+    const currentPriceSol = parseFloat(activeBin.pricePerToken)
 
-    // Fetch 1h volume from Meteora stats endpoint (best-effort)
     let volume1hUsd = 0
     try {
-      const statsUrl = `https://dlmm-api.meteora.ag/pair/${poolAddress}`
-      const statsRes = await fetch(statsUrl, { signal: AbortSignal.timeout(4000) })
+      const statsRes = await fetch(`https://dlmm-api.meteora.ag/pair/${poolAddress}`, { signal: AbortSignal.timeout(4000) })
       if (statsRes.ok) {
         const stats = await statsRes.json()
         volume1hUsd = stats?.trade_volume_usd ?? stats?.volume?.h1 ?? 0
       }
     } catch { /* non-fatal */ }
 
-    if (!positionPubKeyStr) return { ...fallback, currentPrice, volume1hUsd }
+    if (!positionPubKeyStr) return { ...fallback, currentPriceSol, volume1hUsd }
 
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const pos = userPositions.find((p) => p.publicKey.toBase58() === positionPubKeyStr)
-    if (!pos) return { ...fallback, currentPrice, volume1hUsd }
+    if (!pos) return { ...fallback, currentPriceSol, volume1hUsd }
 
     const { lowerBinId, upperBinId, feeY } = pos.positionData
     const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId
     const feesEarnedSol = feeY.toNumber() / 1e9
-    return { inRange, currentPrice, feesEarnedSol, volume1hUsd }
+    return { inRange, currentPriceSol, feesEarnedSol, volume1hUsd }
   } catch (err) {
     console.error(`[monitor] fetchPositionState failed for pool ${poolAddress}:`, err)
     return fallback

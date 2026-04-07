@@ -18,10 +18,11 @@ import { createServerClient } from '@/lib/supabase'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
-const METEORA_RENT_RESERVE_SOL = 0.1
+// Actual rent for a Meteora position account is ~0.057 SOL.
+// We reserve 0.07 SOL as headroom (balance check only — NOT passed to SDK).
+const METEORA_RENT_RESERVE_SOL = 0.07
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
-/** Flatten a single ix or array of ixs into TransactionInstruction[] */
 function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): TransactionInstruction[] {
   return Array.isArray(ix) ? ix : [ix]
 }
@@ -40,10 +41,6 @@ async function sendLegacyTx(
   return sig
 }
 
-/**
- * Detect whether a mint is owned by Token-2022 or the classic Token program.
- * Falls back to TOKEN_PROGRAM_ID if the account can't be fetched.
- */
 async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
   const connection = getConnection()
   const info = await connection.getAccountInfo(mint)
@@ -70,18 +67,19 @@ export async function openPosition(
   const supabase = createServerClient()
 
   try {
-    // 1. Balance check
+    // 1. Balance check — reserve is for headroom only, SDK gets exactly solAmount
     const maxSol = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.1')
     const solAmount = Math.min(strategy.position.maxSolPerPosition, maxSol)
     const balanceLamports = await connection.getBalance(wallet.publicKey)
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
 
-    if (balanceLamports < Math.floor((solAmount + METEORA_RENT_RESERVE_SOL) * 1e9)) {
-      console.warn(`${label} insufficient balance — need ${(solAmount + METEORA_RENT_RESERVE_SOL).toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`)
+    const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL
+    if (balanceSol < requiredSol) {
+      console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`)
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_insufficient_balance',
-        payload: { symbol: metrics.symbol, balanceSol, requiredSol: solAmount + METEORA_RENT_RESERVE_SOL },
+        payload: { symbol: metrics.symbol, balanceSol, requiredSol },
       })
       return null
     }
@@ -90,13 +88,15 @@ export async function openPosition(
     const dlmmPool = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
+    // entryPriceSol is SOL-per-token — used by monitor for correct pricePct calculation
+    const entryPriceSol = parseFloat(activeBin.pricePerToken)
     const binStep = dlmmPool.lbPair.binStep
 
     const mintX = dlmmPool.tokenX.publicKey
     const mintY = dlmmPool.tokenY.publicKey
     const isSolPool = mintY.toBase58() === NATIVE_MINT_STR
 
-    // 3. Ensure ATAs exist — skip native SOL mint (SDK handles wSOL internally)
+    // 3. Ensure ATAs exist
     const ataIxs: TransactionInstruction[] = []
 
     for (const [label_token, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
@@ -133,16 +133,14 @@ export async function openPosition(
     const maxBinId = activeBinId + binsUp
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
 
-    // 5. Liquidity amounts
-    // TOKEN-SOL pools: one-sided SOL deposit only (we hold no memecoin)
-    // TOKEN-TOKEN pools: split by solBias
+    // 5. Liquidity amounts — SDK receives ONLY solAmount, rent is handled by SDK internally
     const lamports = Math.floor(solAmount * 1e9)
     let totalX: BN
     let totalY: BN
     if (isSolPool) {
       totalX = new BN(0)
       totalY = new BN(lamports)
-      console.log(`${label} one-sided SOL deposit: totalX=0, totalY=${lamports} lamports`)
+      console.log(`${label} one-sided SOL deposit: totalX=0, totalY=${lamports} lamports (${solAmount} SOL)`)
     } else {
       totalX = new BN(Math.floor(lamports * (1 - strategy.position.solBias)))
       totalY = new BN(Math.floor(lamports * strategy.position.solBias))
@@ -168,10 +166,10 @@ export async function openPosition(
       { minBinId, maxBinId, strategyType },
       wallet.publicKey,
       wallet.publicKey,
-      1 // 1% slippage
+      1
     )
 
-    // 9. Send each segment's init + liquidity txs
+    // 9. Send each segment
     let lastSig = ''
     let posIndex = 0
     const total = response.instructionsByPositions.length
@@ -180,13 +178,11 @@ export async function openPosition(
     for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
       posIndex++
 
-      // initializePositionIx may be a single ix or array — flatten before adding
       const initIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
       const initTx = new Transaction().add(...initIxs)
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      // addLiquidityIxs may be a single ix, array of ixs, or array of arrays — normalise to ix[][]
       const liqChunks: TransactionInstruction[][] = Array.isArray(addLiquidityIxs)
         ? (addLiquidityIxs as (TransactionInstruction | TransactionInstruction[])[]).map(toIxArray)
         : [toIxArray(addLiquidityIxs as TransactionInstruction | TransactionInstruction[])]
@@ -200,7 +196,7 @@ export async function openPosition(
 
     console.log(`${label} position opened ✔`)
     const firstPubKey = response.instructionsByPositions[0]?.positionKeypair?.publicKey?.toBase58()
-    return await persistPosition(metrics, strategy, lastSig, metrics.priceUsd, solAmount, firstPubKey)
+    return await persistPosition(metrics, strategy, lastSig, entryPriceSol, solAmount, firstPubKey)
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -262,7 +258,7 @@ export async function closePosition(
       console.warn(`${label} fee claim failed (continuing):`, err)
     }
 
-    // 2. Remove liquidity
+    // 2. Remove liquidity + close position account (reclaims rent)
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const userPosition = userPositions.find(p => p.publicKey.toBase58() === positionPubKey.toBase58())
 
@@ -274,12 +270,14 @@ export async function closePosition(
         fromBinId: lowerBinId,
         toBinId: upperBinId,
         bps: new BN(10_000),
-        shouldClaimAndClose: true,
+        shouldClaimAndClose: true, // closes position account → rent returned to wallet
       })
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
         const sig = await sendLegacyTx(tx, [wallet])
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
       }
+    } else {
+      console.warn(`${label} position not found on-chain — may already be closed`)
     }
 
     await markPositionClosed(positionId, feesClaimedSol, reason)
@@ -299,7 +297,7 @@ async function persistPosition(
   metrics: TokenMetrics,
   strategy: Strategy,
   sig: string,
-  entryPrice: number,
+  entryPriceSol: number,
   solDeposited: number,
   positionPubKey?: string
 ): Promise<string> {
@@ -307,19 +305,23 @@ async function persistPosition(
   const { data, error } = await supabase
     .from('positions')
     .insert({
-      token_symbol: metrics.symbol,
-      token_address: metrics.address,
-      pool_address: metrics.poolAddress,
-      strategy_id: strategy.id,
-      bin_range_lower: entryPrice * (1 + strategy.position.rangeDownPct / 100),
-      bin_range_upper: entryPrice * (1 + strategy.position.rangeUpPct / 100),
-      entry_price: entryPrice,
-      sol_deposited: solDeposited,
+      token_symbol:    metrics.symbol,
+      token_address:   metrics.address,
+      pool_address:    metrics.poolAddress,
+      strategy_id:     strategy.id,
+      bin_range_lower: entryPriceSol * (1 + strategy.position.rangeDownPct / 100),
+      bin_range_upper: entryPriceSol * (1 + strategy.position.rangeUpPct / 100),
+      entry_price:     entryPriceSol, // stored in SOL-per-token for consistent pricePct comparison
+      sol_deposited:   solDeposited,
       fees_earned_sol: 0,
-      status: 'active',
-      in_range: true,
-      opened_at: new Date().toISOString(),
-      metadata: { sig, positionPubKey },
+      status:          'active',
+      in_range:        true,
+      opened_at:       new Date().toISOString(),
+      metadata: {
+        sig,
+        positionPubKey,
+        entryPriceSol, // explicit SOL price for monitor to use
+      },
     })
     .select('id')
     .single()
@@ -336,10 +338,10 @@ async function markPositionClosed(
   await supabase
     .from('positions')
     .update({
-      status: 'closed',
-      closed_at: new Date().toISOString(),
+      status:     'closed',
+      closed_at:  new Date().toISOString(),
       fees_earned_sol: feesEarnedSol,
-      metadata: { closeReason: reason },
+      metadata:   { closeReason: reason },
     })
     .eq('id', positionId)
 }
