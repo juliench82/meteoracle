@@ -5,6 +5,7 @@ import { PositionsTable } from '@/components/dashboard/PositionsTable'
 import { CandidateFeed } from '@/components/dashboard/CandidateFeed'
 import { BotLogsPanel } from '@/components/dashboard/BotLogsPanel'
 import { PnlChart } from '@/components/dashboard/PnlChart'
+import { DashboardRefresher } from '@/components/dashboard/DashboardRefresher'
 import { createServerClient } from '@/lib/supabase'
 import type { Candidate } from '@/lib/types'
 
@@ -46,15 +47,16 @@ export default async function DashboardPage() {
   const closed: any[] =
     closedRes.status === 'fulfilled' ? (closedRes.value.data ?? []) : []
 
-  // Supabase returns snake_case column names
-  const solDeployed = positions.reduce((acc: number, p: any) => acc + (p.sol_deposited ?? 0), 0)
-  const feesEarned24h = positions.reduce((acc: number, p: any) => acc + (p.fees_earned_sol ?? 0), 0)
-  const totalClosed = closed.length
-  const wins = closed.filter((p: any) => (p.fees_earned_sol ?? 0) > 0).length
-  const winRate = totalClosed > 0 ? Math.round((wins / totalClosed) * 100) : null
+  const solDeployed    = positions.reduce((acc: number, p: any) => acc + (p.sol_deposited ?? 0), 0)
+  const feesEarned24h  = positions.reduce((acc: number, p: any) => acc + (p.fees_earned_sol ?? 0), 0)
+  const totalClosed    = closed.length
+  const wins           = closed.filter((p: any) => (p.fees_earned_sol ?? 0) > 0).length
+  const winRate        = totalClosed > 0 ? Math.round((wins / totalClosed) * 100) : null
 
   return (
     <div className="flex h-screen overflow-hidden">
+      {/* Auto-refreshes the full page every 30s */}
+      <DashboardRefresher intervalMs={30_000} />
       <Sidebar />
       <div className="flex flex-col flex-1 overflow-hidden">
         <Header />

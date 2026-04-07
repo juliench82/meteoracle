@@ -2,9 +2,10 @@ import axios from 'axios'
 
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
 
-// Cap DAS pages to 1 by default — 1000 accounts is enough to verify >= 500 holders.
-// Override with HELIUS_HOLDER_MAX_PAGES env var if you need more precision.
-const DAS_MAX_PAGES = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1')
+// Full pagination: fetch all pages until exhausted.
+// Each page = 1000 accounts. Cap at 20 pages (20k holders) to avoid runaway calls.
+// Override with HELIUS_HOLDER_MAX_PAGES env var.
+const DAS_MAX_PAGES = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '20')
 
 function heliusDasUrl(): string {
   try {
@@ -40,7 +41,9 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
   }
 
   if (dasResult.status === 'fulfilled' && dasResult.value !== null) {
-    return { holderCount: dasResult.value, topHolderPct, reliable: true }
+    const holderCount = dasResult.value
+    console.log(`[helius] ${mintAddress} — ${holderCount} holders (fully paginated)`)
+    return { holderCount, topHolderPct, reliable: true }
   }
 
   console.warn(`[helius] DAS failed for ${mintAddress}; using heuristic`)
@@ -65,7 +68,6 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
   const totalSupply = parseFloat(supplyRes?.value?.uiAmountString ?? '0')
   if (!totalSupply || accounts.length === 0) return null
 
-  // uiAmount is already decimal-adjusted — same scale as totalSupply
   const topAmount    = accounts[0]?.uiAmount ?? 0
   const topHolderPct = (topAmount / totalSupply) * 100
   return { accounts, topHolderPct }
@@ -98,8 +100,14 @@ async function fetchDasHolderCount(
 
     const tokenAccounts: unknown[] = res.data?.result?.token_accounts ?? []
     total += tokenAccounts.length
+
+    // If we got fewer than a full page, we've reached the end
     if (tokenAccounts.length < pageSize) break
     page++
+  }
+
+  if (page > maxPages) {
+    console.warn(`[helius] ${mint} — hit max pages (${maxPages}), holder count is ${total}+`)
   }
 
   return total > 0 ? total : null
