@@ -8,6 +8,7 @@ type AlertPayload =
   | { type: 'position_closed'; symbol: string; strategy: string; reason: string; feesEarnedSol: number; ilPct: number; ageHours: number }
   | { type: 'position_oor'; symbol: string; strategy: string; currentPrice: number; binRangeLower: number; binRangeUpper: number; oorExitMinutes: number }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number }
+  | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -65,6 +66,15 @@ function formatMessage(payload: AlertPayload): string {
         `Score: ${payload.score}/100`,
         `MC: $${formatNum(payload.mcUsd)}`,
         `Vol 24h: $${formatNum(payload.volume24h)}`,
+      ].join('\n')
+
+    case 'orphan_detected':
+      return [
+        `👻 *Orphaned Position Detected*`,
+        `Symbol: \`${payload.symbol}\``,
+        `Position: \`${payload.positionPubKey}\``,
+        `Pool: \`${payload.poolAddress}\``,
+        `_On-chain but missing from DB — marked orphaned_`,
       ].join('\n')
 
     case 'error':
