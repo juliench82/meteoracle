@@ -18,8 +18,6 @@ import { createServerClient } from '@/lib/supabase'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
-// Actual rent for a Meteora position account is ~0.057 SOL.
-// We reserve 0.07 SOL as headroom (balance check only — NOT passed to SDK).
 const METEORA_RENT_RESERVE_SOL = 0.07
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
@@ -57,6 +55,8 @@ export async function openPosition(
   const label = `[executor][${strategy.id}][${metrics.symbol}]`
   console.log(`${label} opening position`)
 
+  const supabase = createServerClient()
+
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
     return await persistPosition(metrics, strategy, 'dry-run-sig', 0, 0)
@@ -64,16 +64,49 @@ export async function openPosition(
 
   const connection = getConnection()
   const wallet = getWallet()
-  const supabase = createServerClient()
 
   try {
-    // 1. Balance check — reserve is for headroom only, SDK gets exactly solAmount
-    const maxSol = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.1')
-    const solAmount = Math.min(strategy.position.maxSolPerPosition, maxSol)
+    // 1. Resolve position size — strategy cap vs env hard ceiling, whichever is smaller
+    const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
+    const solAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
+
+    // 2. Global exposure guard — never exceed MAX_TOTAL_SOL_DEPLOYED across all open positions
+    const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '0.15')
+    const { data: openPositions } = await supabase
+      .from('positions').select('sol_deposited').eq('status', 'active')
+    const totalDeployed = (openPositions ?? []).reduce((s: number, p: { sol_deposited: number }) => s + (p.sol_deposited ?? 0), 0)
+    if (totalDeployed + solAmount > maxTotalDeployed) {
+      console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL already deployed (limit ${maxTotalDeployed} SOL)`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn', event: 'open_position_skipped_exposure_cap',
+        payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed },
+      })
+      return null
+    }
+
+    // 3. Per-token cooldown — don't re-enter a token too soon after closing
+    const cooldownHours = parseFloat(process.env.TOKEN_COOLDOWN_HOURS ?? '6')
+    const cooldownCutoff = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
+    const { data: recentClose } = await supabase
+      .from('positions')
+      .select('id')
+      .eq('token_address', metrics.address)
+      .eq('status', 'closed')
+      .gte('closed_at', cooldownCutoff)
+      .limit(1)
+    if (recentClose?.length) {
+      console.warn(`${label} token in cooldown — closed within last ${cooldownHours}h`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn', event: 'open_position_skipped_cooldown',
+        payload: { symbol: metrics.symbol, cooldownHours },
+      })
+      return null
+    }
+
+    // 4. Wallet balance check
     const balanceLamports = await connection.getBalance(wallet.publicKey)
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
-
     const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL
     if (balanceSol < requiredSol) {
       console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`)
@@ -84,11 +117,10 @@ export async function openPosition(
       return null
     }
 
-    // 2. Load pool + derive token mints
+    // 5. Load pool + derive token mints
     const dlmmPool = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
-    // entryPriceSol is SOL-per-token — used by monitor for correct pricePct calculation
     const entryPriceSol = parseFloat(activeBin.pricePerToken)
     const binStep = dlmmPool.lbPair.binStep
 
@@ -96,19 +128,16 @@ export async function openPosition(
     const mintY = dlmmPool.tokenY.publicKey
     const isSolPool = mintY.toBase58() === NATIVE_MINT_STR
 
-    // 3. Ensure ATAs exist
+    // 6. Ensure ATAs exist
     const ataIxs: TransactionInstruction[] = []
-
     for (const [label_token, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
         console.log(`${label} token ${label_token} is native SOL — skipping ATA creation`)
         continue
       }
-
       const tokenProgramId = await getTokenProgramId(mint)
       const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID)
       const ataInfo = await connection.getAccountInfo(ata)
-
       if (!ataInfo) {
         console.log(`${label} creating ATA for token ${label_token} (${mint.toBase58().slice(0, 8)}...) program=${tokenProgramId.toBase58().slice(0, 8)}`)
         ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
@@ -116,7 +145,6 @@ export async function openPosition(
         ))
       }
     }
-
     if (ataIxs.length > 0) {
       const ataTx = new Transaction().add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }),
@@ -126,14 +154,14 @@ export async function openPosition(
       console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
     }
 
-    // 4. Bin range
+    // 7. Bin range
     const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
     const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
     const minBinId = activeBinId - binsDown
     const maxBinId = activeBinId + binsUp
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
 
-    // 5. Liquidity amounts — SDK receives ONLY solAmount, rent is handled by SDK internally
+    // 8. Liquidity amounts
     const lamports = Math.floor(solAmount * 1e9)
     let totalX: BN
     let totalY: BN
@@ -146,7 +174,7 @@ export async function openPosition(
       totalY = new BN(Math.floor(lamports * strategy.position.solBias))
     }
 
-    // 6. Strategy type
+    // 9. Strategy type
     const strategyTypeMap: Record<string, StrategyType> = {
       spot: StrategyType.Spot,
       curve: StrategyType.Curve,
@@ -154,11 +182,11 @@ export async function openPosition(
     }
     const strategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyType.Spot
 
-    // 7. Priority fee
+    // 10. Priority fee
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // 8. Build multi-position tx(s)
+    // 11. Build multi-position tx(s)
     const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
       async (count) => Array.from({ length: count }, () => new Keypair()),
       totalX,
@@ -169,7 +197,7 @@ export async function openPosition(
       1
     )
 
-    // 9. Send each segment
+    // 12. Send each segment
     let lastSig = ''
     let posIndex = 0
     const total = response.instructionsByPositions.length
@@ -177,7 +205,6 @@ export async function openPosition(
 
     for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
       posIndex++
-
       const initIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
       const initTx = new Transaction().add(...initIxs)
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
@@ -258,7 +285,7 @@ export async function closePosition(
       console.warn(`${label} fee claim failed (continuing):`, err)
     }
 
-    // 2. Remove liquidity + close position account (reclaims rent)
+    // 2. Remove liquidity + close position account
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const userPosition = userPositions.find(p => p.publicKey.toBase58() === positionPubKey.toBase58())
 
@@ -270,7 +297,7 @@ export async function closePosition(
         fromBinId: lowerBinId,
         toBinId: upperBinId,
         bps: new BN(10_000),
-        shouldClaimAndClose: true, // closes position account → rent returned to wallet
+        shouldClaimAndClose: true,
       })
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
         const sig = await sendLegacyTx(tx, [wallet])
@@ -311,7 +338,7 @@ async function persistPosition(
       strategy_id:     strategy.id,
       bin_range_lower: entryPriceSol * (1 + strategy.position.rangeDownPct / 100),
       bin_range_upper: entryPriceSol * (1 + strategy.position.rangeUpPct / 100),
-      entry_price:     entryPriceSol, // stored in SOL-per-token for consistent pricePct comparison
+      entry_price:     entryPriceSol,
       sol_deposited:   solDeposited,
       fees_earned_sol: 0,
       status:          'active',
@@ -320,7 +347,7 @@ async function persistPosition(
       metadata: {
         sig,
         positionPubKey,
-        entryPriceSol, // explicit SOL price for monitor to use
+        entryPriceSol,
       },
     })
     .select('id')
@@ -338,10 +365,10 @@ async function markPositionClosed(
   await supabase
     .from('positions')
     .update({
-      status:     'closed',
-      closed_at:  new Date().toISOString(),
+      status:          'closed',
+      closed_at:       new Date().toISOString(),
       fees_earned_sol: feesEarnedSol,
-      metadata:   { closeReason: reason },
+      metadata:        { closeReason: reason },
     })
     .eq('id', positionId)
 }

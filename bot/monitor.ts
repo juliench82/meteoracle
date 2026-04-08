@@ -11,6 +11,9 @@ const SUPABASE_TIMEOUT_MS = 5_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
 
+// Hard-exit reasons that must never trigger a rebalance reopen
+const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
+
 async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
   const timer = new Promise<null>((resolve) =>
     setTimeout(() => { console.warn(`[monitor] timeout (${ms}ms): ${label}`); resolve(null) }, ms)
@@ -81,19 +84,16 @@ async function checkPosition(
     position.metadata?.positionPubKey
   )
 
-  // Use SOL-denominated entry price stored at open time — avoids USD/SOL mismatch
   const entryPriceSol: number = position.metadata?.entryPriceSol ?? 0
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
     : 0
 
-  // IL calculation (in SOL terms)
   const k = entryPriceSol > 0 && currentPriceSol > 0 ? currentPriceSol / entryPriceSol : 1
   const ilPct = entryPriceSol > 0
     ? Math.round((2 * Math.sqrt(k) / (1 + k) - 1) * 10000) / 100
     : 0
 
-  // pnlSol = price appreciation on deployed capital + fees
   const pnlSol = entryPriceSol > 0
     ? Math.round((position.sol_deposited * (pricePct / 100) + feesEarnedSol) * 1e6) / 1e6
     : Math.round(feesEarnedSol * 1e6) / 1e6
@@ -110,13 +110,13 @@ async function checkPosition(
     SUPABASE_TIMEOUT_MS, 'positions update'
   )
 
-  const openedAt   = new Date(position.opened_at).getTime()
-  const ageHours   = (now - openedAt) / (1000 * 60 * 60)
-  const oorSince   = position.status === 'out_of_range'
+  const openedAt = new Date(position.opened_at).getTime()
+  const ageHours = (now - openedAt) / (1000 * 60 * 60)
+  const oorSince = position.status === 'out_of_range'
     ? (now - new Date(position.updated_at ?? position.opened_at).getTime()) / 60_000
     : 0
 
-  // Hard exits — only apply pricePct exits if we have a reliable SOL entry price
+  // Hard exits
   let closeReason: string | null = null
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes)
     closeReason = `out_of_range_${Math.round(oorSince)}min`
@@ -145,7 +145,7 @@ async function checkPosition(
     return
   }
 
-  // Smart rebalance
+  // Smart rebalance — only when in-range and drifted, never after a hard exit
   if (inRange) {
     const rangeLower = position.bin_range_lower ?? 0
     const rangeUpper = position.bin_range_upper ?? 0
@@ -160,7 +160,8 @@ async function checkPosition(
     if ((driftedHighInRange || driftedLowInRange) && volume1hUsd >= MIN_VOLUME_USD_FOR_REBALANCE) {
       console.log(`${label} SMART REBALANCE — price at ${positionInRange.toFixed(0)}% of range, vol=$${volume1hUsd.toFixed(0)}/h`)
 
-      const closed = await closePosition(position.id, `smart_rebalance_${positionInRange.toFixed(0)}pct`)
+      const rebalanceReason = `smart_rebalance_${positionInRange.toFixed(0)}pct`
+      const closed = await closePosition(position.id, rebalanceReason)
       if (closed) {
         stats.rebalanced++
         await sendAlert({
@@ -173,21 +174,27 @@ async function checkPosition(
           ageHours: Math.round(ageHours * 10) / 10,
         })
 
-        try {
-          const metrics: TokenMetrics = {
-            address: position.token_address,
-            symbol: position.token_symbol,
-            poolAddress: position.pool_address,
-            priceUsd: currentPriceSol,
-            dexId: position.metadata?.dexId ?? 'meteora',
-            mcUsd: 0, volume24h: 0, liquidityUsd: 0,
-            topHolderPct: 0, holderCount: 0, ageHours,
-            rugcheckScore: 0,
+        // Only reopen on a genuine drift rebalance — never if a hard exit triggered this
+        const isHardExit = HARD_EXIT_PREFIXES.some(prefix => rebalanceReason.startsWith(prefix))
+        if (!isHardExit) {
+          try {
+            const metrics: TokenMetrics = {
+              address: position.token_address,
+              symbol: position.token_symbol,
+              poolAddress: position.pool_address,
+              priceUsd: currentPriceSol,
+              dexId: position.metadata?.dexId ?? 'meteora',
+              mcUsd: 0, volume24h: 0, liquidityUsd: 0,
+              topHolderPct: 0, holderCount: 0, ageHours,
+              rugcheckScore: 0,
+            }
+            await openPosition(metrics, strategy)
+            console.log(`${label} reopened centered at ${currentPriceSol}`)
+          } catch (reopenErr) {
+            console.error(`${label} reopen after rebalance failed:`, reopenErr)
           }
-          await openPosition(metrics, strategy)
-          console.log(`${label} reopened centered at ${currentPriceSol}`)
-        } catch (reopenErr) {
-          console.error(`${label} reopen after rebalance failed:`, reopenErr)
+        } else {
+          console.log(`${label} skipping reopen — hard exit reason: ${rebalanceReason}`)
         }
       }
       return
@@ -231,7 +238,6 @@ async function fetchPositionState(
     const wallet     = getWallet()
     const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
     const activeBin  = await dlmmPool.getActiveBin()
-    // pricePerToken is SOL-per-token (pool's native quote is SOL)
     const currentPriceSol = parseFloat(activeBin.pricePerToken)
 
     let volume1hUsd = 0
