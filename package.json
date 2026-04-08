@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "worker": "tsx --tsconfig tsconfig.worker.json worker.ts",
+    "worker:build": "tsc --project tsconfig.worker.json",
+    "worker:start": "node -r tsconfig-paths/register dist/worker.js"
   },
   "dependencies": {
     "@meteora-ag/dlmm": "^1.1.12",
@@ -23,7 +26,8 @@
     "next": "14.2.18",
     "react": "^18",
     "react-dom": "^18",
-    "recharts": "^3.8.1"
+    "recharts": "^3.8.1",
+    "tsconfig-paths": "^4.2.0"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.6",
@@ -35,6 +39,7 @@
     "eslint-config-next": "14.2.18",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.4",
     "typescript": "^5"
   }
 }
