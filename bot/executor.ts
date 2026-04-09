@@ -1,4 +1,4 @@
-import DLMM from '@meteora-ag/dlmm'
+import DLMM, { StrategyType } from '@meteora-ag/dlmm'
 import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
