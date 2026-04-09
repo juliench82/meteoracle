@@ -99,7 +99,6 @@ async function checkPosition(
     : Math.round(feesEarnedSol * 1e6) / 1e6
 
   // OOR timer: use dedicated oor_since_at column so routine .update() calls don't reset it
-  // If we just went OOR this tick, stamp oor_since_at. If already OOR, preserve existing stamp.
   const wasInRange = position.status === 'active'
   const justWentOOR = !inRange && wasInRange
   const oorSinceAt: string | null = justWentOOR
@@ -124,12 +123,11 @@ async function checkPosition(
   const openedAt = new Date(position.opened_at).getTime()
   const ageHours = (now - openedAt) / (1000 * 60 * 60)
 
-  // OOR duration: measure from oor_since_at (not updated_at, which resets every tick)
   const oorSince = !inRange && oorSinceAt
     ? (now - new Date(oorSinceAt).getTime()) / 60_000
     : 0
 
-  console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(6)} age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
+  console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)} age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
 
   // Hard exits
   let closeReason: string | null = null
@@ -160,7 +158,7 @@ async function checkPosition(
     return
   }
 
-  // Smart rebalance — only when in-range and drifted, never after a hard exit
+  // Smart rebalance
   if (inRange) {
     const rangeLower = position.bin_range_lower ?? 0
     const rangeUpper = position.bin_range_upper ?? 0
@@ -189,7 +187,6 @@ async function checkPosition(
           ageHours: Math.round(ageHours * 10) / 10,
         })
 
-        // Only reopen on a genuine drift rebalance — never if a hard exit triggered this
         const isHardExit = HARD_EXIT_PREFIXES.some(prefix => rebalanceReason.startsWith(prefix))
         if (!isHardExit) {
           try {
@@ -229,7 +226,6 @@ async function checkPosition(
     )
   }
 
-  // OOR alert (only on the tick we first detect OOR)
   if (justWentOOR) {
     await sendAlert({
       type: 'position_oor',
@@ -243,19 +239,42 @@ async function checkPosition(
   }
 }
 
+/**
+ * Derive the human-readable SOL-per-token price from the active bin.
+ *
+ * activeBin.pricePerToken from Meteora SDK is a Q64.64 fixed-point value
+ * that has NOT been adjusted for token decimals. Using it raw produces
+ * wildly wrong prices (e.g. 0.000014 instead of 0.0013).
+ *
+ * The correct approach is dlmmPool.fromPricePerLamport(activeBin.price)
+ * which returns the decimal-adjusted price as a string ready to parse.
+ */
+function getDecimalAdjustedPrice(dlmmPool: DLMM, activeBin: { price: string; pricePerToken: string }): number {
+  try {
+    // fromPricePerLamport adjusts for both tokenX and tokenY decimals
+    const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price))
+    const price = parseFloat(adjusted)
+    if (isFinite(price) && price > 0) return price
+  } catch {
+    // fall through to pricePerToken fallback
+  }
+  // Last resort: pricePerToken is at minimum better than nothing for logging
+  return parseFloat(activeBin.pricePerToken)
+}
+
 async function fetchPositionState(
   poolAddress: string,
   positionPubKeyStr?: string
 ): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number }> {
-  // IMPORTANT: fallback inRange=false so OOR exits fire even if RPC is flaky.
-  // Using inRange=true as fallback silently suppresses OOR detection.
   const fallback = { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
   try {
     const connection = getConnection()
     const wallet     = getWallet()
     const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
     const activeBin  = await dlmmPool.getActiveBin()
-    const currentPriceSol = parseFloat(activeBin.pricePerToken)
+
+    // Use decimal-adjusted price — NOT raw pricePerToken
+    const currentPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin)
 
     let volume1hUsd = 0
     try {
@@ -267,7 +286,6 @@ async function fetchPositionState(
     } catch { /* non-fatal */ }
 
     if (!positionPubKeyStr) {
-      // No on-chain position key — assume in range (can't verify), log warning
       console.warn(`[monitor] fetchPositionState: no positionPubKey for pool ${poolAddress} — assuming inRange=true`)
       return { inRange: true, currentPriceSol, feesEarnedSol: 0, volume1hUsd }
     }

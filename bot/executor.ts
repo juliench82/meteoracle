@@ -1,4 +1,4 @@
-import DLMM, { StrategyType } from '@meteora-ag/dlmm'
+import DLMM from '@meteora-ag/dlmm'
 import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
@@ -48,6 +48,22 @@ async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
   return TOKEN_PROGRAM_ID
 }
 
+/**
+ * Derive the human-readable SOL-per-token price from the active bin.
+ * dlmmPool.fromPricePerLamport adjusts for both tokenX and tokenY decimals.
+ * Raw activeBin.pricePerToken is a Q64 number not adjusted for decimals.
+ */
+function getDecimalAdjustedPrice(dlmmPool: DLMM, activeBin: { price: string; pricePerToken: string }): number {
+  try {
+    const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price))
+    const price = parseFloat(adjusted)
+    if (isFinite(price) && price > 0) return price
+  } catch {
+    // fall through
+  }
+  return parseFloat(activeBin.pricePerToken)
+}
+
 export async function openPosition(
   metrics: TokenMetrics,
   strategy: Strategy
@@ -59,7 +75,6 @@ export async function openPosition(
 
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
-    // Use current price from metrics as placeholder entry price for dry-run positions
     const dryRunEntryPrice = metrics.priceUsd ?? 0
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
     const dryRunSolAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
@@ -70,11 +85,11 @@ export async function openPosition(
   const wallet = getWallet()
 
   try {
-    // 1. Resolve position size — strategy cap vs env hard ceiling, whichever is smaller
+    // 1. Resolve position size
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
     const solAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
 
-    // 2. Global exposure guard — never exceed MAX_TOTAL_SOL_DEPLOYED across all open positions
+    // 2. Global exposure guard
     const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '0.15')
     const { data: openPositions } = await supabase
       .from('positions').select('sol_deposited').eq('status', 'active')
@@ -88,7 +103,7 @@ export async function openPosition(
       return null
     }
 
-    // 3. Per-token cooldown — don't re-enter a token too soon after closing
+    // 3. Per-token cooldown
     const cooldownHours = parseFloat(process.env.TOKEN_COOLDOWN_HOURS ?? '6')
     const cooldownCutoff = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
     const { data: recentClose } = await supabase
@@ -121,11 +136,15 @@ export async function openPosition(
       return null
     }
 
-    // 5. Load pool + derive token mints
+    // 5. Load pool + derive entry price (decimal-adjusted)
     const dlmmPool = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
-    const entryPriceSol = parseFloat(activeBin.pricePerToken)
+
+    // Use decimal-adjusted price — NOT raw pricePerToken
+    const entryPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin)
+    console.log(`${label} entry price: ${entryPriceSol.toFixed(9)} SOL/token (bin ${activeBinId})`)
+
     const binStep = dlmmPool.lbPair.binStep
 
     const mintX = dlmmPool.tokenX.publicKey
