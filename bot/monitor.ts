@@ -84,7 +84,7 @@ async function checkPosition(
     position.metadata?.positionPubKey
   )
 
-  const entryPriceSol: number = position.metadata?.entryPriceSol ?? 0
+  const entryPriceSol: number = position.entry_price ?? position.metadata?.entryPriceSol ?? 0
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
     : 0
@@ -98,23 +98,38 @@ async function checkPosition(
     ? Math.round((position.sol_deposited * (pricePct / 100) + feesEarnedSol) * 1e6) / 1e6
     : Math.round(feesEarnedSol * 1e6) / 1e6
 
+  // OOR timer: use dedicated oor_since_at column so routine .update() calls don't reset it
+  // If we just went OOR this tick, stamp oor_since_at. If already OOR, preserve existing stamp.
+  const wasInRange = position.status === 'active'
+  const justWentOOR = !inRange && wasInRange
+  const oorSinceAt: string | null = justWentOOR
+    ? new Date().toISOString()
+    : (!inRange ? (position.oor_since_at ?? new Date().toISOString()) : null)
+
+  const updatePayload: Record<string, unknown> = {
+    current_price:   currentPriceSol,
+    in_range:        inRange,
+    fees_earned_sol: feesEarnedSol,
+    il_pct:          ilPct,
+    pnl_sol:         pnlSol,
+    status:          inRange ? 'active' : 'out_of_range',
+    oor_since_at:    oorSinceAt,
+  }
+
   await withTimeout(
-    supabase.from('positions').update({
-      current_price: currentPriceSol,
-      in_range: inRange,
-      fees_earned_sol: feesEarnedSol,
-      il_pct: ilPct,
-      pnl_sol: pnlSol,
-      status: inRange ? 'active' : 'out_of_range',
-    }).eq('id', position.id),
+    supabase.from('positions').update(updatePayload).eq('id', position.id),
     SUPABASE_TIMEOUT_MS, 'positions update'
   )
 
   const openedAt = new Date(position.opened_at).getTime()
   const ageHours = (now - openedAt) / (1000 * 60 * 60)
-  const oorSince = position.status === 'out_of_range'
-    ? (now - new Date(position.updated_at ?? position.opened_at).getTime()) / 60_000
+
+  // OOR duration: measure from oor_since_at (not updated_at, which resets every tick)
+  const oorSince = !inRange && oorSinceAt
+    ? (now - new Date(oorSinceAt).getTime()) / 60_000
     : 0
+
+  console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(6)} age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
 
   // Hard exits
   let closeReason: string | null = null
@@ -214,8 +229,8 @@ async function checkPosition(
     )
   }
 
-  // OOR alert
-  if (!inRange && position.status === 'active') {
+  // OOR alert (only on the tick we first detect OOR)
+  if (justWentOOR) {
     await sendAlert({
       type: 'position_oor',
       symbol: position.token_symbol,
@@ -232,7 +247,9 @@ async function fetchPositionState(
   poolAddress: string,
   positionPubKeyStr?: string
 ): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number }> {
-  const fallback = { inRange: true, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
+  // IMPORTANT: fallback inRange=false so OOR exits fire even if RPC is flaky.
+  // Using inRange=true as fallback silently suppresses OOR detection.
+  const fallback = { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
   try {
     const connection = getConnection()
     const wallet     = getWallet()
@@ -249,11 +266,18 @@ async function fetchPositionState(
       }
     } catch { /* non-fatal */ }
 
-    if (!positionPubKeyStr) return { ...fallback, currentPriceSol, volume1hUsd }
+    if (!positionPubKeyStr) {
+      // No on-chain position key — assume in range (can't verify), log warning
+      console.warn(`[monitor] fetchPositionState: no positionPubKey for pool ${poolAddress} — assuming inRange=true`)
+      return { inRange: true, currentPriceSol, feesEarnedSol: 0, volume1hUsd }
+    }
 
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const pos = userPositions.find((p) => p.publicKey.toBase58() === positionPubKeyStr)
-    if (!pos) return { ...fallback, currentPriceSol, volume1hUsd }
+    if (!pos) {
+      console.warn(`[monitor] fetchPositionState: position ${positionPubKeyStr} not found on-chain — assuming closed/OOR`)
+      return { ...fallback, currentPriceSol, volume1hUsd }
+    }
 
     const { lowerBinId, upperBinId, feeY } = pos.positionData
     const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId

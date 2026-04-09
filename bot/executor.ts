@@ -59,7 +59,11 @@ export async function openPosition(
 
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
-    return await persistPosition(metrics, strategy, 'dry-run-sig', 0, 0)
+    // Use current price from metrics as placeholder entry price for dry-run positions
+    const dryRunEntryPrice = metrics.priceUsd ?? 0
+    const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
+    const dryRunSolAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
+    return await persistPosition(metrics, strategy, 'dry-run-sig', dryRunEntryPrice, dryRunSolAmount)
   }
 
   const connection = getConnection()
@@ -336,8 +340,8 @@ async function persistPosition(
       token_address:   metrics.address,
       pool_address:    metrics.poolAddress,
       strategy_id:     strategy.id,
-      bin_range_lower: entryPriceSol * (1 + strategy.position.rangeDownPct / 100),
-      bin_range_upper: entryPriceSol * (1 + strategy.position.rangeUpPct / 100),
+      bin_range_lower: entryPriceSol > 0 ? entryPriceSol * (1 - strategy.position.rangeDownPct / 100) : null,
+      bin_range_upper: entryPriceSol > 0 ? entryPriceSol * (1 + strategy.position.rangeUpPct / 100) : null,
       entry_price:     entryPriceSol,
       sol_deposited:   solDeposited,
       fees_earned_sol: 0,
@@ -368,6 +372,7 @@ async function markPositionClosed(
       status:          'closed',
       closed_at:       new Date().toISOString(),
       fees_earned_sol: feesEarnedSol,
+      oor_since_at:    null,
       metadata:        { closeReason: reason },
     })
     .eq('id', positionId)
