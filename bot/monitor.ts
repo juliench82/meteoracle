@@ -1,3 +1,8 @@
+import 'dotenv/config'
+import * as dotenvLocal from 'dotenv'
+import * as path from 'path'
+dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
+
 import DLMM from '@meteora-ag/dlmm'
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
@@ -10,8 +15,8 @@ import type { Strategy, TokenMetrics } from '@/lib/types'
 const SUPABASE_TIMEOUT_MS = 5_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
+const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000  // default 5min
 
-// Hard-exit reasons that must never trigger a rebalance reopen
 const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
 
 async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
@@ -98,7 +103,6 @@ async function checkPosition(
     ? Math.round((position.sol_deposited * (pricePct / 100) + feesEarnedSol) * 1e6) / 1e6
     : Math.round(feesEarnedSol * 1e6) / 1e6
 
-  // OOR timer: use dedicated oor_since_at column so routine .update() calls don't reset it
   const wasInRange = position.status === 'active'
   const justWentOOR = !inRange && wasInRange
   const oorSinceAt: string | null = justWentOOR
@@ -129,7 +133,6 @@ async function checkPosition(
 
   console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)} age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
 
-  // Hard exits
   let closeReason: string | null = null
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes)
     closeReason = `out_of_range_${Math.round(oorSince)}min`
@@ -158,7 +161,6 @@ async function checkPosition(
     return
   }
 
-  // Smart rebalance
   if (inRange) {
     const rangeLower = position.bin_range_lower ?? 0
     const rangeUpper = position.bin_range_upper ?? 0
@@ -205,15 +207,12 @@ async function checkPosition(
           } catch (reopenErr) {
             console.error(`${label} reopen after rebalance failed:`, reopenErr)
           }
-        } else {
-          console.log(`${label} skipping reopen — hard exit reason: ${rebalanceReason}`)
         }
       }
       return
     }
   }
 
-  // Fee claiming
   if (strategy.exits.claimFeesBeforeClose && feesEarnedSol >= strategy.exits.minFeesToClaim) {
     console.log(`${label} claiming fees: ${feesEarnedSol.toFixed(4)} SOL`)
     stats.claimed++
@@ -239,26 +238,12 @@ async function checkPosition(
   }
 }
 
-/**
- * Derive the human-readable SOL-per-token price from the active bin.
- *
- * activeBin.pricePerToken from Meteora SDK is a Q64.64 fixed-point value
- * that has NOT been adjusted for token decimals. Using it raw produces
- * wildly wrong prices (e.g. 0.000014 instead of 0.0013).
- *
- * The correct approach is dlmmPool.fromPricePerLamport(activeBin.price)
- * which returns the decimal-adjusted price as a string ready to parse.
- */
 function getDecimalAdjustedPrice(dlmmPool: DLMM, activeBin: { price: string; pricePerToken: string }): number {
   try {
-    // fromPricePerLamport adjusts for both tokenX and tokenY decimals
     const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price))
     const price = parseFloat(adjusted)
     if (isFinite(price) && price > 0) return price
-  } catch {
-    // fall through to pricePerToken fallback
-  }
-  // Last resort: pricePerToken is at minimum better than nothing for logging
+  } catch { /* fall through */ }
   return parseFloat(activeBin.pricePerToken)
 }
 
@@ -272,8 +257,6 @@ async function fetchPositionState(
     const wallet     = getWallet()
     const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
     const activeBin  = await dlmmPool.getActiveBin()
-
-    // Use decimal-adjusted price — NOT raw pricePerToken
     const currentPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin)
 
     let volume1hUsd = 0
@@ -305,4 +288,22 @@ async function fetchPositionState(
     console.error(`[monitor] fetchPositionState failed for pool ${poolAddress}:`, err)
     return fallback
   }
+}
+
+// ─── Standalone entrypoint (PM2) ────────────────────────────────────────────
+
+if (require.main === module || process.env.LP_MONITOR_STANDALONE === 'true') {
+  const label = '[lp-monitor-dlmm]'
+  console.log(`${label} starting — poll every ${MONITOR_INTERVAL_MS / 1000}s`)
+
+  async function tick() {
+    try {
+      const result = await monitorPositions()
+      console.log(`${label} tick done — checked=${result.checked} closed=${result.closed} claimed=${result.claimed} rebalanced=${result.rebalanced}`)
+    } catch (err) {
+      console.error(`${label} tick error:`, err)
+    }
+  }
+
+  tick().then(() => setInterval(tick, MONITOR_INTERVAL_MS))
 }

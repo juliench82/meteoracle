@@ -1,3 +1,8 @@
+import 'dotenv/config'
+import * as dotenvLocal from 'dotenv'
+import * as path from 'path'
+dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
+
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { STRATEGIES, getStrategyForToken } from '@/strategies'
@@ -30,6 +35,7 @@ const CHEAP_FILTER = {
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
+const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000  // default 15min
 const WSOL = 'So11111111111111111111111111111111111111112'
 const SUPABASE_TIMEOUT_MS = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
@@ -96,7 +102,6 @@ export async function runScanner(): Promise<{
   }
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
 
-  // Run orphan detector once per process lifetime (not every scan tick)
   if (!_orphanCheckDone) {
     _orphanCheckDone = true
     const poolAddresses = pools.map(p => p.address)
@@ -290,4 +295,22 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
 
   console.log(`[scanner] ${allPools.length} pools fetched; ${pools.length} passed JS pre-filter`)
   return { pools }
+}
+
+// ─── Standalone entrypoint (PM2) ────────────────────────────────────────────
+
+if (require.main === module || process.env.LP_SCANNER_STANDALONE === 'true') {
+  const label = '[lp-scanner]'
+  console.log(`${label} starting — poll every ${SCAN_INTERVAL_MS / 1000}s`)
+
+  async function tick() {
+    try {
+      const result = await runScanner()
+      console.log(`${label} tick done — scanned=${result.scanned} candidates=${result.candidates} opened=${result.opened}`)
+    } catch (err) {
+      console.error(`${label} tick error:`, err)
+    }
+  }
+
+  tick().then(() => setInterval(tick, SCAN_INTERVAL_MS))
 }
