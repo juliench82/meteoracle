@@ -1,18 +1,16 @@
 /**
  * spot-buyer.ts
  *
- * Reads the pre_grad_watchlist from Supabase, buys qualifying tokens via
- * Jupiter v6 REST API, and stores the position in spot_positions.
+ * Reads pre_grad_watchlist, buys qualifying tokens via Jupiter v6, and stores
+ * positions in spot_positions.
  *
- * Dry-run mode (default): logs everything, submits NO transactions.
- *   BOT_DRY_RUN=true   → dry-run (DEFAULT if env var absent)
- *   BOT_DRY_RUN=false  → live mode — REAL money
+ * BOT_DRY_RUN=true  (default) — logs only, no real transactions
+ * BOT_DRY_RUN=false           — live mode, REAL money
  *
  * Run:
  *   npx tsx bot/spot-buyer.ts
  */
 
-// Load .env.local (and .env) before anything else
 import 'dotenv/config'
 import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
@@ -46,29 +44,20 @@ interface WatchlistRow {
   detected_at: string
 }
 
-interface SpotPosition {
-  token_symbol:    string
-  token_address:   string
-  strategy_id:     string
-  entry_price_sol: number
-  sol_spent:       number
-  tokens_bought:   number
-  status:          string
-  metadata:        Record<string, unknown>
-}
-
-async function getTokenDecimals(mint: string): Promise<number> {
-  try {
-    const connection = new Connection(RPC_URL, 'confirmed')
-    const info = await connection.getParsedAccountInfo(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      { toBase58: () => mint } as any
-    )
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (info.value?.data as any)?.parsed?.info?.decimals ?? 6
-  } catch {
-    return 6  // pump.fun tokens are all 6 decimals
-  }
+// Matches public.spot_positions columns exactly
+interface SpotPositionInsert {
+  mint:             string
+  symbol:           string
+  name:             string
+  entry_price_sol:  number
+  amount_sol:       number
+  token_amount:     number
+  tp_pct:           number
+  sl_pct:           number
+  status:           string
+  dry_run:          boolean
+  tx_buy?:          string
+  watchlist_id?:    string
 }
 
 async function getJupiterQuote(inputMint: string, outputMint: string, amountLamports: number) {
@@ -106,16 +95,13 @@ async function executeJupiterSwap(
   tx.sign([wallet])
 
   const sig = await connection.sendTransaction(tx, {
-    skipPreflight:        false,
-    maxRetries:           3,
+    skipPreflight:       false,
+    maxRetries:          3,
     preflightCommitment: 'confirmed',
   })
 
   const latestBlockhash = await connection.getLatestBlockhash()
-  await connection.confirmTransaction(
-    { signature: sig, ...latestBlockhash },
-    'confirmed'
-  )
+  await connection.confirmTransaction({ signature: sig, ...latestBlockhash }, 'confirmed')
 
   return sig
 }
@@ -125,92 +111,89 @@ async function canOpenNewPosition(): Promise<{ ok: boolean; reason?: string }> {
 
   const { data, error } = await supabase
     .from('spot_positions')
-    .select('sol_spent')
-    .eq('status', 'active')
+    .select('amount_sol')
+    .eq('status', 'open')
 
   if (error) return { ok: false, reason: `DB error: ${error.message}` }
 
-  const rows        = data ?? []
-  const openCount   = rows.length
-  const totalSol    = rows.reduce((sum, r) => sum + (r.sol_spent ?? 0), 0)
+  const rows      = data ?? []
+  const openCount = rows.length
+  const totalSol  = rows.reduce((sum, r) => sum + (r.amount_sol ?? 0), 0)
 
   if (openCount >= cfg.position.maxConcurrentSpots) {
-    return { ok: false, reason: `max concurrent spots reached (${openCount}/${cfg.position.maxConcurrentSpots})` }
+    return { ok: false, reason: `max concurrent spots (${openCount}/${cfg.position.maxConcurrentSpots})` }
   }
   if (totalSol + cfg.position.spotBuySol > cfg.position.maxTotalSpotSol) {
-    return { ok: false, reason: `max total SOL would be exceeded (${totalSol.toFixed(3)} + ${cfg.position.spotBuySol} > ${cfg.position.maxTotalSpotSol})` }
+    return { ok: false, reason: `max total SOL exceeded (${totalSol.toFixed(3)} + ${cfg.position.spotBuySol} > ${cfg.position.maxTotalSpotSol})` }
   }
 
   return { ok: true }
 }
 
 async function buyToken(row: WatchlistRow): Promise<void> {
-  const supabase       = createServerClient()
-  const buySol         = cfg.position.spotBuySol
-  const buyLamports    = Math.floor(buySol * 1e9)
+  const supabase    = createServerClient()
+  const buySol      = cfg.position.spotBuySol
+  const buyLamports = Math.floor(buySol * 1e9)
 
   console.log(
     `[spot-buyer] evaluating ${row.symbol} (${row.mint.slice(0, 8)}...)` +
     ` vol=${row.volume_1h_usd.toFixed(2)} SOL`
   )
 
+  // Volume filter
   if (row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
     console.log(`[spot-buyer] SKIP ${row.symbol} — volume too low (${row.volume_1h_usd.toFixed(2)} < ${cfg.scanner.minVolume5minSol})`)
     return
   }
 
+  // Dedup guard: don't buy same token twice
   const { data: existing } = await supabase
     .from('spot_positions')
     .select('id')
-    .eq('token_address', row.mint)
-    .in('status', ['active', 'migrated'])
+    .eq('mint', row.mint)
+    .in('status', ['open'])
     .maybeSingle()
 
   if (existing) {
-    console.log(`[spot-buyer] SKIP ${row.symbol} — already have active/migrated position`)
+    console.log(`[spot-buyer] SKIP ${row.symbol} — already have open position`)
     return
   }
 
+  // Concurrency / capital guard
   const guard = await canOpenNewPosition()
   if (!guard.ok) {
     console.log(`[spot-buyer] BLOCKED — ${guard.reason}`)
     return
   }
 
+  // ---- DRY RUN ----
   if (DRY_RUN) {
     console.log(
       `[spot-buyer] DRY-RUN BUY ${buySol} SOL → ${row.symbol}` +
       ` | TP=+${cfg.exits.takeProfitPct}% SL=${cfg.exits.stopLossPct}% maxHold=${cfg.exits.maxHoldMinutes}min`
     )
 
-    const position: SpotPosition = {
-      token_symbol:    row.symbol,
-      token_address:   row.mint,
-      strategy_id:     cfg.id,
+    const position: SpotPositionInsert = {
+      mint:            row.mint,
+      symbol:          row.symbol,
+      name:            row.name ?? '',
       entry_price_sol: 0,
-      sol_spent:       buySol,
-      tokens_bought:   0,
-      status:          'active',
-      metadata: {
-        dry_run:         true,
-        watchlist_id:    row.id,
-        slippage_bps:    SLIPPAGE_BPS,
-        take_profit_pct: cfg.exits.takeProfitPct,
-        stop_loss_pct:   cfg.exits.stopLossPct,
-        max_hold_min:    cfg.exits.maxHoldMinutes,
-        volume_at_buy:   row.volume_1h_usd,
-      },
+      amount_sol:      buySol,
+      token_amount:    0,
+      tp_pct:          cfg.exits.takeProfitPct,
+      sl_pct:          cfg.exits.stopLossPct,
+      status:          'open',
+      dry_run:         true,
+      watchlist_id:    row.id,
     }
 
-    const { error: insertErr } = await supabase
-      .from('spot_positions')
-      .insert(position)
-
+    const { error: insertErr } = await supabase.from('spot_positions').insert(position)
     if (insertErr) {
       console.error(`[spot-buyer] DB insert error:`, insertErr.message)
-    } else {
-      console.log(`[spot-buyer] DRY-RUN row inserted for ${row.symbol}`)
+      return
     }
+
+    console.log(`[spot-buyer] DRY-RUN row inserted for ${row.symbol}`)
 
     await supabase
       .from('pre_grad_watchlist')
@@ -220,25 +203,25 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     return
   }
 
+  // ---- LIVE BUY ----
   const privateKeyEnv = process.env.WALLET_PRIVATE_KEY
   if (!privateKeyEnv) {
     console.error('[spot-buyer] WALLET_PRIVATE_KEY not set — cannot execute live buy')
     return
   }
 
-  let txSig: string | undefined
+  let txSig:         string | undefined
   let tokensReceived = 0
   let entryPriceSol  = 0
 
   try {
     const wallet = Keypair.fromSecretKey(bs58.decode(privateKeyEnv))
-
     console.log(`[spot-buyer] LIVE BUY ${buySol} SOL → ${row.symbol} (${row.mint.slice(0, 8)}...)`)
 
-    const quote = await getJupiterQuote(WSOL_MINT, row.mint, buyLamports)
+    const quote     = await getJupiterQuote(WSOL_MINT, row.mint, buyLamports)
     const outAmount = parseInt(quote.outAmount as string)
-    const decimals  = await getTokenDecimals(row.mint)
-    tokensReceived  = outAmount / Math.pow(10, decimals)
+    // pump.fun tokens are always 6 decimals
+    tokensReceived  = outAmount / 1e6
     entryPriceSol   = buySol / tokensReceived
 
     console.log(
@@ -255,30 +238,22 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     return
   }
 
-  const position: SpotPosition = {
-    token_symbol:    row.symbol,
-    token_address:   row.mint,
-    strategy_id:     cfg.id,
+  const position: SpotPositionInsert = {
+    mint:            row.mint,
+    symbol:          row.symbol,
+    name:            row.name ?? '',
     entry_price_sol: entryPriceSol,
-    sol_spent:       buySol,
-    tokens_bought:   tokensReceived,
-    status:          'active',
-    metadata: {
-      dry_run:         false,
-      tx_signature:    txSig,
-      watchlist_id:    row.id,
-      slippage_bps:    SLIPPAGE_BPS,
-      take_profit_pct: cfg.exits.takeProfitPct,
-      stop_loss_pct:   cfg.exits.stopLossPct,
-      max_hold_min:    cfg.exits.maxHoldMinutes,
-      volume_at_buy:   row.volume_1h_usd,
-    },
+    amount_sol:      buySol,
+    token_amount:    tokensReceived,
+    tp_pct:          cfg.exits.takeProfitPct,
+    sl_pct:          cfg.exits.stopLossPct,
+    status:          'open',
+    dry_run:         false,
+    tx_buy:          txSig,
+    watchlist_id:    row.id,
   }
 
-  const { error: insertErr } = await supabase
-    .from('spot_positions')
-    .insert(position)
-
+  const { error: insertErr } = await supabase.from('spot_positions').insert(position)
   if (insertErr) {
     console.error(`[spot-buyer] DB insert error:`, insertErr.message)
   } else {
