@@ -1,122 +1,72 @@
 # ⚡ Meteoracle
 
-> Automated pre-graduation spot-buy bot for pump.fun tokens on Solana, with a live Next.js dashboard.
+> Automated Solana trading bot with a live Next.js dashboard. Two active pipelines: pre-graduation pump.fun spot buys, and Meteora DLMM LP positions.
 
-Meteoracle watches pump.fun tokens approaching graduation (80–99% bonding curve), buys them via Jupiter v6, and exits at +200% TP, -40% SL, or after 4 hours. A Next.js dashboard on Vercel shows live positions, P&L, and watchlist. Alerts and control run via Telegram.
-
-**Status:** Live — bots running on Hetzner VPS via PM2, dashboard on Vercel.
-
----
-
-## Strategy: Pre-Grad Spot Buy
-
-### The edge
-
-Tokens graduating from pump.fun's bonding curve get listed on Raydium immediately after. That listing event creates a price spike as new buyers discover the token. The edge is buying *just before* graduation (80–99% bonding progress), riding the spike, and exiting fast before it fades.
-
-### Signal (Scanner)
-
-Every 60 seconds the scanner calls the pump.fun API and filters tokens that match **all** of:
-
-| Filter | Default | Env var |
-|---|---|---|
-| Bonding curve progress | 80% – 99% | `PRE_GRAD_MIN_BONDING_PCT` / `PRE_GRAD_MAX_BONDING_PCT` |
-| Volume (last 5 min) | ≥ 5 SOL | `PRE_GRAD_MIN_VOL_5MIN_SOL` |
-| Holders | ≥ 50 | `PRE_GRAD_MIN_HOLDERS` |
-| Top holder concentration | ≤ 20% | `PRE_GRAD_MAX_TOP_HOLDER` |
-
-Tokens that pass are added to `pre_grad_watchlist` with `status = 'watching'`.
-
-### Entry (Buyer)
-
-Every 30 seconds the buyer reads the watchlist and for each `watching` token:
-
-1. Re-checks volume filter
-2. Dedup guard — skips if already have an open position for that mint
-3. Capital guard — skips if already at `MAX_CONCURRENT_SPOTS` or `MAX_TOTAL_SPOT_SOL`
-4. Wallet balance guard — skips if SOL balance < buy size + 0.05 buffer
-5. Fetches Jupiter quote → executes swap → stores `entry_price_usd` from Jupiter Price API
-6. Inserts row into `spot_positions`, updates watchlist to `opened`
-7. Fires Telegram alert: 🟢 BUY token | size | TP | SL | entry price
-
-| Position config | Default | Env var |
-|---|---|---|
-| Buy size | 0.05 SOL | `SPOT_BUY_SOL` |
-| Max concurrent | 3 | `MAX_CONCURRENT_SPOTS` |
-| Max total capital | 0.15 SOL | `MAX_TOTAL_SPOT_SOL` |
-| Slippage | 300 bps | `SPOT_BUY_SLIPPAGE_BPS` |
-
-### Exit (Monitor)
-
-Every 30 seconds the monitor fetches all `open` positions and checks each one:
-
-- **Live mode:** fetches current USD price from Jupiter Price API, compares to `entry_price_usd`
-- **Dry-run mode:** simulates a random price walk (±15% per tick)
-
-Exit triggers (first to fire wins):
-
-| Condition | Default | Env var |
-|---|---|---|
-| Take profit | +200% | `PRE_GRAD_TP_PCT` |
-| Stop loss | -40% | `PRE_GRAD_SL_PCT` |
-| Max hold time | 240 min | `PRE_GRAD_MAX_HOLD_MIN` |
-
-On exit: calls spot-seller → updates `spot_positions` (status, `closed_at`, `pnl_sol`, `tx_sell`) → Telegram alert.
-
-### Expected trade profile
-
-```
-Avg hold:    15–60 min
-Win rate:    ~30–40% (high reward:risk compensates)
-Avg winner:  +1x to +3x on buy size
-Avg loser:   -40% on buy size (hard floor)
-Max loss/trade: 0.02 SOL (at 0.05 SOL size)
-```
-
-The bet is asymmetric: losers are capped at -40%, winners can run to +200%+. One ONLYFANS-type trade (+215%) covers ~5 stop-losses.
+**Status:** Live — 7 bot processes on Hetzner VPS via PM2, dashboard on Coolify.
 
 ---
 
 ## Architecture
 
 ```
-Hetzner VPS (PM2)
-  ├── bot/pre-grad-scanner.ts   ← polls pump.fun every 60s → pre_grad_watchlist
-  ├── bot/spot-buyer.ts         ← polls watchlist every 30s → buys via Jupiter
-  └── bot/spot-monitor.ts       ← polls open positions every 30s → TP/SL/timeout exits
+Hetzner VPS (PM2 — 7 processes)
+  │
+  ├── PIPELINE 1: Meteora DLMM LP
+  │   ├── bot/scanner.ts          ← scans Meteora pools every 15min
+  │   └── bot/monitor.ts          ← monitors LP range health + exits every 5min
+  │
+  ├── PIPELINE 2: Pre-grad spot buy (pump.fun)
+  │   ├── bot/pre-grad-scanner.ts ← polls pump.fun every 60s (88–98% bonding curve)
+  │   ├── bot/spot-buyer.ts       ← buys watchlist tokens via Jupiter every 30s
+  │   └── bot/spot-monitor.ts     ← TP/SL/timeout exits every 30s
+  │
+  └── PIPELINE 3: Post-grad LP bridge
+      ├── bot/lp-migrator.ts      ← detects graduation, opens Meteora DLMM LP
+      └── bot/lp-monitor.ts       ← monitors post-grad LP positions
 
-Vercel (Next.js dashboard)
+Coolify (Next.js dashboard — npm run start)
   └── app/(dashboard)/
-      ├── page.tsx              ← KPIs, P&L chart, positions table, watchlist
-      ├── strategies/           ← Strategy config + live performance stats
-      ├── bot/                  ← Process health, open positions, recent exits
-      └── settings/             ← Env var reference, Telegram commands
+      ├── page.tsx                ← KPIs, P&L chart, positions table, watchlist
+      ├── strategies/page.tsx     ← Strategy config + live performance
+      ├── bot/page.tsx            ← Process health, open positions, recent exits
+      └── settings/page.tsx       ← Env var reference + go-live checklist
 
 Supabase (Postgres)
-  ├── pre_grad_watchlist        ← tokens detected by scanner
-  └── spot_positions            ← all open and closed trades
+  ├── pre_grad_watchlist          ← tokens detected by pre-grad scanner
+  ├── spot_positions              ← all pre-grad trades (open + closed)
+  ├── positions                   ← all LP positions (open + closed)
+  ├── candidates                  ← Meteora scanner candidates log
+  └── bot_logs                    ← structured event log
 
-Telegram
-  └── Outbound alerts only (buy, sell, low balance, errors)
+Telegram — outbound alerts only
 ```
 
-### Data flow
+---
 
-```
-pump.fun API
-     │
-     ▼
-pre-grad-scanner.ts  →  pre_grad_watchlist (status: watching)
-                                │
-                                ▼
-                        spot-buyer.ts  →  Jupiter swap  →  spot_positions (status: open)
-                                                                    │
-                                                                    ▼
-                                                           spot-monitor.ts  →  spot-seller.ts
-                                                                                    │
-                                                                                    ▼
-                                                                           spot_positions (status: closed_tp / closed_sl)
-```
+## Pipeline 1 — Meteora DLMM LP
+
+Scans all Meteora pools every 15 minutes. Filters by market cap, volume, liquidity, age, holder count, rugcheck score. Opens a DLMM LP position with a tight bin range centered at current price. Monitors range health every 5 minutes — smart-rebalances if price drifts >30% inside range, closes on stop-loss / take-profit / max duration / out-of-range timeout.
+
+## Pipeline 2 — Pre-grad Spot Buy
+
+Scans pump.fun tokens at 88–98% bonding curve progress every 60 seconds. Enriches each candidate with pump.fun API data: bonding curve %, holder count, top holder %, dev wallet %. Buys via Jupiter v6. Exits at +150% TP, -35% SL, or 90-minute timeout.
+
+### Current filters
+
+| Filter | Default | Env var |
+|---|---|---|
+| Bonding curve | 88–98% | `PRE_GRAD_MIN_BONDING_PCT` / `PRE_GRAD_MAX_BONDING_PCT` |
+| Volume (5 min) | ≥ 8 SOL | `PRE_GRAD_MIN_VOL_5MIN_SOL` |
+| Holders | ≥ 100 | `PRE_GRAD_MIN_HOLDERS` |
+| Top holder | ≤ 12% | `PRE_GRAD_MAX_TOP_HOLDER` |
+| Dev wallet | ≤ 3% | `PRE_GRAD_MAX_DEV_WALLET_PCT` |
+| Take profit | +150% | `PRE_GRAD_TP_PCT` |
+| Stop loss | -35% | `PRE_GRAD_SL_PCT` |
+| Max hold | 90 min | `PRE_GRAD_MAX_HOLD_MIN` |
+
+## Pipeline 3 — Post-grad LP Bridge
+
+Detects pump.fun graduation events, then opens a Meteora DLMM LP position for the newly listed token. Monitors LP health and exits on the same conditions as Pipeline 1.
 
 ---
 
@@ -125,32 +75,35 @@ pre-grad-scanner.ts  →  pre_grad_watchlist (status: watching)
 ```
 meteoracle/
 ├── app/
-│   ├── (dashboard)/            ← All dashboard pages (shared Sidebar + Header layout)
-│   │   ├── page.tsx            ← Dashboard home
-│   │   ├── strategies/page.tsx
-│   │   ├── bot/page.tsx
-│   │   └── settings/page.tsx
-│   ├── api/telegram/webhook/   ← Legacy Telegram command handler
-│   ├── layout.tsx
-│   └── globals.css
+│   └── (dashboard)/            ← All Next.js pages (shared layout)
 ├── bot/
-│   ├── pre-grad-scanner.ts     ← Scanner (long-running)
-│   ├── spot-buyer.ts           ← Buyer (long-running)
-│   ├── spot-monitor.ts         ← Monitor (long-running)
+│   ├── pre-grad-scanner.ts     ← Pipeline 2 scanner
+│   ├── spot-buyer.ts           ← Pipeline 2 buyer
+│   ├── spot-monitor.ts         ← Pipeline 2 monitor
 │   ├── spot-seller.ts          ← Jupiter sell helper
-│   └── telegram.ts             ← Outbound Telegram alerts
-├── components/
-│   ├── layout/                 ← Sidebar, Header
-│   └── dashboard/              ← SpotKPIBar, SpotPositionsTable, WatchlistFeed, SpotPnlChart
+│   ├── scanner.ts              ← Pipeline 1 Meteora scanner
+│   ├── monitor.ts              ← Pipeline 1 LP monitor (DLMM)
+│   ├── lp-migrator.ts          ← Pipeline 3 post-grad bridge
+│   ├── lp-monitor.ts           ← Pipeline 3 LP monitor
+│   ├── executor.ts             ← LP open/close execution
+│   ├── alerter.ts              ← Telegram alert dispatcher
+│   ├── scorer.ts               ← Meteora candidate scorer
+│   └── orphan-detector.ts      ← Detects DB positions no longer on-chain
 ├── strategies/
-│   └── pre-grad.ts             ← Strategy config (all tunable via env vars)
+│   └── pre-grad.ts             ← Pipeline 2 config (all tunable via env)
 ├── lib/
 │   ├── supabase.ts
+│   ├── solana.ts
+│   ├── helius.ts
+│   ├── rugcheck.ts
 │   └── types.ts
 ├── supabase/migrations/
 │   ├── 001_initial_schema.sql
-│   └── 002_entry_price_usd.sql
-└── ecosystem.config.cjs        ← PM2 process config
+│   ├── 002_entry_price_usd.sql
+│   ├── 003_meteora_lp_schema.sql
+│   └── 004_pre_grad_watchlist_velocity.sql
+├── ecosystem.config.cjs        ← PM2 config (all 7 processes)
+└── .env.local.example          ← All env vars with descriptions
 ```
 
 ---
@@ -167,79 +120,44 @@ npm install
 
 ### 2. Supabase migrations
 
-Run both migrations in the Supabase SQL editor:
+Run all 4 migrations in order in the Supabase SQL editor:
 
-```sql
--- 001: initial schema (pre_grad_watchlist, spot_positions)
--- paste contents of supabase/migrations/001_initial_schema.sql
-
--- 002: add entry_price_usd
-ALTER TABLE spot_positions ADD COLUMN IF NOT EXISTS entry_price_usd NUMERIC DEFAULT 0;
+```
+supabase/migrations/001_initial_schema.sql
+supabase/migrations/002_entry_price_usd.sql
+supabase/migrations/003_meteora_lp_schema.sql
+supabase/migrations/004_pre_grad_watchlist_velocity.sql
 ```
 
 ### 3. Environment variables
 
-Create `.env.local`:
-
-```env
-# --- Supabase ---
-NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
-SUPABASE_SERVICE_ROLE_KEY=eyJ...
-
-# --- Solana ---
-HELIUS_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
-WALLET_PRIVATE_KEY=           # base58 private key — keep secret
-
-# --- Telegram ---
-TELEGRAM_BOT_TOKEN=           # from @BotFather
-TELEGRAM_CHAT_ID=             # your personal chat ID
-
-# --- Bot control ---
-BOT_DRY_RUN=true              # set to false for live trading
-MIN_WALLET_BALANCE_SOL=0.05   # SOL buffer — never buy below this
-
-# --- Strategy tuning (all optional, defaults shown) ---
-SPOT_BUY_SOL=0.05
-MAX_CONCURRENT_SPOTS=3
-MAX_TOTAL_SPOT_SOL=0.15
-SPOT_BUY_SLIPPAGE_BPS=300
-SPOT_BUYER_POLL_SEC=30
-SPOT_MONITOR_POLL_SEC=30
-
-PRE_GRAD_MIN_BONDING_PCT=80
-PRE_GRAD_MAX_BONDING_PCT=99
-PRE_GRAD_MIN_VOL_5MIN_SOL=5
-PRE_GRAD_MIN_HOLDERS=50
-PRE_GRAD_MAX_TOP_HOLDER=20
-PRE_GRAD_TP_PCT=200
-PRE_GRAD_SL_PCT=-40
-PRE_GRAD_MAX_HOLD_MIN=240
+```bash
+cp .env.local.example .env.local
+# fill in your values
 ```
 
-### 4. Run locally (dry-run first)
+See `.env.local.example` for all variables with descriptions. Required ones are marked.
+
+### 4. Run locally (dry-run)
 
 ```bash
 # Dashboard
 npm run dev
 
-# Bots (3 separate terminals)
+# Bots (separate terminals)
 npx tsx bot/pre-grad-scanner.ts
 npx tsx bot/spot-buyer.ts
 npx tsx bot/spot-monitor.ts
 ```
 
-Watch Telegram for alerts. Check Supabase for rows appearing in `pre_grad_watchlist` and `spot_positions`.
+### 5. Deploy dashboard (Coolify)
 
-### 5. Deploy dashboard to Vercel
+- Build command: `npm run build`
+- Start command: `npm run start`
+- Add all env vars from `.env.local.example` in Coolify environment settings
+- Only `NEXT_PUBLIC_*`, `SUPABASE_SERVICE_ROLE_KEY`, and `TELEGRAM_*` vars are needed by the dashboard
 
-```bash
-npx vercel --prod
-```
-
-Add all env vars in the Vercel dashboard (Settings → Environment Variables).
-
-### 6. Run bots on Hetzner VPS (production)
+### 6. Run bots on VPS (PM2)
 
 ```bash
 # On your VPS
@@ -247,11 +165,10 @@ git clone https://github.com/juliench82/meteoracle.git
 cd meteoracle
 npm install
 cp .env.local.example .env.local   # fill in your values
-
 npm install -g pm2
 pm2 start ecosystem.config.cjs
 pm2 save
-pm2 startup   # follow the printed command to survive reboots
+pm2 startup   # follow the printed command — survives reboots
 ```
 
 Check status:
@@ -262,61 +179,51 @@ pm2 logs buyer --lines 50
 pm2 logs monitor --lines 50
 ```
 
-To update after a code push:
+Update after a code push:
 ```bash
-git pull && pm2 restart all
+git pull && npm install && pm2 restart all
 ```
 
 ---
 
 ## Go-live checklist
 
-- [ ] Migration 002 applied in Supabase SQL editor
-- [ ] Wallet funded (0.5 SOL minimum — covers 3 positions + gas)
+- [ ] All 4 Supabase migrations applied
+- [ ] Wallet funded (≥ 0.5 SOL — covers positions + gas)
 - [ ] `BOT_DRY_RUN=false` in `.env.local` on VPS
-- [ ] PM2 started: `pm2 start ecosystem.config.cjs && pm2 save && pm2 startup`
-- [ ] Telegram alert fires on first live buy ✅
+- [ ] `BITQUERY_API_KEY` set (pre-grad scanner requires it)
+- [ ] PM2 started and saved: `pm2 start ecosystem.config.cjs && pm2 save && pm2 startup`
+- [ ] Telegram alert fires on first live buy
+- [ ] Dashboard accessible via Coolify domain
 
 ---
 
-## Telegram alerts (outbound only)
+## Telegram alerts
 
 | Alert | Trigger |
 |---|---|
-| 🟢 BUY token | Position opened |
-| 🟡 [DRY-RUN] BUY token | Dry-run position opened |
-| 🟢 CLOSED token TP ✅ | Take profit hit |
-| 🔴 CLOSED token SL ❌ | Stop loss hit |
-| ⏱️ CLOSED token TIMEOUT | Max hold exceeded |
-| ⚠️ LOW BALANCE | Wallet too low to buy |
+| 🟢 BUY token | Spot position opened |
+| 🟡 [DRY-RUN] BUY | Dry-run position opened |
+| 🟢 CLOSED TP ✅ | Take profit hit |
+| 🔴 CLOSED SL ❌ | Stop loss hit |
+| ⏱️ CLOSED TIMEOUT | Max hold exceeded |
+| 🔁 REBALANCED | Smart rebalance triggered |
+| ⚠️ LOW BALANCE | Wallet below minimum |
 | ❌ BUY FAILED | Jupiter swap error |
 
 ---
 
-## Required accounts (all free)
+## Required accounts
 
-- [ ] [Helius](https://helius.dev) — Solana RPC
-- [ ] [Supabase](https://supabase.com) — Postgres DB
-- [ ] [Vercel](https://vercel.com) — Dashboard hosting
-- [ ] Telegram bot via @BotFather
-- [ ] Hetzner VPS (cheapest CX11 is fine — ~€4/mo)
-
----
-
-## Roadmap
-
-| | |
-|---|---|
-| ✅ Day 1 | Supabase schema, pump.fun scanner |
-| ✅ Day 2 | spot-buyer.ts — Jupiter v6 buys |
-| ✅ Day 3 | spot-monitor.ts — TP/SL/timeout exits |
-| ✅ Day 4 | spot-seller.ts — Jupiter sell execution |
-| ✅ Day 5 | Live hardening: entry_price_usd, wallet guard, Telegram alerts |
-| ✅ Day 6 | Dashboard wired: KPIs, P&L chart, positions table, watchlist, all nav pages |
-| 🔜 Day 7 | Post-grad LP bridge — detect graduation event, deploy into Meteora DLMM |
+- [Helius](https://helius.dev) — Solana RPC (free tier fine)
+- [Bitquery](https://account.bitquery.io/user/api_v2_keys) — EAP v2 key for pre-grad scanner
+- [Supabase](https://supabase.com) — Postgres DB (free tier fine)
+- [Rugcheck](https://rugcheck.xyz) — token safety scores (no key needed)
+- Telegram bot via @BotFather
+- Hetzner VPS (CX22 recommended — ~€4/mo)
 
 ---
 
 ## Disclaimer
 
-Experimental software. Meme token trading is extremely high risk. Never deploy funds you cannot afford to lose entirely. Always validate in dry-run mode before enabling live trading. Past dry-run results do not predict live performance.
+Experimental software. Meme token and LP trading is extremely high risk. Never deploy funds you cannot afford to lose entirely. Always validate in dry-run mode first.
