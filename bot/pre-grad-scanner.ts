@@ -1,16 +1,16 @@
 /**
  * pre-grad-scanner.ts
  *
- * Polls Bitquery EAP (v2) for active pump.fun tokens and stores them
- * in pre_grad_watchlist so spot-buyer.ts can act on them.
+ * Polls Bitquery EAP (v2) for active pump.fun tokens using the Trading.Pairs API
+ * and stores them in pre_grad_watchlist so spot-buyer.ts can act on them.
  *
  * REQUIRED ENV VARS:
  *   BITQUERY_API_KEY  — Manual key from https://account.bitquery.io/user/api_v2_keys
  *
  * OPTIONAL ENV VARS:
- *   PRE_GRAD_THRESHOLD_PCT   — (default: 80)
- *   PRE_GRAD_POLL_INTERVAL_S — (default: 60)
- *   PRE_GRAD_WATCH_WINDOW_H  — (default: 6)
+ *   PRE_GRAD_POLL_INTERVAL_S — seconds between polls (default: 60)
+ *   PRE_GRAD_WATCH_WINDOW_H  — hours to keep a token on watchlist (default: 6)
+ *   PRE_GRAD_MIN_MCAP        — min market cap USD to include (default: 50000)
  *
  * Run:
  *   npx tsx bot/pre-grad-scanner.ts
@@ -26,62 +26,63 @@ import { createServerClient } from '@/lib/supabase'
 
 const BITQUERY_URL  = 'https://streaming.bitquery.io/eap'
 const API_KEY       = process.env.BITQUERY_API_KEY ?? ''
-const THRESHOLD_PCT = parseFloat(process.env.PRE_GRAD_THRESHOLD_PCT   ?? '80')
-const POLL_SEC      = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S    ?? '60')
-const WATCH_HOURS   = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H   ?? '6')
+const POLL_SEC      = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S ?? '60')
+const WATCH_HOURS   = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
+// Min market cap in USD — pump.fun graduates at ~$69k, so 50k catches near-grad tokens
+const MIN_MCAP      = parseFloat(process.env.PRE_GRAD_MIN_MCAP ?? '50000')
 
 if (!API_KEY) {
   console.error('[pre-grad] BITQUERY_API_KEY is not set — exiting')
   process.exit(1)
 }
 
-// EAP v2 schema:
-// - DateTime (not ISO8601DateTime)
-// - No top-level groupBy; aggregation uses limitBy
-// - Count/sum aliases work differently
-// Strategy: fetch the top 50 most-traded pump.fun tokens in the last N minutes,
-// ordered by trade count descending. High trade count = momentum = near-grad candidate.
-const MOMENTUM_QUERY = `
-query PumpMomentum($since: DateTime!) {
-  Solana {
-    DEXTrades(
-      where: {
-        Trade: { Dex: { ProtocolFamily: { is: "pump" } } }
-        Block: { Time: { after: $since } }
-        Transaction: { Result: { Success: true } }
-      }
-      orderBy: { descendingByField: "count" }
+// Uses Trading.Pairs API (correct for EAP v2) — finds pump.fun tokens
+// traded in last 5 minutes, filtered by min market cap, ordered by market cap desc.
+// This is the pattern from official Bitquery pump.fun docs.
+const PUMP_PAIRS_QUERY = `
+query PumpActivePairs($minMcap: Float!) {
+  Trading {
+    Pairs(
+      limitBy: { by: Token_Address, count: 1 }
       limit: { count: 50 }
-      limitBy: { by: Trade_Buy_Currency_MintAddress, count: 1 }
+      orderBy: { descendingByField: "Supply_MarketCap" }
+      where: {
+        Market: { Program: { is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P" } }
+        Token: { Network: { is: "Solana" } }
+        Supply: { MarketCap: { ge: $minMcap } }
+        Block: { Time: { since_relative: { minutes_ago: 5 } } }
+        Interval: { Time: { Duration: { eq: 1 } } }
+      }
     ) {
-      count
-      Trade {
-        Buy {
-          Currency {
-            MintAddress
-            Symbol
-            Name
-          }
-          Amount
-        }
+      Token {
+        Address
+        Name
+        Symbol
+      }
+      Market {
+        Address
+        Program
+      }
+      Supply {
+        MarketCap
+      }
+      Volume {
+        Usd
       }
     }
   }
 }
 `
 
-interface EAPTrade {
-  count: number
-  Trade: {
-    Buy: {
-      Currency: { MintAddress: string; Symbol: string; Name: string }
-      Amount: number
-    }
-  }
+interface PairResult {
+  Token: { Address: string; Name: string; Symbol: string }
+  Market: { Address: string; Program: string }
+  Supply: { MarketCap: number }
+  Volume: { Usd: number }
 }
 
-interface EAPResponse {
-  data?: { Solana?: { DEXTrades?: EAPTrade[] } }
+interface PairsResponse {
+  data?: { Trading?: { Pairs?: PairResult[] } }
   errors?: Array<{ message: string }>
 }
 
@@ -89,19 +90,14 @@ interface Candidate {
   mint: string
   symbol: string
   name: string
-  tradeCount: number
-  volumeSol: number
+  marketCap: number
+  volumeUsd: number
 }
 
-async function fetchPumpMomentum(lookbackMinutes: number): Promise<Candidate[]> {
-  // EAP DateTime format: "2026-04-10T10:00:00Z"
-  const since = new Date(Date.now() - lookbackMinutes * 60 * 1000)
-    .toISOString()
-    .replace(/\.\d{3}Z$/, 'Z')
-
-  const res = await axios.post<EAPResponse>(
+async function fetchActivePumpPairs(): Promise<Candidate[]> {
+  const res = await axios.post<PairsResponse>(
     BITQUERY_URL,
-    { query: MOMENTUM_QUERY, variables: { since } },
+    { query: PUMP_PAIRS_QUERY, variables: { minMcap: MIN_MCAP } },
     {
       headers: {
         'Content-Type':  'application/json',
@@ -115,15 +111,17 @@ async function fetchPumpMomentum(lookbackMinutes: number): Promise<Candidate[]> 
     throw new Error(res.data.errors.map(e => e.message).join('; '))
   }
 
-  const trades = res.data.data?.Solana?.DEXTrades ?? []
+  const pairs = res.data.data?.Trading?.Pairs ?? []
 
-  return trades.map(t => ({
-    mint:       t.Trade.Buy.Currency.MintAddress,
-    symbol:     t.Trade.Buy.Currency.Symbol || 'UNKNOWN',
-    name:       t.Trade.Buy.Currency.Name   || '',
-    tradeCount: t.count,
-    volumeSol:  t.Trade.Buy.Amount ?? 0,
-  }))
+  return pairs
+    .filter(p => p.Token.Address && p.Token.Symbol)
+    .map(p => ({
+      mint:      p.Token.Address,
+      symbol:    p.Token.Symbol,
+      name:      p.Token.Name ?? '',
+      marketCap: p.Supply?.MarketCap ?? 0,
+      volumeUsd: p.Volume?.Usd ?? 0,
+    }))
 }
 
 async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
@@ -131,9 +129,6 @@ async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
   let added = 0
 
   for (const c of candidates) {
-    // Skip tokens with no real symbol
-    if (!c.mint || c.symbol === 'UNKNOWN') continue
-
     const { data: existing } = await supabase
       .from('pre_grad_watchlist')
       .select('id, status')
@@ -148,7 +143,7 @@ async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
         mint:          c.mint,
         symbol:        c.symbol,
         name:          c.name,
-        volume_1h_usd: c.volumeSol,
+        volume_1h_usd: c.volumeUsd,
         status:        'watching',
         detected_at:   existing ? undefined : new Date().toISOString(),
       }, { onConflict: 'mint', ignoreDuplicates: false })
@@ -158,7 +153,7 @@ async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
     } else if (!existing) {
       console.log(
         `[pre-grad] WATCHLIST ADD: ${c.symbol} (${c.mint.slice(0, 8)}...)` +
-        ` trades=${c.tradeCount} vol=${c.volumeSol.toFixed(2)} SOL`
+        ` mcap=$${Math.round(c.marketCap).toLocaleString()} vol=$${Math.round(c.volumeUsd).toLocaleString()}`
       )
       added++
     }
@@ -178,9 +173,9 @@ async function expireStale(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
-  console.log(`[pre-grad] poll — threshold=${THRESHOLD_PCT}% window=5min`)
+  console.log(`[pre-grad] poll — minMcap=$${MIN_MCAP.toLocaleString()} window=5min`)
   try {
-    const candidates = await fetchPumpMomentum(5)
+    const candidates = await fetchActivePumpPairs()
     console.log(`[pre-grad] Bitquery returned ${candidates.length} active pump tokens`)
 
     if (candidates.length > 0) {
