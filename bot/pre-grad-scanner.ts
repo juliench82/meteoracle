@@ -1,8 +1,8 @@
 /**
  * pre-grad-scanner.ts
  *
- * Polls Bitquery (REST v2) for pump.fun tokens nearing graduation (bonding curve
- * >= GRAD_THRESHOLD_PCT %) and stores them in pre_grad_watchlist.
+ * Polls Bitquery (REST v2 EAP) for active pump.fun tokens and stores them
+ * in pre_grad_watchlist so spot-buyer.ts can act on them.
  *
  * REQUIRED ENV VARS:
  *   BITQUERY_API_KEY  — Manual key from https://account.bitquery.io/user/api_v2_keys
@@ -13,11 +13,11 @@
  *   PRE_GRAD_POLL_INTERVAL_S — seconds between polls (default: 60)
  *   PRE_GRAD_WATCH_WINDOW_H  — hours to keep a token on watchlist (default: 6)
  *
- * Run on VPS:
+ * Run:
  *   npx tsx bot/pre-grad-scanner.ts
  */
 
-// Load .env.local (and .env) before anything else
+// Load .env.local before anything else
 import 'dotenv/config'
 import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
@@ -26,6 +26,8 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 
+// Bitquery EAP endpoint — requires "Authorization: Bearer <key>"
+// NOT X-API-KEY (that's the legacy v1 endpoint)
 const BITQUERY_URL   = 'https://streaming.bitquery.io/eap'
 const API_KEY        = process.env.BITQUERY_API_KEY ?? ''
 const THRESHOLD_PCT  = parseFloat(process.env.PRE_GRAD_THRESHOLD_PCT   ?? '80')
@@ -103,8 +105,9 @@ async function fetchPumpMomentum(lookbackMinutes: number): Promise<BitqueryTrade
     { query: MOMENTUM_QUERY, variables: { since, minTrades } },
     {
       headers: {
-        'Content-Type': 'application/json',
-        'X-API-KEY': API_KEY,
+        'Content-Type':  'application/json',
+        // EAP endpoint requires Bearer token — X-API-KEY is legacy v1 only
+        'Authorization': `Bearer ${API_KEY}`,
       },
       timeout: 15_000,
     }
