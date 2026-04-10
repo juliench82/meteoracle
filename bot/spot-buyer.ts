@@ -4,6 +4,11 @@
  * Reads pre_grad_watchlist, buys qualifying tokens via Jupiter v6, and stores
  * positions in spot_positions.
  *
+ * DAY 5 additions:
+ *   - Stores entry_price_usd (Jupiter Price API) so monitor can calc % change in live mode
+ *   - Wallet SOL balance guard before every live buy
+ *   - Telegram alert on open (DRY_RUN and live)
+ *
  * BOT_DRY_RUN=true  (default) — logs only, no real transactions
  * BOT_DRY_RUN=false           — live mode, REAL money
  *
@@ -17,10 +22,11 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
 
 import axios from 'axios'
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js'
+import { Connection, Keypair, PublicKey, VersionedTransaction } from '@solana/web3.js'
 import bs58 from 'bs58'
 import { createServerClient } from '@/lib/supabase'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
+import { sendTelegram } from './telegram'
 
 const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
 const RPC_URL       = process.env.HELIUS_RPC_URL ?? 'https://api.mainnet-beta.solana.com'
@@ -28,6 +34,8 @@ const JUPITER_API   = 'https://quote-api.jup.ag/v6'
 const WSOL_MINT     = 'So11111111111111111111111111111111111111112'
 const SLIPPAGE_BPS  = parseInt(process.env.SPOT_BUY_SLIPPAGE_BPS ?? '300')
 const POLL_INTERVAL = parseInt(process.env.SPOT_BUYER_POLL_SEC   ?? '30') * 1_000
+// Minimum SOL to keep in wallet — never buy below this buffer
+const MIN_WALLET_BALANCE_SOL = parseFloat(process.env.MIN_WALLET_BALANCE_SOL ?? '0.05')
 
 const cfg = PRE_GRAD_STRATEGY
 
@@ -44,20 +52,44 @@ interface WatchlistRow {
   detected_at: string
 }
 
-// Matches public.spot_positions columns exactly
 interface SpotPositionInsert {
-  mint:             string
-  symbol:           string
-  name:             string
-  entry_price_sol:  number
-  amount_sol:       number
-  token_amount:     number
-  tp_pct:           number
-  sl_pct:           number
-  status:           string
-  dry_run:          boolean
-  tx_buy?:          string
-  watchlist_id?:    string
+  mint:              string
+  symbol:            string
+  name:              string
+  entry_price_sol:   number
+  entry_price_usd:   number   // NEW — used by monitor for live % change
+  amount_sol:        number
+  token_amount:      number
+  tp_pct:            number
+  sl_pct:            number
+  status:            string
+  dry_run:           boolean
+  tx_buy?:           string
+  watchlist_id?:     string
+}
+
+// ---- Helpers ----
+
+async function fetchPriceUsd(mint: string): Promise<number> {
+  try {
+    const res = await axios.get('https://api.jup.ag/price/v2', {
+      params: { ids: mint },
+      timeout: 6_000,
+    })
+    return parseFloat(res.data?.data?.[mint]?.price ?? '0')
+  } catch {
+    return 0
+  }
+}
+
+async function getWalletSolBalance(publicKey: string): Promise<number> {
+  try {
+    const connection = new Connection(RPC_URL, 'confirmed')
+    const lamports   = await connection.getBalance(new PublicKey(publicKey))
+    return lamports / 1e9
+  } catch {
+    return 0
+  }
 }
 
 async function getJupiterQuote(inputMint: string, outputMint: string, amountLamports: number) {
@@ -146,7 +178,7 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     return
   }
 
-  // Dedup guard: don't buy same token twice
+  // Dedup guard
   const { data: existing } = await supabase
     .from('spot_positions')
     .select('id')
@@ -168,6 +200,8 @@ async function buyToken(row: WatchlistRow): Promise<void> {
 
   // ---- DRY RUN ----
   if (DRY_RUN) {
+    const entryPriceUsd = await fetchPriceUsd(row.mint)
+
     console.log(
       `[spot-buyer] DRY-RUN BUY ${buySol} SOL → ${row.symbol}` +
       ` | TP=+${cfg.exits.takeProfitPct}% SL=${cfg.exits.stopLossPct}% maxHold=${cfg.exits.maxHoldMinutes}min`
@@ -178,6 +212,7 @@ async function buyToken(row: WatchlistRow): Promise<void> {
       symbol:          row.symbol,
       name:            row.name ?? '',
       entry_price_sol: 0,
+      entry_price_usd: entryPriceUsd,
       amount_sol:      buySol,
       token_amount:    0,
       tp_pct:          cfg.exits.takeProfitPct,
@@ -200,6 +235,13 @@ async function buyToken(row: WatchlistRow): Promise<void> {
       .update({ status: 'opened' })
       .eq('id', row.id)
 
+    await sendTelegram(
+      `🟡 [DRY-RUN] BUY ${row.symbol}\n` +
+      `💰 ${buySol} SOL | TP +${cfg.exits.takeProfitPct}% | SL ${cfg.exits.stopLossPct}%\n` +
+      `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL\n` +
+      `🔗 https://pump.fun/${row.mint}`
+    )
+
     return
   }
 
@@ -210,23 +252,44 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     return
   }
 
+  const wallet = Keypair.fromSecretKey(bs58.decode(privateKeyEnv))
+
+  // Wallet balance guard
+  const walletBalance = await getWalletSolBalance(wallet.publicKey.toBase58())
+  const required      = buySol + MIN_WALLET_BALANCE_SOL
+  if (walletBalance < required) {
+    console.warn(
+      `[spot-buyer] SKIP ${row.symbol} — wallet balance too low` +
+      ` (${walletBalance.toFixed(4)} SOL < ${required.toFixed(4)} SOL required)`
+    )
+    await sendTelegram(
+      `⚠️ LOW BALANCE — skipped ${row.symbol}\n` +
+      `Wallet: ${walletBalance.toFixed(4)} SOL (need ${required.toFixed(4)})`
+    )
+    return
+  }
+
   let txSig:         string | undefined
   let tokensReceived = 0
   let entryPriceSol  = 0
+  let entryPriceUsd  = 0
 
   try {
-    const wallet = Keypair.fromSecretKey(bs58.decode(privateKeyEnv))
     console.log(`[spot-buyer] LIVE BUY ${buySol} SOL → ${row.symbol} (${row.mint.slice(0, 8)}...)`)
 
-    const quote     = await getJupiterQuote(WSOL_MINT, row.mint, buyLamports)
+    const [quote, priceUsd] = await Promise.all([
+      getJupiterQuote(WSOL_MINT, row.mint, buyLamports),
+      fetchPriceUsd(row.mint),
+    ])
+
     const outAmount = parseInt(quote.outAmount as string)
-    // pump.fun tokens are always 6 decimals
-    tokensReceived  = outAmount / 1e6
+    tokensReceived  = outAmount / 1e6    // pump.fun = 6 decimals
     entryPriceSol   = buySol / tokensReceived
+    entryPriceUsd   = priceUsd
 
     console.log(
       `[spot-buyer] quote: ${buySol} SOL → ${tokensReceived.toFixed(2)} ${row.symbol}` +
-      ` @ ${entryPriceSol.toExponential(4)} SOL/token`
+      ` @ ${entryPriceSol.toExponential(4)} SOL | $${entryPriceUsd.toExponential(4)}`
     )
 
     txSig = await executeJupiterSwap(quote as Record<string, unknown>, wallet)
@@ -235,6 +298,7 @@ async function buyToken(row: WatchlistRow): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`[spot-buyer] buy tx failed for ${row.symbol}:`, message)
+    await sendTelegram(`❌ BUY FAILED ${row.symbol}\n${message}`)
     return
   }
 
@@ -243,6 +307,7 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     symbol:          row.symbol,
     name:            row.name ?? '',
     entry_price_sol: entryPriceSol,
+    entry_price_usd: entryPriceUsd,
     amount_sol:      buySol,
     token_amount:    tokensReceived,
     tp_pct:          cfg.exits.takeProfitPct,
@@ -264,6 +329,13 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     .from('pre_grad_watchlist')
     .update({ status: 'opened' })
     .eq('id', row.id)
+
+  await sendTelegram(
+    `🟢 BUY ${row.symbol}\n` +
+    `💰 ${buySol} SOL | TP +${cfg.exits.takeProfitPct}% | SL ${cfg.exits.stopLossPct}%\n` +
+    `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL | Entry: $${entryPriceUsd.toExponential(3)}\n` +
+    `🔗 https://solscan.io/tx/${txSig}`
+  )
 }
 
 async function tick(): Promise<void> {

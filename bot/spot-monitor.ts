@@ -1,20 +1,18 @@
 /**
- * spot-monitor.ts  —  Day 4
+ * spot-monitor.ts  — Day 4 + Day 5
  *
  * Polls every 30s for all open spot positions.
  * For each position:
  *   1. Fetches current price from Jupiter Price API v2
  *   2. Checks TP / SL / maxHold conditions
  *   3. If triggered: calls spot-seller.ts, updates spot_positions row
+ *   4. Sends Telegram alert on close
  *
- * DRY_RUN mode: simulates price move using a random walk so you can
- * watch the full TP/SL cycle without real money.
+ * DRY_RUN: simulates price random walk so you can watch full TP/SL cycle.
+ * LIVE: uses entry_price_usd (stored at buy time) for accurate % change.
  *
- * BOT_DRY_RUN=true  (default) — no real sells, price is simulated
- * BOT_DRY_RUN=false           — live sells via Jupiter
- *
- * Run:
- *   npx tsx bot/spot-monitor.ts
+ * BOT_DRY_RUN=true  (default)
+ * BOT_DRY_RUN=false
  */
 
 import 'dotenv/config'
@@ -26,20 +24,17 @@ import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { sellTokenForSol } from './spot-seller'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
+import { sendTelegram } from './telegram'
 
 const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
 const POLL_INTERVAL = parseInt(process.env.SPOT_MONITOR_POLL_SEC ?? '30') * 1_000
 const cfg           = PRE_GRAD_STRATEGY
 
-// In dry-run we simulate price with a random walk so exits can be tested.
-// Maps mint -> simulated price multiplier (starts at 1.0)
 const dryRunPriceMultiplier = new Map<string, number>()
 
 console.log(`[spot-monitor] starting — DRY_RUN=${DRY_RUN}`)
 console.log(`[spot-monitor] TP=+${cfg.exits.takeProfitPct}% | SL=${cfg.exits.stopLossPct}% | maxHold=${cfg.exits.maxHoldMinutes}min`)
 console.log(`[spot-monitor] poll interval: ${POLL_INTERVAL / 1000}s`)
-
-// ---- Types ----
 
 interface SpotPosition {
   id:              string
@@ -47,6 +42,7 @@ interface SpotPosition {
   symbol:          string
   name:            string
   entry_price_sol: number
+  entry_price_usd: number   // stored at buy time (Day 5)
   amount_sol:      number
   token_amount:    number
   tp_pct:          number
@@ -59,14 +55,6 @@ interface SpotPosition {
 
 type ExitReason = 'tp' | 'sl' | 'timeout'
 
-// ---- Price fetching ----
-
-/**
- * Jupiter Price API v2 — returns price of token in USDC.
- * We use it as a proxy: price change % is what matters, not absolute USD value.
- * For SOL-denominated P&L we convert: currentPriceSol = entryPriceSol * (currentUsd / entryUsd)
- * But since we stored entry_price_sol=0 for dry-run, we track multiplier instead.
- */
 async function fetchPriceUsd(mint: string): Promise<number | null> {
   try {
     const res = await axios.get('https://api.jup.ag/price/v2', {
@@ -80,32 +68,22 @@ async function fetchPriceUsd(mint: string): Promise<number | null> {
   }
 }
 
-// ---- Dry-run price simulation ----
-// Simulates a price random walk so TP/SL exits fire during testing.
-// Each tick: +/-15% move with slight upward bias to hit TP occasionally.
 function simulatePrice(mint: string): number {
-  const prev = dryRunPriceMultiplier.get(mint) ?? 1.0
-  // Random walk: -15% to +20% per tick
+  const prev  = dryRunPriceMultiplier.get(mint) ?? 1.0
   const delta = (Math.random() * 0.35) - 0.15
   const next  = Math.max(0.01, prev * (1 + delta))
   dryRunPriceMultiplier.set(mint, next)
-  return next  // multiplier relative to entry (1.0 = no change)
+  return next
 }
 
-// ---- Exit logic ----
-
 function checkExitCondition(
-  position:      SpotPosition,
+  position:       SpotPosition,
   pricePctChange: number,
-  ageMinutes:    number,
+  ageMinutes:     number,
 ): ExitReason | null {
-  const tp = position.tp_pct           // e.g. 200  (means +200%)
-  const sl = position.sl_pct           // e.g. -40  (means -40%)
-  const maxHold = cfg.exits.maxHoldMinutes
-
-  if (pricePctChange >= tp)   return 'tp'
-  if (pricePctChange <= sl)   return 'sl'
-  if (ageMinutes >= maxHold)  return 'timeout'
+  if (pricePctChange >= position.tp_pct)          return 'tp'
+  if (pricePctChange <= position.sl_pct)          return 'sl'
+  if (ageMinutes     >= cfg.exits.maxHoldMinutes) return 'timeout'
   return null
 }
 
@@ -113,7 +91,7 @@ async function closePosition(
   position:   SpotPosition,
   reason:     ExitReason,
   pnlSol:     number,
-  exitMult:   number,   // price multiplier at exit vs entry
+  exitMult:   number,
 ): Promise<void> {
   const supabase = createServerClient()
   const label    = `${position.symbol} (${position.mint.slice(0, 8)}...)`
@@ -128,7 +106,6 @@ async function closePosition(
   let solReceived = 0
 
   if (!position.dry_run && position.token_amount > 0) {
-    // Live sell — pump.fun tokens are always 6 decimals
     const sellResult = await sellTokenForSol(
       position.mint,
       position.token_amount,
@@ -137,13 +114,12 @@ async function closePosition(
     )
     if (!sellResult.success) {
       console.error(`[spot-monitor] sell failed for ${label}: ${sellResult.error}`)
-      return  // Don't close DB row if sell failed — will retry next tick
+      return
     }
     txSell      = sellResult.txSignature
     solReceived = sellResult.solReceived ?? 0
     pnlSol      = solReceived - position.amount_sol
   } else if (position.dry_run) {
-    // Dry-run: simulate SOL received
     solReceived = position.amount_sol * exitMult
     pnlSol      = solReceived - position.amount_sol
     console.log(`[spot-monitor] DRY-RUN sell — simulated ${solReceived.toFixed(4)} SOL received`)
@@ -152,7 +128,7 @@ async function closePosition(
   const statusMap: Record<ExitReason, string> = {
     tp:      'closed_tp',
     sl:      'closed_sl',
-    timeout: 'closed_sl',  // timeout treated as SL (didn't hit TP in time)
+    timeout: 'closed_sl',
   }
 
   const { error } = await supabase
@@ -168,16 +144,26 @@ async function closePosition(
 
   if (error) {
     console.error(`[spot-monitor] DB update failed for ${label}:`, error.message)
-  } else {
-    const emoji = reason === 'tp' ? '🟢' : reason === 'sl' ? '🔴' : '⏱️'
-    console.log(
-      `${emoji} [spot-monitor] CLOSED ${label}` +
-      ` reason=${reason} pnl=${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL`
-    )
+    return
   }
-}
 
-// ---- Main poll tick ----
+  const emoji      = reason === 'tp' ? '🟢' : reason === 'sl' ? '🔴' : '⏱️'
+  const pnlStr     = `${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL`
+  const pctStr     = `${((exitMult - 1) * 100).toFixed(1)}%`
+  const dryLabel   = position.dry_run ? '[DRY-RUN] ' : ''
+
+  console.log(`${emoji} [spot-monitor] CLOSED ${label} reason=${reason} pnl=${pnlStr}`)
+
+  const txLine = txSell
+    ? `\n🔗 https://solscan.io/tx/${txSell}`
+    : ''
+
+  await sendTelegram(
+    `${emoji} ${dryLabel}CLOSED ${position.symbol}\n` +
+    `📉 Reason: ${reason.toUpperCase()} (${pctStr})\n` +
+    `💰 PnL: ${pnlStr}${txLine}`
+  )
+}
 
 async function tick(): Promise<void> {
   const supabase = createServerClient()
@@ -209,7 +195,6 @@ async function tick(): Promise<void> {
     let priceMultiplier: number
 
     if (pos.dry_run) {
-      // Simulate price move for dry-run testing
       priceMultiplier = simulatePrice(pos.mint)
       pricePctChange  = (priceMultiplier - 1) * 100
       console.log(
@@ -219,27 +204,24 @@ async function tick(): Promise<void> {
         ` age=${ageMinutes.toFixed(1)}min`
       )
     } else {
-      // Live: fetch real price from Jupiter
-      const currentPrice = await fetchPriceUsd(pos.mint)
-      if (currentPrice === null) {
+      // Live: use entry_price_usd for accurate % change
+      const currentPriceUsd = await fetchPriceUsd(pos.mint)
+      if (currentPriceUsd === null) {
         console.warn(`[spot-monitor] could not fetch price for ${label} — skipping`)
         continue
       }
-      // entry_price_sol is in SOL; we compare % change only
-      // If entry_price_sol is 0 (edge case), skip
-      if (!pos.entry_price_sol || pos.entry_price_sol === 0) {
-        console.warn(`[spot-monitor] entry_price_sol=0 for ${label} — skipping`)
+      if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
+        console.warn(`[spot-monitor] entry_price_usd=0 for ${label} — skipping (stale row)`)
         continue
       }
-      // We stored entry in SOL; Jupiter gives USD. We track % change, not abs value.
-      // Workaround: store USD price at entry in metadata. For now, flag for manual review.
-      console.warn(
-        `[spot-monitor] LIVE mode: entry_price_sol=${pos.entry_price_sol}` +
-        ` currentUsd=${currentPrice} — need USD entry price for accurate % calc.
-        Consider storing entry_price_usd at buy time.`
+      priceMultiplier = currentPriceUsd / pos.entry_price_usd
+      pricePctChange  = (priceMultiplier - 1) * 100
+      console.log(
+        `[spot-monitor] ${label}` +
+        ` price=$${currentPriceUsd.toExponential(4)}` +
+        ` (${pricePctChange >= 0 ? '+' : ''}${pricePctChange.toFixed(1)}%)` +
+        ` age=${ageMinutes.toFixed(1)}min`
       )
-      priceMultiplier = 1   // placeholder: no exit until entry_price_usd is stored
-      pricePctChange  = 0
     }
 
     const exitReason = checkExitCondition(pos, pricePctChange, ageMinutes)
