@@ -2,27 +2,27 @@
  * spot-seller.ts
  *
  * Sells a token position back to SOL via Jupiter v6 REST API.
- * Used by spot-buyer.ts (stop-loss / take-profit / timeout exits)
- * and lp-migrator.ts (sell 50% of bag before opening LP).
+ * Imported as a module — does NOT run a poll loop.
  *
- * Dry-run mode: logs intent but does NOT submit transaction.
- *   BOT_DRY_RUN=true   → dry-run (default if env var absent)
- *   BOT_DRY_RUN=false  → live
- *
- * REQUIRED ENV VARS (live mode):
- *   WALLET_PRIVATE_KEY  — base58-encoded private key
- *   HELIUS_RPC_URL      — Helius or other Solana RPC
+ * BOT_DRY_RUN=true   → dry-run (default if env var absent)
+ * BOT_DRY_RUN=false  → live
  */
 
+// Load .env.local before anything else (safe to call multiple times)
+import 'dotenv/config'
+import * as dotenvLocal from 'dotenv'
+import * as path from 'path'
+dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
+
 import axios from 'axios'
-import { Connection, Keypair, VersionedTransaction, PublicKey } from '@solana/web3.js'
+import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js'
 import bs58 from 'bs58'
 
 const DRY_RUN      = process.env.BOT_DRY_RUN !== 'false'
 const RPC_URL      = process.env.HELIUS_RPC_URL ?? 'https://api.mainnet-beta.solana.com'
 const JUPITER_API  = 'https://quote-api.jup.ag/v6'
 const WSOL_MINT    = 'So11111111111111111111111111111111111111112'
-const SLIPPAGE_BPS = parseInt(process.env.SELL_SLIPPAGE_BPS ?? '300')   // 3%
+const SLIPPAGE_BPS = parseInt(process.env.SELL_SLIPPAGE_BPS ?? '300')
 
 export interface SellResult {
   success: boolean
@@ -32,14 +32,6 @@ export interface SellResult {
   dryRun?: boolean
 }
 
-/**
- * Sell `tokenAmount` units of `tokenMint` for native SOL.
- *
- * @param tokenMint    - SPL token mint address
- * @param tokenAmount  - raw token amount (including decimals)
- * @param tokenDecimals - decimal places of the token
- * @param label        - human-readable label for logs (e.g. symbol)
- */
 export async function sellTokenForSol(
   tokenMint: string,
   tokenAmount: number,
@@ -66,7 +58,6 @@ export async function sellTokenForSol(
     const wallet     = Keypair.fromSecretKey(bs58.decode(privateKeyEnv))
     const connection = new Connection(RPC_URL, 'confirmed')
 
-    // ── 1. Get quote ────────────────────────────────────────────────────────
     const quoteRes = await axios.get(`${JUPITER_API}/quote`, {
       params: {
         inputMint:           tokenMint,
@@ -83,7 +74,6 @@ export async function sellTokenForSol(
     const solOut = outLamports / 1e9
     console.log(`[spot-seller] quote: sell ${label} → ~${solOut.toFixed(4)} SOL`)
 
-    // ── 2. Get swap transaction ──────────────────────────────────────────────
     const swapRes = await axios.post(`${JUPITER_API}/swap`, {
       quoteResponse:             quote,
       userPublicKey:             wallet.publicKey.toBase58(),
@@ -93,9 +83,8 @@ export async function sellTokenForSol(
     }, { timeout: 15_000 })
     const { swapTransaction } = swapRes.data as { swapTransaction: string }
 
-    // ── 3. Deserialise, sign, send ───────────────────────────────────────────
-    const txBuf      = Buffer.from(swapTransaction, 'base64')
-    const tx         = VersionedTransaction.deserialize(txBuf)
+    const txBuf = Buffer.from(swapTransaction, 'base64')
+    const tx    = VersionedTransaction.deserialize(txBuf)
     tx.sign([wallet])
 
     const sig = await connection.sendTransaction(tx, {
@@ -104,7 +93,6 @@ export async function sellTokenForSol(
       preflightCommitment: 'confirmed',
     })
 
-    // ── 4. Confirm ───────────────────────────────────────────────────────────
     const latestBlockhash = await connection.getLatestBlockhash()
     await connection.confirmTransaction(
       { signature: sig, ...latestBlockhash },

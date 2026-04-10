@@ -4,10 +4,6 @@
  * Polls Bitquery (REST v2) for pump.fun tokens nearing graduation (bonding curve
  * >= GRAD_THRESHOLD_PCT %) and stores them in pre_grad_watchlist.
  *
- * When Meteora creates a pool for a watched token within WATCH_WINDOW_HOURS,
- * the main scanner will pick it up naturally. This file only handles the
- * *detection* and *watchlist* side.
- *
  * REQUIRED ENV VARS:
  *   BITQUERY_API_KEY  — Manual key from https://account.bitquery.io/user/api_v2_keys
  *                       Use "Manual" type (no 24h expiry).
@@ -21,6 +17,12 @@
  *   npx tsx bot/pre-grad-scanner.ts
  */
 
+// Load .env.local (and .env) before anything else
+import 'dotenv/config'
+import * as dotenvLocal from 'dotenv'
+import * as path from 'path'
+dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
+
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 
@@ -32,45 +34,10 @@ const WATCH_HOURS    = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H   ?? '6')
 
 if (!API_KEY) {
   console.error('[pre-grad] BITQUERY_API_KEY is not set — exiting')
+  console.error('[pre-grad] Make sure it is in .env.local at the project root')
   process.exit(1)
 }
 
-// Bitquery GraphQL query: pump.fun tokens with bonding curve progress >= threshold
-// We look at the last 5 minutes of trades to find active near-grad tokens.
-const QUERY = `
-query NearGradTokens($threshold: Float!, $since: ISO8601DateTime!) {
-  Solana {
-    DEXTrades(
-      where: {
-        Trade: { Dex: { ProtocolFamily: { is: "pump" } } }
-        Block: { Time: { since: $since } }
-      }
-      limitBy: { by: Trade_Buy_Currency_MintAddress, count: 1 }
-      orderBy: { descending: Block_Time }
-    ) {
-      Trade {
-        Buy {
-          Currency {
-            MintAddress
-            Symbol
-            Name
-          }
-          Price
-        }
-        Market {
-          MarketAddress
-        }
-      }
-      bondingCurveProgress: sum(of: Trade_Buy_Amount)
-    }
-  }
-}
-`
-
-// Separate query to fetch bonding curve completion % from pump.fun on-chain account
-// Since Bitquery EAP doesn't expose bonding % directly, we use a heuristic:
-// tokens still trading on pump (not yet migrated) with recent volume = "near grad"
-// We filter by recent trade count as a proxy for momentum.
 const MOMENTUM_QUERY = `
 query PumpMomentum($since: ISO8601DateTime!, $minTrades: Int!) {
   Solana {
@@ -129,7 +96,6 @@ interface BitqueryResponse {
 
 async function fetchPumpMomentum(lookbackMinutes: number): Promise<BitqueryTrade[]> {
   const since = new Date(Date.now() - lookbackMinutes * 60 * 1000).toISOString()
-  // minTrades: at least 30 trades in window = active token
   const minTrades = 30
 
   const res = await axios.post<BitqueryResponse>(
@@ -160,7 +126,6 @@ async function upsertWatchlist(trades: BitqueryTrade[]): Promise<number> {
     const symbol = t.Trade.Buy.Currency.Symbol
     const name   = t.Trade.Buy.Currency.Name
 
-    // Skip if already graduated or opened
     const { data: existing } = await supabase
       .from('pre_grad_watchlist')
       .select('id, status')
@@ -177,7 +142,7 @@ async function upsertWatchlist(trades: BitqueryTrade[]): Promise<number> {
         mint,
         symbol,
         name,
-        volume_1h_usd: t.volumeSol, // SOL volume as proxy; USD conversion optional
+        volume_1h_usd: t.volumeSol,
         status: 'watching',
         detected_at: existing ? undefined : new Date().toISOString(),
       }, { onConflict: 'mint', ignoreDuplicates: false })
@@ -206,7 +171,6 @@ async function expireStale(): Promise<void> {
 async function tick(): Promise<void> {
   console.log(`[pre-grad] poll — threshold=${THRESHOLD_PCT}% window=5min`)
   try {
-    // Use 5-minute lookback to catch hot tokens right now
     const trades = await fetchPumpMomentum(5)
     console.log(`[pre-grad] Bitquery returned ${trades.length} active pump tokens`)
 
@@ -225,8 +189,6 @@ async function tick(): Promise<void> {
 async function main(): Promise<void> {
   console.log(`[pre-grad] starting — poll every ${POLL_SEC}s, watch window ${WATCH_HOURS}h`)
   console.log(`[pre-grad] Bitquery EAP endpoint: ${BITQUERY_URL}`)
-
-  // Run immediately, then on interval
   await tick()
   setInterval(tick, POLL_SEC * 1_000)
 }
