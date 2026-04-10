@@ -1,26 +1,18 @@
 import type { Metadata } from 'next'
+import { Inter } from 'next/font/google'
 import './globals.css'
+
+const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
   title: 'Meteoracle',
-  description: 'Multi-strategy Meteora DLMM LP automation bot',
+  description: 'Solana trading bot dashboard',
 }
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
-  const botEnabled = process.env.BOT_ENABLED ?? 'false'
-  const botDryRun = process.env.BOT_DRY_RUN ?? 'true'
-
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="dark">
-      <head>
-        <meta name="bot-enabled" content={botEnabled} />
-        <meta name="bot-dry-run" content={botDryRun} />
-      </head>
-      <body className="bg-surface text-white antialiased min-h-screen">
+      <body className={`${inter.className} bg-zinc-950 text-white antialiased`}>
         {children}
       </body>
     </html>
