@@ -1,23 +1,21 @@
 /**
  * pre-grad-scanner.ts
  *
- * Polls Bitquery (REST v2 EAP) for active pump.fun tokens and stores them
+ * Polls Bitquery EAP (v2) for active pump.fun tokens and stores them
  * in pre_grad_watchlist so spot-buyer.ts can act on them.
  *
  * REQUIRED ENV VARS:
  *   BITQUERY_API_KEY  — Manual key from https://account.bitquery.io/user/api_v2_keys
- *                       Use "Manual" type (no 24h expiry).
  *
  * OPTIONAL ENV VARS:
- *   PRE_GRAD_THRESHOLD_PCT   — bonding curve % to trigger watchlist (default: 80)
- *   PRE_GRAD_POLL_INTERVAL_S — seconds between polls (default: 60)
- *   PRE_GRAD_WATCH_WINDOW_H  — hours to keep a token on watchlist (default: 6)
+ *   PRE_GRAD_THRESHOLD_PCT   — (default: 80)
+ *   PRE_GRAD_POLL_INTERVAL_S — (default: 60)
+ *   PRE_GRAD_WATCH_WINDOW_H  — (default: 6)
  *
  * Run:
  *   npx tsx bot/pre-grad-scanner.ts
  */
 
-// Load .env.local before anything else
 import 'dotenv/config'
 import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
@@ -26,37 +24,37 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 
-// Bitquery EAP endpoint — requires "Authorization: Bearer <key>"
-// NOT X-API-KEY (that's the legacy v1 endpoint)
-const BITQUERY_URL   = 'https://streaming.bitquery.io/eap'
-const API_KEY        = process.env.BITQUERY_API_KEY ?? ''
-const THRESHOLD_PCT  = parseFloat(process.env.PRE_GRAD_THRESHOLD_PCT   ?? '80')
-const POLL_SEC       = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S    ?? '60')
-const WATCH_HOURS    = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H   ?? '6')
+const BITQUERY_URL  = 'https://streaming.bitquery.io/eap'
+const API_KEY       = process.env.BITQUERY_API_KEY ?? ''
+const THRESHOLD_PCT = parseFloat(process.env.PRE_GRAD_THRESHOLD_PCT   ?? '80')
+const POLL_SEC      = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S    ?? '60')
+const WATCH_HOURS   = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H   ?? '6')
 
 if (!API_KEY) {
   console.error('[pre-grad] BITQUERY_API_KEY is not set — exiting')
-  console.error('[pre-grad] Make sure it is in .env.local at the project root')
   process.exit(1)
 }
 
+// EAP v2 schema:
+// - DateTime (not ISO8601DateTime)
+// - No top-level groupBy; aggregation uses limitBy
+// - Count/sum aliases work differently
+// Strategy: fetch the top 50 most-traded pump.fun tokens in the last N minutes,
+// ordered by trade count descending. High trade count = momentum = near-grad candidate.
 const MOMENTUM_QUERY = `
-query PumpMomentum($since: ISO8601DateTime!, $minTrades: Int!) {
+query PumpMomentum($since: DateTime!) {
   Solana {
     DEXTrades(
       where: {
         Trade: { Dex: { ProtocolFamily: { is: "pump" } } }
-        Block: { Time: { since: $since } }
+        Block: { Time: { after: $since } }
         Transaction: { Result: { Success: true } }
       }
-      groupBy: [
-        Trade_Buy_Currency_MintAddress
-        Trade_Buy_Currency_Symbol
-        Trade_Buy_Currency_Name
-      ]
-      orderBy: { descendingByField: "tradeCount" }
+      orderBy: { descendingByField: "count" }
       limit: { count: 50 }
+      limitBy: { by: Trade_Buy_Currency_MintAddress, count: 1 }
     ) {
+      count
       Trade {
         Buy {
           Currency {
@@ -64,49 +62,49 @@ query PumpMomentum($since: ISO8601DateTime!, $minTrades: Int!) {
             Symbol
             Name
           }
-          min_price: Price(minimum: Trade_Buy_Price)
-          max_price: Price(maximum: Trade_Buy_Price)
+          Amount
         }
       }
-      tradeCount: count
-      volumeSol: sum(of: Trade_Buy_Amount)
     }
   }
 }
 `
 
-interface BitqueryTrade {
+interface EAPTrade {
+  count: number
   Trade: {
     Buy: {
       Currency: { MintAddress: string; Symbol: string; Name: string }
-      min_price: number
-      max_price: number
+      Amount: number
     }
   }
+}
+
+interface EAPResponse {
+  data?: { Solana?: { DEXTrades?: EAPTrade[] } }
+  errors?: Array<{ message: string }>
+}
+
+interface Candidate {
+  mint: string
+  symbol: string
+  name: string
   tradeCount: number
   volumeSol: number
 }
 
-interface BitqueryResponse {
-  data?: {
-    Solana?: {
-      DEXTrades?: BitqueryTrade[]
-    }
-  }
-  errors?: Array<{ message: string }>
-}
+async function fetchPumpMomentum(lookbackMinutes: number): Promise<Candidate[]> {
+  // EAP DateTime format: "2026-04-10T10:00:00Z"
+  const since = new Date(Date.now() - lookbackMinutes * 60 * 1000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/, 'Z')
 
-async function fetchPumpMomentum(lookbackMinutes: number): Promise<BitqueryTrade[]> {
-  const since = new Date(Date.now() - lookbackMinutes * 60 * 1000).toISOString()
-  const minTrades = 30
-
-  const res = await axios.post<BitqueryResponse>(
+  const res = await axios.post<EAPResponse>(
     BITQUERY_URL,
-    { query: MOMENTUM_QUERY, variables: { since, minTrades } },
+    { query: MOMENTUM_QUERY, variables: { since } },
     {
       headers: {
         'Content-Type':  'application/json',
-        // EAP endpoint requires Bearer token — X-API-KEY is legacy v1 only
         'Authorization': `Bearer ${API_KEY}`,
       },
       timeout: 15_000,
@@ -117,43 +115,51 @@ async function fetchPumpMomentum(lookbackMinutes: number): Promise<BitqueryTrade
     throw new Error(res.data.errors.map(e => e.message).join('; '))
   }
 
-  return res.data.data?.Solana?.DEXTrades ?? []
+  const trades = res.data.data?.Solana?.DEXTrades ?? []
+
+  return trades.map(t => ({
+    mint:       t.Trade.Buy.Currency.MintAddress,
+    symbol:     t.Trade.Buy.Currency.Symbol || 'UNKNOWN',
+    name:       t.Trade.Buy.Currency.Name   || '',
+    tradeCount: t.count,
+    volumeSol:  t.Trade.Buy.Amount ?? 0,
+  }))
 }
 
-async function upsertWatchlist(trades: BitqueryTrade[]): Promise<number> {
+async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
   const supabase = createServerClient()
   let added = 0
 
-  for (const t of trades) {
-    const mint   = t.Trade.Buy.Currency.MintAddress
-    const symbol = t.Trade.Buy.Currency.Symbol
-    const name   = t.Trade.Buy.Currency.Name
+  for (const c of candidates) {
+    // Skip tokens with no real symbol
+    if (!c.mint || c.symbol === 'UNKNOWN') continue
 
     const { data: existing } = await supabase
       .from('pre_grad_watchlist')
       .select('id, status')
-      .eq('mint', mint)
+      .eq('mint', c.mint)
       .maybeSingle()
 
-    if (existing && ['graduated', 'opened', 'expired'].includes(existing.status)) {
-      continue
-    }
+    if (existing && ['graduated', 'opened', 'expired'].includes(existing.status)) continue
 
     const { error } = await supabase
       .from('pre_grad_watchlist')
       .upsert({
-        mint,
-        symbol,
-        name,
-        volume_1h_usd: t.volumeSol,
-        status: 'watching',
-        detected_at: existing ? undefined : new Date().toISOString(),
+        mint:          c.mint,
+        symbol:        c.symbol,
+        name:          c.name,
+        volume_1h_usd: c.volumeSol,
+        status:        'watching',
+        detected_at:   existing ? undefined : new Date().toISOString(),
       }, { onConflict: 'mint', ignoreDuplicates: false })
 
     if (error) {
-      console.error(`[pre-grad] upsert error for ${symbol} (${mint.slice(0, 8)}):`, error.message)
+      console.error(`[pre-grad] upsert error for ${c.symbol}:`, error.message)
     } else if (!existing) {
-      console.log(`[pre-grad] WATCHLIST ADD: ${symbol} (${mint.slice(0, 8)}...) trades=${t.tradeCount} vol=${t.volumeSol.toFixed(2)} SOL`)
+      console.log(
+        `[pre-grad] WATCHLIST ADD: ${c.symbol} (${c.mint.slice(0, 8)}...)` +
+        ` trades=${c.tradeCount} vol=${c.volumeSol.toFixed(2)} SOL`
+      )
       added++
     }
   }
@@ -174,11 +180,11 @@ async function expireStale(): Promise<void> {
 async function tick(): Promise<void> {
   console.log(`[pre-grad] poll — threshold=${THRESHOLD_PCT}% window=5min`)
   try {
-    const trades = await fetchPumpMomentum(5)
-    console.log(`[pre-grad] Bitquery returned ${trades.length} active pump tokens`)
+    const candidates = await fetchPumpMomentum(5)
+    console.log(`[pre-grad] Bitquery returned ${candidates.length} active pump tokens`)
 
-    if (trades.length > 0) {
-      const added = await upsertWatchlist(trades)
+    if (candidates.length > 0) {
+      const added = await upsertWatchlist(candidates)
       console.log(`[pre-grad] ${added} new tokens added to watchlist`)
     }
 
