@@ -15,7 +15,7 @@ import type { Strategy, TokenMetrics } from '@/lib/types'
 const SUPABASE_TIMEOUT_MS = 5_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
-const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000  // default 5min
+const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
 
 const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
 
@@ -292,18 +292,18 @@ async function fetchPositionState(
 
 // ─── Standalone entrypoint (PM2) ────────────────────────────────────────────
 
+const standaloneMonitorTick = async (): Promise<void> => {
+  const label = '[lp-monitor-dlmm]'
+  try {
+    const result = await monitorPositions()
+    console.log(`${label} tick done — checked=${result.checked} closed=${result.closed} claimed=${result.claimed} rebalanced=${result.rebalanced}`)
+  } catch (err) {
+    console.error(`${label} tick error:`, err)
+  }
+}
+
 if (require.main === module || process.env.LP_MONITOR_STANDALONE === 'true') {
   const label = '[lp-monitor-dlmm]'
   console.log(`${label} starting — poll every ${MONITOR_INTERVAL_MS / 1000}s`)
-
-  async function tick() {
-    try {
-      const result = await monitorPositions()
-      console.log(`${label} tick done — checked=${result.checked} closed=${result.closed} claimed=${result.claimed} rebalanced=${result.rebalanced}`)
-    } catch (err) {
-      console.error(`${label} tick error:`, err)
-    }
-  }
-
-  tick().then(() => setInterval(tick, MONITOR_INTERVAL_MS))
+  standaloneMonitorTick().then(() => setInterval(standaloneMonitorTick, MONITOR_INTERVAL_MS))
 }
