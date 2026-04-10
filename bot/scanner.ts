@@ -35,7 +35,7 @@ const CHEAP_FILTER = {
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
-const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000  // default 15min
+const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const WSOL = 'So11111111111111111111111111111111111111112'
 const SUPABASE_TIMEOUT_MS = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
@@ -299,18 +299,18 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
 
 // ─── Standalone entrypoint (PM2) ────────────────────────────────────────────
 
+const standaloneScannerTick = async (): Promise<void> => {
+  const label = '[lp-scanner]'
+  try {
+    const result = await runScanner()
+    console.log(`${label} tick done — scanned=${result.scanned} candidates=${result.candidates} opened=${result.opened}`)
+  } catch (err) {
+    console.error(`${label} tick error:`, err)
+  }
+}
+
 if (require.main === module || process.env.LP_SCANNER_STANDALONE === 'true') {
   const label = '[lp-scanner]'
   console.log(`${label} starting — poll every ${SCAN_INTERVAL_MS / 1000}s`)
-
-  async function tick() {
-    try {
-      const result = await runScanner()
-      console.log(`${label} tick done — scanned=${result.scanned} candidates=${result.candidates} opened=${result.opened}`)
-    } catch (err) {
-      console.error(`${label} tick error:`, err)
-    }
-  }
-
-  tick().then(() => setInterval(tick, SCAN_INTERVAL_MS))
+  standaloneScannerTick().then(() => setInterval(standaloneScannerTick, SCAN_INTERVAL_MS))
 }
