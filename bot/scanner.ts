@@ -12,6 +12,7 @@ import { sendAlert } from './alerter'
 import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
 import { detectOrphanedPositions } from './orphan-detector'
+import { fetchBondingCurve, isPumpFunToken } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
@@ -155,6 +156,8 @@ export async function runScanner(): Promise<{
   let candidateCount = 0
   let openedCount    = 0
 
+  const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
+
   for (const { pool, mcUsd, ageHours } of survivors) {
     const isXSol       = pool.token_x.address === WSOL
     const token        = isXSol ? pool.token_y : pool.token_x
@@ -196,6 +199,16 @@ export async function runScanner(): Promise<{
       if (mh > holderCount) holderCount = mh
     }
 
+    // Bonding curve check for pump.fun tokens
+    let bondingCurvePct: number | null = null
+    if (isPumpFunToken(tokenAddress) && heliusRpcUrl) {
+      const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
+      bondingCurvePct = curve?.progressPct ?? null
+      if (bondingCurvePct !== null) {
+        console.log(`[pumpfun] ${symbol} bonding curve: ${bondingCurvePct.toFixed(1)}% (complete=${curve?.complete})`)
+      }
+    }
+
     const metrics: TokenMetrics = {
       address: tokenAddress, symbol, mcUsd: resolvedMc,
       volume24h: vol24h, liquidityUsd: liqUsd,
@@ -211,6 +224,8 @@ export async function runScanner(): Promise<{
     }
 
     const score = scoreCandidate(metrics)
+    const bondingInfo = bondingCurvePct !== null ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
+
     await withTimeout(
       supabase.from('candidates').insert({
         token_address: metrics.address, symbol: metrics.symbol, score,
@@ -223,7 +238,7 @@ export async function runScanner(): Promise<{
     )
 
     candidateCount++
-    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCount}, rug=${rugScore}, age=${ageHours.toFixed(1)}h)`)
+    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCount}, rug=${rugScore}, age=${ageHours.toFixed(1)}h${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h })
 
     if (score >= MIN_SCORE_TO_OPEN) {
