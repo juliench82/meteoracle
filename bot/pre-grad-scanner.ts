@@ -1,13 +1,13 @@
 /**
  * pre-grad-scanner.ts
  *
- * Polls all active pump.fun bonding curve accounts via Helius
- * getProgramAccountsV2 every 30s. Decodes each account on-chain
- * to get exact bonding progress %. No pump.fun API dependency.
+ * Polls pump.fun /coins every 30s (limit=200, sorted by last_trade_timestamp).
+ * Calculates bonding curve progress from virtual_sol_reserves — same math,
+ * no on-chain decoder, no layout breakage risk.
  *
  * Flow:
- *   getProgramAccountsV2 (pump.fun program, paginated)
- *     → decode bonding curve % from each account
+ *   GET pump.fun/coins (200 most recently traded)
+ *     → calculate progress % from virtual_sol_reserves
  *     → filter 88–98% window
  *     → checkHolders via Helius DAS
  *     → upsert pre_grad_watchlist
@@ -15,7 +15,6 @@
  * ENV VARS:
  *   HELIUS_RPC_URL            required
  *   PRE_GRAD_WATCH_WINDOW_H   watchlist TTL hours (default: 6)
- *   PRE_GRAD_MIN_HOLDERS      default 40 (raise to 80-100 once first buy confirmed)
  */
 
 import 'dotenv/config'
@@ -32,75 +31,38 @@ import { sendStartupAlert } from './startup-alert'
 const POLL_INTERVAL_MS       = 30_000
 const WATCH_HOURS            = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
 const cfg                    = PRE_GRAD_STRATEGY.scanner
-const PUMP_PROGRAM_ID        = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
 const INITIAL_VIRTUAL_SOL    = 30_000_000_000n
 const GRADUATION_VIRTUAL_SOL = 115_000_000_000n
-const PAGE_LIMIT             = 1000
 
-function decodeBondingCurve(data: Buffer): { progressPct: number; complete: boolean; mint: string } | null {
-  if (data.length < 81) return null
-  const complete = data[48] === 1
-  if (complete) return null  // already graduated, skip
-  const virtualSolReserves = data.readBigUInt64LE(16)
-  if (virtualSolReserves <= INITIAL_VIRTUAL_SOL) return { progressPct: 0, complete: false, mint: '' }
-  const num        = virtualSolReserves - INITIAL_VIRTUAL_SOL
-  const den        = GRADUATION_VIRTUAL_SOL - INITIAL_VIRTUAL_SOL
-  const progressPct = Math.min(100, Math.max(0, Number(num * 10000n / den) / 100))
-  // mint pubkey is at offset 49–80 (32 bytes)
-  const mint = Buffer.from(data.subarray(49, 81)).toString('base64')  // decoded to base58 below
-  return { progressPct, complete: false, mint }
+const PUMP_COINS_URL =
+  'https://frontend-api-v3.pump.fun/coins?offset=0&limit=200&sort=last_trade_timestamp&order=desc&includeNsfw=false'
+
+function calculateProgress(virtualSolReserves: number): number {
+  if (!virtualSolReserves) return 0
+  const num = BigInt(virtualSolReserves) - INITIAL_VIRTUAL_SOL
+  const den = GRADUATION_VIRTUAL_SOL - INITIAL_VIRTUAL_SOL
+  if (num <= 0n) return 0
+  return Math.min(100, Math.max(0, Number(num * 10000n / den) / 100))
 }
 
-async function fetchAllBondingCurves(): Promise<Array<{ mint: string; progressPct: number }>> {
-  const rpcUrl = process.env.HELIUS_RPC_URL
-  if (!rpcUrl) throw new Error('HELIUS_RPC_URL not set')
-
-  const { PublicKey } = await import('@solana/web3.js')
-  const results: Array<{ mint: string; progressPct: number }> = []
-  let cursor: string | undefined
-  let page = 0
-
-  while (true) {
-    page++
-    const params: Record<string, unknown> = {
-      programId: PUMP_PROGRAM_ID,
-      limit:     PAGE_LIMIT,
-      encoding:  'base64',
-      filters:   [{ dataSize: 165 }],  // pump.fun BondingCurve account size
-    }
-    if (cursor) params.cursor = cursor
-
-    const resp = await axios.post(
-      rpcUrl,
-      { jsonrpc: '2.0', id: page, method: 'getProgramAccountsV2', params: [PUMP_PROGRAM_ID, params] },
-      { timeout: 30_000 }
-    )
-
-    const accounts: Array<{ pubkey: string; account: { data: [string, string] } }> =
-      resp.data?.result?.accounts ?? resp.data?.result ?? []
-
-    console.log(`[pre-grad] page ${page}: ${accounts.length} accounts fetched (total so far: ${results.length + accounts.length})`)
-
-    for (const acc of accounts) {
-      try {
-        const buf     = Buffer.from(acc.account.data[0], 'base64')
-        const decoded = decodeBondingCurve(buf)
-        if (!decoded || decoded.progressPct === 0) continue
-
-        // Extract mint pubkey from account data bytes 49-80
-        const mintBytes = buf.subarray(49, 81)
-        const mint      = new PublicKey(mintBytes).toString()
-        results.push({ mint, progressPct: decoded.progressPct })
-      } catch {
-        // skip malformed accounts
-      }
-    }
-
-    cursor = resp.data?.result?.cursor
-    if (!cursor || accounts.length < PAGE_LIMIT) break
+async function fetchCandidates(): Promise<Array<{ mint: string; progressPct: number }>> {
+  try {
+    const { data } = await axios.get<any[]>(PUMP_COINS_URL, {
+      timeout: 10_000,
+      headers: { 'User-Agent': 'meteoracle-scanner/1.0' },
+    })
+    if (!Array.isArray(data)) return []
+    return data
+      .filter((c: any) => !c.complete)
+      .map((c: any) => ({
+        mint:        c.mint as string,
+        progressPct: calculateProgress(c.virtual_sol_reserves),
+      }))
+      .filter(c => c.progressPct >= cfg.minBondingProgress && c.progressPct <= cfg.maxBondingProgress)
+  } catch (err) {
+    console.warn('[pre-grad] pump.fun fetch failed:', err instanceof Error ? err.message : err)
+    return []
   }
-
-  return results
 }
 
 async function processCandidate(mint: string, progressPct: number): Promise<void> {
@@ -180,30 +142,17 @@ async function expireStale(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
-  console.log(`[pre-grad] poll via getProgramAccountsV2 curve=${cfg.minBondingProgress}-${cfg.maxBondingProgress}% holders>=${cfg.minHolders} topHolder<=${cfg.maxTopHolderPct}%`)
-  let curves: Array<{ mint: string; progressPct: number }> = []
-  try {
-    curves = await fetchAllBondingCurves()
-  } catch (err) {
-    console.error('[pre-grad] fetchAllBondingCurves error:', err instanceof Error ? err.message : err)
-    return
-  }
+  console.log(`[pre-grad] poll pump.fun REST curve=${cfg.minBondingProgress}-${cfg.maxBondingProgress}% holders>=${cfg.minHolders} topHolder<=${cfg.maxTopHolderPct}%`)
 
-  console.log(`[pre-grad] ${curves.length} active bonding curves total`)
+  const candidates = await fetchCandidates()
+  console.log(`[pre-grad] ${candidates.length} candidates in window`)
 
-  const candidates = curves.filter(
-    c => c.progressPct >= cfg.minBondingProgress && c.progressPct <= cfg.maxBondingProgress
-  )
-  console.log(`[pre-grad] ${candidates.length} in window (${cfg.minBondingProgress}-${cfg.maxBondingProgress}%)`)
-
-  let added = 0
   for (const { mint, progressPct } of candidates) {
-    console.log(`[pre-grad] ${mint.slice(0,8)}... curve=${progressPct.toFixed(1)}% IN WINDOW — checking holders`)
+    console.log(`[pre-grad] ${mint.slice(0, 8)}... curve=${progressPct.toFixed(1)}% IN WINDOW — checking holders`)
     await processCandidate(mint, progressPct)
-    added++
   }
 
-  console.log(`[pre-grad] tick done total=${curves.length} in-window=${candidates.length} added=${added}`)
+  console.log(`[pre-grad] tick done in-window=${candidates.length}`)
 }
 
 export async function runPreGradScanner(): Promise<string> {
@@ -220,7 +169,7 @@ export async function runPreGradScanner(): Promise<string> {
 
 async function main(): Promise<void> {
   await sendStartupAlert('pre-grad-scanner')
-  console.log(`[pre-grad] starting REST poll scanner — every ${POLL_INTERVAL_MS / 1000}s, window ${cfg.minBondingProgress}-${cfg.maxBondingProgress}% minHolders=${cfg.minHolders}`)
+  console.log(`[pre-grad] starting — every ${POLL_INTERVAL_MS / 1000}s, window ${cfg.minBondingProgress}-${cfg.maxBondingProgress}% minHolders=${cfg.minHolders}`)
   await expireStale()
   setInterval(expireStale, 3_600_000)
   await tick()
