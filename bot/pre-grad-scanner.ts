@@ -32,7 +32,7 @@ import { checkHolders } from '@/lib/helius'
 import { sendStartupAlert } from './startup-alert'
 
 const PUMP_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
-const BONDING_CURVE_SIZE = 81
+const BONDING_CURVE_SIZE = 83
 const INITIAL_VIRTUAL_SOL    = 30_000_000_000
 const GRADUATION_VIRTUAL_SOL = 115_000_000_000
 const PAGE_SIZE = 1000
