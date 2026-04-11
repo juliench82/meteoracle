@@ -8,10 +8,6 @@
  *   - holder_count      (≥ 100)
  *   - top_holder_pct    (≤ 12%)
  *
- * Velocity tracking: stores first_seen_at + bonding_pct_at_first_seen
- * to derive curve progress rate (pct/min) across polls.
- * Filters out tokens that crawled to 88% over many hours.
- *
  * No API key required. Uses pump.fun public frontend API.
  *
  * OPTIONAL ENV VARS:
@@ -34,6 +30,15 @@ const POLL_SEC    = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S ?? '60')
 const WATCH_HOURS = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
 const MIN_MCAP    = parseFloat(process.env.PRE_GRAD_MIN_MCAP ?? '50000')
 const cfg         = PRE_GRAD_STRATEGY.scanner
+
+// Mimic a real browser to avoid Cloudflare blocking datacenter IPs
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Referer': 'https://pump.fun/',
+  'Origin': 'https://pump.fun',
+}
 
 interface PumpListItem {
   mint:                  string
@@ -71,11 +76,6 @@ function getDevWalletPct(coin: PumpListItem): number {
   return 0
 }
 
-/**
- * Fetches active pump.fun tokens directly from the pump.fun frontend API.
- * Sorted by last trade timestamp — most recently active first.
- * Filters to tokens with usd_market_cap >= MIN_MCAP that are not yet complete.
- */
 async function fetchActivePumpTokens(): Promise<Candidate[]> {
   const res = await axios.get<PumpListItem[]>(PUMP_API, {
     params: {
@@ -84,6 +84,7 @@ async function fetchActivePumpTokens(): Promise<Candidate[]> {
       order:       'DESC',
       includeNsfw: false,
     },
+    headers: BROWSER_HEADERS,
     timeout: 15_000,
   })
 
@@ -100,13 +101,16 @@ async function fetchActivePumpTokens(): Promise<Candidate[]> {
       symbol:    item.symbol ?? '',
       name:      item.name ?? '',
       marketCap: item.usd_market_cap ?? item.market_cap ?? 0,
-      volumeUsd: 0, // pump.fun list endpoint doesn't include volume — enriched below
+      volumeUsd: 0,
     }))
 }
 
 async function fetchPumpCoin(mint: string): Promise<PumpListItem | null> {
   try {
-    const res = await axios.get<PumpListItem>(`${PUMP_API}/${mint}`, { timeout: 6_000 })
+    const res = await axios.get<PumpListItem>(`${PUMP_API}/${mint}`, {
+      headers: BROWSER_HEADERS,
+      timeout: 6_000,
+    })
     return res.data ?? null
   } catch {
     return null
