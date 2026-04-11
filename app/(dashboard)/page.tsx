@@ -50,7 +50,7 @@ export default async function DashboardPage() {
     tp_pct:          0,
     sl_pct:          0,
     status:          'open',
-    dry_run:         (p.metadata?.sig === 'dry-run-sig') ?? false,
+    dry_run:         p.metadata?.sig === 'dry-run-sig',
     opened_at:       p.opened_at,
     closed_at:       p.closed_at ?? null,
     pnl_sol:         p.pnl_sol   ?? null,
