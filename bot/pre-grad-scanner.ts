@@ -2,20 +2,10 @@
  * pre-grad-scanner.ts
  *
  * Event-driven pre-graduation scanner using Helius logsSubscribe WebSocket.
- * Streams every pump.fun program transaction in real time, extracts the mint
- * from each log, then reads that token's bonding curve progress via a single
- * Helius getAccountInfo call. No pump.fun API. No polling of 500k accounts.
- *
- * Flow:
- *   WSS logsSubscribe (pump.fun program)
- *     → deduplicate mint (seen cache, 5min TTL)
- *     → getAccountInfo on bonding curve PDA → decode progress %
- *     → filter: 88–98% progress, holders ≥ 100, topHolder ≤ 12%
- *     → upsert pre_grad_watchlist
+ * Derives the WSS URL from the existing HELIUS_RPC_URL (https → wss).
  *
  * ENV VARS:
- *   HELIUS_RPC_URL      required  (https://mainnet.helius-rpc.com/?api-key=...)
- *   HELIUS_WSS_URL      required  (wss://mainnet.helius-rpc.com/?api-key=...)
+ *   HELIUS_RPC_URL            required
  *   PRE_GRAD_WATCH_WINDOW_H   watchlist TTL hours (default: 6)
  */
 
@@ -38,6 +28,11 @@ const SEEN_CACHE_TTL_MS      = 5 * 60 * 1_000
 const RECONNECT_DELAY_MS     = 5_000
 const WATCH_HOURS            = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
 const cfg                    = PRE_GRAD_STRATEGY.scanner
+
+/** https://mainnet.helius-rpc.com/?api-key=X → wss://mainnet.helius-rpc.com/?api-key=X */
+function toWssUrl(httpUrl: string): string {
+  return httpUrl.replace(/^https?:\/\//, 'wss://')
+}
 
 function decodeBondingCurve(data: Buffer): { progressPct: number; complete: boolean } | null {
   if (data.length < 49) return null
@@ -205,11 +200,12 @@ export async function runPreGradScanner(): Promise<string> {
 
 async function main(): Promise<void> {
   await sendStartupAlert('pre-grad-scanner')
-  const wssUrl = process.env.HELIUS_WSS_URL
-  if (!wssUrl) {
-    console.error('[pre-grad] HELIUS_WSS_URL not set — add to .env.local')
+  const rpcUrl = process.env.HELIUS_RPC_URL
+  if (!rpcUrl) {
+    console.error('[pre-grad] HELIUS_RPC_URL not set')
     process.exit(1)
   }
+  const wssUrl = toWssUrl(rpcUrl)
   console.log(`[pre-grad] starting WSS scanner — window ${cfg.minBondingProgress}-${cfg.maxBondingProgress}% holders>=${cfg.minHolders} topHolder<=${cfg.maxTopHolderPct}%`)
   await expireStale()
   setInterval(expireStale, 3_600_000)
