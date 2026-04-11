@@ -200,11 +200,11 @@ export async function runScanner(): Promise<{
     }
 
     // Bonding curve check for pump.fun tokens
-    let bondingCurvePct: number | null = null
+    let bondingCurvePct: number | undefined = undefined
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl) {
       const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
-      bondingCurvePct = curve?.progressPct ?? null
-      if (bondingCurvePct !== null) {
+      bondingCurvePct = curve?.progressPct ?? undefined
+      if (bondingCurvePct !== undefined) {
         console.log(`[pumpfun] ${symbol} bonding curve: ${bondingCurvePct.toFixed(1)}% (complete=${curve?.complete})`)
       }
     }
@@ -215,6 +215,7 @@ export async function runScanner(): Promise<{
       topHolderPct, holderCount, ageHours,
       rugcheckScore: rugScore, priceUsd: token.price,
       poolAddress: pool.address, dexId: 'meteora',
+      bondingCurvePct,
     }
 
     const strategy = getStrategyForToken(metrics)
@@ -224,7 +225,7 @@ export async function runScanner(): Promise<{
     }
 
     const score = scoreCandidate(metrics)
-    const bondingInfo = bondingCurvePct !== null ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
+    const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
     await withTimeout(
       supabase.from('candidates').insert({
