@@ -7,7 +7,7 @@ type AlertPayload =
   | { type: 'position_opened'; symbol: string; strategy: string; solDeposited: number; entryPrice: number; positionId: string }
   | { type: 'position_closed'; symbol: string; strategy: string; reason: string; feesEarnedSol: number; ilPct: number; ageHours: number }
   | { type: 'position_oor'; symbol: string; strategy: string; currentPrice: number; binRangeLower: number; binRangeUpper: number; oorExitMinutes: number }
-  | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number }
+  | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string }
   | { type: 'error'; message: string }
 
@@ -58,15 +58,19 @@ function formatMessage(payload: AlertPayload): string {
         `Will close in: ${payload.oorExitMinutes}min if not recovered`,
       ].join('\n')
 
-    case 'candidate_found':
+    case 'candidate_found': {
+      const curveLine = payload.bondingCurvePct !== undefined
+        ? `\nCurve: ${payload.bondingCurvePct.toFixed(1)}% ${bondingCurveEmoji(payload.bondingCurvePct)}`
+        : ''
       return [
         `🔍 *New Candidate*`,
         `Token: \`${payload.symbol}\``,
         `Strategy: ${payload.strategy}`,
         `Score: ${payload.score}/100`,
         `MC: $${formatNum(payload.mcUsd)}`,
-        `Vol 24h: $${formatNum(payload.volume24h)}`,
+        `Vol 24h: $${formatNum(payload.volume24h)}${curveLine}`,
       ].join('\n')
+    }
 
     case 'orphan_detected':
       return [
@@ -83,6 +87,14 @@ function formatMessage(payload: AlertPayload): string {
     default:
       return `🤖 Meteoracle event`
   }
+}
+
+function bondingCurveEmoji(pct: number): string {
+  if (pct >= 95) return '🔴 graduating'
+  if (pct >= 70) return '🟡 hot'
+  if (pct >= 40) return '🟢 filling'
+  if (pct === 100) return '✅ graduated'
+  return '⚪ early'
 }
 
 async function sendTelegram(text: string): Promise<void> {
