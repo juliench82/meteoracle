@@ -1,22 +1,23 @@
 /**
  * pre-grad-scanner.ts
  *
- * Finds pump.fun tokens approaching graduation WITHOUT calling pump.fun API.
+ * Scans ALL active pump.fun bonding curves on-chain via Helius getProgramAccounts.
+ * No pump.fun API. No Meteora. Pure on-chain.
  *
- * Data sources (all free, no Cloudflare):
- *   1. Meteora datapi — fetches all pools sorted by volume, filters in JS to
- *      pump.fun mints (address ends in "pump") created in the last 48h.
- *   2. Helius RPC — reads bonding curve PDA on-chain to get fill %.
- *   3. Helius DAS — holder count + top holder %.
- *
- * Strategy: watch tokens in the 70–99% bonding curve fill window.
- * Once complete (graduated), lp-migrator picks them up.
+ * BondingCurve account layout (Anchor, 8-byte discriminator):
+ *   0-7:   discriminator
+ *   8-15:  virtualTokenReserves  u64 LE
+ *  16-23:  virtualSolReserves    u64 LE
+ *  24-31:  realTokenReserves     u64 LE
+ *  32-39:  realSolReserves       u64 LE
+ *  40-47:  tokenTotalSupply      u64 LE
+ *  48:     complete              bool
+ *  49-80:  mint                  Pubkey (32 bytes)
  *
  * ENV VARS:
- *   PRE_GRAD_POLL_INTERVAL_S  — poll interval seconds (default: 60)
- *   PRE_GRAD_WATCH_WINDOW_H   — watchlist TTL hours (default: 6)
- *   PRE_GRAD_MIN_MCAP         — min market cap USD (default: 50000)
- *   HELIUS_RPC_URL            — required
+ *   PRE_GRAD_POLL_INTERVAL_S  poll interval seconds (default: 60)
+ *   PRE_GRAD_WATCH_WINDOW_H   watchlist TTL hours (default: 6)
+ *   HELIUS_RPC_URL            required
  */
 
 import 'dotenv/config'
@@ -27,156 +28,152 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
-import { fetchBondingCurve } from '@/lib/pumpfun'
 import { checkHolders } from '@/lib/helius'
 import { sendStartupAlert } from './startup-alert'
 
-const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
-const METEORA_DLMM   = 'https://dlmm-api.meteora.ag'
-const WSOL           = 'So11111111111111111111111111111111111111112'
-const POLL_SEC       = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S ?? '60')
-const WATCH_HOURS    = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
-const MIN_MCAP       = parseFloat(process.env.PRE_GRAD_MIN_MCAP ?? '50000')
-const MAX_AGE_HOURS  = 48
-const cfg            = PRE_GRAD_STRATEGY.scanner
+const PUMP_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
+const BONDING_CURVE_SIZE = 81
+const INITIAL_VIRTUAL_SOL    = 30_000_000_000
+const GRADUATION_VIRTUAL_SOL = 115_000_000_000
 
-interface MeteoraPool {
-  address:        string
-  name:           string
-  created_at:     number
-  tvl:            number
-  volume:         { '24h': number }
-  token_x:        { address: string; symbol: string; market_cap: number; price: number; holders: number }
-  token_y:        { address: string; symbol: string; market_cap: number; price: number; holders: number }
-  is_blacklisted: boolean
+const POLL_SEC    = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S ?? '60')
+const WATCH_HOURS = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
+const cfg         = PRE_GRAD_STRATEGY.scanner
+
+interface DecodedCurve {
+  bondingCurveAddress: string
+  mintAddress: string
+  progressPct: number
 }
 
-interface PoolsResponse {
-  data: MeteoraPool[]
-}
-
-function toUnixSeconds(ts: number): number {
-  return ts > 1e10 ? ts / 1000 : ts
-}
-
-function isPumpMint(address: string): boolean {
-  return address.endsWith('pump')
-}
-
-/**
- * Fetch Meteora pools and filter in JS to pump.fun mints created within MAX_AGE_HOURS.
- * Uses same sort_by param that scanner.ts uses (volume_24h:desc) — created_at:desc returns 400.
- */
-async function fetchRecentPumpPools(): Promise<MeteoraPool[]> {
-  const nowSec    = Date.now() / 1000
-  const maxAgeSec = MAX_AGE_HOURS * 3600
-
-  let allPools: MeteoraPool[] = []
-
-  for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
-    try {
-      const res = await axios.get<PoolsResponse>(`${endpoint}/pools`, {
-        params: { page: 1, page_size: 1000, sort_by: 'volume_24h:desc' },
-        timeout: 20_000,
-      })
-      allPools = res.data?.data ?? []
-      if (allPools.length > 0) {
-        console.log(`[pre-grad] Meteora ${endpoint} returned ${allPools.length} pools`)
-        break
-      }
-    } catch (err) {
-      const status  = (err as { response?: { status?: number } })?.response?.status
-      const message = err instanceof Error ? err.message : String(err)
-      console.warn(`[pre-grad] Meteora ${endpoint} failed: ${status ? `HTTP ${status}: ` : ''}${message}`)
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+function bs58Encode(bytes: Uint8Array): string {
+  const digits: number[] = [0]
+  for (let i = 0; i < bytes.length; i++) {
+    let carry = bytes[i]
+    for (let j = 0; j < digits.length; j++) {
+      carry += digits[j] << 8
+      digits[j] = carry % 58
+      carry = Math.floor(carry / 58)
     }
+    while (carry > 0) { digits.push(carry % 58); carry = Math.floor(carry / 58) }
+  }
+  let result = ''
+  for (let i = 0; i < bytes.length && bytes[i] === 0; i++) result += '1'
+  for (let i = digits.length - 1; i >= 0; i--) result += BASE58[digits[i]]
+  return result
+}
+
+function decodeAccount(pubkey: string, data: Buffer): DecodedCurve | null {
+  if (data.length < BONDING_CURVE_SIZE) return null
+  const complete = data[48] === 1
+  if (complete) return null
+
+  const virtualSolReserves = data.readBigUInt64LE(16)
+  const mintBytes = data.slice(49, 81)
+  if (mintBytes.length < 32) return null
+
+  let mintAddress: string
+  try { mintAddress = bs58Encode(mintBytes) } catch { return null }
+
+  let progressPct: number
+  if (virtualSolReserves > BigInt(INITIAL_VIRTUAL_SOL)) {
+    const num = Number(virtualSolReserves) - INITIAL_VIRTUAL_SOL
+    const den = GRADUATION_VIRTUAL_SOL - INITIAL_VIRTUAL_SOL
+    progressPct = Math.min(100, Math.max(0, (num / den) * 100))
+  } else {
+    progressPct = 0
   }
 
-  return allPools.filter(p => {
-    if (p.is_blacklisted) return false
-    if (!p.created_at || p.created_at === 0) return false
-    if ((nowSec - toUnixSeconds(p.created_at)) > maxAgeSec) return false
-    const hasSol = p.token_x.address === WSOL || p.token_y.address === WSOL
-    if (!hasSol) return false
-    const token = p.token_x.address === WSOL ? p.token_y : p.token_x
-    if (!isPumpMint(token.address)) return false
-    const mc = token.market_cap ?? 0
-    if (mc > 0 && mc < MIN_MCAP) return false
-    return true
-  })
+  return { bondingCurveAddress: pubkey, mintAddress, progressPct }
+}
+
+async function fetchActiveBondingCurves(heliusRpcUrl: string): Promise<DecodedCurve[]> {
+  const resp = await axios.post(
+    heliusRpcUrl,
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'getProgramAccounts',
+      params: [
+        PUMP_PROGRAM_ID,
+        {
+          encoding: 'base64',
+          filters: [
+            { dataSize: BONDING_CURVE_SIZE },
+            // complete=false: byte 48 must be 0x00
+            { memcmp: { offset: 48, bytes: bs58Encode(new Uint8Array([0])) } },
+          ],
+        },
+      ],
+    },
+    { timeout: 30_000 }
+  )
+
+  const accounts: Array<{ pubkey: string; account: { data: [string, string] } }> =
+    resp.data?.result ?? []
+
+  const curves: DecodedCurve[] = []
+  for (const { pubkey, account } of accounts) {
+    const raw = Buffer.from(account.data[0], 'base64')
+    const decoded = decodeAccount(pubkey, raw)
+    if (decoded) curves.push(decoded)
+  }
+  return curves
 }
 
 async function tick(): Promise<void> {
   const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
   if (!heliusRpcUrl) {
-    console.error('[pre-grad] HELIUS_RPC_URL not set — aborting tick')
+    console.error('[pre-grad] HELIUS_RPC_URL not set')
     return
   }
 
   console.log(
-    `[pre-grad] poll — minMcap=$${MIN_MCAP.toLocaleString()}` +
+    `[pre-grad] poll via getProgramAccounts` +
     ` curve=${cfg.minBondingProgress}-${cfg.maxBondingProgress}%` +
-    ` holders≥${cfg.minHolders} dev≤${cfg.maxDevWalletPct}%`
+    ` holders>=${cfg.minHolders} topHolder<=${cfg.maxTopHolderPct}%`
   )
 
-  let pools: MeteoraPool[]
+  let allCurves: DecodedCurve[]
   try {
-    pools = await fetchRecentPumpPools()
+    allCurves = await fetchActiveBondingCurves(heliusRpcUrl)
   } catch (err) {
-    console.error('[pre-grad] Meteora fetch failed:', err instanceof Error ? err.message : String(err))
+    console.error('[pre-grad] getProgramAccounts failed:', err instanceof Error ? err.message : String(err))
     return
   }
-  console.log(`[pre-grad] ${pools.length} recent pump.fun Meteora pools`)
+  console.log(`[pre-grad] ${allCurves.length} active bonding curves`)
+
+  const inWindow = allCurves.filter(
+    c => c.progressPct >= cfg.minBondingProgress && c.progressPct <= cfg.maxBondingProgress
+  )
+  console.log(`[pre-grad] ${inWindow.length} in window (${cfg.minBondingProgress}-${cfg.maxBondingProgress}%)`)
 
   const supabase = createServerClient()
   let added = 0
 
-  for (const pool of pools) {
-    const token  = pool.token_x.address === WSOL ? pool.token_y : pool.token_x
-    const mint   = token.address
-    const symbol = token.symbol ?? pool.name
+  for (const curve of inWindow) {
+    const mint   = curve.mintAddress
+    const symbol = mint.slice(0, 8)
 
-    // --- bonding curve via Helius RPC (no pump.fun API) ---
-    const curve = await fetchBondingCurve(mint, heliusRpcUrl)
-
-    if (!curve) {
-      console.log(`[pre-grad] ${symbol} — skip: bonding curve unreadable`)
-      continue
-    }
-
-    const bondingPct = curve.progressPct
-
-    if (curve.complete) {
-      console.log(`[pre-grad] ${symbol} — skip: fully graduated (curve=100%)`)
-      continue
-    }
-
-    if (bondingPct < cfg.minBondingProgress) {
-      console.log(`[pre-grad] ${symbol} — skip: curve ${bondingPct.toFixed(1)}% < ${cfg.minBondingProgress}%`)
-      continue
-    }
-    if (bondingPct > cfg.maxBondingProgress) {
-      console.log(`[pre-grad] ${symbol} — skip: curve ${bondingPct.toFixed(1)}% > ${cfg.maxBondingProgress}%`)
-      continue
-    }
-
-    // --- holder data via Helius DAS (no pump.fun API) ---
     const holderData   = await checkHolders(mint)
     const holderCount  = holderData.holderCount
     const topHolderPct = holderData.topHolderPct
 
     if (holderCount > 0 && holderCount < cfg.minHolders) {
-      console.log(`[pre-grad] ${symbol} — skip: holders ${holderCount} < ${cfg.minHolders}`)
+      console.log(`[pre-grad] ${symbol}... skip: holders ${holderCount} < ${cfg.minHolders}`)
       continue
     }
     if (topHolderPct > 0 && topHolderPct > cfg.maxTopHolderPct) {
-      console.log(`[pre-grad] ${symbol} — skip: top holder ${topHolderPct.toFixed(1)}% > ${cfg.maxTopHolderPct}%`)
+      console.log(`[pre-grad] ${symbol}... skip: topHolder ${topHolderPct.toFixed(1)}% > ${cfg.maxTopHolderPct}%`)
       continue
     }
 
-    // --- dedup + velocity ---
+    const bondingPct = curve.progressPct
+
     const { data: existing } = await supabase
       .from('pre_grad_watchlist')
-      .select('id, status, first_seen_at, bonding_pct_at_first_seen, bonding_curve_pct')
+      .select('id, status, first_seen_at, bonding_pct_at_first_seen')
       .eq('mint', mint)
       .maybeSingle()
 
@@ -191,7 +188,7 @@ async function tick(): Promise<void> {
       velocitySolPerMin = elapsedMin > 0 ? pctGained / elapsedMin : 0
 
       if (cfg.minVelocitySolPerMin > 0 && velocitySolPerMin < cfg.minVelocitySolPerMin) {
-        console.log(`[pre-grad] ${symbol} — skip: velocity ${velocitySolPerMin.toFixed(3)} pct/min < ${cfg.minVelocitySolPerMin}`)
+        console.log(`[pre-grad] ${symbol}... skip: velocity ${velocitySolPerMin.toFixed(3)} pct/min < ${cfg.minVelocitySolPerMin}`)
         continue
       }
     }
@@ -199,14 +196,14 @@ async function tick(): Promise<void> {
     const upsertData: Record<string, unknown> = {
       mint,
       symbol,
-      name:                  pool.name,
-      volume_1h_usd:         pool.volume['24h'],
-      status:                'watching',
-      bonding_curve_pct:     bondingPct,
-      holder_count:          holderCount,
-      top_holder_pct:        topHolderPct,
-      dev_wallet_pct:        0,
-      velocity_pct_per_min:  velocitySolPerMin,
+      name:                 symbol,
+      volume_1h_usd:        0,
+      status:               'watching',
+      bonding_curve_pct:    bondingPct,
+      holder_count:         holderCount,
+      top_holder_pct:       topHolderPct,
+      dev_wallet_pct:       0,
+      velocity_pct_per_min: velocitySolPerMin,
     }
 
     if (!existing) {
@@ -223,20 +220,15 @@ async function tick(): Promise<void> {
       console.error(`[pre-grad] upsert error for ${symbol}:`, error.message)
     } else if (!existing) {
       console.log(
-        `[pre-grad] WATCHLIST ADD: ${symbol} (${mint.slice(0, 8)}...)` +
-        ` curve=${bondingPct.toFixed(1)}% holders=${holderCount} topHolder=${topHolderPct.toFixed(1)}%` +
-        ` mcap=$${Math.round(token.market_cap ?? 0).toLocaleString()}`
+        `[pre-grad] WATCHLIST ADD: ${symbol}... (${mint})` +
+        ` curve=${bondingPct.toFixed(1)}% holders=${holderCount} topHolder=${topHolderPct.toFixed(1)}%`
       )
       added++
     } else {
-      console.log(
-        `[pre-grad] UPDATE: ${symbol} curve=${bondingPct.toFixed(1)}%` +
-        ` velocity=${velocitySolPerMin.toFixed(3)} pct/min`
-      )
+      console.log(`[pre-grad] UPDATE: ${symbol}... curve=${bondingPct.toFixed(1)}% vel=${velocitySolPerMin.toFixed(3)}/min`)
     }
   }
 
-  // Expire stale watchlist entries
   const cutoff = new Date(Date.now() - WATCH_HOURS * 3_600_000).toISOString()
   await supabase
     .from('pre_grad_watchlist')
@@ -244,23 +236,23 @@ async function tick(): Promise<void> {
     .eq('status', 'watching')
     .lt('detected_at', cutoff)
 
-  console.log(`[pre-grad] tick done — ${pools.length} pump pools checked, ${added} new watchlist entries`)
+  console.log(`[pre-grad] tick done total=${allCurves.length} in-window=${inWindow.length} added=${added}`)
 }
 
 export async function runPreGradScanner(): Promise<string> {
   try {
     const before = Date.now()
     await tick()
-    return `✅ pre-grad-scanner (${Date.now() - before}ms)`
+    return `ok pre-grad-scanner (${Date.now() - before}ms)`
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return `❌ pre-grad-scanner: ${msg}`
+    return `err pre-grad-scanner: ${msg}`
   }
 }
 
 async function main(): Promise<void> {
   await sendStartupAlert('pre-grad-scanner')
-  console.log(`[pre-grad] starting — poll every ${POLL_SEC}s, watch window ${WATCH_HOURS}h`)
+  console.log(`[pre-grad] starting poll every ${POLL_SEC}s, watch window ${WATCH_HOURS}h`)
   await tick()
   setInterval(tick, POLL_SEC * 1_000)
 }
