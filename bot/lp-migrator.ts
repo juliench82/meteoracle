@@ -35,6 +35,7 @@ import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { sendTelegram } from './telegram'
+import { sendStartupAlert } from './startup-alert'
 import { POST_GRAD_LP_STRATEGY } from '../strategies/post-grad-lp'
 
 const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
@@ -66,14 +67,12 @@ async function fetchPumpToken(mint: string): Promise<PumpToken | null> {
 
 async function findMeteoraPool(mint: string): Promise<string | null> {
   try {
-    // Meteora's public pool search API — returns pools that include this token
     const res = await axios.get('https://dlmm-api.meteora.ag/pair/all_with_pagination', {
       params: { token: mint, limit: 5, sort_key: 'tvl', order_by: 'desc' },
       timeout: 10_000,
     })
     const pairs = res.data?.data ?? res.data?.pairs ?? []
     if (pairs.length === 0) return null
-    // Prefer SOL pair
     const solPair = pairs.find((p: any) =>
       p.mint_x === mint && p.mint_y === 'So11111111111111111111111111111111111111112' ||
       p.mint_y === mint && p.mint_x === 'So11111111111111111111111111111111111111112'
@@ -163,7 +162,6 @@ async function openLpPosition(
     const maxBinId   = activeBinId + cfg.lp.binsUp
     console.log(`${label} bin range ${minBinId}→${maxBinId} (step=${binStep})`)
 
-    // Determine which side is the token vs SOL
     const mintX      = dlmmPool.tokenX.publicKey.toBase58()
     const WSOL       = 'So11111111111111111111111111111111111111112'
     const tokenIsX   = mintX === mint
@@ -172,7 +170,6 @@ async function openLpPosition(
     const totalX     = tokenIsX ? rawTokenUnits : new BN(0)
     const totalY     = tokenIsX ? new BN(0)      : rawTokenUnits
 
-    // Ensure token ATA exists
     const tokenProgram = await (async () => {
       const info = await connection.getAccountInfo(new PublicKey(mint))
       return info?.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID
@@ -233,7 +230,6 @@ async function openLpPosition(
     }
     console.log(`${label} LP opened ✔ sig: ${lastSig}`)
 
-    // Current price for entry_price_usd
     let entryPriceUsd = 0
     try {
       const priceRes = await axios.get('https://api.jup.ag/price/v2', { params: { ids: mint }, timeout: 8_000 })
@@ -273,6 +269,7 @@ async function openLpPosition(
       payload: { spotPositionId, mint, symbol, error: msg },
     })
     await sendTelegram(`❌ LP OPEN FAILED ${symbol}\n${msg}`)
+    throw err  // re-throw so tick() can count failures
   }
 }
 
@@ -280,6 +277,7 @@ async function openLpPosition(
 
 async function tick(): Promise<void> {
   const supabase = createServerClient()
+  const stats = { openChecked: 0, newGrads: 0, toMigrate: 0, migrated: 0, skipped: 0, failed: 0 }
 
   // 1. Check open spot positions for new graduations
   const { data: openSpots } = await supabase
@@ -288,10 +286,13 @@ async function tick(): Promise<void> {
     .eq('status', 'open')
     .eq('graduated', false)
 
+  stats.openChecked = (openSpots ?? []).length
+
   for (const spot of (openSpots ?? [])) {
     const token = await fetchPumpToken(spot.mint)
     if (!token?.complete) continue
 
+    stats.newGrads++
     console.log(`[lp-migrator] 🎓 ${spot.symbol} graduated! marking + queuing LP migration`)
     await supabase.from('spot_positions').update({
       graduated:    true,
@@ -306,12 +307,15 @@ async function tick(): Promise<void> {
     .select('id, mint, symbol, token_amount, dry_run')
     .eq('graduated',   true)
     .eq('lp_migrated', false)
-    .in('status', ['open', 'closed_tp', 'closed_sl'])  // migrate even if spot already exited
+    .in('status', ['open', 'closed_tp', 'closed_sl'])
+
+  stats.toMigrate = (toMigrate ?? []).length
 
   for (const spot of (toMigrate ?? [])) {
     if (!spot.token_amount || spot.token_amount <= 0) {
       console.warn(`[lp-migrator] [${spot.symbol}] token_amount=0 — skipping LP`)
       await supabase.from('spot_positions').update({ lp_migrated: true }).eq('id', spot.id)
+      stats.skipped++
       continue
     }
 
@@ -324,23 +328,45 @@ async function tick(): Promise<void> {
         payload: { mint: spot.mint, symbol: spot.symbol },
       })
       await sendTelegram(`⚠️ No Meteora pool found for ${spot.symbol} after ${cfg.poolSearchTimeoutMin}min — skipping LP`)
-      await supabase.from('spot_positions').update({ lp_migrated: true }).eq('id', spot.id)  // don't retry forever
+      await supabase.from('spot_positions').update({ lp_migrated: true }).eq('id', spot.id)
+      stats.skipped++
       continue
     }
 
-    await openLpPosition(
-      spot.id,
-      spot.mint,
-      spot.symbol,
-      spot.token_amount,
-      6,  // pump.fun tokens are always 6 decimals
-      poolAddress,
-      DRY_RUN || spot.dry_run,
-    )
+    try {
+      await openLpPosition(
+        spot.id,
+        spot.mint,
+        spot.symbol,
+        spot.token_amount,
+        6,  // pump.fun tokens are always 6 decimals
+        poolAddress,
+        DRY_RUN || spot.dry_run,
+      )
+      stats.migrated++
+    } catch {
+      stats.failed++
+    }
+  }
+
+  // ── Tick summary (always fires — no more silent runs) ──
+  const summary =
+    `📋 *lp-migrator tick*\n` +
+    `Open checked: ${stats.openChecked} | New grads: ${stats.newGrads}\n` +
+    `To migrate: ${stats.toMigrate} | Done: ${stats.migrated} | Skipped: ${stats.skipped} | Failed: ${stats.failed}`
+
+  console.log(`[lp-migrator] tick summary — ${JSON.stringify(stats)}`)
+
+  // Only send Telegram summary if there was actual activity OR a failure
+  if (stats.newGrads > 0 || stats.migrated > 0 || stats.failed > 0 || stats.skipped > 0) {
+    await sendTelegram(summary)
   }
 }
 
 async function main(): Promise<void> {
+  // Always announce startup so you know when PM2 restarts this process
+  await sendStartupAlert('lp-migrator')
+
   await tick()
   setInterval(tick, POLL_INTERVAL)
 }
