@@ -4,13 +4,10 @@
  * Finds pump.fun tokens approaching graduation WITHOUT calling pump.fun API.
  *
  * Data sources (all free, no Cloudflare):
- *   1. Meteora datapi — identifies recently-created pools whose token mint
- *      ends in "pump" (pump.fun graduated tokens) as a discovery feed.
- *      These are tokens that JUST graduated and got a Meteora pool.
- *   2. Helius RPC — reads the bonding curve PDA on-chain to get fill %.
- *      For just-graduated tokens this will be ~100%; we also scan tokens
- *      still on the bonding curve via Helius getAccountInfo.
- *   3. Helius DAS — holder count + top holder % (same as scanner.ts).
+ *   1. Meteora datapi — fetches all pools sorted by volume, filters in JS to
+ *      pump.fun mints (address ends in "pump") created in the last 48h.
+ *   2. Helius RPC — reads bonding curve PDA on-chain to get fill %.
+ *   3. Helius DAS — holder count + top holder %.
  *
  * Strategy: watch tokens in the 70–99% bonding curve fill window.
  * Once complete (graduated), lp-migrator picks them up.
@@ -35,20 +32,22 @@ import { checkHolders } from '@/lib/helius'
 import { sendStartupAlert } from './startup-alert'
 
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
+const METEORA_DLMM   = 'https://dlmm-api.meteora.ag'
 const WSOL           = 'So11111111111111111111111111111111111111112'
 const POLL_SEC       = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S ?? '60')
 const WATCH_HOURS    = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
 const MIN_MCAP       = parseFloat(process.env.PRE_GRAD_MIN_MCAP ?? '50000')
+const MAX_AGE_HOURS  = 48
 const cfg            = PRE_GRAD_STRATEGY.scanner
 
 interface MeteoraPool {
-  address:     string
-  name:        string
-  created_at:  number
-  tvl:         number
-  volume:      { '24h': number }
-  token_x:     { address: string; symbol: string; market_cap: number; price: number; holders: number }
-  token_y:     { address: string; symbol: string; market_cap: number; price: number; holders: number }
+  address:        string
+  name:           string
+  created_at:     number
+  tvl:            number
+  volume:         { '24h': number }
+  token_x:        { address: string; symbol: string; market_cap: number; price: number; holders: number }
+  token_y:        { address: string; symbol: string; market_cap: number; price: number; holders: number }
   is_blacklisted: boolean
 }
 
@@ -65,34 +64,43 @@ function isPumpMint(address: string): boolean {
 }
 
 /**
- * Fetch recently-created Meteora pools that contain a pump.fun token.
- * We use Meteora datapi sorted by creation date, then filter to pump mints.
- * Max age 48h — we want tokens that very recently graduated.
+ * Fetch Meteora pools and filter in JS to pump.fun mints created within MAX_AGE_HOURS.
+ * Uses same sort_by param that scanner.ts uses (volume_24h:desc) — created_at:desc returns 400.
  */
 async function fetchRecentPumpPools(): Promise<MeteoraPool[]> {
-  const res = await axios.get<PoolsResponse>(`${METEORA_DATAPI}/pools`, {
-    params: { page: 1, page_size: 500, sort_by: 'created_at:desc' },
-    timeout: 20_000,
-  })
+  const nowSec    = Date.now() / 1000
+  const maxAgeSec = MAX_AGE_HOURS * 3600
 
-  const allPools: MeteoraPool[] = res.data?.data ?? []
-  const nowSec = Date.now() / 1000
-  const maxAgeSec = 48 * 3600  // only tokens that graduated in the last 48h
+  let allPools: MeteoraPool[] = []
+
+  for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
+    try {
+      const res = await axios.get<PoolsResponse>(`${endpoint}/pools`, {
+        params: { page: 1, page_size: 1000, sort_by: 'volume_24h:desc' },
+        timeout: 20_000,
+      })
+      allPools = res.data?.data ?? []
+      if (allPools.length > 0) {
+        console.log(`[pre-grad] Meteora ${endpoint} returned ${allPools.length} pools`)
+        break
+      }
+    } catch (err) {
+      const status  = (err as { response?: { status?: number } })?.response?.status
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[pre-grad] Meteora ${endpoint} failed: ${status ? `HTTP ${status}: ` : ''}${message}`)
+    }
+  }
 
   return allPools.filter(p => {
     if (p.is_blacklisted) return false
     if (!p.created_at || p.created_at === 0) return false
     if ((nowSec - toUnixSeconds(p.created_at)) > maxAgeSec) return false
-
-    const hasSol   = p.token_x.address === WSOL || p.token_y.address === WSOL
+    const hasSol = p.token_x.address === WSOL || p.token_y.address === WSOL
     if (!hasSol) return false
-
     const token = p.token_x.address === WSOL ? p.token_y : p.token_x
     if (!isPumpMint(token.address)) return false
-
     const mc = token.market_cap ?? 0
     if (mc > 0 && mc < MIN_MCAP) return false
-
     return true
   })
 }
@@ -117,7 +125,7 @@ async function tick(): Promise<void> {
     console.error('[pre-grad] Meteora fetch failed:', err instanceof Error ? err.message : String(err))
     return
   }
-  console.log(`[pre-grad] Meteora returned ${pools.length} recent pump.fun pools`)
+  console.log(`[pre-grad] ${pools.length} recent pump.fun Meteora pools`)
 
   const supabase = createServerClient()
   let added = 0
@@ -137,7 +145,6 @@ async function tick(): Promise<void> {
 
     const bondingPct = curve.progressPct
 
-    // Already fully graduated — lp-migrator handles these
     if (curve.complete) {
       console.log(`[pre-grad] ${symbol} — skip: fully graduated (curve=100%)`)
       continue
@@ -153,7 +160,7 @@ async function tick(): Promise<void> {
     }
 
     // --- holder data via Helius DAS (no pump.fun API) ---
-    const holderData = await checkHolders(mint)
+    const holderData   = await checkHolders(mint)
     const holderCount  = holderData.holderCount
     const topHolderPct = holderData.topHolderPct
 
@@ -165,9 +172,6 @@ async function tick(): Promise<void> {
       console.log(`[pre-grad] ${symbol} — skip: top holder ${topHolderPct.toFixed(1)}% > ${cfg.maxTopHolderPct}%`)
       continue
     }
-
-    // Note: dev wallet % was read from pump.fun coin detail — now omitted since
-    // we no longer call pump.fun API. top_holder_pct from Helius is a sufficient proxy.
 
     // --- dedup + velocity ---
     const { data: existing } = await supabase
@@ -201,7 +205,7 @@ async function tick(): Promise<void> {
       bonding_curve_pct:     bondingPct,
       holder_count:          holderCount,
       top_holder_pct:        topHolderPct,
-      dev_wallet_pct:        0, // no longer available without pump.fun API — set 0
+      dev_wallet_pct:        0,
       velocity_pct_per_min:  velocitySolPerMin,
     }
 
@@ -243,9 +247,6 @@ async function tick(): Promise<void> {
   console.log(`[pre-grad] tick done — ${pools.length} pump pools checked, ${added} new watchlist entries`)
 }
 
-/**
- * Exported tick for use by telegram-bot /tick command.
- */
 export async function runPreGradScanner(): Promise<string> {
   try {
     const before = Date.now()
