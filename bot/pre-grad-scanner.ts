@@ -1,19 +1,18 @@
 /**
  * pre-grad-scanner.ts
  *
- * Polls Bitquery EAP (v2) for active pump.fun tokens.
- * For each candidate, enriches with pump.fun API data:
+ * Polls pump.fun frontend API for tokens approaching graduation.
+ * For each candidate, enriches with pump.fun coin detail:
  *   - bonding_curve_pct (88-98% window)
  *   - dev_wallet_pct    (≤ 3%)
  *   - holder_count      (≥ 100)
  *   - top_holder_pct    (≤ 12%)
  *
  * Velocity tracking: stores first_seen_at + bonding_pct_at_first_seen
- * to derive curve progress rate (SOL/min) across polls.
+ * to derive curve progress rate (pct/min) across polls.
  * Filters out tokens that crawled to 88% over many hours.
  *
- * REQUIRED ENV VARS:
- *   BITQUERY_API_KEY  — https://account.bitquery.io/user/api_v2_keys
+ * No API key required. Uses pump.fun public frontend API.
  *
  * OPTIONAL ENV VARS:
  *   PRE_GRAD_POLL_INTERVAL_S  — poll interval seconds (default: 60)
@@ -30,53 +29,29 @@ import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
 
-const BITQUERY_URL  = 'https://streaming.bitquery.io/eap'
-const PUMP_API      = 'https://frontend-api.pump.fun/coins'
-const API_KEY       = process.env.BITQUERY_API_KEY ?? ''
-const POLL_SEC      = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S ?? '60')
-const WATCH_HOURS   = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
-const MIN_MCAP      = parseFloat(process.env.PRE_GRAD_MIN_MCAP ?? '50000')
-const cfg           = PRE_GRAD_STRATEGY.scanner
+const PUMP_API    = 'https://frontend-api.pump.fun/coins'
+const POLL_SEC    = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S ?? '60')
+const WATCH_HOURS = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
+const MIN_MCAP    = parseFloat(process.env.PRE_GRAD_MIN_MCAP ?? '50000')
+const cfg         = PRE_GRAD_STRATEGY.scanner
 
-if (!API_KEY) {
-  console.error('[pre-grad] BITQUERY_API_KEY is not set — exiting')
-  process.exit(1)
-}
-
-const PUMP_PAIRS_QUERY = `
-query PumpActivePairs($minMcap: Float!) {
-  Trading {
-    Pairs(
-      limitBy: { by: Token_Address, count: 1 }
-      limit: { count: 50 }
-      orderBy: { descendingByField: "Supply_MarketCap" }
-      where: {
-        Market: { Program: { is: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P" } }
-        Token: { Network: { is: "Solana" } }
-        Supply: { MarketCap: { ge: $minMcap } }
-        Block: { Time: { since_relative: { minutes_ago: 5 } } }
-        Interval: { Time: { Duration: { eq: 1 } } }
-      }
-    ) {
-      Token { Address Name Symbol }
-      Market { Address Program }
-      Supply { MarketCap }
-      Volume { Usd }
-    }
-  }
-}
-`
-
-interface PairResult {
-  Token:   { Address: string; Name: string; Symbol: string }
-  Market:  { Address: string; Program: string }
-  Supply:  { MarketCap: number }
-  Volume:  { Usd: number }
-}
-
-interface PairsResponse {
-  data?:   { Trading?: { Pairs?: PairResult[] } }
-  errors?: Array<{ message: string }>
+interface PumpListItem {
+  mint:                  string
+  symbol:                string
+  name:                  string
+  usd_market_cap?:       number
+  market_cap?:           number
+  bonding_curve_pct?:    number
+  complete:              boolean
+  created_timestamp?:    number
+  holder_count?:         number
+  top_holder_pct?:       number
+  creator?:              string
+  top_holders?:          Array<{ wallet: string; pct: number }>
+  virtual_sol_reserves?: number
+  virtual_token_reserves?: number
+  king_of_the_hill?:     number
+  reply_count?:          number
 }
 
 interface Candidate {
@@ -87,66 +62,55 @@ interface Candidate {
   volumeUsd: number
 }
 
-interface PumpCoin {
-  complete:            boolean
-  bonding_curve_pct?:  number
-  king_of_the_hill?:   number
-  total_supply?:       number
-  virtual_sol_reserves?: number
-  virtual_token_reserves?: number
-  creator?:            string
-  top_holders?:        Array<{ wallet: string; pct: number }>
-  holder_count?:       number
-  top_holder_pct?:     number
-  reply_count?:        number
-  last_reply?:         string
-  created_timestamp?:  number
-}
-
-async function fetchPumpCoin(mint: string): Promise<PumpCoin | null> {
-  try {
-    const res = await axios.get<PumpCoin>(`${PUMP_API}/${mint}`, { timeout: 6_000 })
-    return res.data ?? null
-  } catch {
-    return null
-  }
-}
-
-// Derive dev wallet % from pump.fun top_holders if available,
-// or fallback to checking if creator is in top holders.
-function getDevWalletPct(coin: PumpCoin): number {
+function getDevWalletPct(coin: PumpListItem): number {
   if (!coin.creator) return 0
   if (coin.top_holders && coin.top_holders.length > 0) {
     const devEntry = coin.top_holders.find(h => h.wallet === coin.creator)
     return devEntry?.pct ?? 0
   }
-  // No holder breakdown available — can't filter, assume ok
   return 0
 }
 
-async function fetchActivePumpPairs(): Promise<Candidate[]> {
-  const res = await axios.post<PairsResponse>(
-    BITQUERY_URL,
-    { query: PUMP_PAIRS_QUERY, variables: { minMcap: MIN_MCAP } },
-    {
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
-      timeout: 15_000,
-    }
-  )
+/**
+ * Fetches active pump.fun tokens directly from the pump.fun frontend API.
+ * Sorted by last trade timestamp — most recently active first.
+ * Filters to tokens with usd_market_cap >= MIN_MCAP that are not yet complete.
+ */
+async function fetchActivePumpTokens(): Promise<Candidate[]> {
+  const res = await axios.get<PumpListItem[]>(PUMP_API, {
+    params: {
+      limit:       50,
+      sort:        'last_trade_timestamp',
+      order:       'DESC',
+      includeNsfw: false,
+    },
+    timeout: 15_000,
+  })
 
-  if (res.data.errors?.length) {
-    throw new Error(res.data.errors.map(e => e.message).join('; '))
-  }
+  const items = res.data ?? []
 
-  return (res.data.data?.Trading?.Pairs ?? [])
-    .filter(p => p.Token.Address && p.Token.Symbol)
-    .map(p => ({
-      mint:      p.Token.Address,
-      symbol:    p.Token.Symbol,
-      name:      p.Token.Name ?? '',
-      marketCap: p.Supply?.MarketCap ?? 0,
-      volumeUsd: p.Volume?.Usd ?? 0,
+  return items
+    .filter(item => !item.complete)
+    .filter(item => {
+      const mc = item.usd_market_cap ?? item.market_cap ?? 0
+      return mc >= MIN_MCAP
+    })
+    .map(item => ({
+      mint:      item.mint,
+      symbol:    item.symbol ?? '',
+      name:      item.name ?? '',
+      marketCap: item.usd_market_cap ?? item.market_cap ?? 0,
+      volumeUsd: 0, // pump.fun list endpoint doesn't include volume — enriched below
     }))
+}
+
+async function fetchPumpCoin(mint: string): Promise<PumpListItem | null> {
+  try {
+    const res = await axios.get<PumpListItem>(`${PUMP_API}/${mint}`, { timeout: 6_000 })
+    return res.data ?? null
+  } catch {
+    return null
+  }
 }
 
 async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
@@ -162,14 +126,12 @@ async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
 
     if (existing && ['graduated', 'opened', 'expired'].includes(existing.status)) continue
 
-    // ── Enrich with pump.fun data ──────────────────────────────────────────
     const coin = await fetchPumpCoin(c.mint)
     if (!coin) {
-      console.log(`[pre-grad] ${c.symbol} — skip: pump.fun API unavailable`)
+      console.log(`[pre-grad] ${c.symbol} — skip: pump.fun detail unavailable`)
       continue
     }
 
-    // Already graduated
     if (coin.complete) {
       console.log(`[pre-grad] ${c.symbol} — skip: already graduated`)
       continue
@@ -180,35 +142,27 @@ async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
     const topHolderPct = coin.top_holder_pct ?? 0
     const devPct       = getDevWalletPct(coin)
 
-    // ── Filter: bonding curve window ───────────────────────────────────────
     if (bondingPct < cfg.minBondingProgress) {
       console.log(`[pre-grad] ${c.symbol} — skip: curve ${bondingPct.toFixed(1)}% < ${cfg.minBondingProgress}%`)
       continue
     }
     if (bondingPct > cfg.maxBondingProgress) {
-      console.log(`[pre-grad] ${c.symbol} — skip: curve ${bondingPct.toFixed(1)}% > ${cfg.maxBondingProgress}% (near/post-grad)`)
+      console.log(`[pre-grad] ${c.symbol} — skip: curve ${bondingPct.toFixed(1)}% > ${cfg.maxBondingProgress}%`)
       continue
     }
-
-    // ── Filter: holders ───────────────────────────────────────────────────
     if (holderCount > 0 && holderCount < cfg.minHolders) {
       console.log(`[pre-grad] ${c.symbol} — skip: holders ${holderCount} < ${cfg.minHolders}`)
       continue
     }
-
-    // ── Filter: top holder concentration ──────────────────────────────────
     if (topHolderPct > 0 && topHolderPct > cfg.maxTopHolderPct) {
       console.log(`[pre-grad] ${c.symbol} — skip: top holder ${topHolderPct.toFixed(1)}% > ${cfg.maxTopHolderPct}%`)
       continue
     }
-
-    // ── Filter: dev wallet ────────────────────────────────────────────────
     if (devPct > cfg.maxDevWalletPct) {
       console.log(`[pre-grad] ${c.symbol} — skip: dev wallet ${devPct.toFixed(1)}% > ${cfg.maxDevWalletPct}%`)
       continue
     }
 
-    // ── Velocity: compute curve progress rate ─────────────────────────────
     const now = new Date().toISOString()
     let velocitySolPerMin = 0
 
@@ -223,23 +177,22 @@ async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
       }
     }
 
-    // ── Upsert ────────────────────────────────────────────────────────────
     const upsertData: Record<string, unknown> = {
-      mint:                     c.mint,
-      symbol:                   c.symbol,
-      name:                     c.name,
-      volume_1h_usd:            c.volumeUsd,
-      status:                   'watching',
-      bonding_curve_pct:        bondingPct,
-      holder_count:             holderCount,
-      top_holder_pct:           topHolderPct,
-      dev_wallet_pct:           devPct,
-      velocity_pct_per_min:     velocitySolPerMin,
+      mint:                  c.mint,
+      symbol:                c.symbol,
+      name:                  c.name,
+      volume_1h_usd:         c.volumeUsd,
+      status:                'watching',
+      bonding_curve_pct:     bondingPct,
+      holder_count:          holderCount,
+      top_holder_pct:        topHolderPct,
+      dev_wallet_pct:        devPct,
+      velocity_pct_per_min:  velocitySolPerMin,
     }
 
     if (!existing) {
-      upsertData.detected_at             = now
-      upsertData.first_seen_at           = now
+      upsertData.detected_at               = now
+      upsertData.first_seen_at             = now
       upsertData.bonding_pct_at_first_seen = bondingPct
     }
 
@@ -253,7 +206,7 @@ async function upsertWatchlist(candidates: Candidate[]): Promise<number> {
       console.log(
         `[pre-grad] WATCHLIST ADD: ${c.symbol} (${c.mint.slice(0, 8)}...)` +
         ` curve=${bondingPct.toFixed(1)}% holders=${holderCount} dev=${devPct.toFixed(1)}%` +
-        ` mcap=$${Math.round(c.marketCap).toLocaleString()} vol=$${Math.round(c.volumeUsd).toLocaleString()}`
+        ` mcap=$${Math.round(c.marketCap).toLocaleString()}`
       )
       added++
     } else {
@@ -278,10 +231,10 @@ async function expireStale(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
-  console.log(`[pre-grad] poll — minMcap=$${MIN_MCAP.toLocaleString()} curve=${cfg.minBondingProgress}-${cfg.maxBondingProgress}% vol≥${cfg.minVolume5minSol}SOL dev≤${cfg.maxDevWalletPct}%`)
+  console.log(`[pre-grad] poll — minMcap=$${MIN_MCAP.toLocaleString()} curve=${cfg.minBondingProgress}-${cfg.maxBondingProgress}% holders≥${cfg.minHolders} dev≤${cfg.maxDevWalletPct}%`)
   try {
-    const candidates = await fetchActivePumpPairs()
-    console.log(`[pre-grad] Bitquery returned ${candidates.length} active pump tokens`)
+    const candidates = await fetchActivePumpTokens()
+    console.log(`[pre-grad] pump.fun returned ${candidates.length} active tokens`)
     if (candidates.length > 0) {
       const added = await upsertWatchlist(candidates)
       console.log(`[pre-grad] ${added} new tokens added to watchlist`)
