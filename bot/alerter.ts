@@ -90,10 +90,10 @@ function formatMessage(payload: AlertPayload): string {
 }
 
 function bondingCurveEmoji(pct: number): string {
-  if (pct >= 95) return '🔴 graduating'
-  if (pct >= 70) return '🟡 hot'
-  if (pct >= 40) return '🟢 filling'
-  if (pct === 100) return '✅ graduated'
+  if (pct >= 100) return '✅ graduated'
+  if (pct >= 95)  return '🔴 graduating'
+  if (pct >= 70)  return '🟡 hot'
+  if (pct >= 40)  return '🟢 filling'
   return '⚪ early'
 }
 
