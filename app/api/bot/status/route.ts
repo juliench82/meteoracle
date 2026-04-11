@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET() {
   const supabase = createServerClient()
 
-  const [lastTickRes, openCountRes] = await Promise.allSettled([
+  const [stateRes, lastTickRes, lpCountRes, spotCountRes] = await Promise.allSettled([
+    getBotState(),
     supabase
       .from('bot_logs')
       .select('created_at, payload')
@@ -18,18 +20,24 @@ export async function GET() {
       .from('positions')
       .select('id', { count: 'exact', head: true })
       .in('status', ['active', 'out_of_range']),
+    supabase
+      .from('spot_positions')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'open'),
   ])
 
-  const lastTick =
-    lastTickRes.status === 'fulfilled' ? lastTickRes.value.data : null
-  const openCount =
-    openCountRes.status === 'fulfilled' ? openCountRes.value.count : 0
+  const state      = stateRes.status      === 'fulfilled' ? stateRes.value      : { enabled: false, dry_run: true }
+  const lastTick   = lastTickRes.status   === 'fulfilled' ? lastTickRes.value.data : null
+  const lpCount    = lpCountRes.status    === 'fulfilled' ? (lpCountRes.value.count   ?? 0) : 0
+  const spotCount  = spotCountRes.status  === 'fulfilled' ? (spotCountRes.value.count  ?? 0) : 0
 
   return NextResponse.json({
-    enabled: process.env.BOT_ENABLED === 'true',
-    dryRun: process.env.BOT_DRY_RUN === 'true',
-    lastTickAt: lastTick?.created_at ?? null,
-    lastTickPayload: lastTick?.payload ?? null,
-    openPositions: openCount,
+    enabled:         state.enabled,
+    dryRun:          state.dry_run,
+    lastTickAt:      lastTick?.created_at ?? null,
+    lastTickPayload: lastTick?.payload    ?? null,
+    openPositions:   lpCount + spotCount,
+    lpPositions:     lpCount,
+    spotPositions:   spotCount,
   })
 }
