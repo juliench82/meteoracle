@@ -1,88 +1,126 @@
-import { createServerClient } from '@/lib/supabase'
-import { PRE_GRAD_STRATEGY } from '@/strategies/pre-grad'
-
-export const dynamic = 'force-dynamic'
-
-export default async function StrategiesPage() {
-  const supabase = createServerClient()
-  const cfg = PRE_GRAD_STRATEGY
-
-  const { data: closed } = await supabase
-    .from('spot_positions')
-    .select('pnl_sol, status, dry_run, opened_at, closed_at, amount_sol')
-    .in('status', ['closed_tp', 'closed_sl'])
-
-  const rows     = closed ?? []
-  const wins     = rows.filter(r => (r.pnl_sol ?? 0) > 0).length
-  const losses   = rows.length - wins
-  const totalPnl = rows.reduce((s, r) => s + (r.pnl_sol ?? 0), 0)
-  const winRate  = rows.length > 0 ? Math.round((wins / rows.length) * 100) : null
-  const avgWin   = wins > 0
-    ? rows.filter(r => (r.pnl_sol ?? 0) > 0).reduce((s, r) => s + (r.pnl_sol ?? 0), 0) / wins
-    : 0
-  const avgLoss  = losses > 0
-    ? rows.filter(r => (r.pnl_sol ?? 0) <= 0).reduce((s, r) => s + (r.pnl_sol ?? 0), 0) / losses
-    : 0
-  const avgHoldMin = rows.filter(r => r.closed_at).reduce((s, r) => {
-    return s + (new Date(r.closed_at!).getTime() - new Date(r.opened_at).getTime()) / 60_000
-  }, 0) / (rows.length || 1)
+export default function StrategiesPage() {
+  const strategies = [
+    {
+      id: 'pre-grad',
+      name: 'Pre-Grad Spot Buy',
+      pipeline: 'Pipeline 2',
+      tag: 'SPOT',
+      tagColor: 'bg-blue-900 text-blue-300',
+      description: 'Buys pump.fun tokens at 88–98% bonding curve. Rides the graduation pump, exits at TP or SL before or just after Meteora pool opens.',
+      criteria: [
+        { label: 'Curve Range',    value: '88 – 98%' },
+        { label: 'Min Vol 5min',   value: '8 SOL' },
+        { label: 'Min Holders',    value: '100' },
+        { label: 'Max Top Holder', value: '12%' },
+        { label: 'Max Dev Wallet', value: '3%' },
+        { label: 'Buy Size',       value: '0.05 SOL' },
+        { label: 'Max Positions',  value: '3' },
+        { label: 'Take Profit',    value: '+150%' },
+        { label: 'Stop Loss',      value: '−35%' },
+        { label: 'Max Hold',       value: '90 min' },
+      ],
+    },
+    {
+      id: 'evil-panda',
+      name: 'Evil Panda',
+      pipeline: 'Pipeline 1',
+      tag: 'DLMM LP',
+      tagColor: 'bg-orange-900 text-orange-300',
+      description: 'Wide-range memecoin fee farming on Meteora DLMM. Deploys single-sided SOL into −80% to +20% ranges on freshly graduated low-cap pairs. Earns fees as price falls through the range. Assumes the token WILL dump — that\'s the point.',
+      criteria: [
+        { label: 'MC Range',         value: '$50K – $5M' },
+        { label: 'Min Vol 24h',      value: '$40K' },
+        { label: 'Min Liquidity',    value: '$20K' },
+        { label: 'Max Age',          value: '120h' },
+        { label: 'Min Holders',      value: '200' },
+        { label: 'Max Top Holder',   value: '25%' },
+        { label: 'Min Rugcheck',     value: '40/100' },
+        { label: 'Range',            value: '−80% / +20%' },
+        { label: 'Bin Step',         value: '100' },
+        { label: 'SOL Bias',         value: '80% SOL' },
+        { label: 'Size',             value: '0.05 SOL' },
+        { label: 'Stop Loss',        value: '−90%' },
+        { label: 'Take Profit',      value: '+300%' },
+        { label: 'OOR Exit',         value: '120 min' },
+        { label: 'Max Duration',     value: '48h' },
+      ],
+    },
+    {
+      id: 'post-grad-lp',
+      name: 'Post-Grad LP Migration',
+      pipeline: 'Pipeline 3',
+      tag: 'DLMM LP',
+      tagColor: 'bg-purple-900 text-purple-300',
+      description: 'Detects pre-grad spot positions that graduated successfully and migrates a portion of the bag into a Meteora DLMM LP to continue earning fees post-graduation.',
+      criteria: [
+        { label: 'Trigger',        value: 'Graduation detected' },
+        { label: 'LP % of bag',    value: '50%' },
+        { label: 'Range',          value: 'Evil Panda profile' },
+        { label: 'Source',         value: 'pre-grad spot wins only' },
+      ],
+    },
+    {
+      id: 'scalp-spike',
+      name: 'Scalp Spike',
+      pipeline: 'Pipeline 1',
+      tag: 'DLMM LP',
+      tagColor: 'bg-yellow-900 text-yellow-300',
+      description: 'Tight range LP around current price on tokens experiencing sudden volume spikes. Captures fees during the spike, exits quickly when volume normalises.',
+      criteria: [
+        { label: 'MC Range',       value: '$500K – $20M' },
+        { label: 'Vol spike',      value: '3× 1h average' },
+        { label: 'Range',          value: '±15%' },
+        { label: 'Max Duration',   value: '4h' },
+        { label: 'OOR Exit',       value: '30 min' },
+      ],
+    },
+    {
+      id: 'stable-farm',
+      name: 'Stable Farm',
+      pipeline: 'Pipeline 1',
+      tag: 'DLMM LP',
+      tagColor: 'bg-green-900 text-green-300',
+      description: 'Conservative fee farming on stable or low-volatility pairs (SOL/USDC, SOL/mSOL). Wide symmetric range, long duration, low maintenance.',
+      criteria: [
+        { label: 'Pairs',          value: 'SOL/USDC, SOL/mSOL' },
+        { label: 'Range',          value: '±10%' },
+        { label: 'Bin Step',       value: '5–10' },
+        { label: 'Max Duration',   value: '7 days' },
+        { label: 'OOR Exit',       value: '60 min' },
+      ],
+    },
+  ]
 
   return (
     <div className="p-6 space-y-6">
       <div>
         <h1 className="text-xl font-bold text-white">Strategies</h1>
-        <p className="text-sm text-zinc-500 mt-1">Active strategy configs and performance</p>
+        <p className="text-sm text-zinc-500 mt-1">Reference for all active strategy configs and criteria</p>
       </div>
 
-      <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-white">pre-grad</h2>
-            <p className="text-sm text-zinc-500">Pre-graduation pump.fun spot buys</p>
-          </div>
-          <span className="px-3 py-1 rounded-full text-xs font-medium bg-green-900 text-green-300">ACTIVE</span>
-        </div>
-
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {[
-            { label: 'Buy Size',      value: `${cfg.position.spotBuySol} SOL` },
-            { label: 'Max Positions', value: String(cfg.position.maxConcurrentSpots) },
-            { label: 'Max Capital',   value: `${cfg.position.maxTotalSpotSol} SOL` },
-            { label: 'Min Volume',    value: `${cfg.scanner.minVolume5minSol} SOL` },
-            { label: 'Take Profit',   value: `+${cfg.exits.takeProfitPct}%` },
-            { label: 'Stop Loss',     value: `${cfg.exits.stopLossPct}%` },
-            { label: 'Max Hold',      value: `${cfg.exits.maxHoldMinutes}min` },
-            { label: 'Bonding Range', value: `${cfg.scanner.minBondingProgress}–${cfg.scanner.maxBondingProgress}%` },
-          ].map(({ label, value }) => (
-            <div key={label} className="bg-zinc-800 rounded-lg p-3">
-              <p className="text-xs text-zinc-500 mb-1">{label}</p>
-              <p className="text-sm font-semibold text-white">{value}</p>
-            </div>
-          ))}
-        </div>
-
-        <div>
-          <h3 className="text-sm font-medium text-zinc-400 mb-3">Performance (all time)</h3>
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
-            {[
-              { label: 'Trades',    value: String(rows.length),                                       color: 'text-white' },
-              { label: 'Win Rate',  value: winRate !== null ? `${winRate}%` : '—',                    color: winRate !== null && winRate >= 50 ? 'text-green-400' : 'text-yellow-400' },
-              { label: 'Total PnL', value: `${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(4)} SOL`,   color: totalPnl >= 0 ? 'text-green-400' : 'text-red-400' },
-              { label: 'Avg Win',   value: wins > 0 ? `+${avgWin.toFixed(4)} SOL` : '—',             color: 'text-green-400' },
-              { label: 'Avg Loss',  value: losses > 0 ? `${avgLoss.toFixed(4)} SOL` : '—',           color: 'text-red-400' },
-              { label: 'Avg Hold',  value: rows.length > 0 ? `${Math.round(avgHoldMin)}min` : '—',   color: 'text-zinc-300' },
-            ].map(({ label, value, color }) => (
-              <div key={label} className="bg-zinc-800 rounded-lg p-3">
-                <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                <p className={`text-sm font-bold ${color}`}>{value}</p>
+      <div className="space-y-4">
+        {strategies.map(s => (
+          <div key={s.id} className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <h2 className="text-base font-semibold text-white">{s.name}</h2>
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${s.tagColor}`}>{s.tag}</span>
+                  <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400">{s.pipeline}</span>
+                </div>
+                <p className="text-sm text-zinc-400 leading-relaxed">{s.description}</p>
               </div>
-            ))}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+              {s.criteria.map(({ label, value }) => (
+                <div key={label} className="bg-zinc-800 rounded-lg px-3 py-2">
+                  <p className="text-xs text-zinc-500 mb-0.5">{label}</p>
+                  <p className="text-sm font-semibold text-white">{value}</p>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      </div>
-
-      <div className="bg-zinc-900 border border-dashed border-zinc-700 rounded-xl p-6 text-center">
-        <p className="text-zinc-500 text-sm">More strategies coming — post-grad LP (Day 7)</p>
+        ))}
       </div>
     </div>
   )

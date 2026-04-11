@@ -2,13 +2,11 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { BarChart2, Zap, BookOpen, Settings } from 'lucide-react'
+import { BarChart2, BookOpen } from 'lucide-react'
 
 const nav = [
-  { href: '/',            icon: BarChart2, label: 'Dashboard' },
-  { href: '/strategies',  icon: BookOpen,  label: 'Strategies' },
-  { href: '/bot',         icon: Zap,       label: 'Bot' },
-  { href: '/settings',    icon: Settings,  label: 'Settings' },
+  { href: '/',           icon: BarChart2, label: 'Dashboard' },
+  { href: '/strategies', icon: BookOpen,  label: 'Strategies' },
 ]
 
 export function Sidebar() {
@@ -16,13 +14,11 @@ export function Sidebar() {
 
   return (
     <aside className="w-56 flex-shrink-0 bg-surface-elevated border-r border-surface-border flex flex-col">
-      {/* Logo */}
       <div className="flex items-center gap-2 px-5 py-5 border-b border-surface-border">
         <span className="text-brand text-2xl">⚡</span>
         <span className="font-bold text-lg tracking-tight text-white">Meteoracle</span>
       </div>
 
-      {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-1">
         {nav.map(({ href, icon: Icon, label }) => {
           const active = href === '/' ? pathname === '/' : pathname.startsWith(href)
