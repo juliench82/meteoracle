@@ -1,8 +1,8 @@
 /**
  * pre-grad-scanner.ts
  *
- * Scans ALL active pump.fun bonding curves on-chain via Helius getProgramAccounts.
- * No pump.fun API. No Meteora. Pure on-chain.
+ * Scans ALL active pump.fun bonding curves on-chain via Helius getProgramAccountsV2
+ * (paginated). No pump.fun API. No Meteora. Pure on-chain.
  *
  * BondingCurve account layout (Anchor, 8-byte discriminator):
  *   0-7:   discriminator
@@ -35,6 +35,7 @@ const PUMP_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
 const BONDING_CURVE_SIZE = 81
 const INITIAL_VIRTUAL_SOL    = 30_000_000_000
 const GRADUATION_VIRTUAL_SOL = 115_000_000_000
+const PAGE_SIZE = 1000
 
 const POLL_SEC    = parseInt(process.env.PRE_GRAD_POLL_INTERVAL_S ?? '60')
 const WATCH_HOURS = parseFloat(process.env.PRE_GRAD_WATCH_WINDOW_H ?? '6')
@@ -89,36 +90,45 @@ function decodeAccount(pubkey: string, data: Buffer): DecodedCurve | null {
 }
 
 async function fetchActiveBondingCurves(heliusRpcUrl: string): Promise<DecodedCurve[]> {
-  const resp = await axios.post(
-    heliusRpcUrl,
-    {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'getProgramAccounts',
-      params: [
-        PUMP_PROGRAM_ID,
-        {
-          encoding: 'base64',
-          filters: [
-            { dataSize: BONDING_CURVE_SIZE },
-            // complete=false: byte 48 must be 0x00
-            { memcmp: { offset: 48, bytes: bs58Encode(new Uint8Array([0])) } },
-          ],
-        },
-      ],
-    },
-    { timeout: 30_000 }
-  )
-
-  const accounts: Array<{ pubkey: string; account: { data: [string, string] } }> =
-    resp.data?.result ?? []
-
   const curves: DecodedCurve[] = []
-  for (const { pubkey, account } of accounts) {
-    const raw = Buffer.from(account.data[0], 'base64')
-    const decoded = decodeAccount(pubkey, raw)
-    if (decoded) curves.push(decoded)
+  let cursor: string | undefined = undefined
+  let page = 0
+
+  while (true) {
+    const params: unknown[] = [
+      PUMP_PROGRAM_ID,
+      {
+        encoding: 'base64',
+        filters: [{ dataSize: BONDING_CURVE_SIZE }],
+        limit: PAGE_SIZE,
+        ...(cursor ? { cursor } : {}),
+      },
+    ]
+
+    const resp = await axios.post(
+      heliusRpcUrl,
+      { jsonrpc: '2.0', id: 1, method: 'getProgramAccountsV2', params },
+      { timeout: 30_000 }
+    )
+
+    const result = resp.data?.result
+    const accounts: Array<{ pubkey: string; account: { data: [string, string] } }> =
+      result?.accounts ?? result ?? []
+
+    for (const { pubkey, account } of accounts) {
+      const raw = Buffer.from(account.data[0], 'base64')
+      const decoded = decodeAccount(pubkey, raw)
+      if (decoded) curves.push(decoded)
+    }
+
+    page++
+    console.log(`[pre-grad] page ${page}: ${accounts.length} accounts fetched (total so far: ${curves.length})`)
+
+    // Stop if last page
+    cursor = result?.cursor
+    if (!cursor || accounts.length < PAGE_SIZE) break
   }
+
   return curves
 }
 
@@ -130,7 +140,7 @@ async function tick(): Promise<void> {
   }
 
   console.log(
-    `[pre-grad] poll via getProgramAccounts` +
+    `[pre-grad] poll via getProgramAccountsV2` +
     ` curve=${cfg.minBondingProgress}-${cfg.maxBondingProgress}%` +
     ` holders>=${cfg.minHolders} topHolder<=${cfg.maxTopHolderPct}%`
   )
@@ -139,10 +149,10 @@ async function tick(): Promise<void> {
   try {
     allCurves = await fetchActiveBondingCurves(heliusRpcUrl)
   } catch (err) {
-    console.error('[pre-grad] getProgramAccounts failed:', err instanceof Error ? err.message : String(err))
+    console.error('[pre-grad] getProgramAccountsV2 failed:', err instanceof Error ? err.message : String(err))
     return
   }
-  console.log(`[pre-grad] ${allCurves.length} active bonding curves`)
+  console.log(`[pre-grad] ${allCurves.length} active bonding curves total`)
 
   const inWindow = allCurves.filter(
     c => c.progressPct >= cfg.minBondingProgress && c.progressPct <= cfg.maxBondingProgress
