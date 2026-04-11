@@ -38,21 +38,33 @@ export default async function DashboardPage() {
   const openLp      = openLpRes.status      === 'fulfilled' ? (openLpRes.value.data      ?? []) : []
   const watchlist   = watchlistRes.status   === 'fulfilled' ? (watchlistRes.value.data   ?? []) : []
 
-  // Normalise LP positions into the same shape SpotPositionsTable expects
+  // Normalise LP positions into the SpotPosition shape expected by SpotPositionsTable
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const openLpNorm = openLp.map((p: any) => ({
-    ...p,
-    amount_sol: p.sol_deposited,
-    status: 'open',
-    type: 'lp',
+    id:              p.id,
+    mint:            p.token_address ?? '',
+    symbol:          p.token_symbol  ?? 'LP',
+    entry_price_usd: p.entry_price   ?? 0,
+    amount_sol:      p.sol_deposited ?? 0,
+    token_amount:    0,
+    tp_pct:          0,
+    sl_pct:          0,
+    status:          'open',
+    dry_run:         (p.metadata?.sig === 'dry-run-sig') ?? false,
+    opened_at:       p.opened_at,
+    closed_at:       p.closed_at ?? null,
+    pnl_sol:         p.pnl_sol   ?? null,
+    tx_buy:          p.metadata?.sig !== 'dry-run-sig' ? p.metadata?.sig : undefined,
+    tx_sell:         undefined,
   }))
 
   const allOpen = [...openSpot, ...openLpNorm]
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const solDeployed = allOpen.reduce((s: number, p: any) => s + (p.amount_sol ?? p.sol_deposited ?? 0), 0)
+  const solDeployed = allOpen.reduce((s: number, p: any) => s + (p.amount_sol ?? 0), 0)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const totalPnl    = closedSpot.reduce((s: number, p: any) => s + (p.pnl_sol ?? 0), 0)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wins        = closedSpot.filter((p: any) => (p.pnl_sol ?? 0) > 0).length
   const winRate     = closedSpot.length > 0
     ? Math.round((wins / closedSpot.length) * 100)
