@@ -250,6 +250,21 @@ async function tick(): Promise<void> {
   }
 }
 
+/**
+ * Exported tick for use by telegram-bot /tick command.
+ * Returns a summary string for reporting.
+ */
+export async function runPreGradScanner(): Promise<string> {
+  try {
+    const before = Date.now()
+    await tick()
+    return `✅ pre-grad-scanner (${Date.now() - before}ms)`
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return `❌ pre-grad-scanner: ${msg}`
+  }
+}
+
 async function main(): Promise<void> {
   console.log(`[pre-grad] starting — poll every ${POLL_SEC}s, watch window ${WATCH_HOURS}h`)
   await tick()

@@ -14,6 +14,7 @@
  *   /status            — snapshot: state, open positions, wallet SOL
  *   /positions         — list all open LP positions
  *   /spots             — list all open spot positions
+ *   /tick              — manually trigger all 5 pipelines in parallel
  *   /help              — command list
  *
  * Run:
@@ -29,10 +30,16 @@ import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
+import { runScanner } from '@/bot/scanner'
+import { monitorPositions } from '@/bot/monitor'
+import { runPreGradScanner } from '@/bot/pre-grad-scanner'
+import { runSpotMonitor } from '@/bot/spot-monitor'
+import { runLpMigrator } from '@/bot/lp-migrator'
 
 const BOT_TOKEN   = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const CHAT_ID     = process.env.TELEGRAM_CHAT_ID   ?? ''
 const POLL_MS     = 2_000
+const TICK_TIMEOUT_MS = 55_000
 const API         = `https://api.telegram.org/bot${BOT_TOKEN}`
 
 if (!BOT_TOKEN || !CHAT_ID) {
@@ -72,6 +79,17 @@ async function getUpdates(): Promise<TelegramUpdate[]> {
 interface TelegramUpdate {
   update_id: number
   message?: { chat: { id: number }; text?: string }
+}
+
+// ─── Tick helper ─────────────────────────────────────────────────────────────
+
+function withTickTimeout(fn: () => Promise<string>, name: string): Promise<string> {
+  return Promise.race([
+    fn(),
+    new Promise<string>(resolve =>
+      setTimeout(() => resolve(`⏱️ ${name}: timeout (${TICK_TIMEOUT_MS / 1000}s)`), TICK_TIMEOUT_MS)
+    ),
+  ])
 }
 
 // ─── Command handlers ────────────────────────────────────────────────────────
@@ -265,6 +283,45 @@ async function handleSpots() {
   }
 }
 
+async function handleTick() {
+  await reply('⚡ *Manual tick triggered* — running all 5 pipelines in parallel...')
+
+  const started = Date.now()
+
+  const [lpScanResult, lpMonitorResult, preGradResult, spotMonitorResult, lpMigratorResult] =
+    await Promise.all([
+      withTickTimeout(
+        async () => {
+          const r = await runScanner()
+          return `✅ lp-scanner: scanned=${r.scanned} candidates=${r.candidates} opened=${r.opened}`
+        },
+        'lp-scanner',
+      ),
+      withTickTimeout(
+        async () => {
+          const r = await monitorPositions()
+          return `✅ lp-monitor: checked=${r.checked} closed=${r.closed} rebalanced=${r.rebalanced}`
+        },
+        'lp-monitor',
+      ),
+      withTickTimeout(runPreGradScanner, 'pre-grad-scanner'),
+      withTickTimeout(runSpotMonitor,    'spot-monitor'),
+      withTickTimeout(runLpMigrator,     'lp-migrator'),
+    ])
+
+  const elapsed = ((Date.now() - started) / 1000).toFixed(1)
+
+  await reply([
+    `📋 *Tick complete* (${elapsed}s)`,
+    ``,
+    lpScanResult,
+    lpMonitorResult,
+    preGradResult,
+    spotMonitorResult,
+    lpMigratorResult,
+  ].join('\n'))
+}
+
 async function handleHelp() {
   await reply([
     `🤖 *Meteoracle Commands*`,
@@ -274,6 +331,7 @@ async function handleHelp() {
     `/start         — resume the bot`,
     `/dry           — dry-run mode (no real trades)`,
     `/live          — live trading ⚠️`,
+    `/tick          — manual trigger all pipelines`,
     ``,
     `*Positions*`,
     `/positions     — list open LP positions`,
@@ -310,6 +368,7 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   else if (command === '/status')    await handleStatus()
   else if (command === '/positions') await handlePositions()
   else if (command === '/spots')     await handleSpots()
+  else if (command === '/tick')      await handleTick()
   else if (command === '/help')      await handleHelp()
   else await reply(`❓ Unknown command. Send /help for the list.`)
 }

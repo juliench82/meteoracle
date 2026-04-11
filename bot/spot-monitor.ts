@@ -165,7 +165,7 @@ async function closePosition(
   )
 }
 
-async function tick(): Promise<void> {
+async function tick(): Promise<{ monitored: number; closed: number }> {
   const supabase = createServerClient()
 
   const { data, error } = await supabase
@@ -175,16 +175,17 @@ async function tick(): Promise<void> {
 
   if (error) {
     console.error('[spot-monitor] fetch error:', error.message)
-    return
+    return { monitored: 0, closed: 0 }
   }
 
   const positions = (data ?? []) as SpotPosition[]
   if (positions.length === 0) {
     console.log('[spot-monitor] no open positions')
-    return
+    return { monitored: 0, closed: 0 }
   }
 
   console.log(`[spot-monitor] monitoring ${positions.length} open position(s)`)
+  let closed = 0
 
   for (const pos of positions) {
     const label      = `${pos.symbol} (${pos.mint.slice(0, 8)}...)`
@@ -228,7 +229,25 @@ async function tick(): Promise<void> {
     if (exitReason) {
       const pnlSol = pos.amount_sol * (priceMultiplier - 1)
       await closePosition(pos, exitReason, pnlSol, priceMultiplier)
+      closed++
     }
+  }
+
+  return { monitored: positions.length, closed }
+}
+
+/**
+ * Exported tick for use by telegram-bot /tick command.
+ * Returns a summary string for reporting.
+ */
+export async function runSpotMonitor(): Promise<string> {
+  try {
+    const before = Date.now()
+    const result = await tick()
+    return `✅ spot-monitor: ${result.monitored} monitored, ${result.closed} closed (${Date.now() - before}ms)`
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return `❌ spot-monitor: ${msg}`
   }
 }
 

@@ -275,7 +275,7 @@ async function openLpPosition(
 
 // ─── Main tick ────────────────────────────────────────────────────────────────
 
-async function tick(): Promise<void> {
+async function tick(): Promise<{ openChecked: number; newGrads: number; migrated: number; skipped: number; failed: number }> {
   const supabase = createServerClient()
   const stats = { openChecked: 0, newGrads: 0, toMigrate: 0, migrated: 0, skipped: 0, failed: 0 }
 
@@ -360,6 +360,23 @@ async function tick(): Promise<void> {
   // Only send Telegram summary if there was actual activity OR a failure
   if (stats.newGrads > 0 || stats.migrated > 0 || stats.failed > 0 || stats.skipped > 0) {
     await sendTelegram(summary)
+  }
+
+  return stats
+}
+
+/**
+ * Exported tick for use by telegram-bot /tick command.
+ * Returns a summary string for reporting.
+ */
+export async function runLpMigrator(): Promise<string> {
+  try {
+    const before = Date.now()
+    const result = await tick()
+    return `✅ lp-migrator: checked=${result.openChecked} grads=${result.newGrads} migrated=${result.migrated} (${Date.now() - before}ms)`
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return `❌ lp-migrator: ${msg}`
   }
 }
 
