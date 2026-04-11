@@ -47,6 +47,8 @@ export interface TokenMetrics {
   priceUsd: number
   poolAddress: string
   dexId: string
+  /** pump.fun bonding curve fill %, 0–100. undefined = not a pump.fun token or fetch failed. */
+  bondingCurvePct?: number
 }
 
 export interface TokenFilters {
