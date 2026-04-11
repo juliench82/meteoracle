@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic'
 export default async function DashboardPage() {
   const supabase = createServerClient()
 
-  const [openRes, closedRes, watchlistRes] = await Promise.allSettled([
+  const [openSpotRes, closedSpotRes, openLpRes, watchlistRes] = await Promise.allSettled([
     supabase
       .from('spot_positions')
       .select('*')
@@ -22,41 +22,58 @@ export default async function DashboardPage() {
       .order('closed_at', { ascending: false })
       .limit(50),
     supabase
+      .from('positions')
+      .select('*')
+      .in('status', ['active', 'out_of_range'])
+      .order('opened_at', { ascending: false }),
+    supabase
       .from('pre_grad_watchlist')
       .select('*')
       .order('detected_at', { ascending: false })
       .limit(20),
   ])
 
-  const openPositions   = openRes.status      === 'fulfilled' ? (openRes.value.data      ?? []) : []
-  const closedPositions = closedRes.status    === 'fulfilled' ? (closedRes.value.data    ?? []) : []
-  const watchlist       = watchlistRes.status === 'fulfilled' ? (watchlistRes.value.data ?? []) : []
+  const openSpot    = openSpotRes.status    === 'fulfilled' ? (openSpotRes.value.data    ?? []) : []
+  const closedSpot  = closedSpotRes.status  === 'fulfilled' ? (closedSpotRes.value.data  ?? []) : []
+  const openLp      = openLpRes.status      === 'fulfilled' ? (openLpRes.value.data      ?? []) : []
+  const watchlist   = watchlistRes.status   === 'fulfilled' ? (watchlistRes.value.data   ?? []) : []
+
+  // Normalise LP positions into the same shape SpotPositionsTable expects
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const openLpNorm = openLp.map((p: any) => ({
+    ...p,
+    amount_sol: p.sol_deposited,
+    status: 'open',
+    type: 'lp',
+  }))
+
+  const allOpen = [...openSpot, ...openLpNorm]
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const solDeployed = openPositions.reduce((s: number, p: any) => s + (p.amount_sol ?? 0), 0)
+  const solDeployed = allOpen.reduce((s: number, p: any) => s + (p.amount_sol ?? p.sol_deposited ?? 0), 0)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const totalPnl    = closedPositions.reduce((s: number, p: any) => s + (p.pnl_sol ?? 0), 0)
-  const wins        = closedPositions.filter((p: any) => (p.pnl_sol ?? 0) > 0).length
-  const winRate     = closedPositions.length > 0
-    ? Math.round((wins / closedPositions.length) * 100)
+  const totalPnl    = closedSpot.reduce((s: number, p: any) => s + (p.pnl_sol ?? 0), 0)
+  const wins        = closedSpot.filter((p: any) => (p.pnl_sol ?? 0) > 0).length
+  const winRate     = closedSpot.length > 0
+    ? Math.round((wins / closedSpot.length) * 100)
     : null
 
   return (
     <div className="p-6 space-y-6">
       <SpotKPIBar
         solDeployed={solDeployed}
-        openPositions={openPositions.length}
+        openPositions={allOpen.length}
         totalPnlSol={totalPnl}
         winRate={winRate}
-        totalTrades={closedPositions.length}
+        totalTrades={closedSpot.length}
         watchlistCount={watchlist.length}
       />
-      <SpotPnlChart closedPositions={closedPositions} />
+      <SpotPnlChart closedPositions={closedSpot} />
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <div className="xl:col-span-2">
           <SpotPositionsTable
-            openPositions={openPositions}
-            closedPositions={closedPositions.slice(0, 20)}
+            openPositions={allOpen}
+            closedPositions={closedSpot.slice(0, 20)}
           />
         </div>
         <div>
