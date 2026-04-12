@@ -2,10 +2,9 @@
  * spot-monitor.ts
  *
  * Polls every 30s for all open spot positions.
- * For each position:
- *   1. Fetches current price from Jupiter Price API v2 (both dry-run and live)
- *   2. Checks TP / SL / maxHold conditions
- *   3. If triggered: updates spot_positions row, sends Telegram alert
+ * Price source priority:
+ *   1. Jupiter Price API v2 (post-grad / DEX-listed tokens)
+ *   2. pump.fun API fallback (pre-grad tokens still on bonding curve)
  *
  * BOT_DRY_RUN=true  — real prices, no actual sell tx
  * BOT_DRY_RUN=false — real prices + real sell tx
@@ -49,17 +48,37 @@ interface SpotPosition {
 
 type ExitReason = 'tp' | 'sl' | 'timeout'
 
+/** Try Jupiter first, fall back to pump.fun for pre-grad tokens */
 async function fetchPriceUsd(mint: string): Promise<number | null> {
+  // 1. Jupiter
   try {
     const res = await axios.get('https://api.jup.ag/price/v2', {
       params: { ids: mint },
       timeout: 8_000,
     })
     const price = res.data?.data?.[mint]?.price
-    return price ? parseFloat(price) : null
+    if (price) return parseFloat(price)
   } catch {
-    return null
+    // fall through
   }
+
+  // 2. pump.fun fallback
+  try {
+    const res = await axios.get(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
+      timeout: 8_000,
+      headers: { 'User-Agent': 'meteoracle-monitor/1.0' },
+    })
+    const usdMc   = parseFloat(res.data?.usd_market_cap ?? '0')
+    const supply  = parseFloat(res.data?.total_supply    ?? '0')
+    if (usdMc > 0 && supply > 0) {
+      const price = usdMc / supply
+      return price
+    }
+  } catch {
+    // fall through
+  }
+
+  return null
 }
 
 function checkExitCondition(
@@ -67,9 +86,9 @@ function checkExitCondition(
   pricePctChange: number,
   ageMinutes:     number,
 ): ExitReason | null {
-  if (pricePctChange >= position.tp_pct)          return 'tp'
-  if (pricePctChange <= -Math.abs(position.sl_pct)) return 'sl'
-  if (ageMinutes     >= cfg.exits.maxHoldMinutes) return 'timeout'
+  if (pricePctChange >= position.tp_pct)             return 'tp'
+  if (pricePctChange <= -Math.abs(position.sl_pct))  return 'sl'
+  if (ageMinutes     >= cfg.exits.maxHoldMinutes)    return 'timeout'
   return null
 }
 
@@ -105,10 +124,10 @@ async function closePosition(
     txSell      = sellResult.txSignature
     solReceived = sellResult.solReceived ?? 0
     pnlSol      = solReceived - position.amount_sol
-  } else if (position.dry_run) {
+  } else {
     solReceived = position.amount_sol * exitMult
     pnlSol      = solReceived - position.amount_sol
-    console.log(`[spot-monitor] DRY-RUN close — simulated ${solReceived.toFixed(4)} SOL received`)
+    console.log(`[spot-monitor] DRY-RUN close — ${solReceived.toFixed(4)} SOL simulated`)
   }
 
   const statusMap: Record<ExitReason, string> = {
@@ -176,7 +195,7 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
 
     const currentPriceUsd = await fetchPriceUsd(pos.mint)
     if (currentPriceUsd === null) {
-      console.warn(`[spot-monitor] could not fetch price for ${label} — skipping`)
+      console.warn(`[spot-monitor] price unavailable for ${label} — skipping`)
       continue
     }
 
@@ -184,8 +203,7 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
     let pricePctChange: number
 
     if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
-      // No entry price stored (dry-run buy didn't fetch it) — use 1x as baseline
-      // and update entry_price_usd now so next tick is accurate
+      // Seed entry price on first successful fetch
       priceMultiplier = 1.0
       pricePctChange  = 0
       await supabase
