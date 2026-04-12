@@ -18,6 +18,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
 import { checkHolders } from '@/lib/helius'
 import { sendStartupAlert } from './startup-alert'
@@ -39,7 +40,6 @@ function calculateProgress(virtualSolReserves: number): number {
   return Math.min(100, Math.max(0, Number(num * 10000n / den) / 100))
 }
 
-/** Estimate volume proxy: SOL raised = (virtualSol - initial) / 1e9 */
 function estimateVolumeSol(virtualSolReserves: number): number {
   if (!virtualSolReserves) return 0
   const raised = BigInt(virtualSolReserves) - INITIAL_VIRTUAL_SOL
@@ -154,6 +154,13 @@ async function expireStale(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
+  // ██ BOT STATE GATE — respect /stop command ██
+  const state = await getBotState()
+  if (!state.enabled) {
+    console.log('[pre-grad] bot is stopped — skipping tick')
+    return
+  }
+
   console.log(`[pre-grad] poll pump.fun REST curve=${cfg.minBondingProgress}-${cfg.maxBondingProgress}% holders>=${cfg.minHolders} topHolder<=${cfg.maxTopHolderPct}%`)
 
   const candidates = await fetchCandidates()

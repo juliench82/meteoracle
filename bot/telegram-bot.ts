@@ -5,8 +5,8 @@
  * No webhook, no HTTPS, no Vercel needed — runs as a PM2 process on the VPS.
  *
  * Commands:
- *   /stop              — pause all scanning & monitoring
- *   /start             — resume the bot
+ *   /stop              — EMERGENCY: close all positions + pm2 stop all
+ *   /restart           — resume: setBotState enabled + pm2 restart all
  *   /dry               — switch to dry-run mode
  *   /live              — switch to live trading
  *   /close <id>        — force-close an LP position by ID
@@ -14,7 +14,7 @@
  *   /status            — snapshot: state, open positions, wallet SOL
  *   /positions         — list all open LP positions
  *   /spots             — list all open spot positions
- *   /tick              — manually trigger all 5 pipelines in parallel
+ *   /tick              — manually trigger all pipelines in parallel
  *   /help              — command list
  */
 
@@ -24,6 +24,8 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
 
 import axios from 'axios'
+import { exec } from 'child_process'
+import { promisify } from 'util'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
@@ -32,6 +34,9 @@ import { monitorPositions } from '@/bot/monitor'
 import { runPreGradScanner } from '@/bot/pre-grad-scanner'
 import { runSpotMonitor } from '@/bot/spot-monitor'
 import { runLpMigrator } from '@/bot/lp-migrator'
+
+const execAsync = promisify(exec)
+const PM2 = '/usr/local/bin/pm2'
 
 const BOT_TOKEN       = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const CHAT_ID         = process.env.TELEGRAM_CHAT_ID   ?? ''
@@ -78,6 +83,21 @@ interface TelegramUpdate {
   message?: { chat: { id: number }; text?: string }
 }
 
+// ─── PM2 helpers ─────────────────────────────────────────────────────────
+
+async function pm2StopAll(): Promise<void> {
+  // Stop all processes except telegram-bot itself so we keep receiving commands
+  await execAsync(`${PM2} stop all --silent`).catch(err =>
+    console.warn('[telegram-bot] pm2 stop all failed:', err.message)
+  )
+}
+
+async function pm2RestartAll(): Promise<void> {
+  await execAsync(`${PM2} restart all --silent`).catch(err =>
+    console.warn('[telegram-bot] pm2 restart all failed:', err.message)
+  )
+}
+
 // ─── Tick helper ─────────────────────────────────────────────────────────────
 
 function withTickTimeout(fn: () => Promise<string>, name: string): Promise<string> {
@@ -92,20 +112,69 @@ function withTickTimeout(fn: () => Promise<string>, name: string): Promise<strin
 // ─── Command handlers ─────────────────────────────────────────────────────
 
 async function handleStop() {
+  await reply('🛑 *EMERGENCY STOP initiated...*')
+
+  // 1. Disable bot in DB so workers gate on next tick
   await setBotState({ enabled: false })
+
+  // 2. Close all open LP positions
+  const supabase = createServerClient()
+  const { data: lpPositions } = await supabase
+    .from('lp_positions')
+    .select('id, symbol, status')
+    .in('status', ['active', 'out_of_range'])
+
+  let lpClosed = 0
+  for (const pos of lpPositions ?? []) {
+    try {
+      const ok = await closePosition(pos.id, 'emergency_stop')
+      if (ok) lpClosed++
+    } catch (err) {
+      console.error(`[telegram-bot] emergency close LP ${pos.id} failed:`, err)
+    }
+  }
+
+  // 3. Close all open spot positions (mark closed_manual — spot-monitor picks up on next tick if still running)
+  const { data: spotPositions } = await supabase
+    .from('spot_positions')
+    .select('id, symbol')
+    .eq('status', 'open')
+
+  let spotClosed = 0
+  for (const pos of spotPositions ?? []) {
+    const { error } = await supabase
+      .from('spot_positions')
+      .update({ status: 'closed_manual', closed_at: new Date().toISOString() })
+      .eq('id', pos.id)
+    if (!error) spotClosed++
+  }
+
+  // 4. Stop all PM2 processes (telegram-bot stays alive to receive /restart)
+  await pm2StopAll()
+
   await reply([
-    `🛑 *Bot stopped.*`,
-    `• Scanner and monitor will skip new ticks`,
-    `• Open positions will NOT be auto-managed while stopped`,
-    `• Send /start to resume`,
+    `🛑 *Emergency stop complete.*`,
+    ``,
+    `• LP positions closed: ${lpClosed}/${(lpPositions ?? []).length}`,
+    `• Spot positions marked closed: ${spotClosed}/${(spotPositions ?? []).length}`,
+    `• All PM2 services stopped (telegram-bot stays alive)`,
+    ``,
+    `Send /restart to resume all services.`,
   ].join('\n'))
 }
 
-async function handleStart() {
+async function handleRestart() {
+  await reply('⏳ *Restarting all services...*')
+
+  // 1. Re-enable bot in DB
   await setBotState({ enabled: true })
+
+  // 2. Restart all PM2 processes
+  await pm2RestartAll()
+
   const state = await getBotState()
   await reply([
-    `✅ *Bot started.*`,
+    `✅ *All services restarted.*`,
     `Mode: ${state.dry_run ? '🟡 Dry-run (no real trades)' : '🟢 Live trading'}`,
     `Send /status for a full snapshot.`,
   ].join('\n'))
@@ -167,7 +236,7 @@ async function handleCloseSpot(positionId: string) {
     const supabase = createServerClient()
     const { data: pos, error } = await supabase
       .from('spot_positions')
-      .select('id, symbol, status, mint, token_amount, dry_run')
+      .select('id, symbol, status')
       .eq('id', positionId)
       .single()
     if (error || !pos) {
@@ -186,7 +255,7 @@ async function handleCloseSpot(positionId: string) {
       await reply(`❌ DB update failed: ${updateErr.message}`)
       return
     }
-    await reply(`✅ \`${positionId}\` (${pos.symbol}) marked closed. Spot-seller will execute the sell on next tick.`)
+    await reply(`✅ \`${positionId}\` (${pos.symbol}) marked closed.`)
   } catch (err) {
     await reply(`❌ CloseSpot error: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -195,12 +264,13 @@ async function handleCloseSpot(positionId: string) {
 async function handleStatus() {
   try {
     const supabase = createServerClient()
-    const [stateRes, lpRes, spotRes] = await Promise.allSettled([
+    const [stateRes, lpRes, spotRes, pm2Res] = await Promise.allSettled([
       getBotState(),
       supabase.from('lp_positions').select('id, symbol, status, sol_deposited')
         .in('status', ['active', 'out_of_range']),
       supabase.from('spot_positions').select('id, symbol, amount_sol, status')
         .eq('status', 'open'),
+      execAsync(`${PM2} jlist`),
     ])
 
     const state    = stateRes.status === 'fulfilled' ? stateRes.value    : { enabled: false, dry_run: true }
@@ -210,11 +280,27 @@ async function handleStatus() {
     const lpSol   = lpRows.reduce((s: number,   r: { sol_deposited?: number }) => s + (r.sol_deposited ?? 0), 0)
     const spotSol = spotRows.reduce((s: number, r: { amount_sol?: number })    => s + (r.amount_sol    ?? 0), 0)
 
+    // Parse PM2 status
+    let pm2Summary = 'unknown'
+    if (pm2Res.status === 'fulfilled') {
+      try {
+        const procs = JSON.parse(pm2Res.value.stdout) as Array<{ name: string; pm2_env: { status: string } }>
+        const running = procs.filter(p => p.pm2_env.status === 'online').map(p => p.name)
+        const stopped = procs.filter(p => p.pm2_env.status !== 'online').map(p => p.name)
+        pm2Summary = running.length > 0
+          ? `${running.length} running: ${running.join(', ')}`
+          : `all stopped`
+        if (stopped.length > 0 && running.length > 0)
+          pm2Summary += `\nStopped: ${stopped.join(', ')}`
+      } catch { pm2Summary = 'parse error' }
+    }
+
     await reply([
       `📊 *Bot Status*`,
       ``,
       `State:   ${state.enabled ? '✅ Running' : '🛑 Stopped'}`,
       `Mode:    ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
+      `PM2:     ${pm2Summary}`,
       ``,
       `LP positions:   ${lpRows.length} open (${lpSol.toFixed(3)} SOL deployed)`,
       `Spot positions: ${spotRows.length} open (${spotSol.toFixed(3)} SOL deployed)`,
@@ -279,7 +365,7 @@ async function handleSpots() {
 }
 
 async function handleTick() {
-  await reply('⚡ *Manual tick triggered* — running all 5 pipelines in parallel...')
+  await reply('⚡ *Manual tick triggered* — running all pipelines in parallel...')
 
   const started = Date.now()
 
@@ -322,8 +408,8 @@ async function handleHelp() {
     `🤖 *Meteoracle Commands*`,
     ``,
     `*Control*`,
-    `/stop          — pause scanner & monitor`,
-    `/start         — resume the bot`,
+    `/stop          — 🛑 Emergency: close all positions + stop all services`,
+    `/restart       — ▶️ Resume: restart all PM2 services`,
     `/dry           — dry-run mode (no real trades)`,
     `/live          — live trading ⚠️`,
     `/tick          — manual trigger all pipelines`,
@@ -335,7 +421,7 @@ async function handleHelp() {
     `/closespot <id> — force-close a spot position`,
     ``,
     `*Info*`,
-    `/status        — state + deployed SOL snapshot`,
+    `/status        — state + PM2 status + deployed SOL snapshot`,
     `/help          — this message`,
   ].join('\n'))
 }
@@ -353,7 +439,8 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
   console.log(`[telegram-bot] command: ${command}`)
 
   if      (command === '/stop')      await handleStop()
-  else if (command === '/start')     await handleStart()
+  else if (command === '/restart')   await handleRestart()
+  else if (command === '/start')     await handleRestart()  // alias for muscle memory
   else if (command === '/dry')       await handleDry()
   else if (command === '/live')      await handleLive()
   else if (command === '/close')     await handleClose(parts[1] ?? '')
