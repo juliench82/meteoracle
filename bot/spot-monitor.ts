@@ -187,15 +187,15 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
     let pricePctChange: number
 
     if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
-      priceMultiplier = 1.0
-      pricePctChange  = 0
+      // Seed entry price on first tick — skip exit check this tick to avoid instant zero-PnL close
       await supabase.from('spot_positions')
         .update({ entry_price_usd: currentPriceUsd }).eq('id', pos.id)
-      console.log(`[spot-monitor] ${label} seeded entry_price_usd=$${currentPriceUsd.toExponential(4)}`)
-    } else {
-      priceMultiplier = currentPriceUsd / pos.entry_price_usd
-      pricePctChange  = (priceMultiplier - 1) * 100
+      console.log(`[spot-monitor] ${label} seeded entry_price_usd=$${currentPriceUsd.toExponential(4)} — skipping exit check this tick`)
+      continue
     }
+
+    priceMultiplier = currentPriceUsd / pos.entry_price_usd
+    pricePctChange  = (priceMultiplier - 1) * 100
 
     console.log(
       `[spot-monitor] ${label}` +
@@ -226,7 +226,7 @@ export async function runSpotMonitor(): Promise<string> {
   }
 }
 
-// ─── Standalone entrypoint (PM2 only) ─────────────────────────────────────────────
+// ─── Standalone entrypoint (PM2 only) ─────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   console.log(`[spot-monitor] starting — DRY_RUN=${DRY_RUN}`)
