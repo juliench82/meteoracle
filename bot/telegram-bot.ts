@@ -5,7 +5,7 @@
  * No webhook, no HTTPS, no Vercel needed — runs as a PM2 process on the VPS.
  *
  * Commands:
- *   /stop              — EMERGENCY: close all positions + pm2 stop all
+ *   /stop              — EMERGENCY: close all positions + pm2 stop workers (bot stays alive)
  *   /restart           — resume: setBotState enabled + pm2 restart all
  *   /dry               — switch to dry-run mode
  *   /live              — switch to live trading
@@ -37,6 +37,18 @@ import { runLpMigrator } from '@/bot/lp-migrator'
 
 const execAsync = promisify(exec)
 const PM2 = '/usr/local/bin/pm2'
+
+// Worker process names to stop/restart — telegram-bot intentionally excluded from stop
+const WORKER_PROCESSES = [
+  'lp-scanner',
+  'lp-monitor-dlmm',
+  'scanner',
+  'buyer',
+  'monitor',
+  'migrator',
+  'lp-monitor',
+  'dashboard',
+]
 
 const BOT_TOKEN       = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const CHAT_ID         = process.env.TELEGRAM_CHAT_ID   ?? ''
@@ -85,10 +97,13 @@ interface TelegramUpdate {
 
 // ─── PM2 helpers ─────────────────────────────────────────────────────────
 
-async function pm2StopAll(): Promise<void> {
-  // Stop all processes except telegram-bot itself so we keep receiving commands
-  await execAsync(`${PM2} stop all --silent`).catch(err =>
-    console.warn('[telegram-bot] pm2 stop all failed:', err.message)
+/**
+ * Stop all worker processes individually — telegram-bot stays alive to receive /restart.
+ */
+async function pm2StopWorkers(): Promise<void> {
+  const names = WORKER_PROCESSES.join(' ')
+  await execAsync(`${PM2} stop ${names} --silent`).catch(err =>
+    console.warn('[telegram-bot] pm2 stop workers failed:', err.message)
   )
 }
 
@@ -134,7 +149,7 @@ async function handleStop() {
     }
   }
 
-  // 3. Close all open spot positions (mark closed_manual — spot-monitor picks up on next tick if still running)
+  // 3. Close all open spot positions
   const { data: spotPositions } = await supabase
     .from('spot_positions')
     .select('id, symbol')
@@ -149,15 +164,15 @@ async function handleStop() {
     if (!error) spotClosed++
   }
 
-  // 4. Stop all PM2 processes (telegram-bot stays alive to receive /restart)
-  await pm2StopAll()
+  // 4. Stop all worker PM2 processes — telegram-bot stays alive for /restart
+  await pm2StopWorkers()
 
   await reply([
     `🛑 *Emergency stop complete.*`,
     ``,
     `• LP positions closed: ${lpClosed}/${(lpPositions ?? []).length}`,
     `• Spot positions marked closed: ${spotClosed}/${(spotPositions ?? []).length}`,
-    `• All PM2 services stopped (telegram-bot stays alive)`,
+    `• All worker services stopped (telegram-bot alive ✅)`,
     ``,
     `Send /restart to resume all services.`,
   ].join('\n'))
@@ -169,7 +184,7 @@ async function handleRestart() {
   // 1. Re-enable bot in DB
   await setBotState({ enabled: true })
 
-  // 2. Restart all PM2 processes
+  // 2. Restart all PM2 processes (including telegram-bot itself)
   await pm2RestartAll()
 
   const state = await getBotState()
@@ -280,7 +295,6 @@ async function handleStatus() {
     const lpSol   = lpRows.reduce((s: number,   r: { sol_deposited?: number }) => s + (r.sol_deposited ?? 0), 0)
     const spotSol = spotRows.reduce((s: number, r: { amount_sol?: number })    => s + (r.amount_sol    ?? 0), 0)
 
-    // Parse PM2 status
     let pm2Summary = 'unknown'
     if (pm2Res.status === 'fulfilled') {
       try {
