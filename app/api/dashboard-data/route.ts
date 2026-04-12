@@ -1,9 +1,9 @@
+import { NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
-import { DashboardClient } from '@/components/dashboard/DashboardClient'
 
 export const dynamic = 'force-dynamic'
 
-export default async function DashboardPage() {
+export async function GET() {
   const supabase = createServerClient()
 
   const [openSpotRes, closedSpotRes, openLpRes, closedLpRes, watchlistRes] = await Promise.allSettled([
@@ -14,13 +14,11 @@ export default async function DashboardPage() {
     supabase.from('pre_grad_watchlist').select('*').order('detected_at', { ascending: false }).limit(20),
   ])
 
-  const initialData = {
+  return NextResponse.json({
     openSpot:   openSpotRes.status   === 'fulfilled' ? (openSpotRes.value.data   ?? []) : [],
     closedSpot: closedSpotRes.status === 'fulfilled' ? (closedSpotRes.value.data ?? []) : [],
     openLp:     openLpRes.status     === 'fulfilled' ? (openLpRes.value.data     ?? []) : [],
     closedLp:   closedLpRes.status   === 'fulfilled' ? (closedLpRes.value.data   ?? []) : [],
     watchlist:  watchlistRes.status  === 'fulfilled' ? (watchlistRes.value.data  ?? []) : [],
-  }
-
-  return <DashboardClient initialData={initialData} />
+  })
 }
