@@ -28,6 +28,10 @@
  *
  * Update after git pull:
  *   git pull && npm install && npm run build && pm2 restart all
+ *
+ * DRY-RUN vs LIVE:
+ *   BOT_DRY_RUN=true  — simulate only, no real txs, no wallet needed
+ *   BOT_DRY_RUN=false — live mode, REAL money, fund wallet first
  */
 
 module.exports = {
@@ -43,7 +47,7 @@ module.exports = {
       max_restarts:   10,
       env: {
         NODE_ENV:              'production',
-        BOT_DRY_RUN:           'false',
+        BOT_DRY_RUN:           'true',
         LP_SCANNER_STANDALONE: 'true',
         LP_SCAN_INTERVAL_SEC:  '900',
       },
@@ -62,7 +66,7 @@ module.exports = {
       max_restarts:   10,
       env: {
         NODE_ENV:               'production',
-        BOT_DRY_RUN:            'false',
+        BOT_DRY_RUN:            'true',
         LP_MONITOR_STANDALONE:  'true',
         LP_MONITOR_INTERVAL_SEC: '300',
       },
@@ -81,7 +85,7 @@ module.exports = {
       cwd:           __dirname,
       restart_delay:  5_000,
       max_restarts:   10,
-      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'false' },
+      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'true' },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/scanner-error.log',
       out_file:   './logs/scanner-out.log',
@@ -95,7 +99,7 @@ module.exports = {
       cwd:           __dirname,
       restart_delay:  5_000,
       max_restarts:   10,
-      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'false' },
+      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'true' },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/buyer-error.log',
       out_file:   './logs/buyer-out.log',
@@ -109,7 +113,7 @@ module.exports = {
       cwd:           __dirname,
       restart_delay:  5_000,
       max_restarts:   10,
-      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'false' },
+      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'true' },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/monitor-error.log',
       out_file:   './logs/monitor-out.log',
@@ -125,7 +129,7 @@ module.exports = {
       cwd:           __dirname,
       restart_delay:  10_000,
       max_restarts:   10,
-      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'false' },
+      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'true' },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/migrator-error.log',
       out_file:   './logs/migrator-out.log',
@@ -139,7 +143,7 @@ module.exports = {
       cwd:           __dirname,
       restart_delay:  10_000,
       max_restarts:   10,
-      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'false' },
+      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'true' },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/lp-monitor-error.log',
       out_file:   './logs/lp-monitor-out.log',
@@ -155,7 +159,7 @@ module.exports = {
       cwd:           __dirname,
       restart_delay:  5_000,
       max_restarts:   10,
-      env: { NODE_ENV: 'production' },
+      env: { NODE_ENV: 'production', BOT_DRY_RUN: 'true' },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/telegram-bot-error.log',
       out_file:   './logs/telegram-bot-out.log',
@@ -169,9 +173,6 @@ module.exports = {
       cwd:           __dirname,
       restart_delay:  5_000,
       max_restarts:   10,
-      // Next.js reads .env.local automatically during `next start` for server components
-      // but only if the working directory is correct and the file exists.
-      // We also pass env vars explicitly to guarantee runtime availability.
       env_file:      '.env.local',
       env: {
         NODE_ENV: 'production',
