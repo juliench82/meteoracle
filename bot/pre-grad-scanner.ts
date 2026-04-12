@@ -7,7 +7,8 @@
  *
  * DB columns (pre_grad_watchlist):
  *   id, mint, symbol, name, detected_at, bonding_progress, market_cap_usd,
- *   volume_1h_usd, holder_count, graduated_at, status, reject_reason, updated_at
+ *   volume_1h_usd, holder_count, graduated_at, status, reject_reason, updated_at,
+ *   bonding_curve_pct, bonding_pct_at_first_seen
  */
 
 import 'dotenv/config'
@@ -113,17 +114,19 @@ async function processCandidate(
 
   const upsertData: Record<string, unknown> = {
     mint,
-    symbol:           shortSym,
-    name:             name || shortSym,
-    volume_1h_usd:    volumeSol,   // ← real value from pump.fun
-    market_cap_usd:   marketCapUsd,
-    status:           'watching',
-    bonding_progress: progressPct,
-    holder_count:     holderCount,
-    updated_at:       now,
+    symbol:             shortSym,
+    name:               name || shortSym,
+    volume_1h_usd:      volumeSol,
+    market_cap_usd:     marketCapUsd,
+    status:             'watching',
+    bonding_progress:   progressPct,
+    bonding_curve_pct:  progressPct,
+    holder_count:       holderCount,
+    updated_at:         now,
   }
   if (!existing) {
-    upsertData.detected_at = now
+    upsertData.detected_at             = now
+    upsertData.bonding_pct_at_first_seen = progressPct
   }
 
   const { error } = await supabase
