@@ -50,8 +50,6 @@ async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
 
 /**
  * Derive the human-readable SOL-per-token price from the active bin.
- * dlmmPool.fromPricePerLamport adjusts for both tokenX and tokenY decimals.
- * Raw activeBin.pricePerToken is a Q64 number not adjusted for decimals.
  */
 function getDecimalAdjustedPrice(dlmmPool: DLMM, activeBin: { price: string; pricePerToken: string }): number {
   try {
@@ -89,10 +87,10 @@ export async function openPosition(
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
     const solAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
 
-    // 2. Global exposure guard
+    // 2. Global exposure guard (lp_positions)
     const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '0.15')
     const { data: openPositions } = await supabase
-      .from('positions').select('sol_deposited').eq('status', 'active')
+      .from('lp_positions').select('sol_deposited').eq('status', 'active')
     const totalDeployed = (openPositions ?? []).reduce((s: number, p: { sol_deposited: number }) => s + (p.sol_deposited ?? 0), 0)
     if (totalDeployed + solAmount > maxTotalDeployed) {
       console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL already deployed (limit ${maxTotalDeployed} SOL)`)
@@ -103,11 +101,11 @@ export async function openPosition(
       return null
     }
 
-    // 3. Per-token cooldown
+    // 3. Per-token cooldown (lp_positions)
     const cooldownHours = parseFloat(process.env.TOKEN_COOLDOWN_HOURS ?? '6')
     const cooldownCutoff = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
     const { data: recentClose } = await supabase
-      .from('positions')
+      .from('lp_positions')
       .select('id')
       .eq('token_address', metrics.address)
       .eq('status', 'closed')
@@ -141,7 +139,6 @@ export async function openPosition(
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
 
-    // Use decimal-adjusted price — NOT raw pricePerToken
     const entryPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin)
     console.log(`${label} entry price: ${entryPriceSol.toFixed(9)} SOL/token (bin ${activeBinId})`)
 
@@ -266,17 +263,17 @@ export async function closePosition(
   const supabase = createServerClient()
 
   const { data: position, error } = await supabase
-    .from('positions')
+    .from('lp_positions')
     .select('*')
     .eq('id', positionId)
     .single()
 
   if (error || !position) {
-    console.error(`[executor] closePosition: position ${positionId} not found`)
+    console.error(`[executor] closePosition: LP position ${positionId} not found`)
     return false
   }
 
-  const label = `[executor][close][${position.token_symbol}]`
+  const label = `[executor][close][${position.symbol}]`
   console.log(`${label} closing — reason: ${reason}`)
 
   if (DRY_RUN) {
@@ -290,7 +287,7 @@ export async function closePosition(
 
   try {
     const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
-    const positionPubKey = new PublicKey(position.metadata?.positionPubKey ?? '')
+    const positionPubKey = new PublicKey(position.position_pubkey ?? '')
 
     // 1. Claim fees
     let feesClaimedSol = 0
@@ -353,9 +350,9 @@ async function persistPosition(
 ): Promise<string> {
   const supabase = createServerClient()
   const { data, error } = await supabase
-    .from('positions')
+    .from('lp_positions')
     .insert({
-      token_symbol:    metrics.symbol,
+      symbol:          metrics.symbol,
       token_address:   metrics.address,
       pool_address:    metrics.poolAddress,
       strategy_id:     strategy.id,
@@ -367,15 +364,12 @@ async function persistPosition(
       status:          'active',
       in_range:        true,
       opened_at:       new Date().toISOString(),
-      metadata: {
-        sig,
-        positionPubKey,
-        entryPriceSol,
-      },
+      position_pubkey: positionPubKey ?? null,
+      metadata: { sig, entryPriceSol },
     })
     .select('id')
     .single()
-  if (error) throw new Error(`Failed to persist position: ${error.message}`)
+  if (error) throw new Error(`Failed to persist LP position: ${error.message}`)
   return data.id
 }
 
@@ -386,7 +380,7 @@ async function markPositionClosed(
 ): Promise<void> {
   const supabase = createServerClient()
   await supabase
-    .from('positions')
+    .from('lp_positions')
     .update({
       status:          'closed',
       closed_at:       new Date().toISOString(),
