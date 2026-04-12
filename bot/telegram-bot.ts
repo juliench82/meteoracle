@@ -16,9 +16,6 @@
  *   /spots             — list all open spot positions
  *   /tick              — manually trigger all 5 pipelines in parallel
  *   /help              — command list
- *
- * Run:
- *   npx tsx bot/telegram-bot.ts
  */
 
 import 'dotenv/config'
@@ -36,11 +33,11 @@ import { runPreGradScanner } from '@/bot/pre-grad-scanner'
 import { runSpotMonitor } from '@/bot/spot-monitor'
 import { runLpMigrator } from '@/bot/lp-migrator'
 
-const BOT_TOKEN   = process.env.TELEGRAM_BOT_TOKEN ?? ''
-const CHAT_ID     = process.env.TELEGRAM_CHAT_ID   ?? ''
-const POLL_MS     = 2_000
+const BOT_TOKEN       = process.env.TELEGRAM_BOT_TOKEN ?? ''
+const CHAT_ID         = process.env.TELEGRAM_CHAT_ID   ?? ''
+const POLL_MS         = 2_000
 const TICK_TIMEOUT_MS = 55_000
-const API         = `https://api.telegram.org/bot${BOT_TOKEN}`
+const API             = `https://api.telegram.org/bot${BOT_TOKEN}`
 
 if (!BOT_TOKEN || !CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — exiting')
@@ -49,7 +46,7 @@ if (!BOT_TOKEN || !CHAT_ID) {
 
 let lastUpdateId = 0
 
-// ─── Telegram helpers ────────────────────────────────────────────────────────
+// ─── Telegram helpers ────────────────────────────────────────────────────
 
 async function reply(text: string): Promise<void> {
   try {
@@ -92,7 +89,7 @@ function withTickTimeout(fn: () => Promise<string>, name: string): Promise<strin
   ])
 }
 
-// ─── Command handlers ────────────────────────────────────────────────────────
+// ─── Command handlers ─────────────────────────────────────────────────────
 
 async function handleStop() {
   await setBotState({ enabled: false })
@@ -137,21 +134,21 @@ async function handleClose(positionId: string) {
   try {
     const supabase = createServerClient()
     const { data: pos, error } = await supabase
-      .from('positions')
-      .select('id, token_symbol, status')
+      .from('lp_positions')
+      .select('id, symbol, status')
       .eq('id', positionId)
       .single()
     if (error || !pos) {
-      await reply(`❌ Position \`${positionId}\` not found.`)
+      await reply(`❌ LP position \`${positionId}\` not found.`)
       return
     }
     if (pos.status === 'closed') {
-      await reply(`ℹ️ \`${positionId}\` (${pos.token_symbol}) is already closed.`)
+      await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) is already closed.`)
       return
     }
     const ok = await closePosition(positionId, 'manual_telegram')
     if (ok) {
-      await reply(`✅ \`${positionId}\` (${pos.token_symbol}) closed successfully.`)
+      await reply(`✅ \`${positionId}\` (${pos.symbol}) closed successfully.`)
     } else {
       await reply(`❌ Failed to close \`${positionId}\` — check PM2 logs.`)
     }
@@ -181,7 +178,6 @@ async function handleCloseSpot(positionId: string) {
       await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) is already closed (status=${pos.status}).`)
       return
     }
-    // Mark as manually closed in DB — spot-seller handles actual sell
     const { error: updateErr } = await supabase
       .from('spot_positions')
       .update({ status: 'closed_manual', closed_at: new Date().toISOString() })
@@ -201,19 +197,18 @@ async function handleStatus() {
     const supabase = createServerClient()
     const [stateRes, lpRes, spotRes] = await Promise.allSettled([
       getBotState(),
-      supabase.from('positions').select('id, token_symbol, status, sol_deposited, fees_earned_sol')
+      supabase.from('lp_positions').select('id, symbol, status, sol_deposited')
         .in('status', ['active', 'out_of_range']),
       supabase.from('spot_positions').select('id, symbol, amount_sol, status')
         .eq('status', 'open'),
     ])
 
-    const state     = stateRes.status    === 'fulfilled' ? stateRes.value    : { enabled: false, dry_run: true }
-    const lpRows    = lpRes.status       === 'fulfilled' ? (lpRes.value.data ?? [])   : []
-    const spotRows  = spotRes.status     === 'fulfilled' ? (spotRes.value.data ?? []) : []
+    const state    = stateRes.status === 'fulfilled' ? stateRes.value    : { enabled: false, dry_run: true }
+    const lpRows   = lpRes.status    === 'fulfilled' ? (lpRes.value.data   ?? []) : []
+    const spotRows = spotRes.status  === 'fulfilled' ? (spotRes.value.data ?? []) : []
 
-    const lpSol     = lpRows.reduce((s: number, r: { sol_deposited?: number }) => s + (r.sol_deposited ?? 0), 0)
-    const spotSol   = spotRows.reduce((s: number, r: { amount_sol?: number }) => s + (r.amount_sol ?? 0), 0)
-    const totalSol  = lpSol + spotSol
+    const lpSol   = lpRows.reduce((s: number,   r: { sol_deposited?: number }) => s + (r.sol_deposited ?? 0), 0)
+    const spotSol = spotRows.reduce((s: number, r: { amount_sol?: number })    => s + (r.amount_sol    ?? 0), 0)
 
     await reply([
       `📊 *Bot Status*`,
@@ -223,7 +218,7 @@ async function handleStatus() {
       ``,
       `LP positions:   ${lpRows.length} open (${lpSol.toFixed(3)} SOL deployed)`,
       `Spot positions: ${spotRows.length} open (${spotSol.toFixed(3)} SOL deployed)`,
-      `Total deployed: ${totalSol.toFixed(3)} SOL`,
+      `Total deployed: ${(lpSol + spotSol).toFixed(3)} SOL`,
       ``,
       `Use /positions for LP details, /spots for spot details.`,
     ].join('\n'))
@@ -236,8 +231,8 @@ async function handlePositions() {
   try {
     const supabase = createServerClient()
     const { data, error } = await supabase
-      .from('positions')
-      .select('id, token_symbol, status, sol_deposited, fees_earned_sol, opened_at')
+      .from('lp_positions')
+      .select('id, symbol, status, sol_deposited, pool_address, opened_at')
       .in('status', ['active', 'out_of_range'])
       .order('opened_at', { ascending: false })
       .limit(10)
@@ -246,13 +241,13 @@ async function handlePositions() {
     const rows = data ?? []
     if (rows.length === 0) { await reply('📭 No open LP positions.'); return }
 
-    const lines = rows.map((r: { id: string; token_symbol: string; status: string; sol_deposited?: number; fees_earned_sol?: number; opened_at: string }) => {
-      const age = ((Date.now() - new Date(r.opened_at).getTime()) / 3_600_000).toFixed(1)
-      const fees = (r.fees_earned_sol ?? 0).toFixed(4)
-      return `• \`${r.id.slice(0, 8)}\` *${r.token_symbol}* — ${r.status} | ${(r.sol_deposited ?? 0).toFixed(3)} SOL | fees=${fees} SOL | ${age}h\n  /close ${r.id}`
+    const lines = rows.map((r: { id: string; symbol: string; status: string; sol_deposited?: number; pool_address?: string; opened_at: string }) => {
+      const age  = ((Date.now() - new Date(r.opened_at).getTime()) / 3_600_000).toFixed(1)
+      const pool = r.pool_address ? r.pool_address.slice(0, 8) + '...' : 'unknown'
+      return `• \`${r.id.slice(0, 8)}\` *${r.symbol}* — ${r.status} | ${(r.sol_deposited ?? 0).toFixed(3)} SOL | pool=${pool} | ${age}h\n  /close ${r.id}`
     })
 
-    await reply([`📂 *Open LP Positions (${rows.length})*`, '', ...lines].join('\n'))
+    await reply([`🏊 *Open LP Positions (${rows.length})*`, '', ...lines].join('\n'))
   } catch (err) {
     await reply(`❌ Error: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -334,8 +329,8 @@ async function handleHelp() {
     `/tick          — manual trigger all pipelines`,
     ``,
     `*Positions*`,
-    `/positions     — list open LP positions`,
-    `/spots         — list open spot positions`,
+    `/positions     — list open Meteora LP positions`,
+    `/spots         — list open pre-grad spot positions`,
     `/close <id>    — force-close an LP position`,
     `/closespot <id> — force-close a spot position`,
     ``,
@@ -345,13 +340,11 @@ async function handleHelp() {
   ].join('\n'))
 }
 
-// ─── Main poll loop ───────────────────────────────────────────────────────────
+// ─── Main poll loop ─────────────────────────────────────────────────────────────
 
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
   const msg = update.message
   if (!msg?.text) return
-
-  // Security: only respond to your own chat
   if (String(msg.chat.id) !== String(CHAT_ID)) return
 
   const parts   = msg.text.trim().split(/\s+/)
