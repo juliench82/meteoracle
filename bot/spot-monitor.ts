@@ -3,11 +3,11 @@
  *
  * Polls every 30s for all open spot positions.
  * Price source priority:
- *   1. Jupiter Price API v2 (post-grad / DEX-listed tokens)
- *   2. pump.fun API fallback (pre-grad tokens still on bonding curve)
+ *   1. Jupiter Price API v2
+ *   2. pump.fun API fallback
  *
- * BOT_DRY_RUN=true  — real prices, no actual sell tx
- * BOT_DRY_RUN=false — real prices + real sell tx
+ * DRY_RUN is sourced from bot_state DB (via getBotState) so that
+ * the Telegram /dry command works without a pm2 restart.
  */
 
 import 'dotenv/config'
@@ -22,7 +22,6 @@ import { sellTokenForSol } from './spot-seller'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
 import { sendTelegram } from './telegram'
 
-const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
 const POLL_INTERVAL = parseInt(process.env.SPOT_MONITOR_POLL_SEC ?? '30') * 1_000
 const cfg           = PRE_GRAD_STRATEGY
 
@@ -84,6 +83,7 @@ async function closeSpotPosition(
   reason:   ExitReason,
   pnlSol:   number,
   exitMult: number,
+  dryRun:   boolean,
 ): Promise<void> {
   const supabase = createServerClient()
   const label    = `${position.symbol} (${position.mint.slice(0, 8)}...)`
@@ -97,7 +97,10 @@ async function closeSpotPosition(
   let txSell: string | undefined
   let solReceived = 0
 
-  if (!position.dry_run && position.token_amount > 0) {
+  // Use per-position dry_run flag OR global bot_state dry_run
+  const isRealSell = !dryRun && !position.dry_run && position.token_amount > 0
+
+  if (isRealSell) {
     const sellResult = await sellTokenForSol(
       position.mint, position.token_amount, 6, position.symbol,
     )
@@ -137,7 +140,7 @@ async function closeSpotPosition(
   const emoji    = reason === 'tp' ? '🟢' : reason === 'sl' ? '🔴' : '⏱️'
   const pnlStr   = `${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL`
   const pctStr   = `${((exitMult - 1) * 100).toFixed(1)}%`
-  const dryLabel = position.dry_run ? '[DRY-RUN] ' : ''
+  const dryLabel = (dryRun || position.dry_run) ? '[DRY-RUN] ' : ''
   const txLine   = txSell ? `\n🔗 https://solscan.io/tx/${txSell}` : ''
 
   await sendTelegram(
@@ -148,8 +151,10 @@ async function closeSpotPosition(
 }
 
 async function tick(): Promise<{ monitored: number; closed: number }> {
-  // ██ BOT STATE GATE — respect /stop command ██
-  const state = await getBotState()
+  // ██ BOT STATE GATE — respect /stop and dry_run from DB ██
+  const state  = await getBotState()
+  const dryRun = state.dry_run  // authoritative source — overrides BOT_DRY_RUN env
+
   if (!state.enabled) {
     console.log('[spot-monitor] bot is stopped — skipping tick')
     return { monitored: 0, closed: 0 }
@@ -183,31 +188,35 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
       continue
     }
 
-    let priceMultiplier: number
-    let pricePctChange: number
-
     if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
-      // Seed entry price on first tick — skip exit check this tick to avoid instant zero-PnL close
       await supabase.from('spot_positions')
         .update({ entry_price_usd: currentPriceUsd }).eq('id', pos.id)
       console.log(`[spot-monitor] ${label} seeded entry_price_usd=$${currentPriceUsd.toExponential(4)} — skipping exit check this tick`)
       continue
     }
 
-    priceMultiplier = currentPriceUsd / pos.entry_price_usd
-    pricePctChange  = (priceMultiplier - 1) * 100
+    const priceMultiplier = currentPriceUsd / pos.entry_price_usd
+    const pricePctChange  = (priceMultiplier - 1) * 100
+    const pnlSol          = pos.amount_sol * (priceMultiplier - 1)
+
+    // Write live price + P&L back to DB every tick so dashboard shows it
+    await supabase.from('spot_positions').update({
+      current_price_usd: currentPriceUsd,
+      pnl_pct:           parseFloat(pricePctChange.toFixed(2)),
+      pnl_sol:           parseFloat(pnlSol.toFixed(6)),
+    }).eq('id', pos.id)
 
     console.log(
       `[spot-monitor] ${label}` +
       ` price=$${currentPriceUsd.toExponential(4)}` +
       ` (${pricePctChange >= 0 ? '+' : ''}${pricePctChange.toFixed(1)}%)` +
+      ` pnl=${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL` +
       ` age=${ageMinutes.toFixed(1)}min`
     )
 
     const exitReason = checkExitCondition(pos, pricePctChange, ageMinutes)
     if (exitReason) {
-      const pnlSol = pos.amount_sol * (priceMultiplier - 1)
-      await closeSpotPosition(pos, exitReason, pnlSol, priceMultiplier)
+      await closeSpotPosition(pos, exitReason, pnlSol, priceMultiplier, dryRun)
       closed++
     }
   }
@@ -226,10 +235,9 @@ export async function runSpotMonitor(): Promise<string> {
   }
 }
 
-// ─── Standalone entrypoint (PM2 only) ─────────────────────────────────────────────────────
-
 async function main(): Promise<void> {
-  console.log(`[spot-monitor] starting — DRY_RUN=${DRY_RUN}`)
+  const state = await getBotState()
+  console.log(`[spot-monitor] starting — dry_run=${state.dry_run} (from DB)`)
   console.log(`[spot-monitor] TP=+${cfg.exits.takeProfitPct}% | SL=${cfg.exits.stopLossPct}% | maxHold=${cfg.exits.maxHoldMinutes}min`)
   console.log(`[spot-monitor] poll interval: ${POLL_INTERVAL / 1000}s`)
   await tick()

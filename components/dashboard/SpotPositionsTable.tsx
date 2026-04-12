@@ -3,19 +3,22 @@
 import { useState } from 'react'
 
 interface Position {
-  id:              string
-  mint:            string
-  symbol:          string
-  entry_price_usd: number
-  amount_sol:      number
-  status:          string
-  dry_run:         boolean
-  opened_at:       string
-  closed_at?:      string
-  pnl_sol?:        number
-  tx_buy?:         string
-  tx_sell?:        string
-  _type?:          string   // 'lp' | undefined (spot)
+  id:                string
+  mint:              string
+  symbol:            string
+  entry_price_usd:   number
+  entry_price_sol:   number
+  current_price_usd: number
+  amount_sol:        number
+  pnl_sol?:          number
+  pnl_pct?:          number
+  status:            string
+  dry_run:           boolean
+  opened_at:         string
+  closed_at?:        string
+  tx_buy?:           string
+  tx_sell?:          string
+  _type?:            string
 }
 
 interface Props {
@@ -48,10 +51,25 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
     return <span className={`${base} bg-zinc-800 text-zinc-400`}>{status}</span>
   }
 
-  function pnlCell(pnl: number | undefined) {
-    if (pnl === undefined || pnl === null) return <span className="text-zinc-500">—</span>
-    const color = pnl >= 0 ? 'text-green-400' : 'text-red-400'
-    return <span className={color}>{pnl >= 0 ? '+' : ''}{pnl.toFixed(4)} SOL</span>
+  function entryCell(pos: Position) {
+    if (pos.entry_price_usd > 0)
+      return <span>${pos.entry_price_usd.toExponential(3)}</span>
+    if (pos.entry_price_sol > 0)
+      return <span className="text-zinc-400">{pos.entry_price_sol.toExponential(3)} SOL</span>
+    return <span className="text-zinc-500">—</span>
+  }
+
+  function pnlCell(pos: Position) {
+    // prefer live pnl_pct for open positions, fall back to pnl_sol
+    if (pos.status === 'open' && pos.pnl_pct !== undefined && pos.pnl_pct !== null) {
+      const color = pos.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'
+      return <span className={color}>{pos.pnl_pct >= 0 ? '+' : ''}{pos.pnl_pct.toFixed(1)}%</span>
+    }
+    if (pos.pnl_sol !== undefined && pos.pnl_sol !== null) {
+      const color = pos.pnl_sol >= 0 ? 'text-green-400' : 'text-red-400'
+      return <span className={color}>{pos.pnl_sol >= 0 ? '+' : ''}{pos.pnl_sol.toFixed(4)} SOL</span>
+    }
+    return <span className="text-zinc-500">—</span>
   }
 
   function age(openedAt: string) {
@@ -63,7 +81,6 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-xl">
-      {/* Tabs */}
       <div className="flex border-b border-zinc-800">
         {(['open', 'closed'] as const).map(t => (
           <button
@@ -82,7 +99,6 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
         ))}
       </div>
 
-      {/* Table */}
       <div className="overflow-x-auto">
         {rows.length === 0 ? (
           <p className="text-zinc-500 text-sm text-center py-10">
@@ -94,7 +110,7 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
               <tr className="text-zinc-500 text-xs uppercase border-b border-zinc-800">
                 <th className="text-left px-4 py-3">Token</th>
                 <th className="text-right px-4 py-3">Size</th>
-                <th className="text-right px-4 py-3">Entry $</th>
+                <th className="text-right px-4 py-3">Entry</th>
                 <th className="text-right px-4 py-3">P&amp;L</th>
                 <th className="text-right px-4 py-3">Age</th>
                 <th className="text-center px-4 py-3">Status</th>
@@ -115,13 +131,10 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
                     {pos.amount_sol.toFixed(3)} SOL
                   </td>
                   <td className="text-right px-4 py-3 text-zinc-300">
-                    {pos.entry_price_usd > 0
-                      ? `$${pos.entry_price_usd.toExponential(3)}`
-                      : <span className="text-zinc-500">—</span>
-                    }
+                    {entryCell(pos)}
                   </td>
                   <td className="text-right px-4 py-3">
-                    {pnlCell(pos.pnl_sol)}
+                    {pnlCell(pos)}
                   </td>
                   <td className="text-right px-4 py-3 text-zinc-400">
                     {age(pos.opened_at)}
