@@ -1,44 +1,48 @@
 # ⚡ Meteoracle
 
-> Automated Solana trading bot with a live Next.js dashboard. Two active pipelines: pre-graduation pump.fun spot buys, and Meteora DLMM LP positions.
+> Automated Solana trading bot with a live Next.js dashboard. Three active pipelines: pre-graduation pump.fun spot buys, Meteora DLMM LP positions, and a post-grad LP bridge.
 
-**Status:** Live — 7 bot processes on Hetzner VPS via PM2, dashboard on Coolify.
+**Status:** Live — 9 processes on Hetzner VPS via PM2 (7 bot workers + Telegram command bot + Next.js dashboard).
 
 ---
 
 ## Architecture
 
 ```
-Hetzner VPS (PM2 — 7 processes)
+Hetzner VPS (PM2 — 9 processes)
   │
   ├── PIPELINE 1: Meteora DLMM LP
-  │   ├── bot/scanner.ts          ← scans Meteora pools every 15min
-  │   └── bot/monitor.ts          ← monitors LP range health + exits every 5min
+  │   ├── bot/scanner.ts          ← scans Meteora pools every 15min   [PM2: lp-scanner]
+  │   └── bot/monitor.ts          ← monitors LP range health + exits every 5min  [PM2: lp-monitor-dlmm]
   │
   ├── PIPELINE 2: Pre-grad spot buy (pump.fun)
-  │   ├── bot/pre-grad-scanner.ts ← polls pump.fun every 60s (88–98% bonding curve)
-  │   ├── bot/spot-buyer.ts       ← buys watchlist tokens via Jupiter every 30s
-  │   └── bot/spot-monitor.ts     ← TP/SL/timeout exits every 30s
+  │   ├── bot/pre-grad-scanner.ts ← polls pump.fun REST every 60s (88–98% bonding curve)  [PM2: scanner]
+  │   ├── bot/spot-buyer.ts       ← buys watchlist tokens via Jupiter every 30s  [PM2: buyer]
+  │   └── bot/spot-monitor.ts     ← TP/SL/timeout exits every 30s  [PM2: monitor]
   │
-  └── PIPELINE 3: Post-grad LP bridge
-      ├── bot/lp-migrator.ts      ← detects graduation, opens Meteora DLMM LP
-      └── bot/lp-monitor.ts       ← monitors post-grad LP positions
+  ├── PIPELINE 3: Post-grad LP bridge
+  │   ├── bot/lp-migrator.ts      ← detects graduation, opens Meteora DLMM LP every 60s  [PM2: migrator]
+  │   └── bot/lp-monitor.ts       ← monitors post-grad LP positions every 5min  [PM2: lp-monitor]
+  │
+  └── INTERFACE
+      ├── bot/telegram-bot.ts     ← bidirectional Telegram command bot  [PM2: telegram-bot]
+      └── start-dashboard.sh      ← cleans .next + builds + starts Next.js on port 3000  [PM2: dashboard]
 
-Coolify (Next.js dashboard — npm run start)
+Next.js dashboard (same VPS, port 3000, served by PM2)
   └── app/(dashboard)/
-      ├── page.tsx                ← KPIs, P&L chart, positions table, watchlist
-      ├── strategies/page.tsx     ← Strategy config + live performance
-      ├── bot/page.tsx            ← Process health, open positions, recent exits
-      └── settings/page.tsx       ← Env var reference + go-live checklist
+      ├── page.tsx                ← KPIs, P&L chart, combined positions table (SPOT + LP), watchlist
+      └── strategies/page.tsx     ← Strategy config + live performance
+      (bot/ and settings/ pages removed)
 
 Supabase (Postgres)
   ├── pre_grad_watchlist          ← tokens detected by pre-grad scanner
   ├── spot_positions              ← all pre-grad trades (open + closed)
-  ├── positions                   ← all LP positions (open + closed)
+  ├── lp_positions                ← all LP positions (open + closed) — Pipelines 1 & 3
   ├── candidates                  ← Meteora scanner candidates log
-  └── bot_logs                    ← structured event log
+  ├── bot_logs                    ← structured event log
+  └── bot_state                   ← single-row enabled flag; read by all workers + dashboard
 
-Telegram — outbound alerts only
+Telegram — bidirectional (alerts out + commands in)
 ```
 
 ---
@@ -49,7 +53,7 @@ Scans all Meteora pools every 15 minutes. Filters by market cap, volume, liquidi
 
 ## Pipeline 2 — Pre-grad Spot Buy
 
-Scans pump.fun tokens at 88–98% bonding curve progress every 60 seconds. Enriches each candidate with pump.fun API data: bonding curve %, holder count, top holder %, dev wallet %. Buys via Jupiter v6. Exits at +150% TP, -35% SL, or 90-minute timeout.
+Scans pump.fun tokens at 88–98% bonding curve progress every 60 seconds via the pump.fun REST API (no Bitquery, no API key required). Enriches each candidate with pump.fun API data: bonding curve %, holder count, top holder %, dev wallet %. Buys via Jupiter v6. Exits at +150% TP, -35% SL, or 90-minute timeout.
 
 ### Current filters
 
@@ -66,7 +70,37 @@ Scans pump.fun tokens at 88–98% bonding curve progress every 60 seconds. Enric
 
 ## Pipeline 3 — Post-grad LP Bridge
 
-Detects pump.fun graduation events, then opens a Meteora DLMM LP position for the newly listed token. Monitors LP health and exits on the same conditions as Pipeline 1.
+Detects pump.fun graduation events every 60 seconds, then opens a Meteora DLMM LP position for the newly listed token. Monitors LP health and exits on the same conditions as Pipeline 1.
+
+---
+
+## Telegram bot commands
+
+The `telegram-bot` process is a **bidirectional** command interface, not just outbound alerts.
+
+| Command | Action |
+|---|---|
+| `/stop` | Emergency stop — closes all open positions + `pm2 stop` all workers |
+| `/restart` | Restarts all workers (not telegram-bot itself) + sets botState enabled |
+| `/close` | Manually close all open positions |
+| `/tick` | Runs one tick of all 5 pipeline runners in parallel (55s timeout each) |
+| `/positions` | Shows all open spot + LP positions |
+| `/status` | Shows bot state (enabled/disabled), open position count, wallet balance |
+| `/help` | Lists all commands |
+
+### Outbound alerts
+
+| Alert | Trigger |
+|---|---|
+| 🟢 BUY token | Spot position opened |
+| 🟡 [DRY-RUN] BUY | Dry-run position opened |
+| 🟢 CLOSED TP ✅ | Take profit hit |
+| 🔴 CLOSED SL ❌ | Stop loss hit |
+| ⏱️ CLOSED TIMEOUT | Max hold exceeded |
+| 🔁 REBALANCED | Smart rebalance triggered |
+| ⚠️ LOW BALANCE | Wallet below minimum |
+| ❌ BUY FAILED | Jupiter swap error |
+| 🚀 STARTUP (crash restart) | Process restarted after crash (PM2_RESTART_COUNT > 0) |
 
 ---
 
@@ -76,6 +110,8 @@ Detects pump.fun graduation events, then opens a Meteora DLMM LP position for th
 meteoracle/
 ├── app/
 │   └── (dashboard)/            ← All Next.js pages (shared layout)
+│       ├── page.tsx            ← Main dashboard (KPIs, P&L, positions, watchlist)
+│       └── strategies/page.tsx ← Strategy config + performance
 ├── bot/
 │   ├── pre-grad-scanner.ts     ← Pipeline 2 scanner
 │   ├── spot-buyer.ts           ← Pipeline 2 buyer
@@ -88,6 +124,8 @@ meteoracle/
 │   ├── executor.ts             ← LP open/close execution
 │   ├── alerter.ts              ← Telegram alert dispatcher
 │   ├── scorer.ts               ← Meteora candidate scorer
+│   ├── startup-alert.ts        ← Fires Telegram ping on PM2 crash restart
+│   ├── telegram-bot.ts         ← Bidirectional Telegram command bot
 │   └── orphan-detector.ts      ← Detects DB positions no longer on-chain
 ├── strategies/
 │   └── pre-grad.ts             ← Pipeline 2 config (all tunable via env)
@@ -102,7 +140,8 @@ meteoracle/
 │   ├── 002_entry_price_usd.sql
 │   ├── 003_meteora_lp_schema.sql
 │   └── 004_pre_grad_watchlist_velocity.sql
-├── ecosystem.config.cjs        ← PM2 config (all 7 processes)
+├── ecosystem.config.cjs        ← PM2 config (all 9 processes)
+├── start-dashboard.sh          ← Cleans .next, builds, starts Next.js (called by PM2)
 └── .env.local.example          ← All env vars with descriptions
 ```
 
@@ -129,6 +168,13 @@ supabase/migrations/003_meteora_lp_schema.sql
 supabase/migrations/004_pre_grad_watchlist_velocity.sql
 ```
 
+Also create the `bot_state` row manually once:
+
+```sql
+insert into bot_state (id, enabled) values (1, true)
+on conflict (id) do nothing;
+```
+
 ### 3. Environment variables
 
 ```bash
@@ -150,14 +196,9 @@ npx tsx bot/spot-buyer.ts
 npx tsx bot/spot-monitor.ts
 ```
 
-### 5. Deploy dashboard (Coolify)
+### 5. Run everything on VPS (PM2)
 
-- Build command: `npm run build`
-- Start command: `npm run start`
-- Add all env vars from `.env.local.example` in Coolify environment settings
-- Only `NEXT_PUBLIC_*`, `SUPABASE_SERVICE_ROLE_KEY`, and `TELEGRAM_*` vars are needed by the dashboard
-
-### 6. Run bots on VPS (PM2)
+All 9 processes — bots, Telegram bot, and dashboard — are managed by PM2 on a single VPS.
 
 ```bash
 # On your VPS
@@ -165,62 +206,69 @@ git clone https://github.com/juliench82/meteoracle.git
 cd meteoracle
 npm install
 cp .env.local.example .env.local   # fill in your values
+chmod +x start-dashboard.sh
 npm install -g pm2
+
+# Load env into shell before starting PM2
+set -a && source .env.local && set +a
+
 pm2 start ecosystem.config.cjs
 pm2 save
 pm2 startup   # follow the printed command — survives reboots
 ```
 
 Check status:
+
 ```bash
 pm2 status
+# Pipeline 1
+pm2 logs lp-scanner --lines 50
+pm2 logs lp-monitor-dlmm --lines 50
+# Pipeline 2
 pm2 logs scanner --lines 50
 pm2 logs buyer --lines 50
 pm2 logs monitor --lines 50
+# Pipeline 3
+pm2 logs migrator --lines 50
+pm2 logs lp-monitor --lines 50
+# Interface
+pm2 logs telegram-bot --lines 50
+pm2 logs dashboard --lines 50
 ```
 
 Update after a code push:
+
 ```bash
-git pull && npm install && pm2 restart all
+git pull && pm2 restart all --update-env && pm2 save
 ```
+
+> `start-dashboard.sh` automatically runs `rm -rf .next && npm run build` before each dashboard start, so stale build cache is never an issue.
 
 ---
 
 ## Go-live checklist
 
 - [ ] All 4 Supabase migrations applied
+- [ ] `bot_state` row inserted (`id=1, enabled=true`)
 - [ ] Wallet funded (≥ 0.5 SOL — covers positions + gas)
-- [ ] `BOT_DRY_RUN=false` in `.env.local` on VPS
-- [ ] `BITQUERY_API_KEY` set (pre-grad scanner requires it)
+- [ ] `BOT_DRY_RUN=false` set in `.env.local` on VPS
+- [ ] `chmod +x start-dashboard.sh`
+- [ ] `set -a && source .env.local && set +a` run before `pm2 start`
 - [ ] PM2 started and saved: `pm2 start ecosystem.config.cjs && pm2 save && pm2 startup`
 - [ ] Telegram alert fires on first live buy
-- [ ] Dashboard accessible via Coolify domain
-
----
-
-## Telegram alerts
-
-| Alert | Trigger |
-|---|---|
-| 🟢 BUY token | Spot position opened |
-| 🟡 [DRY-RUN] BUY | Dry-run position opened |
-| 🟢 CLOSED TP ✅ | Take profit hit |
-| 🔴 CLOSED SL ❌ | Stop loss hit |
-| ⏱️ CLOSED TIMEOUT | Max hold exceeded |
-| 🔁 REBALANCED | Smart rebalance triggered |
-| ⚠️ LOW BALANCE | Wallet below minimum |
-| ❌ BUY FAILED | Jupiter swap error |
+- [ ] Dashboard accessible at `http://<vps-ip>:3000`
 
 ---
 
 ## Required accounts
 
 - [Helius](https://helius.dev) — Solana RPC (free tier fine)
-- [Bitquery](https://account.bitquery.io/user/api_v2_keys) — EAP v2 key for pre-grad scanner
 - [Supabase](https://supabase.com) — Postgres DB (free tier fine)
 - [Rugcheck](https://rugcheck.xyz) — token safety scores (no key needed)
 - Telegram bot via @BotFather
 - Hetzner VPS (CX22 recommended — ~€4/mo)
+
+> **No Bitquery API key required.** The pre-grad scanner uses the pump.fun REST API directly.
 
 ---
 
