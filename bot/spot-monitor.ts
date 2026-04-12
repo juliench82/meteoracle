@@ -1,18 +1,14 @@
 /**
- * spot-monitor.ts  — Day 4 + Day 5
+ * spot-monitor.ts
  *
  * Polls every 30s for all open spot positions.
  * For each position:
- *   1. Fetches current price from Jupiter Price API v2
+ *   1. Fetches current price from Jupiter Price API v2 (both dry-run and live)
  *   2. Checks TP / SL / maxHold conditions
- *   3. If triggered: calls spot-seller.ts, updates spot_positions row
- *   4. Sends Telegram alert on close
+ *   3. If triggered: updates spot_positions row, sends Telegram alert
  *
- * DRY_RUN: simulates price random walk so you can watch full TP/SL cycle.
- * LIVE: uses entry_price_usd (stored at buy time) for accurate % change.
- *
- * BOT_DRY_RUN=true  (default)
- * BOT_DRY_RUN=false
+ * BOT_DRY_RUN=true  — real prices, no actual sell tx
+ * BOT_DRY_RUN=false — real prices + real sell tx
  */
 
 import 'dotenv/config'
@@ -30,8 +26,6 @@ const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
 const POLL_INTERVAL = parseInt(process.env.SPOT_MONITOR_POLL_SEC ?? '30') * 1_000
 const cfg           = PRE_GRAD_STRATEGY
 
-const dryRunPriceMultiplier = new Map<string, number>()
-
 console.log(`[spot-monitor] starting — DRY_RUN=${DRY_RUN}`)
 console.log(`[spot-monitor] TP=+${cfg.exits.takeProfitPct}% | SL=${cfg.exits.stopLossPct}% | maxHold=${cfg.exits.maxHoldMinutes}min`)
 console.log(`[spot-monitor] poll interval: ${POLL_INTERVAL / 1000}s`)
@@ -42,7 +36,7 @@ interface SpotPosition {
   symbol:          string
   name:            string
   entry_price_sol: number
-  entry_price_usd: number   // stored at buy time (Day 5)
+  entry_price_usd: number
   amount_sol:      number
   token_amount:    number
   tp_pct:          number
@@ -68,21 +62,13 @@ async function fetchPriceUsd(mint: string): Promise<number | null> {
   }
 }
 
-function simulatePrice(mint: string): number {
-  const prev  = dryRunPriceMultiplier.get(mint) ?? 1.0
-  const delta = (Math.random() * 0.35) - 0.15
-  const next  = Math.max(0.01, prev * (1 + delta))
-  dryRunPriceMultiplier.set(mint, next)
-  return next
-}
-
 function checkExitCondition(
   position:       SpotPosition,
   pricePctChange: number,
   ageMinutes:     number,
 ): ExitReason | null {
   if (pricePctChange >= position.tp_pct)          return 'tp'
-  if (pricePctChange <= position.sl_pct)          return 'sl'
+  if (pricePctChange <= -Math.abs(position.sl_pct)) return 'sl'
   if (ageMinutes     >= cfg.exits.maxHoldMinutes) return 'timeout'
   return null
 }
@@ -122,7 +108,7 @@ async function closePosition(
   } else if (position.dry_run) {
     solReceived = position.amount_sol * exitMult
     pnlSol      = solReceived - position.amount_sol
-    console.log(`[spot-monitor] DRY-RUN sell — simulated ${solReceived.toFixed(4)} SOL received`)
+    console.log(`[spot-monitor] DRY-RUN close — simulated ${solReceived.toFixed(4)} SOL received`)
   }
 
   const statusMap: Record<ExitReason, string> = {
@@ -147,16 +133,13 @@ async function closePosition(
     return
   }
 
-  const emoji      = reason === 'tp' ? '🟢' : reason === 'sl' ? '🔴' : '⏱️'
-  const pnlStr     = `${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL`
-  const pctStr     = `${((exitMult - 1) * 100).toFixed(1)}%`
-  const dryLabel   = position.dry_run ? '[DRY-RUN] ' : ''
+  const emoji    = reason === 'tp' ? '🟢' : reason === 'sl' ? '🔴' : '⏱️'
+  const pnlStr   = `${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL`
+  const pctStr   = `${((exitMult - 1) * 100).toFixed(1)}%`
+  const dryLabel = position.dry_run ? '[DRY-RUN] ' : ''
+  const txLine   = txSell ? `\n🔗 https://solscan.io/tx/${txSell}` : ''
 
   console.log(`${emoji} [spot-monitor] CLOSED ${label} reason=${reason} pnl=${pnlStr}`)
-
-  const txLine = txSell
-    ? `\n🔗 https://solscan.io/tx/${txSell}`
-    : ''
 
   await sendTelegram(
     `${emoji} ${dryLabel}CLOSED ${position.symbol}\n` +
@@ -189,41 +172,38 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
 
   for (const pos of positions) {
     const label      = `${pos.symbol} (${pos.mint.slice(0, 8)}...)`
-    const openedAt   = new Date(pos.opened_at).getTime()
-    const ageMinutes = (Date.now() - openedAt) / 60_000
+    const ageMinutes = (Date.now() - new Date(pos.opened_at).getTime()) / 60_000
 
-    let pricePctChange: number
+    const currentPriceUsd = await fetchPriceUsd(pos.mint)
+    if (currentPriceUsd === null) {
+      console.warn(`[spot-monitor] could not fetch price for ${label} — skipping`)
+      continue
+    }
+
     let priceMultiplier: number
+    let pricePctChange: number
 
-    if (pos.dry_run) {
-      priceMultiplier = simulatePrice(pos.mint)
-      pricePctChange  = (priceMultiplier - 1) * 100
-      console.log(
-        `[spot-monitor] ${label}` +
-        ` sim_price=${priceMultiplier.toFixed(3)}x` +
-        ` (${pricePctChange >= 0 ? '+' : ''}${pricePctChange.toFixed(1)}%)` +
-        ` age=${ageMinutes.toFixed(1)}min`
-      )
+    if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
+      // No entry price stored (dry-run buy didn't fetch it) — use 1x as baseline
+      // and update entry_price_usd now so next tick is accurate
+      priceMultiplier = 1.0
+      pricePctChange  = 0
+      await supabase
+        .from('spot_positions')
+        .update({ entry_price_usd: currentPriceUsd })
+        .eq('id', pos.id)
+      console.log(`[spot-monitor] ${label} seeded entry_price_usd=$${currentPriceUsd.toExponential(4)}`)
     } else {
-      // Live: use entry_price_usd for accurate % change
-      const currentPriceUsd = await fetchPriceUsd(pos.mint)
-      if (currentPriceUsd === null) {
-        console.warn(`[spot-monitor] could not fetch price for ${label} — skipping`)
-        continue
-      }
-      if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
-        console.warn(`[spot-monitor] entry_price_usd=0 for ${label} — skipping (stale row)`)
-        continue
-      }
       priceMultiplier = currentPriceUsd / pos.entry_price_usd
       pricePctChange  = (priceMultiplier - 1) * 100
-      console.log(
-        `[spot-monitor] ${label}` +
-        ` price=$${currentPriceUsd.toExponential(4)}` +
-        ` (${pricePctChange >= 0 ? '+' : ''}${pricePctChange.toFixed(1)}%)` +
-        ` age=${ageMinutes.toFixed(1)}min`
-      )
     }
+
+    console.log(
+      `[spot-monitor] ${label}` +
+      ` price=$${currentPriceUsd.toExponential(4)}` +
+      ` (${pricePctChange >= 0 ? '+' : ''}${pricePctChange.toFixed(1)}%)` +
+      ` age=${ageMinutes.toFixed(1)}min`
+    )
 
     const exitReason = checkExitCondition(pos, pricePctChange, ageMinutes)
     if (exitReason) {
@@ -236,10 +216,6 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
   return { monitored: positions.length, closed }
 }
 
-/**
- * Exported tick for use by telegram-bot /tick command.
- * Returns a summary string for reporting.
- */
 export async function runSpotMonitor(): Promise<string> {
   try {
     const before = Date.now()
