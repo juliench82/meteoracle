@@ -44,9 +44,9 @@ interface InitialData {
 }
 
 export function DashboardClient({ initialData }: { initialData: InitialData }) {
-  const [data, setData]         = useState(initialData)
+  const [data, setData]             = useState(initialData)
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date())
-  const [loading, setLoading]   = useState(false)
+  const [loading, setLoading]       = useState(false)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -64,7 +64,8 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
   }, [])
 
   useEffect(() => {
-    const id = setInterval(fetchData, POLL_INTERVAL_MS)
+    fetchData()                                         // fetch immediately on mount
+    const id = setInterval(fetchData, POLL_INTERVAL_MS) // then every 30s
     return () => clearInterval(id)
   }, [fetchData])
 
