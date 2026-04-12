@@ -3,11 +3,11 @@
  *
  * Polls pump.fun /coins every 30s (limit=200, sorted by last_trade_timestamp).
  * Calculates bonding curve progress from virtual_sol_reserves.
+ * Passes real usd_market_cap and volume proxy (sol_raised) to watchlist.
  *
  * DB columns (pre_grad_watchlist):
  *   id, mint, symbol, name, detected_at, bonding_progress, market_cap_usd,
- *   volume_1h_usd, holder_count, graduated_at, status, reject_reason,
- *   updated_at, bonding_curve_pct (legacy — keep for dashboard compat)
+ *   volume_1h_usd, holder_count, graduated_at, status, reject_reason, updated_at
  */
 
 import 'dotenv/config'
@@ -38,7 +38,22 @@ function calculateProgress(virtualSolReserves: number): number {
   return Math.min(100, Math.max(0, Number(num * 10000n / den) / 100))
 }
 
-async function fetchCandidates(): Promise<Array<{ mint: string; progressPct: number }>> {
+/** Estimate volume proxy: SOL raised = (virtualSol - initial) / 1e9 */
+function estimateVolumeSol(virtualSolReserves: number): number {
+  if (!virtualSolReserves) return 0
+  const raised = BigInt(virtualSolReserves) - INITIAL_VIRTUAL_SOL
+  if (raised <= 0n) return 0
+  return Number(raised) / 1e9
+}
+
+async function fetchCandidates(): Promise<Array<{
+  mint: string
+  progressPct: number
+  volumeSol: number
+  marketCapUsd: number
+  symbol: string
+  name: string
+}>> {
   try {
     const { data } = await axios.get<any[]>(PUMP_COINS_URL, {
       timeout: 10_000,
@@ -48,8 +63,12 @@ async function fetchCandidates(): Promise<Array<{ mint: string; progressPct: num
     return data
       .filter((c: any) => !c.complete)
       .map((c: any) => ({
-        mint:        c.mint as string,
-        progressPct: calculateProgress(c.virtual_sol_reserves),
+        mint:         c.mint as string,
+        progressPct:  calculateProgress(c.virtual_sol_reserves),
+        volumeSol:    estimateVolumeSol(c.virtual_sol_reserves),
+        marketCapUsd: parseFloat(c.usd_market_cap ?? '0'),
+        symbol:       (c.symbol ?? c.mint.slice(0, 8)) as string,
+        name:         (c.name   ?? c.mint.slice(0, 8)) as string,
       }))
       .filter(c => c.progressPct >= cfg.minBondingProgress && c.progressPct <= cfg.maxBondingProgress)
   } catch (err) {
@@ -58,19 +77,26 @@ async function fetchCandidates(): Promise<Array<{ mint: string; progressPct: num
   }
 }
 
-async function processCandidate(mint: string, progressPct: number): Promise<void> {
-  const shortSym = mint.slice(0, 8)
+async function processCandidate(
+  mint: string,
+  progressPct: number,
+  volumeSol: number,
+  marketCapUsd: number,
+  symbol: string,
+  name: string,
+): Promise<void> {
+  const shortSym = symbol || mint.slice(0, 8)
 
   const holderData   = await checkHolders(mint)
   const holderCount  = holderData.holderCount
   const topHolderPct = holderData.topHolderPct
 
   if (holderCount > 0 && holderCount < cfg.minHolders) {
-    console.log(`[pre-grad] ${shortSym}... skip: holders ${holderCount} < ${cfg.minHolders}`)
+    console.log(`[pre-grad] ${shortSym} skip: holders ${holderCount} < ${cfg.minHolders}`)
     return
   }
   if (topHolderPct > 0 && topHolderPct > cfg.maxTopHolderPct) {
-    console.log(`[pre-grad] ${shortSym}... skip: topHolder ${topHolderPct.toFixed(1)}% > ${cfg.maxTopHolderPct}%`)
+    console.log(`[pre-grad] ${shortSym} skip: topHolder ${topHolderPct.toFixed(1)}% > ${cfg.maxTopHolderPct}%`)
     return
   }
 
@@ -85,14 +111,14 @@ async function processCandidate(mint: string, progressPct: number): Promise<void
 
   const now = new Date().toISOString()
 
-  // only columns that actually exist in the DB schema
   const upsertData: Record<string, unknown> = {
     mint,
     symbol:           shortSym,
-    name:             shortSym,
-    volume_1h_usd:    0,
+    name:             name || shortSym,
+    volume_1h_usd:    volumeSol,   // ← real value from pump.fun
+    market_cap_usd:   marketCapUsd,
     status:           'watching',
-    bonding_progress: progressPct,   // ← correct column name
+    bonding_progress: progressPct,
     holder_count:     holderCount,
     updated_at:       now,
   }
@@ -107,9 +133,13 @@ async function processCandidate(mint: string, progressPct: number): Promise<void
   if (error) {
     console.error(`[pre-grad] upsert error for ${shortSym}:`, error.message)
   } else if (!existing) {
-    console.log(`[pre-grad] WATCHLIST ADD: ${shortSym}... (${mint}) curve=${progressPct.toFixed(1)}% holders=${holderCount} topHolder=${topHolderPct.toFixed(1)}%`)
+    console.log(
+      `[pre-grad] WATCHLIST ADD: ${shortSym} (${mint})` +
+      ` curve=${progressPct.toFixed(1)}% vol=${volumeSol.toFixed(1)}SOL` +
+      ` holders=${holderCount} topHolder=${topHolderPct.toFixed(1)}%`
+    )
   } else {
-    console.log(`[pre-grad] UPDATE: ${shortSym}... curve=${progressPct.toFixed(1)}%`)
+    console.log(`[pre-grad] UPDATE: ${shortSym} curve=${progressPct.toFixed(1)}% vol=${volumeSol.toFixed(1)}SOL`)
   }
 }
 
@@ -126,9 +156,9 @@ async function tick(): Promise<void> {
   const candidates = await fetchCandidates()
   console.log(`[pre-grad] ${candidates.length} candidates in window`)
 
-  for (const { mint, progressPct } of candidates) {
-    console.log(`[pre-grad] ${mint.slice(0, 8)}... curve=${progressPct.toFixed(1)}% IN WINDOW — checking holders`)
-    await processCandidate(mint, progressPct)
+  for (const c of candidates) {
+    console.log(`[pre-grad] ${c.mint.slice(0, 8)}... curve=${c.progressPct.toFixed(1)}% vol=${c.volumeSol.toFixed(1)}SOL IN WINDOW — checking holders`)
+    await processCandidate(c.mint, c.progressPct, c.volumeSol, c.marketCapUsd, c.symbol, c.name)
   }
 
   console.log(`[pre-grad] tick done in-window=${candidates.length}`)

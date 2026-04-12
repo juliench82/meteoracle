@@ -4,16 +4,8 @@
  * Reads pre_grad_watchlist, buys qualifying tokens via Jupiter v6, and stores
  * positions in spot_positions.
  *
- * DAY 5 additions:
- *   - Stores entry_price_usd (Jupiter Price API) so monitor can calc % change in live mode
- *   - Wallet SOL balance guard before every live buy
- *   - Telegram alert on open (DRY_RUN and live)
- *
  * BOT_DRY_RUN=true  (default) — logs only, no real transactions
  * BOT_DRY_RUN=false           — live mode, REAL money
- *
- * Run:
- *   npx tsx bot/spot-buyer.ts
  */
 
 import 'dotenv/config'
@@ -34,7 +26,6 @@ const JUPITER_API   = 'https://quote-api.jup.ag/v6'
 const WSOL_MINT     = 'So11111111111111111111111111111111111111112'
 const SLIPPAGE_BPS  = parseInt(process.env.SPOT_BUY_SLIPPAGE_BPS ?? '300')
 const POLL_INTERVAL = parseInt(process.env.SPOT_BUYER_POLL_SEC   ?? '30') * 1_000
-// Minimum SOL to keep in wallet — never buy below this buffer
 const MIN_WALLET_BALANCE_SOL = parseFloat(process.env.MIN_WALLET_BALANCE_SOL ?? '0.05')
 
 const cfg = PRE_GRAD_STRATEGY
@@ -57,7 +48,7 @@ interface SpotPositionInsert {
   symbol:            string
   name:              string
   entry_price_sol:   number
-  entry_price_usd:   number   // NEW — used by monitor for live % change
+  entry_price_usd:   number
   amount_sol:        number
   token_amount:      number
   tp_pct:            number
@@ -67,8 +58,6 @@ interface SpotPositionInsert {
   tx_buy?:           string
   watchlist_id?:     string
 }
-
-// ---- Helpers ----
 
 async function fetchPriceUsd(mint: string): Promise<number> {
   try {
@@ -172,10 +161,13 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     ` vol=${row.volume_1h_usd.toFixed(2)} SOL`
   )
 
-  // Volume filter
-  if (row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
+  // Volume filter — skip in dry-run so we can validate the full pipeline
+  if (!DRY_RUN && row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
     console.log(`[spot-buyer] SKIP ${row.symbol} — volume too low (${row.volume_1h_usd.toFixed(2)} < ${cfg.scanner.minVolume5minSol})`)
     return
+  }
+  if (DRY_RUN && row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
+    console.log(`[spot-buyer] DRY-RUN: vol=${row.volume_1h_usd.toFixed(2)} below threshold but proceeding for pipeline validation`)
   }
 
   // Dedup guard
@@ -246,6 +238,7 @@ async function buyToken(row: WatchlistRow): Promise<void> {
   }
 
   // ---- LIVE BUY ----
+  // Volume filter enforced for live only (checked above)
   const privateKeyEnv = process.env.WALLET_PRIVATE_KEY
   if (!privateKeyEnv) {
     console.error('[spot-buyer] WALLET_PRIVATE_KEY not set — cannot execute live buy')
@@ -254,7 +247,6 @@ async function buyToken(row: WatchlistRow): Promise<void> {
 
   const wallet = Keypair.fromSecretKey(bs58.decode(privateKeyEnv))
 
-  // Wallet balance guard
   const walletBalance = await getWalletSolBalance(wallet.publicKey.toBase58())
   const required      = buySol + MIN_WALLET_BALANCE_SOL
   if (walletBalance < required) {
@@ -283,7 +275,7 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     ])
 
     const outAmount = parseInt(quote.outAmount as string)
-    tokensReceived  = outAmount / 1e6    // pump.fun = 6 decimals
+    tokensReceived  = outAmount / 1e6
     entryPriceSol   = buySol / tokensReceived
     entryPriceUsd   = priceUsd
 
