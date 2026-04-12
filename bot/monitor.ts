@@ -35,11 +35,11 @@ export async function monitorPositions(): Promise<{
   const supabase = createServerClient()
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
 
-  console.log('[monitor] fetching open positions')
+  console.log('[monitor] fetching open LP positions')
   const result = await withTimeout(
-    supabase.from('positions').select('*').in('status', ['active', 'out_of_range']),
+    supabase.from('lp_positions').select('*').in('status', ['active', 'out_of_range']),
     SUPABASE_TIMEOUT_MS,
-    'positions select'
+    'lp_positions select'
   )
 
   if (!result) {
@@ -48,10 +48,10 @@ export async function monitorPositions(): Promise<{
   }
 
   const { data: positions, error } = result
-  if (error) { console.warn('[monitor] positions fetch error:', error.message); return stats }
-  if (!positions?.length) { console.log('[monitor] no open positions'); return stats }
+  if (error) { console.warn('[monitor] lp_positions fetch error:', error.message); return stats }
+  if (!positions?.length) { console.log('[monitor] no open LP positions'); return stats }
 
-  console.log(`[monitor] checking ${positions.length} positions`)
+  console.log(`[monitor] checking ${positions.length} LP positions`)
 
   for (const position of positions) {
     try {
@@ -81,12 +81,12 @@ async function checkPosition(
   stats: { checked: number; closed: number; claimed: number; rebalanced: number }
 ): Promise<void> {
   const supabase = createServerClient()
-  const label = `[monitor][${position.token_symbol}][${strategy.id}]`
+  const label = `[monitor][${position.symbol}][${strategy.id}]`
   const now = Date.now()
 
   const { inRange, currentPriceSol, feesEarnedSol, volume1hUsd } = await fetchPositionState(
     position.pool_address,
-    position.metadata?.positionPubKey
+    position.position_pubkey
   )
 
   const entryPriceSol: number = position.entry_price ?? position.metadata?.entryPriceSol ?? 0
@@ -120,8 +120,8 @@ async function checkPosition(
   }
 
   await withTimeout(
-    supabase.from('positions').update(updatePayload).eq('id', position.id),
-    SUPABASE_TIMEOUT_MS, 'positions update'
+    supabase.from('lp_positions').update(updatePayload).eq('id', position.id),
+    SUPABASE_TIMEOUT_MS, 'lp_positions update'
   )
 
   const openedAt = new Date(position.opened_at).getTime()
@@ -150,7 +150,7 @@ async function checkPosition(
       stats.closed++
       await sendAlert({
         type: 'position_closed',
-        symbol: position.token_symbol,
+        symbol: position.symbol,
         strategy: strategy.id,
         reason: closeReason,
         feesEarnedSol,
@@ -181,7 +181,7 @@ async function checkPosition(
         stats.rebalanced++
         await sendAlert({
           type: 'position_closed',
-          symbol: position.token_symbol,
+          symbol: position.symbol,
           strategy: strategy.id,
           reason: `smart_rebalance (price at ${positionInRange.toFixed(0)}% of range)`,
           feesEarnedSol,
@@ -194,7 +194,7 @@ async function checkPosition(
           try {
             const metrics: TokenMetrics = {
               address: position.token_address,
-              symbol: position.token_symbol,
+              symbol: position.symbol,
               poolAddress: position.pool_address,
               priceUsd: currentPriceSol,
               dexId: position.metadata?.dexId ?? 'meteora',
@@ -219,7 +219,7 @@ async function checkPosition(
     await withTimeout(
       supabase.from('bot_logs').insert({
         level: 'info', event: 'fees_claimable',
-        payload: { positionId: position.id, symbol: position.token_symbol, feesEarnedSol },
+        payload: { positionId: position.id, symbol: position.symbol, feesEarnedSol },
       }),
       SUPABASE_TIMEOUT_MS, 'bot_logs fees'
     )
@@ -228,7 +228,7 @@ async function checkPosition(
   if (justWentOOR) {
     await sendAlert({
       type: 'position_oor',
-      symbol: position.token_symbol,
+      symbol: position.symbol,
       strategy: strategy.id,
       currentPrice: currentPriceSol,
       binRangeLower: position.bin_range_lower,
@@ -269,7 +269,7 @@ async function fetchPositionState(
     } catch { /* non-fatal */ }
 
     if (!positionPubKeyStr) {
-      console.warn(`[monitor] fetchPositionState: no positionPubKey for pool ${poolAddress} — assuming inRange=true`)
+      console.warn(`[monitor] fetchPositionState: no position_pubkey for pool ${poolAddress} — assuming inRange=true`)
       return { inRange: true, currentPriceSol, feesEarnedSol: 0, volume1hUsd }
     }
 
@@ -290,7 +290,7 @@ async function fetchPositionState(
   }
 }
 
-// ─── Standalone entrypoint (PM2) ────────────────────────────────────────────
+// ─── Standalone entrypoint (PM2) ──────────────────────────────────────────────
 
 const standaloneMonitorTick = async (): Promise<void> => {
   const label = '[lp-monitor-dlmm]'

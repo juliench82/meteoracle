@@ -9,13 +9,12 @@ export const runtime = 'nodejs'
 export const maxDuration = 30
 export const dynamic = 'force-dynamic'
 
-const CACHE_TTL = 20 // seconds
+const CACHE_TTL = 20
 const RATE_LIMIT_WINDOW = 60
 const RATE_LIMIT_MAX = 30
 
 export async function GET() {
-  // Rate limiting via Vercel KV
-  const ip = 'global' // cron-based, single caller
+  const ip = 'global'
   const rlKey = `rl:pnl:${ip}`
   const calls = await redis.get<number>(rlKey)
   if (calls && calls >= RATE_LIMIT_MAX) {
@@ -23,13 +22,12 @@ export async function GET() {
   }
   await redis.set(rlKey, (calls ?? 0) + 1, RATE_LIMIT_WINDOW)
 
-  // Serve from cache if fresh
   const cached = await redis.get<object>('pnl:snapshot')
   if (cached) return NextResponse.json(cached)
 
   const supabase = createServerClient()
   const { data: positions, error } = await supabase
-    .from('positions')
+    .from('lp_positions')
     .select('*')
     .in('status', ['active', 'out_of_range'])
 
@@ -45,26 +43,22 @@ export async function GET() {
       try {
         const dlmmPool = await DLMM.create(connection, new PublicKey(pos.pool_address))
         const activeBin = await dlmmPool.getActiveBin()
-        // pricePerToken is SOL-per-token — same unit as metadata.entryPriceSol
         const currentPriceSol = parseFloat(activeBin.pricePerToken)
 
         const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
         const match = userPositions.find(
-          (p) => p.publicKey.toBase58() === pos.metadata?.positionPubKey
+          (p) => p.publicKey.toBase58() === pos.position_pubkey
         )
 
         const feesSol = match
           ? match.positionData.feeY.toNumber() / 1e9
           : (pos.fees_earned_sol ?? 0)
 
-        // Use entryPriceSol from metadata (SOL-denominated) — same as monitor.ts
-        // Fall back to pnl_sol already persisted in DB if no reliable entry price
         const entryPriceSol: number = pos.metadata?.entryPriceSol ?? 0
         const pricePct = entryPriceSol > 0
           ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
           : 0
 
-        // Impermanent loss: IL% ≈ 2√k/(1+k) - 1
         const k = entryPriceSol > 0 && currentPriceSol > 0
           ? currentPriceSol / entryPriceSol
           : 1
@@ -72,14 +66,13 @@ export async function GET() {
           ? (2 * Math.sqrt(k) / (1 + k) - 1) * 100
           : 0
 
-        // pnlSol: price appreciation on deployed capital + fees earned
         const pnlSol = entryPriceSol > 0
           ? pos.sol_deposited * (pricePct / 100) + feesSol
-          : (pos.pnl_sol ?? feesSol) // fallback to persisted value
+          : (pos.pnl_sol ?? feesSol)
 
         return {
           id: pos.id,
-          symbol: pos.token_symbol,
+          symbol: pos.symbol,
           strategy: pos.strategy_id,
           currentPrice: currentPriceSol,
           pricePct: Math.round(pricePct * 100) / 100,
@@ -89,10 +82,9 @@ export async function GET() {
           status: pos.status,
         }
       } catch {
-        // On RPC error fall back to DB-persisted values
         return {
           id: pos.id,
-          symbol: pos.token_symbol,
+          symbol: pos.symbol,
           strategy: pos.strategy_id,
           currentPrice: pos.current_price ?? 0,
           pricePct: 0,

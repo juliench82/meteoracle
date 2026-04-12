@@ -127,8 +127,8 @@ export async function POST(req: Request) {
       try {
         const supabase = createServerClient()
         const { data: pos, error } = await supabase
-          .from('positions')
-          .select('id, token_symbol, status')
+          .from('lp_positions')
+          .select('id, symbol, status')
           .eq('id', positionId)
           .single()
         if (error || !pos) {
@@ -136,12 +136,12 @@ export async function POST(req: Request) {
           return NextResponse.json({ ok: true })
         }
         if (pos.status === 'closed') {
-          await reply(chatId, `ℹ️ Position \`${positionId}\` (${pos.token_symbol}) is already closed.`)
+          await reply(chatId, `ℹ️ Position \`${positionId}\` (${pos.symbol}) is already closed.`)
           return NextResponse.json({ ok: true })
         }
         const ok = await closePosition(positionId, 'manual_telegram')
         if (ok) {
-          await reply(chatId, `✅ Position \`${positionId}\` (${pos.token_symbol}) closed successfully.`)
+          await reply(chatId, `✅ Position \`${positionId}\` (${pos.symbol}) closed successfully.`)
         } else {
           await reply(chatId, `❌ Failed to close \`${positionId}\` — check logs.`)
         }
@@ -247,7 +247,7 @@ export async function POST(req: Request) {
       const supabase = createServerClient()
       const [stateRes, openRes, lastTickRes] = await Promise.allSettled([
         getBotState(),
-        supabase.from('positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
+        supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
         supabase.from('bot_logs').select('created_at').eq('event', 'bot_tick').order('created_at', { ascending: false }).limit(1).single(),
       ])
       const state       = stateRes.status === 'fulfilled' ? stateRes.value : { enabled: false, dry_run: true }

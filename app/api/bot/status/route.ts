@@ -17,7 +17,7 @@ export async function GET() {
       .limit(1)
       .single(),
     supabase
-      .from('positions')
+      .from('lp_positions')
       .select('id', { count: 'exact', head: true })
       .in('status', ['active', 'out_of_range']),
     supabase

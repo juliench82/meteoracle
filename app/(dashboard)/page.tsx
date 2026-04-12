@@ -22,7 +22,7 @@ export default async function DashboardPage() {
       .order('closed_at', { ascending: false })
       .limit(50),
     supabase
-      .from('positions')
+      .from('lp_positions')
       .select('*')
       .in('status', ['active', 'out_of_range'])
       .order('opened_at', { ascending: false }),
@@ -38,12 +38,11 @@ export default async function DashboardPage() {
   const openLp      = openLpRes.status      === 'fulfilled' ? (openLpRes.value.data      ?? []) : []
   const watchlist   = watchlistRes.status   === 'fulfilled' ? (watchlistRes.value.data   ?? []) : []
 
-  // Normalise LP positions into the SpotPosition shape expected by SpotPositionsTable
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const openLpNorm = openLp.map((p: any) => ({
     id:              p.id,
     mint:            p.token_address ?? '',
-    symbol:          p.token_symbol  ?? 'LP',
+    symbol:          p.symbol        ?? 'LP',
     entry_price_usd: p.entry_price   ?? 0,
     amount_sol:      p.sol_deposited ?? 0,
     token_amount:    0,

@@ -11,7 +11,7 @@ export async function GET(request: Request) {
   const supabase = createServerClient()
 
   let query = supabase
-    .from('positions')
+    .from('lp_positions')
     .select('*')
     .order('opened_at', { ascending: false })
     .limit(limit)
