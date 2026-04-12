@@ -1,4 +1,3 @@
-import DLMM, { StrategyType } from '@meteora-ag/dlmm'
 import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
@@ -16,6 +15,17 @@ import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import type { Strategy, TokenMetrics } from '@/lib/types'
+
+// @meteora-ag/dlmm is lazy-loaded inside functions to avoid
+// ERR_UNSUPPORTED_DIR_IMPORT from @coral-xyz/anchor during Next.js build.
+async function getDLMM() {
+  const mod = await import('@meteora-ag/dlmm')
+  return mod.default as typeof import('@meteora-ag/dlmm').default
+}
+async function getStrategyType() {
+  const mod = await import('@meteora-ag/dlmm')
+  return mod.StrategyType
+}
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 const METEORA_RENT_RESERVE_SOL = 0.07
@@ -48,10 +58,8 @@ async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
   return TOKEN_PROGRAM_ID
 }
 
-/**
- * Derive the human-readable SOL-per-token price from the active bin.
- */
-function getDecimalAdjustedPrice(dlmmPool: DLMM, activeBin: { price: string; pricePerToken: string }): number {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pricePerToken: string }): number {
   try {
     const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price))
     const price = parseFloat(adjusted)
@@ -135,6 +143,7 @@ export async function openPosition(
     }
 
     // 5. Load pool + derive entry price (decimal-adjusted)
+    const DLMM = await getDLMM()
     const dlmmPool = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
@@ -195,7 +204,8 @@ export async function openPosition(
     }
 
     // 9. Strategy type
-    const strategyTypeMap: Record<string, StrategyType> = {
+    const StrategyType = await getStrategyType()
+    const strategyTypeMap: Record<string, typeof StrategyType[keyof typeof StrategyType]> = {
       spot: StrategyType.Spot,
       curve: StrategyType.Curve,
       'bid-ask': StrategyType.BidAsk,
@@ -286,6 +296,7 @@ export async function closePosition(
   const wallet = getWallet()
 
   try {
+    const DLMM = await getDLMM()
     const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
     const positionPubKey = new PublicKey(position.position_pubkey ?? '')
 
