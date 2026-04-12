@@ -32,8 +32,6 @@ const WSOL_MINT     = 'So11111111111111111111111111111111111111112'
 const SLIPPAGE_BPS  = parseInt(process.env.SPOT_BUY_SLIPPAGE_BPS ?? '300')
 const POLL_INTERVAL = parseInt(process.env.SPOT_BUYER_POLL_SEC   ?? '30') * 1_000
 
-// Minimum wallet balance kept in reserve for LP bin rent + tx fees.
-// SOL_RESERVE takes precedence over MIN_WALLET_BALANCE_SOL (legacy).
 const SOL_RESERVE = parseFloat(process.env.SOL_RESERVE ?? process.env.MIN_WALLET_BALANCE_SOL ?? '0.25')
 
 const cfg = PRE_GRAD_STRATEGY
@@ -68,16 +66,32 @@ interface SpotPositionInsert {
   watchlist_id?:     string
 }
 
+/**
+ * Fetch price in USD — Jupiter first, pump.fun fallback for pre-grad tokens.
+ * Same two-source logic as spot-monitor so entry price is never 0.
+ */
 async function fetchPriceUsd(mint: string): Promise<number> {
   try {
     const res = await axios.get('https://api.jup.ag/price/v2', {
       params: { ids: mint },
       timeout: 6_000,
     })
-    return parseFloat(res.data?.data?.[mint]?.price ?? '0')
-  } catch {
-    return 0
-  }
+    const price = parseFloat(res.data?.data?.[mint]?.price ?? '0')
+    if (price > 0) return price
+  } catch {}
+
+  // pump.fun fallback for pre-grad tokens not yet listed on Jupiter
+  try {
+    const res = await axios.get(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
+      timeout: 6_000,
+      headers: { 'User-Agent': 'meteoracle-buyer/1.0' },
+    })
+    const usdMc  = parseFloat(res.data?.usd_market_cap ?? '0')
+    const supply = parseFloat(res.data?.total_supply    ?? '0')
+    if (usdMc > 0 && supply > 0) return usdMc / supply
+  } catch {}
+
+  return 0
 }
 
 async function getWalletSolBalance(publicKey: string): Promise<number> {
@@ -136,10 +150,6 @@ async function executeJupiterSwap(
   return sig
 }
 
-/**
- * Checks position count and capital caps.
- * Also checks wallet balance vs SOL_RESERVE in live mode.
- */
 async function canOpenNewPosition(
   walletPubkey?: string,
 ): Promise<{ ok: boolean; reason?: string }> {
@@ -163,7 +173,6 @@ async function canOpenNewPosition(
     return { ok: false, reason: `max total SOL exceeded (${totalSol.toFixed(3)} + ${cfg.position.spotBuySol} > ${cfg.position.maxTotalSpotSol})` }
   }
 
-  // Live-only: ensure wallet keeps SOL_RESERVE after this buy
   if (!DRY_RUN && walletPubkey) {
     const balance  = await getWalletSolBalance(walletPubkey)
     const required = cfg.position.spotBuySol + SOL_RESERVE
@@ -188,7 +197,6 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
     ` vol=${row.volume_1h_usd.toFixed(2)} SOL`
   )
 
-  // Volume filter — skip in dry-run so we can validate the full pipeline
   if (!DRY_RUN && row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
     console.log(`[spot-buyer] SKIP ${row.symbol} — volume too low (${row.volume_1h_usd.toFixed(2)} < ${cfg.scanner.minVolume5minSol})`)
     return
@@ -197,7 +205,6 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
     console.log(`[spot-buyer] DRY-RUN: vol=${row.volume_1h_usd.toFixed(2)} below threshold but proceeding for pipeline validation`)
   }
 
-  // Dedup guard
   const { data: existing } = await supabase
     .from('spot_positions')
     .select('id')
@@ -210,7 +217,6 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
     return
   }
 
-  // Concurrency / capital / reserve guard
   const guard = await canOpenNewPosition(walletPubkey)
   if (!guard.ok) {
     console.log(`[spot-buyer] BLOCKED — ${guard.reason}`)
@@ -222,10 +228,11 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
 
   // ---- DRY RUN ----
   if (DRY_RUN) {
-    const entryPriceUsd = await fetchPriceUsd(row.mint)
+    const entryPriceUsd = await fetchPriceUsd(row.mint)  // Jupiter + pump.fun fallback
 
     console.log(
       `[spot-buyer] DRY-RUN BUY ${buySol} SOL → ${row.symbol}` +
+      ` entry=$${entryPriceUsd > 0 ? entryPriceUsd.toExponential(4) : 'unavailable'}` +
       ` | TP=+${cfg.exits.takeProfitPct}% SL=${cfg.exits.stopLossPct}% maxHold=${cfg.exits.maxHoldMinutes}min`
     )
 
@@ -260,7 +267,7 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
     await sendTelegram(
       `🟡 [DRY-RUN] BUY ${row.symbol}\n` +
       `💰 ${buySol} SOL | TP +${cfg.exits.takeProfitPct}% | SL ${cfg.exits.stopLossPct}%\n` +
-      `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL\n` +
+      `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL | Entry: $${entryPriceUsd > 0 ? entryPriceUsd.toExponential(3) : 'n/a'}\n` +
       `🔗 https://pump.fun/${row.mint}`
     )
 
@@ -348,7 +355,6 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
 async function tick(): Promise<void> {
   const supabase = createServerClient()
 
-  // Resolve wallet pubkey once per tick for live balance check
   let walletPubkey: string | undefined
   if (!DRY_RUN) {
     try {
