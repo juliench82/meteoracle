@@ -22,12 +22,13 @@
  *
  * Setup:
  *   npm install -g pm2
+ *   set -a && source .env.local && set +a
  *   pm2 start ecosystem.config.cjs
  *   pm2 save
  *   pm2 startup   ← follow the printed command
  *
- * Update after git pull:
- *   git pull && npm install && npm run build && pm2 restart all
+ * Deploy (ALWAYS use this — rm -rf .next prevents stale build cache):
+ *   git pull && rm -rf .next && npm run build && pm2 restart all --update-env && pm2 save
  *
  * DRY-RUN vs LIVE:
  *   BOT_DRY_RUN=true  — simulate only, no real txs, no wallet needed
