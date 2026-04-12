@@ -4,11 +4,10 @@
  * Sells a token position back to SOL via Jupiter v6 REST API.
  * Imported as a module — does NOT run a poll loop.
  *
- * BOT_DRY_RUN=true   → dry-run (default if env var absent)
- * BOT_DRY_RUN=false  → live
+ * dry_run is sourced from getBotState() (DB) so /dry and /live Telegram
+ * commands take effect immediately without a pm2 restart.
  */
 
-// Load .env.local before anything else (safe to call multiple times)
 import 'dotenv/config'
 import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
@@ -17,12 +16,13 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import axios from 'axios'
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js'
 import bs58 from 'bs58'
+import { getBotState } from '@/lib/botState'
 
-const DRY_RUN      = process.env.BOT_DRY_RUN !== 'false'
-const RPC_URL      = process.env.HELIUS_RPC_URL ?? 'https://api.mainnet-beta.solana.com'
-const JUPITER_API  = 'https://quote-api.jup.ag/v6'
-const WSOL_MINT    = 'So11111111111111111111111111111111111111112'
-const SLIPPAGE_BPS = parseInt(process.env.SELL_SLIPPAGE_BPS ?? '300')
+const RPC_URL         = process.env.HELIUS_RPC_URL  ?? 'https://api.mainnet-beta.solana.com'
+const JUPITER_API     = 'https://api.jup.ag/swap/v1'   // same endpoint as spot-buyer
+const JUPITER_API_KEY = process.env.JUPITER_API_KEY ?? ''
+const WSOL_MINT       = 'So11111111111111111111111111111111111111112'
+const SLIPPAGE_BPS    = parseInt(process.env.SELL_SLIPPAGE_BPS ?? '300')
 
 export interface SellResult {
   success: boolean
@@ -33,17 +33,20 @@ export interface SellResult {
 }
 
 export async function sellTokenForSol(
-  tokenMint: string,
-  tokenAmount: number,
+  tokenMint:     string,
+  tokenAmount:   number,
   tokenDecimals: number,
-  label: string,
+  label:         string,
 ): Promise<SellResult> {
   const rawAmount = Math.floor(tokenAmount * Math.pow(10, tokenDecimals))
 
-  if (DRY_RUN) {
-    const approxSol = rawAmount / Math.pow(10, tokenDecimals)
+  // ██ Always read from DB — respects /dry and /live without restart ██
+  const state  = await getBotState()
+  const dryRun = state.dry_run
+
+  if (dryRun) {
     console.log(
-      `[spot-seller] DRY-RUN sell ${approxSol.toFixed(4)} ${label}` +
+      `[spot-seller] DRY-RUN sell ${tokenAmount.toFixed(4)} ${label}` +
       ` (${rawAmount} raw) → SOL | slippage=${SLIPPAGE_BPS}bps`
     )
     return { success: true, solReceived: 0, dryRun: true }
@@ -67,11 +70,12 @@ export async function sellTokenForSol(
         onlyDirectRoutes:    false,
         asLegacyTransaction: false,
       },
-      timeout: 10_000,
+      headers:  { 'x-api-key': JUPITER_API_KEY },
+      timeout:  10_000,
     })
-    const quote = quoteRes.data
+    const quote       = quoteRes.data
     const outLamports = parseInt(quote.outAmount as string)
-    const solOut = outLamports / 1e9
+    const solOut      = outLamports / 1e9
     console.log(`[spot-seller] quote: sell ${label} → ~${solOut.toFixed(4)} SOL`)
 
     const swapRes = await axios.post(`${JUPITER_API}/swap`, {
@@ -80,7 +84,10 @@ export async function sellTokenForSol(
       wrapAndUnwrapSol:          true,
       dynamicComputeUnitLimit:   true,
       prioritizationFeeLamports: 'auto',
-    }, { timeout: 15_000 })
+    }, {
+      headers: { 'x-api-key': JUPITER_API_KEY },
+      timeout: 15_000,
+    })
     const { swapTransaction } = swapRes.data as { swapTransaction: string }
 
     const txBuf = Buffer.from(swapTransaction, 'base64')
@@ -88,8 +95,8 @@ export async function sellTokenForSol(
     tx.sign([wallet])
 
     const sig = await connection.sendTransaction(tx, {
-      skipPreflight:        false,
-      maxRetries:           3,
+      skipPreflight:       false,
+      maxRetries:          3,
       preflightCommitment: 'confirmed',
     })
 
