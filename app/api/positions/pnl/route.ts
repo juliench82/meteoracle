@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server'
-import DLMM from '@meteora-ag/dlmm'
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
@@ -12,6 +11,11 @@ export const dynamic = 'force-dynamic'
 const CACHE_TTL = 20
 const RATE_LIMIT_WINDOW = 60
 const RATE_LIMIT_MAX = 30
+
+async function getDLMM() {
+  const mod = await import('@meteora-ag/dlmm')
+  return mod.default as typeof import('@meteora-ag/dlmm').default
+}
 
 export async function GET() {
   const ip = 'global'
@@ -37,6 +41,7 @@ export async function GET() {
 
   const connection = getConnection()
   const wallet = getWallet()
+  const DLMM = await getDLMM()
 
   const enriched = await Promise.all(
     positions.map(async (pos) => {
