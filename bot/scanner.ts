@@ -142,13 +142,14 @@ export async function runScanner(): Promise<{
   console.log('[scanner] step 3/4 — Supabase dedup check')
   const supabase = createServerClient()
 
+  // Use lp_positions (active Meteora LP positions)
   const countResult = await withTimeout(
-    supabase.from('positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
-    SUPABASE_TIMEOUT_MS, 'positions count'
+    supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
+    SUPABASE_TIMEOUT_MS, 'lp_positions count'
   )
   const openCount = countResult?.count ?? 0
   if (openCount >= MAX_CONCURRENT_POSITIONS) {
-    console.log(`[scanner] max positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS})`)
+    console.log(`[scanner] max LP positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS})`)
     return { scanned: pools.length, candidates: 0, opened: 0 }
   }
 
@@ -173,12 +174,13 @@ export async function runScanner(): Promise<{
     )
     if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last 1h`); continue }
 
+    // Dedup against open LP positions
     const posResult = await withTimeout(
-      supabase.from('positions').select('id').eq('token_address', tokenAddress)
+      supabase.from('lp_positions').select('id').eq('token_address', tokenAddress)
         .in('status', ['active', 'out_of_range']).limit(1),
-      SUPABASE_TIMEOUT_MS, `positions dedup ${symbol}`
+      SUPABASE_TIMEOUT_MS, `lp_positions dedup ${symbol}`
     )
-    if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open position exists`); continue }
+    if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
 
     let resolvedMc = mcUsd
     if (!resolvedMc || resolvedMc < 1) {
@@ -313,7 +315,7 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
   return { pools }
 }
 
-// ─── Standalone entrypoint (PM2) ────────────────────────────────────────────
+// ─── Standalone entrypoint (PM2) ──────────────────────────────────────────────
 
 const standaloneScannerTick = async (): Promise<void> => {
   const label = '[lp-scanner]'
