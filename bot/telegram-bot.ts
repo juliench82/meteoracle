@@ -6,7 +6,7 @@
  *
  * Commands:
  *   /stop              — EMERGENCY: close all positions + pm2 stop workers (bot stays alive)
- *   /restart           — resume: setBotState enabled + pm2 restart all
+ *   /restart           — resume: setBotState enabled + pm2 restart workers
  *   /dry               — switch to dry-run mode
  *   /live              — switch to live trading
  *   /close <id>        — force-close an LP position by ID
@@ -38,7 +38,7 @@ import { runLpMigrator } from '@/bot/lp-migrator'
 const execAsync = promisify(exec)
 const PM2 = '/usr/local/bin/pm2'
 
-// Worker process names to stop/restart — telegram-bot intentionally excluded from stop
+// Worker process names — telegram-bot is intentionally excluded from stop/restart
 const WORKER_PROCESSES = [
   'lp-scanner',
   'lp-monitor-dlmm',
@@ -63,7 +63,7 @@ if (!BOT_TOKEN || !CHAT_ID) {
 
 let lastUpdateId = 0
 
-// ─── Telegram helpers ────────────────────────────────────────────────────
+// ─── Telegram helpers ─────────────────────────────────────────────────
 
 async function reply(text: string): Promise<void> {
   try {
@@ -78,10 +78,10 @@ async function reply(text: string): Promise<void> {
   }
 }
 
-async function getUpdates(): Promise<TelegramUpdate[]> {
+async function getUpdates(offset?: number): Promise<TelegramUpdate[]> {
   try {
     const res = await axios.get(`${API}/getUpdates`, {
-      params: { offset: lastUpdateId + 1, timeout: 10, limit: 100 },
+      params: { offset: offset ?? lastUpdateId + 1, timeout: 10, limit: 100 },
       timeout: 15_000,
     })
     return res.data?.result ?? []
@@ -95,11 +95,26 @@ interface TelegramUpdate {
   message?: { chat: { id: number }; text?: string }
 }
 
-// ─── PM2 helpers ─────────────────────────────────────────────────────────
-
 /**
- * Stop all worker processes individually — telegram-bot stays alive to receive /restart.
+ * Drain all pending updates from Telegram without processing them.
+ * Called once on startup so stale commands from a previous session
+ * (e.g. /stop, /restart) are not replayed.
  */
+async function drainPendingUpdates(): Promise<void> {
+  console.log('[telegram-bot] draining stale updates...')
+  const updates = await getUpdates()
+  if (updates.length > 0) {
+    lastUpdateId = updates[updates.length - 1].update_id
+    // ACK them all by fetching with offset = lastUpdateId + 1
+    await getUpdates(lastUpdateId + 1)
+    console.log(`[telegram-bot] drained ${updates.length} stale update(s), resuming from id=${lastUpdateId}`)
+  } else {
+    console.log('[telegram-bot] no stale updates')
+  }
+}
+
+// ─── PM2 helpers ──────────────────────────────────────────────────────────
+
 async function pm2StopWorkers(): Promise<void> {
   const names = WORKER_PROCESSES.join(' ')
   await execAsync(`${PM2} stop ${names} --silent`).catch(err =>
@@ -107,13 +122,15 @@ async function pm2StopWorkers(): Promise<void> {
   )
 }
 
-async function pm2RestartAll(): Promise<void> {
-  await execAsync(`${PM2} restart all --silent`).catch(err =>
-    console.warn('[telegram-bot] pm2 restart all failed:', err.message)
+// Restart only worker processes — NOT telegram-bot to avoid self-restart loop
+async function pm2RestartWorkers(): Promise<void> {
+  const names = WORKER_PROCESSES.join(' ')
+  await execAsync(`${PM2} restart ${names} --silent`).catch(err =>
+    console.warn('[telegram-bot] pm2 restart workers failed:', err.message)
   )
 }
 
-// ─── Tick helper ─────────────────────────────────────────────────────────────
+// ─── Tick helper ──────────────────────────────────────────────────────────────
 
 function withTickTimeout(fn: () => Promise<string>, name: string): Promise<string> {
   return Promise.race([
@@ -124,15 +141,13 @@ function withTickTimeout(fn: () => Promise<string>, name: string): Promise<strin
   ])
 }
 
-// ─── Command handlers ─────────────────────────────────────────────────────
+// ─── Command handlers ──────────────────────────────────────────────────────
 
 async function handleStop() {
   await reply('🛑 *EMERGENCY STOP initiated...*')
 
-  // 1. Disable bot in DB so workers gate on next tick
   await setBotState({ enabled: false })
 
-  // 2. Close all open LP positions
   const supabase = createServerClient()
   const { data: lpPositions } = await supabase
     .from('lp_positions')
@@ -149,7 +164,6 @@ async function handleStop() {
     }
   }
 
-  // 3. Close all open spot positions
   const { data: spotPositions } = await supabase
     .from('spot_positions')
     .select('id, symbol')
@@ -164,7 +178,6 @@ async function handleStop() {
     if (!error) spotClosed++
   }
 
-  // 4. Stop all worker PM2 processes — telegram-bot stays alive for /restart
   await pm2StopWorkers()
 
   await reply([
@@ -179,17 +192,16 @@ async function handleStop() {
 }
 
 async function handleRestart() {
-  await reply('⏳ *Restarting all services...*')
+  await reply('⏳ *Restarting worker services...*')
 
-  // 1. Re-enable bot in DB
   await setBotState({ enabled: true })
 
-  // 2. Restart all PM2 processes (including telegram-bot itself)
-  await pm2RestartAll()
+  // Restart only workers — NOT telegram-bot (we're already running fine)
+  await pm2RestartWorkers()
 
   const state = await getBotState()
   await reply([
-    `✅ *All services restarted.*`,
+    `✅ *All worker services restarted.*`,
     `Mode: ${state.dry_run ? '🟡 Dry-run (no real trades)' : '🟢 Live trading'}`,
     `Send /status for a full snapshot.`,
   ].join('\n'))
@@ -210,67 +222,41 @@ async function handleLive() {
 }
 
 async function handleClose(positionId: string) {
-  if (!positionId) {
-    await reply('❌ Usage: `/close <position_id>`')
-    return
-  }
+  if (!positionId) { await reply('❌ Usage: `/close <position_id>`'); return }
   await reply(`⏳ Closing LP position \`${positionId}\`...`)
   try {
     const supabase = createServerClient()
     const { data: pos, error } = await supabase
-      .from('lp_positions')
-      .select('id, symbol, status')
-      .eq('id', positionId)
-      .single()
-    if (error || !pos) {
-      await reply(`❌ LP position \`${positionId}\` not found.`)
-      return
-    }
-    if (pos.status === 'closed') {
-      await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) is already closed.`)
-      return
-    }
+      .from('lp_positions').select('id, symbol, status').eq('id', positionId).single()
+    if (error || !pos) { await reply(`❌ LP position \`${positionId}\` not found.`); return }
+    if (pos.status === 'closed') { await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) is already closed.`); return }
     const ok = await closePosition(positionId, 'manual_telegram')
-    if (ok) {
-      await reply(`✅ \`${positionId}\` (${pos.symbol}) closed successfully.`)
-    } else {
-      await reply(`❌ Failed to close \`${positionId}\` — check PM2 logs.`)
-    }
+    await reply(ok
+      ? `✅ \`${positionId}\` (${pos.symbol}) closed successfully.`
+      : `❌ Failed to close \`${positionId}\` — check PM2 logs.`
+    )
   } catch (err) {
     await reply(`❌ Close error: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
 async function handleCloseSpot(positionId: string) {
-  if (!positionId) {
-    await reply('❌ Usage: `/closespot <position_id>`')
-    return
-  }
+  if (!positionId) { await reply('❌ Usage: `/closespot <position_id>`'); return }
   await reply(`⏳ Closing spot position \`${positionId}\`...`)
   try {
     const supabase = createServerClient()
     const { data: pos, error } = await supabase
-      .from('spot_positions')
-      .select('id, symbol, status')
-      .eq('id', positionId)
-      .single()
-    if (error || !pos) {
-      await reply(`❌ Spot position \`${positionId}\` not found.`)
-      return
-    }
-    if (pos.status !== 'open') {
-      await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) is already closed (status=${pos.status}).`)
-      return
-    }
+      .from('spot_positions').select('id, symbol, status').eq('id', positionId).single()
+    if (error || !pos) { await reply(`❌ Spot position \`${positionId}\` not found.`); return }
+    if (pos.status !== 'open') { await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) already closed (status=${pos.status}).`); return }
     const { error: updateErr } = await supabase
       .from('spot_positions')
       .update({ status: 'closed_manual', closed_at: new Date().toISOString() })
       .eq('id', positionId)
-    if (updateErr) {
-      await reply(`❌ DB update failed: ${updateErr.message}`)
-      return
-    }
-    await reply(`✅ \`${positionId}\` (${pos.symbol}) marked closed.`)
+    await reply(updateErr
+      ? `❌ DB update failed: ${updateErr.message}`
+      : `✅ \`${positionId}\` (${pos.symbol}) marked closed.`
+    )
   } catch (err) {
     await reply(`❌ CloseSpot error: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -281,31 +267,25 @@ async function handleStatus() {
     const supabase = createServerClient()
     const [stateRes, lpRes, spotRes, pm2Res] = await Promise.allSettled([
       getBotState(),
-      supabase.from('lp_positions').select('id, symbol, status, sol_deposited')
-        .in('status', ['active', 'out_of_range']),
-      supabase.from('spot_positions').select('id, symbol, amount_sol, status')
-        .eq('status', 'open'),
+      supabase.from('lp_positions').select('id, symbol, status, sol_deposited').in('status', ['active', 'out_of_range']),
+      supabase.from('spot_positions').select('id, symbol, amount_sol, status').eq('status', 'open'),
       execAsync(`${PM2} jlist`),
     ])
 
     const state    = stateRes.status === 'fulfilled' ? stateRes.value    : { enabled: false, dry_run: true }
     const lpRows   = lpRes.status    === 'fulfilled' ? (lpRes.value.data   ?? []) : []
     const spotRows = spotRes.status  === 'fulfilled' ? (spotRes.value.data ?? []) : []
-
-    const lpSol   = lpRows.reduce((s: number,   r: { sol_deposited?: number }) => s + (r.sol_deposited ?? 0), 0)
-    const spotSol = spotRows.reduce((s: number, r: { amount_sol?: number })    => s + (r.amount_sol    ?? 0), 0)
+    const lpSol    = lpRows.reduce((s: number,   r: { sol_deposited?: number }) => s + (r.sol_deposited ?? 0), 0)
+    const spotSol  = spotRows.reduce((s: number, r: { amount_sol?: number })    => s + (r.amount_sol    ?? 0), 0)
 
     let pm2Summary = 'unknown'
     if (pm2Res.status === 'fulfilled') {
       try {
-        const procs = JSON.parse(pm2Res.value.stdout) as Array<{ name: string; pm2_env: { status: string } }>
+        const procs   = JSON.parse(pm2Res.value.stdout) as Array<{ name: string; pm2_env: { status: string } }>
         const running = procs.filter(p => p.pm2_env.status === 'online').map(p => p.name)
         const stopped = procs.filter(p => p.pm2_env.status !== 'online').map(p => p.name)
-        pm2Summary = running.length > 0
-          ? `${running.length} running: ${running.join(', ')}`
-          : `all stopped`
-        if (stopped.length > 0 && running.length > 0)
-          pm2Summary += `\nStopped: ${stopped.join(', ')}`
+        pm2Summary    = running.length > 0 ? `${running.length} running: ${running.join(', ')}` : 'all stopped'
+        if (stopped.length > 0 && running.length > 0) pm2Summary += `\nStopped: ${stopped.join(', ')}`
       } catch { pm2Summary = 'parse error' }
     }
 
@@ -346,7 +326,6 @@ async function handlePositions() {
       const pool = r.pool_address ? r.pool_address.slice(0, 8) + '...' : 'unknown'
       return `• \`${r.id.slice(0, 8)}\` *${r.symbol}* — ${r.status} | ${(r.sol_deposited ?? 0).toFixed(3)} SOL | pool=${pool} | ${age}h\n  /close ${r.id}`
     })
-
     await reply([`🏊 *Open LP Positions (${rows.length})*`, '', ...lines].join('\n'))
   } catch (err) {
     await reply(`❌ Error: ${err instanceof Error ? err.message : String(err)}`)
@@ -371,7 +350,6 @@ async function handleSpots() {
       const age = ((Date.now() - new Date(r.opened_at).getTime()) / 3_600_000).toFixed(1)
       return `• \`${r.id.slice(0, 8)}\` *${r.symbol}* — ${(r.amount_sol ?? 0).toFixed(3)} SOL | ${age}h\n  /closespot ${r.id}`
     })
-
     await reply([`🎯 *Open Spot Positions (${rows.length})*`, '', ...lines].join('\n'))
   } catch (err) {
     await reply(`❌ Error: ${err instanceof Error ? err.message : String(err)}`)
@@ -380,34 +358,25 @@ async function handleSpots() {
 
 async function handleTick() {
   await reply('⚡ *Manual tick triggered* — running all pipelines in parallel...')
-
   const started = Date.now()
 
   const [lpScanResult, lpMonitorResult, preGradResult, spotMonitorResult, lpMigratorResult] =
     await Promise.all([
-      withTickTimeout(
-        async () => {
-          const r = await runScanner()
-          return `✅ lp-scanner: scanned=${r.scanned} candidates=${r.candidates} opened=${r.opened}`
-        },
-        'lp-scanner',
-      ),
-      withTickTimeout(
-        async () => {
-          const r = await monitorPositions()
-          return `✅ lp-monitor: checked=${r.checked} closed=${r.closed} rebalanced=${r.rebalanced}`
-        },
-        'lp-monitor',
-      ),
+      withTickTimeout(async () => {
+        const r = await runScanner()
+        return `✅ lp-scanner: scanned=${r.scanned} candidates=${r.candidates} opened=${r.opened}`
+      }, 'lp-scanner'),
+      withTickTimeout(async () => {
+        const r = await monitorPositions()
+        return `✅ lp-monitor: checked=${r.checked} closed=${r.closed} rebalanced=${r.rebalanced}`
+      }, 'lp-monitor'),
       withTickTimeout(runPreGradScanner, 'pre-grad-scanner'),
       withTickTimeout(runSpotMonitor,    'spot-monitor'),
       withTickTimeout(runLpMigrator,     'lp-migrator'),
     ])
 
-  const elapsed = ((Date.now() - started) / 1000).toFixed(1)
-
   await reply([
-    `📋 *Tick complete* (${elapsed}s)`,
+    `📋 *Tick complete* (${((Date.now() - started) / 1000).toFixed(1)}s)`,
     ``,
     lpScanResult,
     lpMonitorResult,
@@ -422,8 +391,8 @@ async function handleHelp() {
     `🤖 *Meteoracle Commands*`,
     ``,
     `*Control*`,
-    `/stop          — 🛑 Emergency: close all positions + stop all services`,
-    `/restart       — ▶️ Resume: restart all PM2 services`,
+    `/stop          — 🛑 Emergency: close all positions + stop worker services`,
+    `/restart       — ▶️ Resume: restart all worker services`,
     `/dry           — dry-run mode (no real trades)`,
     `/live          — live trading ⚠️`,
     `/tick          — manual trigger all pipelines`,
@@ -440,7 +409,7 @@ async function handleHelp() {
   ].join('\n'))
 }
 
-// ─── Main poll loop ─────────────────────────────────────────────────────────────
+// ─── Main poll loop ──────────────────────────────────────────────────────────────
 
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
   const msg = update.message
@@ -454,7 +423,7 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
 
   if      (command === '/stop')      await handleStop()
   else if (command === '/restart')   await handleRestart()
-  else if (command === '/start')     await handleRestart()  // alias for muscle memory
+  else if (command === '/start')     await handleRestart()
   else if (command === '/dry')       await handleDry()
   else if (command === '/live')      await handleLive()
   else if (command === '/close')     await handleClose(parts[1] ?? '')
@@ -481,6 +450,10 @@ async function poll(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log(`[telegram-bot] starting — polling every ${POLL_MS}ms`)
+
+  // Drain stale updates first — prevents replaying /stop or /restart from a previous session
+  await drainPendingUpdates()
+
   await reply('🤖 *Meteoracle bot online.* Send /help for commands.')
   await poll()
   setInterval(poll, POLL_MS)
