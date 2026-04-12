@@ -20,19 +20,20 @@ const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM    = 'https://dlmm-api.meteora.ag'
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
+// Pre-filter: broad pass to limit API cost — strategy filters are the real gate
 const PRE_FILTER = {
   minVolume24hUsd: 10_000,
   minLiquidityUsd: 10_000,
-  maxLiquidityUsd: 50_000_000,
-  maxAgeHours:     168,
+  maxLiquidityUsd: 500_000_000, // raised: allow deep Stable Farm pools
+  maxAgeHours:     999_999,     // no age cap here — strategies enforce their own
 }
 
 const CHEAP_FILTER = {
   minMcUsd:    100_000,
-  maxMcUsd: 50_000_000,
-  minVol24h:    50_000,
-  minLiqUsd:    20_000,
-  maxAgeHours:     168,
+  maxMcUsd: 500_000_000, // raised: allow large-cap tokens for Stable Farm
+  minVol24h:    10_000,  // lowered: pre-filter already gates on 10k, avoid double-filtering
+  minLiqUsd:    10_000,
+  maxAgeHours:  999_999, // no age cap — strategies enforce their own
 }
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
@@ -96,7 +97,6 @@ let _orphanCheckDone = false
 export async function runScanner(): Promise<{
   scanned: number; candidates: number; opened: number; error?: string
 }> {
-  // ██ BOT STATE GATE — respect /stop command ██
   const state = await getBotState()
   if (!state.enabled) {
     console.log('[scanner] bot is stopped — skipping tick')
@@ -129,15 +129,16 @@ export async function runScanner(): Promise<{
     const vol24h   = pool.volume['24h']
     const liqUsd   = pool.tvl
     const mcUsd    = token.market_cap ?? 0
-    const ageHours = (Date.now() / 1000 - toUnixSeconds(pool.created_at)) / 3600
+    const ageHours = pool.created_at
+      ? (Date.now() / 1000 - toUnixSeconds(pool.created_at)) / 3600
+      : 0
 
-    if (mcUsd    < CHEAP_FILTER.minMcUsd)    { console.log(`[scanner] ${symbol} — skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
-    if (mcUsd    > CHEAP_FILTER.maxMcUsd)    { console.log(`[scanner] ${symbol} — skip: mc too high`); continue }
-    if (vol24h   < CHEAP_FILTER.minVol24h)   { console.log(`[scanner] ${symbol} — skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
-    if (liqUsd   < CHEAP_FILTER.minLiqUsd)   { console.log(`[scanner] ${symbol} — skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
-    if (ageHours > CHEAP_FILTER.maxAgeHours) { console.log(`[scanner] ${symbol} — skip: age=${ageHours.toFixed(1)}h > ${CHEAP_FILTER.maxAgeHours}h`); continue }
+    if (mcUsd    < CHEAP_FILTER.minMcUsd)  { console.log(`[scanner] ${symbol} — skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
+    if (mcUsd    > CHEAP_FILTER.maxMcUsd)  { console.log(`[scanner] ${symbol} — skip: mc too high`); continue }
+    if (vol24h   < CHEAP_FILTER.minVol24h) { console.log(`[scanner] ${symbol} — skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
+    if (liqUsd   < CHEAP_FILTER.minLiqUsd) { console.log(`[scanner] ${symbol} — skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
 
-    console.log(`[scanner] ${symbol} — passed cheap filter (mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, age=${ageHours.toFixed(1)}h)`)
+    console.log(`[scanner] ${symbol} — passed cheap filter (mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, liq=$${liqUsd.toFixed(0)}, age=${ageHours.toFixed(1)}h)`)
     survivors.push({ pool, mcUsd, ageHours })
   }
   console.log(`[scanner] step 2/4 — ${survivors.length}/${pools.length} passed cheap filter`)
@@ -181,7 +182,6 @@ export async function runScanner(): Promise<{
     )
     if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last 1h`); continue }
 
-    // Dedup: open LP positions — use 'mint' (correct column)
     const posResult = await withTimeout(
       supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
         .in('status', ['active', 'out_of_range']).limit(1),
@@ -275,17 +275,25 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
 }
 
 async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPool[]> {
-  const res = await axios.get<PoolsResponse>(`${baseUrl}/pools`, {
-    params: { page: 1, page_size: 1000, sort_by: 'volume_24h:desc' },
-    timeout: METEORA_FETCH_TIMEOUT_MS,
-  })
-  return res.data?.data ?? []
+  // Fetch up to 3 pages to surface large-cap pools buried by volume sort
+  const allPools: MeteoraPool[] = []
+  for (let page = 1; page <= 3; page++) {
+    try {
+      const res = await axios.get<PoolsResponse>(`${baseUrl}/pools`, {
+        params: { page, page_size: 1000, sort_by: 'volume_24h:desc' },
+        timeout: METEORA_FETCH_TIMEOUT_MS,
+      })
+      const data = res.data?.data ?? []
+      allPools.push(...data)
+      if (data.length < 1000) break // last page
+    } catch {
+      break
+    }
+  }
+  return allPools
 }
 
 async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: string }> {
-  const maxAgeSec = PRE_FILTER.maxAgeHours * 3600
-  const now = Date.now() / 1000
-
   let allPools: MeteoraPool[] = []
 
   for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
@@ -314,8 +322,6 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
     if (p.tvl > PRE_FILTER.maxLiquidityUsd) return false
     const hasSol = p.token_x.address === WSOL || p.token_y.address === WSOL
     if (!hasSol) return false
-    if (!p.created_at || p.created_at === 0) return false
-    if ((now - toUnixSeconds(p.created_at)) > maxAgeSec) return false
     return true
   })
 

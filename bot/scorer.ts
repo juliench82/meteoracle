@@ -9,14 +9,19 @@ import type { TokenMetrics } from '@/lib/types'
  *   - Holder count       (20pts) — distribution signal
  *   - Token freshness    (15pts) — recency signal
  *
- * Bonus (additive, capped at 100 total):
- *   - pump.fun bonding curve 70–95%: +8pts  — sweet spot, about to graduate
- *   - pump.fun bonding curve 95–99%: +4pts  — close but slippage risk
- *   - pump.fun bonding curve 100%:   +5pts  — confirmed graduation = real demand
+ * Freshness is tier-aware:
+ *   - SHITCOIN (Evil Panda):  rewards very fresh tokens (<24h)
+ *   - MEMECOIN (Scalp Spike): rewards established tokens (72h–120h gets full score)
+ *   - LARGE_CAP (Stable Farm): age is irrelevant, always max freshness score
  *
- * Hard disqualifiers (return 0 immediately):
+ * Bonus (additive, capped at 100 total):
+ *   - pump.fun bonding curve 70–95%: +8pts
+ *   - pump.fun bonding curve 95–99%: +4pts
+ *   - pump.fun bonding curve 100%:   +5pts
+ *
+ * Hard disqualifiers:
  *   - pump.fun mint + age < 6h      — too early, classic dump window
- *   - vol/MC ratio > 3.0            — wash trading / imminent dump signal
+ *   - vol/MC ratio > 3.0            — wash trading signal
  */
 export function scoreCandidate(token: TokenMetrics): number {
   const isPumpFun = token.address.endsWith('pump')
@@ -33,10 +38,14 @@ export function scoreCandidate(token: TokenMetrics): number {
     return 0
   }
 
+  // Determine tier from MC + age for tier-aware freshness scoring
+  const isLargeCap = token.mcUsd >= 10_000_000 && token.liquidityUsd >= 500_000
+  const isMemecoin = !isLargeCap && token.mcUsd >= 5_000_000 && token.ageHours >= 72
+
   const volMcScore     = scoreVolumeMcRatio(volMcRatio, isPumpFun)
   const rugScore       = scoreRugcheck(token.rugcheckScore)
   const holderScore    = scoreHolders(token.holderCount)
-  const freshnessScore = scoreFreshness(token.ageHours)
+  const freshnessScore = scoreFreshness(token.ageHours, isLargeCap, isMemecoin)
 
   const base = (
     volMcScore     * 0.40 +
@@ -48,9 +57,9 @@ export function scoreCandidate(token: TokenMetrics): number {
   let curveBonus = 0
   if (isPumpFun && token.bondingCurvePct !== undefined) {
     const pct = token.bondingCurvePct
-    if (pct >= 70 && pct < 95)   curveBonus = 8
+    if (pct >= 70 && pct < 95)       curveBonus = 8
     else if (pct >= 95 && pct < 100) curveBonus = 4
-    else if (pct === 100)         curveBonus = 5  // confirmed graduation
+    else if (pct === 100)            curveBonus = 5
   }
 
   const total = base + curveBonus
@@ -96,7 +105,25 @@ function scoreHolders(holderCount: number): number {
   return 10
 }
 
-function scoreFreshness(ageHours: number): number {
+/**
+ * Tier-aware freshness scoring:
+ * - Large cap (Stable Farm): age irrelevant → always 100
+ * - Memecoin (Scalp Spike):  72–120h is the sweet spot → 100; penalise very fresh
+ * - Shitcoin (Evil Panda):   very fresh is best → original curve
+ */
+function scoreFreshness(ageHours: number, isLargeCap: boolean, isMemecoin: boolean): number {
+  if (isLargeCap) return 100
+
+  if (isMemecoin) {
+    // 72–120h is the target window — full score
+    if (ageHours >= 72 && ageHours <= 120) return 100
+    if (ageHours >= 48 && ageHours < 72)   return 80
+    if (ageHours >= 24 && ageHours < 48)   return 60
+    if (ageHours < 24)                     return 30  // too fresh for memecoin tier
+    return 50  // > 120h, still usable
+  }
+
+  // Default (shitcoin): freshness = speed
   if (ageHours <= 1)  return 100
   if (ageHours <= 3)  return 90
   if (ageHours <= 6)  return 75
