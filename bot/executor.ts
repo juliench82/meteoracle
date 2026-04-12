@@ -16,8 +16,6 @@ import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
-// @meteora-ag/dlmm is lazy-loaded inside functions to avoid
-// ERR_UNSUPPORTED_DIR_IMPORT from @coral-xyz/anchor during Next.js build.
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
   return mod.default as typeof import('@meteora-ag/dlmm').default
@@ -64,9 +62,7 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
     const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price))
     const price = parseFloat(adjusted)
     if (isFinite(price) && price > 0) return price
-  } catch {
-    // fall through
-  }
+  } catch {}
   return parseFloat(activeBin.pricePerToken)
 }
 
@@ -81,21 +77,30 @@ export async function openPosition(
 
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
-    const dryRunEntryPrice = metrics.priceUsd ?? 0
+    const dryRunEntryPriceUsd = metrics.priceUsd ?? 0
+    // Derive entry_price_sol from priceUsd if we have it
+    // We store 0 if unavailable — acceptable for dry-run, real value set on live
+    const dryRunEntryPriceSol = 0  // no on-chain pool access in dry-run
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
     const dryRunSolAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
-    return await persistPosition(metrics, strategy, 'dry-run-sig', dryRunEntryPrice, dryRunSolAmount)
+    return await persistPosition(
+      metrics, strategy,
+      'dry-run-sig',
+      dryRunEntryPriceUsd,
+      dryRunEntryPriceSol,
+      dryRunSolAmount,
+      undefined,
+      0  // token_amount: no on-chain quote in dry-run for LP (token goes into pool, not wallet)
+    )
   }
 
   const connection = getConnection()
   const wallet = getWallet()
 
   try {
-    // 1. Resolve position size
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
     const solAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
 
-    // 2. Global exposure guard (lp_positions)
     const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '0.15')
     const { data: openPositions } = await supabase
       .from('lp_positions').select('sol_deposited').eq('status', 'active')
@@ -109,7 +114,6 @@ export async function openPosition(
       return null
     }
 
-    // 3. Per-token cooldown (lp_positions) — uses mint column
     const cooldownHours = parseFloat(process.env.TOKEN_COOLDOWN_HOURS ?? '6')
     const cooldownCutoff = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
     const { data: recentClose } = await supabase
@@ -128,7 +132,6 @@ export async function openPosition(
       return null
     }
 
-    // 4. Wallet balance check
     const balanceLamports = await connection.getBalance(wallet.publicKey)
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
@@ -142,7 +145,6 @@ export async function openPosition(
       return null
     }
 
-    // 5. Load pool + derive entry price (decimal-adjusted)
     const DLMM = await getDLMM()
     const dlmmPool = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
     const activeBin = await dlmmPool.getActiveBin()
@@ -157,7 +159,6 @@ export async function openPosition(
     const mintY = dlmmPool.tokenY.publicKey
     const isSolPool = mintY.toBase58() === NATIVE_MINT_STR
 
-    // 6. Ensure ATAs exist
     const ataIxs: TransactionInstruction[] = []
     for (const [label_token, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
@@ -183,14 +184,12 @@ export async function openPosition(
       console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
     }
 
-    // 7. Bin range
     const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
     const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
     const minBinId = activeBinId - binsDown
     const maxBinId = activeBinId + binsUp
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
 
-    // 8. Liquidity amounts
     const lamports = Math.floor(solAmount * 1e9)
     let totalX: BN
     let totalY: BN
@@ -203,7 +202,6 @@ export async function openPosition(
       totalY = new BN(Math.floor(lamports * strategy.position.solBias))
     }
 
-    // 9. Strategy type
     const StrategyType = await getStrategyType()
     const strategyTypeMap: Record<string, typeof StrategyType[keyof typeof StrategyType]> = {
       spot: StrategyType.Spot,
@@ -212,11 +210,9 @@ export async function openPosition(
     }
     const strategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyType.Spot
 
-    // 10. Priority fee
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // 11. Build multi-position tx(s)
     const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
       async (count) => Array.from({ length: count }, () => new Keypair()),
       totalX,
@@ -227,13 +223,15 @@ export async function openPosition(
       1
     )
 
-    // 12. Send each segment
     let lastSig = ''
     let posIndex = 0
     const total = response.instructionsByPositions.length
     console.log(`${label} opening ${total} position segment(s)`)
 
+    let positionKeypairForQuery: Keypair | null = null
+
     for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
+      if (!positionKeypairForQuery) positionKeypairForQuery = positionKeypair
       posIndex++
       const initIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
       const initTx = new Transaction().add(...initIxs)
@@ -251,9 +249,38 @@ export async function openPosition(
       }
     }
 
+    // Query on-chain to get actual token amount deposited into the LP position
+    let tokenAmountDeposited = 0
+    if (positionKeypairForQuery) {
+      try {
+        const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
+        const userPos = userPositions.find(
+          p => p.publicKey.toBase58() === positionKeypairForQuery!.publicKey.toBase58()
+        )
+        if (userPos) {
+          // positionData.totalXAmount is token X in the position (non-SOL side)
+          const rawAmount = userPos.positionData.totalXAmount
+          tokenAmountDeposited = typeof rawAmount === 'object'
+            ? (rawAmount as BN).toNumber() / 1e6
+            : Number(rawAmount) / 1e6
+          console.log(`${label} token amount in position: ${tokenAmountDeposited.toFixed(4)}`)
+        }
+      } catch (err) {
+        console.warn(`${label} could not fetch token amount from on-chain position:`, err)
+      }
+    }
+
     console.log(`${label} position opened ✔`)
     const firstPubKey = response.instructionsByPositions[0]?.positionKeypair?.publicKey?.toBase58()
-    return await persistPosition(metrics, strategy, lastSig, entryPriceSol, solAmount, firstPubKey)
+    return await persistPosition(
+      metrics, strategy,
+      lastSig,
+      metrics.priceUsd ?? 0,
+      entryPriceSol,
+      solAmount,
+      firstPubKey,
+      tokenAmountDeposited
+    )
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -300,7 +327,6 @@ export async function closePosition(
     const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
     const positionPubKey = new PublicKey(position.position_pubkey ?? '')
 
-    // 1. Claim fees
     let feesClaimedSol = 0
     try {
       const claimTxs = await dlmmPool.claimAllRewards({
@@ -316,7 +342,6 @@ export async function closePosition(
       console.warn(`${label} fee claim failed (continuing):`, err)
     }
 
-    // 2. Remove liquidity + close position account
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const userPosition = userPositions.find(p => p.publicKey.toBase58() === positionPubKey.toBase58())
 
@@ -352,16 +377,19 @@ export async function closePosition(
 }
 
 /**
- * Persists a new LP position to lp_positions table.
- * Column mapping aligned with actual DB schema.
+ * Persists a new LP position to lp_positions.
+ * entry_price_sol is now a top-level column (not buried in metadata).
+ * token_amount is populated from on-chain query after live open; 0 for dry-run (token goes into pool).
  */
 async function persistPosition(
   metrics: TokenMetrics,
   strategy: Strategy,
   sig: string,
+  entryPriceUsd: number,
   entryPriceSol: number,
   solDeposited: number,
-  positionPubKey?: string
+  positionPubKey?: string,
+  tokenAmount: number = 0
 ): Promise<string> {
   const supabase = createServerClient()
   const { data, error } = await supabase
@@ -371,9 +399,10 @@ async function persistPosition(
       symbol:          metrics.symbol,
       pool_address:    metrics.poolAddress,
       position_pubkey: positionPubKey ?? null,
-      token_amount:    0,
+      token_amount:    tokenAmount,
       sol_deposited:   solDeposited,
-      entry_price_usd: metrics.priceUsd ?? 0,
+      entry_price_usd: entryPriceUsd,
+      entry_price_sol: entryPriceSol,
       fees_earned_sol: 0,
       status:          'active',
       in_range:        true,
@@ -381,10 +410,9 @@ async function persistPosition(
       opened_at:       new Date().toISOString(),
       tx_open:         sig,
       metadata: {
-        strategy_id:     strategy.id,
-        entry_price_sol: entryPriceSol,
-        bin_range_down:  strategy.position.rangeDownPct,
-        bin_range_up:    strategy.position.rangeUpPct,
+        strategy_id:    strategy.id,
+        bin_range_down: strategy.position.rangeDownPct,
+        bin_range_up:   strategy.position.rangeUpPct,
       },
     })
     .select('id')

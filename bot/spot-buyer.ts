@@ -28,6 +28,7 @@ import { sendTelegram } from './telegram'
 const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
 const RPC_URL       = process.env.HELIUS_RPC_URL ?? 'https://api.mainnet-beta.solana.com'
 const JUPITER_API   = 'https://quote-api.jup.ag/v6'
+const SOL_PRICE_API = 'https://api.jup.ag/price/v2'
 const WSOL_MINT     = 'So11111111111111111111111111111111111111112'
 const SLIPPAGE_BPS  = parseInt(process.env.SPOT_BUY_SLIPPAGE_BPS ?? '300')
 const POLL_INTERVAL = parseInt(process.env.SPOT_BUYER_POLL_SEC   ?? '30') * 1_000
@@ -67,31 +68,56 @@ interface SpotPositionInsert {
 }
 
 /**
- * Fetch price in USD — Jupiter first, pump.fun fallback for pre-grad tokens.
- * Same two-source logic as spot-monitor so entry price is never 0.
+ * Fetch SOL price in USD from Jupiter price API.
  */
-async function fetchPriceUsd(mint: string): Promise<number> {
+async function fetchSolPriceUsd(): Promise<number> {
   try {
-    const res = await axios.get('https://api.jup.ag/price/v2', {
-      params: { ids: mint },
+    const res = await axios.get(SOL_PRICE_API, {
+      params: { ids: WSOL_MINT },
       timeout: 6_000,
     })
-    const price = parseFloat(res.data?.data?.[mint]?.price ?? '0')
-    if (price > 0) return price
-  } catch {}
+    const price = parseFloat(res.data?.data?.[WSOL_MINT]?.price ?? '0')
+    return price > 0 ? price : 0
+  } catch {
+    return 0
+  }
+}
 
-  // pump.fun fallback for pre-grad tokens not yet listed on Jupiter
-  try {
-    const res = await axios.get(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
-      timeout: 6_000,
-      headers: { 'User-Agent': 'meteoracle-buyer/1.0' },
-    })
-    const usdMc  = parseFloat(res.data?.usd_market_cap ?? '0')
-    const supply = parseFloat(res.data?.total_supply    ?? '0')
-    if (usdMc > 0 && supply > 0) return usdMc / supply
-  } catch {}
+/**
+ * Fetch price in USD — Jupiter first, pump.fun fallback for pre-grad tokens.
+ * Returns { priceUsd, priceSol } using live SOL price for SOL conversion.
+ */
+async function fetchPrices(mint: string): Promise<{ priceUsd: number; priceSol: number }> {
+  const [tokenRes, solPriceUsd] = await Promise.allSettled([
+    axios.get(SOL_PRICE_API, { params: { ids: mint }, timeout: 6_000 }),
+    fetchSolPriceUsd(),
+  ])
 
-  return 0
+  const resolvedSolPrice = solPriceUsd.status === 'fulfilled' ? solPriceUsd.value : 0
+
+  let priceUsd = 0
+  if (tokenRes.status === 'fulfilled') {
+    priceUsd = parseFloat(tokenRes.value.data?.data?.[mint]?.price ?? '0')
+  }
+
+  // pump.fun fallback
+  if (priceUsd === 0) {
+    try {
+      const res = await axios.get(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
+        timeout: 6_000,
+        headers: { 'User-Agent': 'meteoracle-buyer/1.0' },
+      })
+      const usdMc  = parseFloat(res.data?.usd_market_cap ?? '0')
+      const supply = parseFloat(res.data?.total_supply    ?? '0')
+      if (usdMc > 0 && supply > 0) priceUsd = usdMc / supply
+    } catch {}
+  }
+
+  const priceSol = priceUsd > 0 && resolvedSolPrice > 0
+    ? priceUsd / resolvedSolPrice
+    : 0
+
+  return { priceUsd, priceSol }
 }
 
 async function getWalletSolBalance(publicKey: string): Promise<number> {
@@ -117,6 +143,22 @@ async function getJupiterQuote(inputMint: string, outputMint: string, amountLamp
     timeout: 10_000,
   })
   return res.data
+}
+
+/**
+ * Simulate a Jupiter quote in dry-run to estimate token_amount.
+ * Uses the same quote API but does NOT execute the swap.
+ */
+async function simulateJupiterQuote(mint: string, buySol: number): Promise<number> {
+  try {
+    const buyLamports = Math.floor(buySol * 1e9)
+    const quote = await getJupiterQuote(WSOL_MINT, mint, buyLamports)
+    const outAmount = parseInt(quote.outAmount as string ?? '0')
+    // Most tokens are 6 decimals; fallback gracefully
+    return outAmount / 1e6
+  } catch {
+    return 0
+  }
 }
 
 async function executeJupiterSwap(
@@ -228,11 +270,17 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
 
   // ---- DRY RUN ----
   if (DRY_RUN) {
-    const entryPriceUsd = await fetchPriceUsd(row.mint)  // Jupiter + pump.fun fallback
+    // Fetch prices and simulate quote in parallel
+    const [{ priceUsd: entryPriceUsd, priceSol: entryPriceSol }, simulatedTokenAmount] = await Promise.all([
+      fetchPrices(row.mint),
+      simulateJupiterQuote(row.mint, buySol),
+    ])
 
     console.log(
       `[spot-buyer] DRY-RUN BUY ${buySol} SOL → ${row.symbol}` +
       ` entry=$${entryPriceUsd > 0 ? entryPriceUsd.toExponential(4) : 'unavailable'}` +
+      ` (${entryPriceSol > 0 ? entryPriceSol.toExponential(4) : '?'} SOL)` +
+      ` ~${simulatedTokenAmount.toFixed(2)} tokens` +
       ` | TP=+${cfg.exits.takeProfitPct}% SL=${cfg.exits.stopLossPct}% maxHold=${cfg.exits.maxHoldMinutes}min`
     )
 
@@ -240,10 +288,10 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
       mint:            row.mint,
       symbol:          row.symbol,
       name:            row.name ?? '',
-      entry_price_sol: 0,
+      entry_price_sol: entryPriceSol,
       entry_price_usd: entryPriceUsd,
       amount_sol:      buySol,
-      token_amount:    0,
+      token_amount:    simulatedTokenAmount,
       tp_pct:          cfg.exits.takeProfitPct,
       sl_pct:          cfg.exits.stopLossPct,
       status:          'open',
@@ -267,7 +315,7 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
     await sendTelegram(
       `🟡 [DRY-RUN] BUY ${row.symbol}\n` +
       `💰 ${buySol} SOL | TP +${cfg.exits.takeProfitPct}% | SL ${cfg.exits.stopLossPct}%\n` +
-      `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL | Entry: $${entryPriceUsd > 0 ? entryPriceUsd.toExponential(3) : 'n/a'}\n` +
+      `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL | Entry: $${entryPriceUsd > 0 ? entryPriceUsd.toExponential(3) : 'n/a'} (${entryPriceSol > 0 ? entryPriceSol.toExponential(3) : '?'} SOL) | ~${simulatedTokenAmount.toFixed(0)} tokens\n` +
       `🔗 https://pump.fun/${row.mint}`
     )
 
@@ -291,9 +339,9 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
   try {
     console.log(`[spot-buyer] LIVE BUY ${buySol} SOL → ${row.symbol} (${row.mint.slice(0, 8)}...)`)
 
-    const [quote, priceUsd] = await Promise.all([
+    const [quote, { priceUsd }] = await Promise.all([
       getJupiterQuote(WSOL_MINT, row.mint, buyLamports),
-      fetchPriceUsd(row.mint),
+      fetchPrices(row.mint),
     ])
 
     const outAmount = parseInt(quote.outAmount as string)
@@ -347,7 +395,7 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
   await sendTelegram(
     `🟢 BUY ${row.symbol}\n` +
     `💰 ${buySol} SOL | TP +${cfg.exits.takeProfitPct}% | SL ${cfg.exits.stopLossPct}%\n` +
-    `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL | Entry: $${entryPriceUsd.toExponential(3)}\n` +
+    `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL | Entry: $${entryPriceUsd.toExponential(3)} (${entryPriceSol.toExponential(3)} SOL) | ${tokensReceived.toFixed(0)} tokens\n` +
     `🔗 https://solscan.io/tx/${txSig}`
   )
 }
