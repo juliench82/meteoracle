@@ -2,7 +2,6 @@
 const nextConfig = {
   reactStrictMode: true,
   experimental: {
-    typedRoutes: false,
     serverComponentsExternalPackages: [
       '@meteora-ag/dlmm',
       '@coral-xyz/anchor',
@@ -15,10 +14,6 @@ const nextConfig = {
       'borsh',
     ],
   },
-  // Prevent Next.js from tracing into these packages during page data collection.
-  // @meteora-ag/dlmm ships an .mjs that imports @coral-xyz/anchor with bare
-  // directory imports — unsupported by Node ESM. These packages are runtime-only
-  // (loaded by PM2 workers), never needed at build time.
   outputFileTracingExcludes: {
     '*': [
       'node_modules/@meteora-ag/**',
@@ -27,8 +22,6 @@ const nextConfig = {
     ],
   },
   webpack: (config, { isServer }) => {
-    // Hard-exclude the problematic ESM packages from webpack bundling.
-    // They are loaded at runtime by the server process, not bundled.
     const esmExternals = [
       '@meteora-ag/dlmm',
       '@coral-xyz/anchor',
