@@ -23,12 +23,11 @@
  * Setup:
  *   npm install -g pm2
  *   pm2 start ecosystem.config.cjs
- *   pm2 start npm --name dashboard -- start
  *   pm2 save
  *   pm2 startup   ← follow the printed command
  *
  * Update after git pull:
- *   git pull && npm run build && pm2 restart all
+ *   git pull && npm install && npm run build && pm2 restart all
  */
 
 module.exports = {
@@ -160,6 +159,27 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/telegram-bot-error.log',
       out_file:   './logs/telegram-bot-out.log',
+      merge_logs: true,
+    },
+    {
+      name:          'dashboard',
+      script:        'npm',
+      args:          'run start',
+      interpreter:   'none',
+      cwd:           __dirname,
+      restart_delay:  5_000,
+      max_restarts:   10,
+      // Next.js reads .env.local automatically during `next start` for server components
+      // but only if the working directory is correct and the file exists.
+      // We also pass env vars explicitly to guarantee runtime availability.
+      env_file:      '.env.local',
+      env: {
+        NODE_ENV: 'production',
+        PORT:     '3000',
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: './logs/dashboard-error.log',
+      out_file:   './logs/dashboard-out.log',
       merge_logs: true,
     },
   ],
