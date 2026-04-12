@@ -68,7 +68,6 @@ export async function monitorPositions(): Promise<{
   for (const position of positions) {
     try {
       stats.checked++
-      // strategy_id stored in metadata (aligned with new schema)
       const strategyId = position.strategy_id ?? position.metadata?.strategy_id
       const strategy = STRATEGIES.find((s) => s.id === strategyId)
       if (!strategy) {
@@ -106,7 +105,6 @@ async function checkPosition(
     position.position_pubkey
   )
 
-  // entry_price_usd stored in DB; entry_price_sol in metadata
   const entryPriceSol: number = position.metadata?.entry_price_sol ?? position.entry_price ?? 0
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
@@ -126,6 +124,14 @@ async function checkPosition(
   const oorSinceAt: string | null = justWentOOR
     ? new Date().toISOString()
     : (!inRange ? (position.oor_since_at ?? new Date().toISOString()) : null)
+
+  // Hoisted to function scope — needed by both the rebalance block and justWentOOR alert
+  const rangeLower = position.metadata?.bin_range_down
+    ? entryPriceSol * (1 + position.metadata.bin_range_down / 100)
+    : 0
+  const rangeUpper = position.metadata?.bin_range_up
+    ? entryPriceSol * (1 + position.metadata.bin_range_up / 100)
+    : 0
 
   const updatePayload: Record<string, unknown> = {
     current_price:   currentPriceSol,
@@ -180,8 +186,6 @@ async function checkPosition(
   }
 
   if (inRange) {
-    const rangeLower = position.metadata?.bin_range_down ? entryPriceSol * (1 + position.metadata.bin_range_down / 100) : 0
-    const rangeUpper = position.metadata?.bin_range_up   ? entryPriceSol * (1 + position.metadata.bin_range_up / 100)   : 0
     const rangeWidth = rangeUpper - rangeLower
     const positionInRange = rangeWidth > 0
       ? ((currentPriceSol - rangeLower) / rangeWidth) * 100
@@ -210,7 +214,6 @@ async function checkPosition(
         const isHardExit = HARD_EXIT_PREFIXES.some(prefix => rebalanceReason.startsWith(prefix))
         if (!isHardExit) {
           try {
-            // use 'mint' — correct DB column (was incorrectly token_address)
             const metrics: TokenMetrics = {
               address: position.mint,
               symbol: position.symbol,
@@ -311,7 +314,7 @@ async function fetchPositionState(
   }
 }
 
-// ─── Standalone entrypoint (PM2) ──────────────────────────────────────────────────────────
+// ─── Standalone entrypoint (PM2) ──────────────────────────────────────────────
 
 const standaloneMonitorTick = async (): Promise<void> => {
   const label = '[lp-monitor-dlmm]'
