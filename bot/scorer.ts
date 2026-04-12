@@ -12,7 +12,7 @@ import type { TokenMetrics } from '@/lib/types'
  * Bonus (additive, capped at 100 total):
  *   - pump.fun bonding curve 70–95%: +8pts  — sweet spot, about to graduate
  *   - pump.fun bonding curve 95–99%: +4pts  — close but slippage risk
- *   - pump.fun bonding curve 100%:    0pts  — already graduated, no bonus
+ *   - pump.fun bonding curve 100%:   +5pts  — confirmed graduation = real demand
  *
  * Hard disqualifiers (return 0 immediately):
  *   - pump.fun mint + age < 6h      — too early, classic dump window
@@ -21,7 +21,6 @@ import type { TokenMetrics } from '@/lib/types'
 export function scoreCandidate(token: TokenMetrics): number {
   const isPumpFun = token.address.endsWith('pump')
 
-  // Hard disqualifier: pump.fun token still in its first 6h dump window
   if (isPumpFun && token.ageHours < 6) {
     console.log(`[scorer] ${token.symbol} DISQUALIFIED — pump.fun + age ${token.ageHours.toFixed(1)}h < 6h`)
     return 0
@@ -29,7 +28,6 @@ export function scoreCandidate(token: TokenMetrics): number {
 
   const volMcRatio = token.mcUsd > 0 ? token.volume24h / token.mcUsd : 0
 
-  // Hard disqualifier: vol/MC > 3 = wash trading or dump in progress
   if (volMcRatio > 3.0) {
     console.log(`[scorer] ${token.symbol} DISQUALIFIED — vol/MC ratio ${volMcRatio.toFixed(2)} > 3.0`)
     return 0
@@ -47,13 +45,12 @@ export function scoreCandidate(token: TokenMetrics): number {
     freshnessScore * 0.15
   )
 
-  // Bonding curve bonus — only meaningful in 70–99% range
   let curveBonus = 0
   if (isPumpFun && token.bondingCurvePct !== undefined) {
     const pct = token.bondingCurvePct
-    if (pct >= 70 && pct < 95) curveBonus = 8
+    if (pct >= 70 && pct < 95)   curveBonus = 8
     else if (pct >= 95 && pct < 100) curveBonus = 4
-    // 100% = already graduated, no bonus
+    else if (pct === 100)         curveBonus = 5  // confirmed graduation
   }
 
   const total = base + curveBonus
@@ -65,14 +62,6 @@ export function scoreCandidate(token: TokenMetrics): number {
   return Math.round(Math.min(100, Math.max(0, total)))
 }
 
-// ---------------------------------------------------------------------------
-// Component scorers (each returns 0–100)
-// ---------------------------------------------------------------------------
-
-/**
- * Volume/MC ratio — momentum signal.
- * pump.fun tokens get a 15pt penalty on this component (higher bar to pass).
- */
 function scoreVolumeMcRatio(ratio: number, isPumpFun: boolean): number {
   const effectiveRatio = isPumpFun ? Math.min(ratio, 1.5) : ratio
   const penalty        = isPumpFun ? 15 : 0
