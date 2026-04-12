@@ -26,10 +26,6 @@ const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
 const POLL_INTERVAL = parseInt(process.env.SPOT_MONITOR_POLL_SEC ?? '30') * 1_000
 const cfg           = PRE_GRAD_STRATEGY
 
-console.log(`[spot-monitor] starting — DRY_RUN=${DRY_RUN}`)
-console.log(`[spot-monitor] TP=+${cfg.exits.takeProfitPct}% | SL=${cfg.exits.stopLossPct}% | maxHold=${cfg.exits.maxHoldMinutes}min`)
-console.log(`[spot-monitor] poll interval: ${POLL_INTERVAL / 1000}s`)
-
 interface SpotPosition {
   id:              string
   mint:            string
@@ -49,7 +45,6 @@ interface SpotPosition {
 
 type ExitReason = 'tp' | 'sl' | 'timeout'
 
-/** Try Jupiter first, fall back to pump.fun for pre-grad tokens */
 async function fetchPriceUsd(mint: string): Promise<number | null> {
   try {
     const res = await axios.get('https://api.jup.ag/price/v2', {
@@ -58,23 +53,17 @@ async function fetchPriceUsd(mint: string): Promise<number | null> {
     })
     const price = res.data?.data?.[mint]?.price
     if (price) return parseFloat(price)
-  } catch {
-    // fall through
-  }
+  } catch {}
 
   try {
     const res = await axios.get(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
       timeout: 8_000,
       headers: { 'User-Agent': 'meteoracle-monitor/1.0' },
     })
-    const usdMc   = parseFloat(res.data?.usd_market_cap ?? '0')
-    const supply  = parseFloat(res.data?.total_supply    ?? '0')
-    if (usdMc > 0 && supply > 0) {
-      return usdMc / supply
-    }
-  } catch {
-    // fall through
-  }
+    const usdMc  = parseFloat(res.data?.usd_market_cap ?? '0')
+    const supply = parseFloat(res.data?.total_supply    ?? '0')
+    if (usdMc > 0 && supply > 0) return usdMc / supply
+  } catch {}
 
   return null
 }
@@ -84,17 +73,17 @@ function checkExitCondition(
   pricePctChange: number,
   ageMinutes:     number,
 ): ExitReason | null {
-  if (pricePctChange >= position.tp_pct)             return 'tp'
-  if (pricePctChange <= -Math.abs(position.sl_pct))  return 'sl'
-  if (ageMinutes     >= cfg.exits.maxHoldMinutes)    return 'timeout'
+  if (pricePctChange >= position.tp_pct)            return 'tp'
+  if (pricePctChange <= -Math.abs(position.sl_pct)) return 'sl'
+  if (ageMinutes     >= cfg.exits.maxHoldMinutes)   return 'timeout'
   return null
 }
 
 async function closeSpotPosition(
-  position:   SpotPosition,
-  reason:     ExitReason,
-  pnlSol:     number,
-  exitMult:   number,
+  position: SpotPosition,
+  reason:   ExitReason,
+  pnlSol:   number,
+  exitMult: number,
 ): Promise<void> {
   const supabase = createServerClient()
   const label    = `${position.symbol} (${position.mint.slice(0, 8)}...)`
@@ -110,10 +99,7 @@ async function closeSpotPosition(
 
   if (!position.dry_run && position.token_amount > 0) {
     const sellResult = await sellTokenForSol(
-      position.mint,
-      position.token_amount,
-      6,
-      position.symbol,
+      position.mint, position.token_amount, 6, position.symbol,
     )
     if (!sellResult.success) {
       console.error(`[spot-monitor] sell failed for ${label}: ${sellResult.error}`)
@@ -129,9 +115,7 @@ async function closeSpotPosition(
   }
 
   const statusMap: Record<ExitReason, string> = {
-    tp:      'closed_tp',
-    sl:      'closed_sl',
-    timeout: 'closed_sl',
+    tp: 'closed_tp', sl: 'closed_sl', timeout: 'closed_sl',
   }
 
   const { error } = await supabase
@@ -156,8 +140,6 @@ async function closeSpotPosition(
   const dryLabel = position.dry_run ? '[DRY-RUN] ' : ''
   const txLine   = txSell ? `\n🔗 https://solscan.io/tx/${txSell}` : ''
 
-  console.log(`${emoji} [spot-monitor] CLOSED ${label} reason=${reason} pnl=${pnlStr}`)
-
   await sendTelegram(
     `${emoji} ${dryLabel}CLOSED ${position.symbol}\n` +
     `📉 Reason: ${reason.toUpperCase()} (${pctStr})\n` +
@@ -174,11 +156,8 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
   }
 
   const supabase = createServerClient()
-
   const { data, error } = await supabase
-    .from('spot_positions')
-    .select('*')
-    .eq('status', 'open')
+    .from('spot_positions').select('*').eq('status', 'open')
 
   if (error) {
     console.error('[spot-monitor] fetch error:', error.message)
@@ -210,10 +189,8 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
     if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
       priceMultiplier = 1.0
       pricePctChange  = 0
-      await supabase
-        .from('spot_positions')
-        .update({ entry_price_usd: currentPriceUsd })
-        .eq('id', pos.id)
+      await supabase.from('spot_positions')
+        .update({ entry_price_usd: currentPriceUsd }).eq('id', pos.id)
       console.log(`[spot-monitor] ${label} seeded entry_price_usd=$${currentPriceUsd.toExponential(4)}`)
     } else {
       priceMultiplier = currentPriceUsd / pos.entry_price_usd
@@ -249,12 +226,19 @@ export async function runSpotMonitor(): Promise<string> {
   }
 }
 
+// ─── Standalone entrypoint (PM2 only) ─────────────────────────────────────────────
+
 async function main(): Promise<void> {
+  console.log(`[spot-monitor] starting — DRY_RUN=${DRY_RUN}`)
+  console.log(`[spot-monitor] TP=+${cfg.exits.takeProfitPct}% | SL=${cfg.exits.stopLossPct}% | maxHold=${cfg.exits.maxHoldMinutes}min`)
+  console.log(`[spot-monitor] poll interval: ${POLL_INTERVAL / 1000}s`)
   await tick()
   setInterval(tick, POLL_INTERVAL)
 }
 
-main().catch(err => {
-  console.error('[spot-monitor] fatal:', err)
-  process.exit(1)
-})
+if (require.main === module) {
+  main().catch(err => {
+    console.error('[spot-monitor] fatal:', err)
+    process.exit(1)
+  })
+}

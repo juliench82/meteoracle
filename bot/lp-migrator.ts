@@ -33,6 +33,7 @@ import {
 import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 import { sendTelegram } from './telegram'
 import { sendStartupAlert } from './startup-alert'
 import { POST_GRAD_LP_STRATEGY } from '../strategies/post-grad-lp'
@@ -50,11 +51,7 @@ const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
 const POLL_INTERVAL = 60_000
 const cfg           = POST_GRAD_LP_STRATEGY
 
-console.log(`[lp-migrator] starting — DRY_RUN=${DRY_RUN}`)
-console.log(`[lp-migrator] LP_BAG_PCT=${cfg.lp.bagPct}% | binsDown=${cfg.lp.binsDown} | binsUp=${cfg.lp.binsUp}`)
-console.log(`[lp-migrator] pool search timeout=${cfg.poolSearchTimeoutMin}min | retry=${cfg.poolSearchRetrySeconds}s`)
-
-// ─── pump.fun graduation check ───────────────────────────────────────────────
+// ─── pump.fun graduation check ────────────────────────────────────────────
 
 interface PumpToken {
   complete:          boolean
@@ -71,7 +68,7 @@ async function fetchPumpToken(mint: string): Promise<PumpToken | null> {
   }
 }
 
-// ─── Meteora pool discovery ───────────────────────────────────────────────────
+// ─── Meteora pool discovery ─────────────────────────────────────────────
 
 async function findMeteoraPool(mint: string): Promise<string | null> {
   try {
@@ -92,15 +89,10 @@ async function findMeteoraPool(mint: string): Promise<string | null> {
   }
 }
 
-// ─── Wait for pool with retry ─────────────────────────────────────────────────
-
-async function waitForMeteoraPool(
-  mint:   string,
-  symbol: string,
-): Promise<string | null> {
-  const deadline  = Date.now() + cfg.poolSearchTimeoutMin * 60_000
-  const retryMs   = cfg.poolSearchRetrySeconds * 1_000
-  let   attempt   = 0
+async function waitForMeteoraPool(mint: string, symbol: string): Promise<string | null> {
+  const deadline = Date.now() + cfg.poolSearchTimeoutMin * 60_000
+  const retryMs  = cfg.poolSearchRetrySeconds * 1_000
+  let attempt    = 0
 
   while (Date.now() < deadline) {
     attempt++
@@ -117,7 +109,7 @@ async function waitForMeteoraPool(
   return null
 }
 
-// ─── DLMM deposit ────────────────────────────────────────────────────────────
+// ─── DLMM deposit ──────────────────────────────────────────────────────────────
 
 async function openLpPosition(
   spotPositionId: string,
@@ -128,7 +120,7 @@ async function openLpPosition(
   poolAddress:    string,
   isDryRun:       boolean,
 ): Promise<void> {
-  const label   = `[lp-migrator][${symbol}]`
+  const label    = `[lp-migrator][${symbol}]`
   const supabase = createServerClient()
 
   const lpTokens = Math.floor(tokenAmount * (cfg.lp.bagPct / 100))
@@ -162,23 +154,23 @@ async function openLpPosition(
   const wallet     = getWallet()
 
   try {
-    const DLMM       = await getDLMM()
+    const DLMM        = await getDLMM()
     const StrategyType = await getStrategyType()
-    const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
-    const activeBin  = await dlmmPool.getActiveBin()
+    const dlmmPool    = await DLMM.create(connection, new PublicKey(poolAddress))
+    const activeBin   = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
-    const binStep    = dlmmPool.lbPair.binStep
+    const binStep     = dlmmPool.lbPair.binStep
 
-    const minBinId   = activeBinId - cfg.lp.binsDown
-    const maxBinId   = activeBinId + cfg.lp.binsUp
+    const minBinId = activeBinId - cfg.lp.binsDown
+    const maxBinId = activeBinId + cfg.lp.binsUp
     console.log(`${label} bin range ${minBinId}→${maxBinId} (step=${binStep})`)
 
-    const mintX      = dlmmPool.tokenX.publicKey.toBase58()
-    const tokenIsX   = mintX === mint
+    const mintX     = dlmmPool.tokenX.publicKey.toBase58()
+    const tokenIsX  = mintX === mint
 
     const rawTokenUnits = new BN(lpTokens).mul(new BN(10 ** tokenDecimals))
-    const totalX     = tokenIsX ? rawTokenUnits : new BN(0)
-    const totalY     = tokenIsX ? new BN(0)      : rawTokenUnits
+    const totalX    = tokenIsX ? rawTokenUnits : new BN(0)
+    const totalY    = tokenIsX ? new BN(0)      : rawTokenUnits
 
     const tokenProgram = await (async () => {
       const info = await connection.getAccountInfo(new PublicKey(mint))
@@ -287,7 +279,14 @@ async function openLpPosition(
 
 // ─── Main tick ────────────────────────────────────────────────────────────────
 
-async function tick(): Promise<{ openChecked: number; newGrads: number; migrated: number; skipped: number; failed: number }> {
+async function tick(): Promise<{ openChecked: number; newGrads: number; toMigrate: number; migrated: number; skipped: number; failed: number }> {
+  // ██ BOT STATE GATE — respect /stop command ██
+  const state = await getBotState()
+  if (!state.enabled) {
+    console.log('[lp-migrator] bot is stopped — skipping tick')
+    return { openChecked: 0, newGrads: 0, toMigrate: 0, migrated: 0, skipped: 0, failed: 0 }
+  }
+
   const supabase = createServerClient()
   const stats = { openChecked: 0, newGrads: 0, toMigrate: 0, migrated: 0, skipped: 0, failed: 0 }
 
@@ -345,12 +344,8 @@ async function tick(): Promise<{ openChecked: number; newGrads: number; migrated
 
     try {
       await openLpPosition(
-        spot.id,
-        spot.mint,
-        spot.symbol,
-        spot.token_amount,
-        6,
-        poolAddress,
+        spot.id, spot.mint, spot.symbol,
+        spot.token_amount, 6, poolAddress,
         DRY_RUN || spot.dry_run,
       )
       stats.migrated++
@@ -359,15 +354,14 @@ async function tick(): Promise<{ openChecked: number; newGrads: number; migrated
     }
   }
 
-  const summary =
-    `📋 *lp-migrator tick*\n` +
-    `Open checked: ${stats.openChecked} | New grads: ${stats.newGrads}\n` +
-    `To migrate: ${stats.toMigrate} | Done: ${stats.migrated} | Skipped: ${stats.skipped} | Failed: ${stats.failed}`
-
   console.log(`[lp-migrator] tick summary — ${JSON.stringify(stats)}`)
 
   if (stats.newGrads > 0 || stats.migrated > 0 || stats.failed > 0 || stats.skipped > 0) {
-    await sendTelegram(summary)
+    await sendTelegram(
+      `📋 *lp-migrator tick*\n` +
+      `Open checked: ${stats.openChecked} | New grads: ${stats.newGrads}\n` +
+      `To migrate: ${stats.toMigrate} | Done: ${stats.migrated} | Skipped: ${stats.skipped} | Failed: ${stats.failed}`
+    )
   }
 
   return stats
@@ -384,13 +378,20 @@ export async function runLpMigrator(): Promise<string> {
   }
 }
 
+// ─── Standalone entrypoint (PM2 only) ─────────────────────────────────────────────
+
 async function main(): Promise<void> {
+  console.log(`[lp-migrator] starting — DRY_RUN=${DRY_RUN}`)
+  console.log(`[lp-migrator] LP_BAG_PCT=${cfg.lp.bagPct}% | binsDown=${cfg.lp.binsDown} | binsUp=${cfg.lp.binsUp}`)
+  console.log(`[lp-migrator] pool search timeout=${cfg.poolSearchTimeoutMin}min | retry=${cfg.poolSearchRetrySeconds}s`)
   await sendStartupAlert('lp-migrator')
   await tick()
   setInterval(tick, POLL_INTERVAL)
 }
 
-main().catch(err => {
-  console.error('[lp-migrator] fatal:', err)
-  process.exit(1)
-})
+if (require.main === module) {
+  main().catch(err => {
+    console.error('[lp-migrator] fatal:', err)
+    process.exit(1)
+  })
+}
