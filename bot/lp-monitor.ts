@@ -19,7 +19,6 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
 
 import axios from 'axios'
-import DLMM from '@meteora-ag/dlmm'
 import {
   PublicKey, Transaction,
 } from '@solana/web3.js'
@@ -29,8 +28,13 @@ import { createServerClient } from '@/lib/supabase'
 import { sendTelegram } from './telegram'
 import { POST_GRAD_LP_STRATEGY } from '../strategies/post-grad-lp'
 
+async function getDLMM() {
+  const mod = await import('@meteora-ag/dlmm')
+  return mod.default as typeof import('@meteora-ag/dlmm').default
+}
+
 const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
-const POLL_INTERVAL = parseInt(process.env.LP_MONITOR_POLL_SEC ?? '300') * 1_000  // default 5min
+const POLL_INTERVAL = parseInt(process.env.LP_MONITOR_POLL_SEC ?? '300') * 1_000
 const cfg           = POST_GRAD_LP_STRATEGY
 
 console.log(`[lp-monitor] starting — DRY_RUN=${DRY_RUN}`)
@@ -87,6 +91,7 @@ async function closeLpPosition(
   let txClose    = 'dry-run'
 
   if (!pos.dry_run && pos.position_pubkey) {
+    const DLMM       = await getDLMM()
     const connection = getConnection()
     const wallet     = getWallet()
 
@@ -94,7 +99,6 @@ async function closeLpPosition(
       const dlmmPool    = await DLMM.create(connection, new PublicKey(pos.pool_address))
       const positionKey = new PublicKey(pos.position_pubkey)
 
-      // Claim fees first
       try {
         const claimTxs = await dlmmPool.claimAllRewards({
           owner:     wallet.publicKey,
@@ -108,7 +112,6 @@ async function closeLpPosition(
         console.warn(`${label} fee claim failed (continuing):`, e)
       }
 
-      // Remove liquidity + close position account
       const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
       const userPos = userPositions.find(p => p.publicKey.toBase58() === pos.position_pubkey)
 
@@ -142,7 +145,6 @@ async function closeLpPosition(
     }
   }
 
-  // Current price for rough PnL estimate
   let exitPriceUsd = 0
   try {
     const priceRes = await axios.get('https://api.jup.ag/price/v2', { params: { ids: pos.mint }, timeout: 8_000 })
@@ -207,7 +209,6 @@ async function tick(): Promise<void> {
     const ageMinutes = (Date.now() - new Date(pos.opened_at).getTime()) / 60_000
     const ageHours   = ageMinutes / 60
 
-    // Max hold check
     if (ageHours >= cfg.exits.maxHoldHours) {
       console.log(`${label} max hold reached (${ageHours.toFixed(1)}h) — closing`)
       await closeLpPosition(pos, 'max_hold')
@@ -218,11 +219,11 @@ async function tick(): Promise<void> {
 
     if (!pos.dry_run && pos.position_pubkey && wallet) {
       try {
+        const DLMM     = await getDLMM()
         const dlmmPool  = await DLMM.create(connection, new PublicKey(pos.pool_address))
         const activeBin = await dlmmPool.getActiveBin()
         currentlyInRange = activeBin.binId >= pos.bin_lower && activeBin.binId <= pos.bin_upper
 
-        // Periodic fee snapshot
         try {
           const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
           const userPos = userPositions.find(p => p.publicKey.toBase58() === pos.position_pubkey)
@@ -241,11 +242,9 @@ async function tick(): Promise<void> {
         continue
       }
     } else if (pos.dry_run) {
-      // Simulate occasional OOR for testing
       currentlyInRange = Math.random() > 0.1
     }
 
-    // Update in_range state
     if (currentlyInRange !== pos.in_range) {
       await supabase.from('lp_positions').update({
         in_range:     currentlyInRange,
@@ -254,7 +253,6 @@ async function tick(): Promise<void> {
       console.log(`${label} range state changed → ${currentlyInRange ? 'IN range ✅' : 'OUT of range ⚠️'}`)
     }
 
-    // OOR timeout check
     if (!currentlyInRange && pos.oor_since_at) {
       const oorMinutes = (Date.now() - new Date(pos.oor_since_at).getTime()) / 60_000
       console.log(`${label} OOR for ${oorMinutes.toFixed(1)}min (limit ${cfg.exits.maxOorMinutes}min)`)

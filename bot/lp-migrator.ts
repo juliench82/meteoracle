@@ -21,7 +21,6 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
 
 import axios from 'axios'
-import DLMM, { StrategyType } from '@meteora-ag/dlmm'
 import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
@@ -38,8 +37,17 @@ import { sendTelegram } from './telegram'
 import { sendStartupAlert } from './startup-alert'
 import { POST_GRAD_LP_STRATEGY } from '../strategies/post-grad-lp'
 
+async function getDLMM() {
+  const mod = await import('@meteora-ag/dlmm')
+  return mod.default as typeof import('@meteora-ag/dlmm').default
+}
+async function getStrategyType() {
+  const mod = await import('@meteora-ag/dlmm')
+  return mod.StrategyType
+}
+
 const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
-const POLL_INTERVAL = 60_000   // check for new graduations every 60s
+const POLL_INTERVAL = 60_000
 const cfg           = POST_GRAD_LP_STRATEGY
 
 console.log(`[lp-migrator] starting — DRY_RUN=${DRY_RUN}`)
@@ -73,6 +81,7 @@ async function findMeteoraPool(mint: string): Promise<string | null> {
     })
     const pairs = res.data?.data ?? res.data?.pairs ?? []
     if (pairs.length === 0) return null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const solPair = pairs.find((p: any) =>
       p.mint_x === mint && p.mint_y === 'So11111111111111111111111111111111111111112' ||
       p.mint_y === mint && p.mint_x === 'So11111111111111111111111111111111111111112'
@@ -153,6 +162,8 @@ async function openLpPosition(
   const wallet     = getWallet()
 
   try {
+    const DLMM       = await getDLMM()
+    const StrategyType = await getStrategyType()
     const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
     const activeBin  = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
@@ -163,7 +174,6 @@ async function openLpPosition(
     console.log(`${label} bin range ${minBinId}→${maxBinId} (step=${binStep})`)
 
     const mintX      = dlmmPool.tokenX.publicKey.toBase58()
-    const WSOL       = 'So11111111111111111111111111111111111111112'
     const tokenIsX   = mintX === mint
 
     const rawTokenUnits = new BN(lpTokens).mul(new BN(10 ** tokenDecimals))
@@ -190,12 +200,13 @@ async function openLpPosition(
       console.log(`${label} ATA created ✔`)
     }
 
-    const strategyTypeMap: Record<string, StrategyType> = {
+    const strategyTypeMap: Record<string, typeof StrategyType[keyof typeof StrategyType]> = {
       spot: StrategyType.Spot, curve: StrategyType.Curve, 'bid-ask': StrategyType.BidAsk,
     }
     const strategyType = strategyTypeMap[cfg.lp.distributionType] ?? StrategyType.Spot
 
     const priorityFee = await getPriorityFee([poolAddress, wallet.publicKey.toBase58()])
+    void priorityFee
 
     const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
       async (count) => Array.from({ length: count }, () => new Keypair()),
@@ -218,6 +229,7 @@ async function openLpPosition(
       lastSig = await connection.sendRawTransaction(initTx.serialize())
       await connection.confirmTransaction({ signature: lastSig, blockhash: bh1, lastValidBlockHeight: lbh1 }, 'confirmed')
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const liqChunks = Array.isArray(addLiquidityIxs) ? addLiquidityIxs.map((ix: any) => Array.isArray(ix) ? ix : [ix]) : [[addLiquidityIxs]]
       for (const chunk of liqChunks) {
         const liqTx = new Transaction().add(...chunk)
@@ -269,7 +281,7 @@ async function openLpPosition(
       payload: { spotPositionId, mint, symbol, error: msg },
     })
     await sendTelegram(`❌ LP OPEN FAILED ${symbol}\n${msg}`)
-    throw err  // re-throw so tick() can count failures
+    throw err
   }
 }
 
@@ -279,7 +291,6 @@ async function tick(): Promise<{ openChecked: number; newGrads: number; migrated
   const supabase = createServerClient()
   const stats = { openChecked: 0, newGrads: 0, toMigrate: 0, migrated: 0, skipped: 0, failed: 0 }
 
-  // 1. Check open spot positions for new graduations
   const { data: openSpots } = await supabase
     .from('spot_positions')
     .select('id, mint, symbol, token_amount, dry_run')
@@ -301,7 +312,6 @@ async function tick(): Promise<{ openChecked: number; newGrads: number; migrated
     await sendTelegram(`🎓 ${spot.symbol} GRADUATED!\nSearching for Meteora pool...`)
   }
 
-  // 2. Pick up graduated-but-not-yet-migrated positions
   const { data: toMigrate } = await supabase
     .from('spot_positions')
     .select('id, mint, symbol, token_amount, dry_run')
@@ -339,7 +349,7 @@ async function tick(): Promise<{ openChecked: number; newGrads: number; migrated
         spot.mint,
         spot.symbol,
         spot.token_amount,
-        6,  // pump.fun tokens are always 6 decimals
+        6,
         poolAddress,
         DRY_RUN || spot.dry_run,
       )
@@ -349,7 +359,6 @@ async function tick(): Promise<{ openChecked: number; newGrads: number; migrated
     }
   }
 
-  // ── Tick summary (always fires — no more silent runs) ──
   const summary =
     `📋 *lp-migrator tick*\n` +
     `Open checked: ${stats.openChecked} | New grads: ${stats.newGrads}\n` +
@@ -357,7 +366,6 @@ async function tick(): Promise<{ openChecked: number; newGrads: number; migrated
 
   console.log(`[lp-migrator] tick summary — ${JSON.stringify(stats)}`)
 
-  // Only send Telegram summary if there was actual activity OR a failure
   if (stats.newGrads > 0 || stats.migrated > 0 || stats.failed > 0 || stats.skipped > 0) {
     await sendTelegram(summary)
   }
@@ -365,10 +373,6 @@ async function tick(): Promise<{ openChecked: number; newGrads: number; migrated
   return stats
 }
 
-/**
- * Exported tick for use by telegram-bot /tick command.
- * Returns a summary string for reporting.
- */
 export async function runLpMigrator(): Promise<string> {
   try {
     const before = Date.now()
@@ -381,9 +385,7 @@ export async function runLpMigrator(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  // Always announce startup so you know when PM2 restarts this process
   await sendStartupAlert('lp-migrator')
-
   await tick()
   setInterval(tick, POLL_INTERVAL)
 }

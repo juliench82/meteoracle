@@ -1,13 +1,18 @@
-import DLMM from '@meteora-ag/dlmm'
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { sendAlert } from '@/bot/alerter'
 
+async function getDLMM() {
+  const mod = await import('@meteora-ag/dlmm')
+  return mod.default as typeof import('@meteora-ag/dlmm').default
+}
+
 export async function detectOrphanedPositions(knownPoolAddresses: string[]): Promise<void> {
   const connection = getConnection()
   const wallet     = getWallet()
   const supabase   = createServerClient()
+  const DLMM       = await getDLMM()
 
   console.log(`[orphan-detector] checking ${knownPoolAddresses.length} known pools for orphaned positions`)
 

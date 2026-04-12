@@ -3,7 +3,6 @@ import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
 
-import DLMM from '@meteora-ag/dlmm'
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
@@ -11,6 +10,11 @@ import { closePosition, openPosition } from '@/bot/executor'
 import { sendAlert } from '@/bot/alerter'
 import { STRATEGIES } from '@/strategies'
 import type { Strategy, TokenMetrics } from '@/lib/types'
+
+async function getDLMM() {
+  const mod = await import('@meteora-ag/dlmm')
+  return mod.default as typeof import('@meteora-ag/dlmm').default
+}
 
 const SUPABASE_TIMEOUT_MS = 5_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
@@ -238,7 +242,8 @@ async function checkPosition(
   }
 }
 
-function getDecimalAdjustedPrice(dlmmPool: DLMM, activeBin: { price: string; pricePerToken: string }): number {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pricePerToken: string }): number {
   try {
     const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price))
     const price = parseFloat(adjusted)
@@ -253,6 +258,7 @@ async function fetchPositionState(
 ): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number }> {
   const fallback = { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
   try {
+    const DLMM      = await getDLMM()
     const connection = getConnection()
     const wallet     = getWallet()
     const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
