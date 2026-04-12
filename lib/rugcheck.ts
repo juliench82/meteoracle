@@ -7,7 +7,8 @@ import axios from 'axios'
  *   score_normalised > 30 → safetyScore = 15 (risky)
  *   score_normalised ≤ 30 → safetyScore = max(0, 100 − raw/10)
  *
- * Returns 50 (neutral) on API failure so we don’t block the pipeline.
+ * Returns 70 (neutral/unknown) on API failure — 50 maps to score band 30/100
+ * and kills candidates that are otherwise strong. Unknown ≠ bad.
  */
 export async function checkRugscore(mintAddress: string): Promise<number> {
   try {
@@ -29,9 +30,9 @@ export async function checkRugscore(mintAddress: string): Promise<number> {
       return raw > 1000 ? 0 : Math.round(Math.max(0, 100 - (raw / 10)))
     }
 
-    return 50
+    return 70
   } catch {
-    console.warn(`[rugcheck] score fetch failed for ${mintAddress}, defaulting to 50`)
-    return 50
+    console.warn(`[rugcheck] score fetch failed for ${mintAddress}, defaulting to 70`)
+    return 70
   }
 }
