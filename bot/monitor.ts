@@ -17,7 +17,7 @@ async function getDLMM() {
   return mod.default as typeof import('@meteora-ag/dlmm').default
 }
 
-const SUPABASE_TIMEOUT_MS = 5_000
+const SUPABASE_TIMEOUT_MS = 15_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
@@ -125,7 +125,6 @@ async function checkPosition(
     ? new Date().toISOString()
     : (!inRange ? (position.oor_since_at ?? new Date().toISOString()) : null)
 
-  // Hoisted to function scope — needed by both the rebalance block and justWentOOR alert
   const rangeLower = position.metadata?.bin_range_down
     ? entryPriceSol * (1 + position.metadata.bin_range_down / 100)
     : 0
