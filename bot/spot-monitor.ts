@@ -87,6 +87,7 @@ async function closeSpotPosition(
 ): Promise<void> {
   const supabase = createServerClient()
   const label    = `${position.symbol} (${position.mint.slice(0, 8)}...)`
+  const dexUrl   = `https://dexscreener.com/solana/${position.mint}`
 
   console.log(
     `[spot-monitor] EXIT ${reason.toUpperCase()} — ${label}` +
@@ -97,7 +98,6 @@ async function closeSpotPosition(
   let txSell: string | undefined
   let solReceived = 0
 
-  // Use per-position dry_run flag OR global bot_state dry_run
   const isRealSell = !dryRun && !position.dry_run && position.token_amount > 0
 
   if (isRealSell) {
@@ -141,19 +141,18 @@ async function closeSpotPosition(
   const pnlStr   = `${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL`
   const pctStr   = `${((exitMult - 1) * 100).toFixed(1)}%`
   const dryLabel = (dryRun || position.dry_run) ? '[DRY-RUN] ' : ''
-  const txLine   = txSell ? `\n🔗 https://solscan.io/tx/${txSell}` : ''
 
   await sendTelegram(
     `${emoji} ${dryLabel}CLOSED ${position.symbol}\n` +
     `📉 Reason: ${reason.toUpperCase()} (${pctStr})\n` +
-    `💰 PnL: ${pnlStr}${txLine}`
+    `💰 PnL: ${pnlStr}\n` +
+    `📈 ${dexUrl}`
   )
 }
 
 async function tick(): Promise<{ monitored: number; closed: number }> {
-  // ██ BOT STATE GATE — respect /stop and dry_run from DB ██
   const state  = await getBotState()
-  const dryRun = state.dry_run  // authoritative source — overrides BOT_DRY_RUN env
+  const dryRun = state.dry_run
 
   if (!state.enabled) {
     console.log('[spot-monitor] bot is stopped — skipping tick')
@@ -199,7 +198,6 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
     const pricePctChange  = (priceMultiplier - 1) * 100
     const pnlSol          = pos.amount_sol * (priceMultiplier - 1)
 
-    // Write live price + P&L back to DB every tick so dashboard shows it
     await supabase.from('spot_positions').update({
       current_price_usd: currentPriceUsd,
       pnl_pct:           parseFloat(pricePctChange.toFixed(2)),

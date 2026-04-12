@@ -24,10 +24,10 @@ import axios from 'axios'
 import { Connection, Keypair, PublicKey, VersionedTransaction } from '@solana/web3.js'
 import bs58 from 'bs58'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
 import { sendTelegram } from './telegram'
 
-const DRY_RUN         = process.env.BOT_DRY_RUN !== 'false'
 const RPC_URL         = process.env.HELIUS_RPC_URL ?? 'https://api.mainnet-beta.solana.com'
 const JUPITER_API     = 'https://api.jup.ag/swap/v1'
 const JUPITER_API_KEY = process.env.JUPITER_API_KEY ?? ''
@@ -40,7 +40,6 @@ const SOL_RESERVE = parseFloat(process.env.SOL_RESERVE ?? process.env.MIN_WALLET
 
 const cfg = PRE_GRAD_STRATEGY
 
-// Jupiter free tier: max 1 request every 2 seconds
 const JUPITER_MIN_INTERVAL_MS = 2_000
 let lastJupiterCallTs = 0
 async function jupiterDelay(): Promise<void> {
@@ -51,11 +50,6 @@ async function jupiterDelay(): Promise<void> {
   }
   lastJupiterCallTs = Date.now()
 }
-
-console.log(`[spot-buyer] starting — DRY_RUN=${DRY_RUN}`)
-console.log(`[spot-buyer] buy=${cfg.position.spotBuySol} SOL | maxPos=${cfg.position.maxConcurrentSpots} | maxTotal=${cfg.position.maxTotalSpotSol} SOL`)
-console.log(`[spot-buyer] SOL_RESERVE=${SOL_RESERVE} SOL (LP rent + fee buffer)`)
-console.log(`[spot-buyer] Jupiter endpoint=${JUPITER_API} | apiKey=${JUPITER_API_KEY ? 'set' : 'MISSING'}`)
 
 interface WatchlistRow {
   id: string
@@ -83,9 +77,6 @@ interface SpotPositionInsert {
   watchlist_id?:     string
 }
 
-/**
- * Fetch SOL price in USD from Jupiter price API.
- */
 async function fetchSolPriceUsd(): Promise<number> {
   try {
     const res = await axios.get(SOL_PRICE_API, {
@@ -99,10 +90,6 @@ async function fetchSolPriceUsd(): Promise<number> {
   }
 }
 
-/**
- * Fetch price in USD — Jupiter first, pump.fun fallback for pre-grad tokens.
- * Returns { priceUsd, priceSol } using live SOL price for SOL conversion.
- */
 async function fetchPrices(mint: string): Promise<{ priceUsd: number; priceSol: number }> {
   const [tokenRes, solPriceUsd] = await Promise.allSettled([
     axios.get(SOL_PRICE_API, { params: { ids: mint }, timeout: 6_000 }),
@@ -116,7 +103,6 @@ async function fetchPrices(mint: string): Promise<{ priceUsd: number; priceSol: 
     priceUsd = parseFloat(tokenRes.value.data?.data?.[mint]?.price ?? '0')
   }
 
-  // pump.fun fallback
   if (priceUsd === 0) {
     try {
       const res = await axios.get(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
@@ -163,16 +149,11 @@ async function getJupiterQuote(inputMint: string, outputMint: string, amountLamp
   return res.data
 }
 
-/**
- * Simulate a Jupiter quote in dry-run to estimate token_amount.
- * Uses the same quote API but does NOT execute the swap.
- */
 async function simulateJupiterQuote(mint: string, buySol: number): Promise<number> {
   try {
     const buyLamports = Math.floor(buySol * 1e9)
     const quote = await getJupiterQuote(WSOL_MINT, mint, buyLamports)
     const outAmount = parseInt(quote.outAmount as string ?? '0')
-    // Most tokens are 6 decimals; fallback gracefully
     return outAmount / 1e6
   } catch {
     return 0
@@ -237,35 +218,25 @@ async function canOpenNewPosition(
     return { ok: false, reason: `max total SOL exceeded (${totalSol.toFixed(3)} + ${cfg.position.spotBuySol} > ${cfg.position.maxTotalSpotSol})` }
   }
 
-  if (!DRY_RUN && walletPubkey) {
-    const balance  = await getWalletSolBalance(walletPubkey)
-    const required = cfg.position.spotBuySol + SOL_RESERVE
-    if (balance < required) {
-      return {
-        ok:     false,
-        reason: `wallet balance too low (${balance.toFixed(4)} SOL < ${cfg.position.spotBuySol} buy + ${SOL_RESERVE} reserve = ${required.toFixed(4)})`,
-      }
-    }
-  }
-
   return { ok: true }
 }
 
-async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void> {
+async function buyToken(row: WatchlistRow, dryRun: boolean, walletPubkey?: string): Promise<void> {
   const supabase    = createServerClient()
   const buySol      = cfg.position.spotBuySol
   const buyLamports = Math.floor(buySol * 1e9)
+  const dexUrl      = `https://dexscreener.com/solana/${row.mint}`
 
   console.log(
     `[spot-buyer] evaluating ${row.symbol} (${row.mint.slice(0, 8)}...)` +
     ` vol=${row.volume_1h_usd.toFixed(2)} SOL`
   )
 
-  if (!DRY_RUN && row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
+  if (!dryRun && row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
     console.log(`[spot-buyer] SKIP ${row.symbol} — volume too low (${row.volume_1h_usd.toFixed(2)} < ${cfg.scanner.minVolume5minSol})`)
     return
   }
-  if (DRY_RUN && row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
+  if (dryRun && row.volume_1h_usd < cfg.scanner.minVolume5minSol) {
     console.log(`[spot-buyer] DRY-RUN: vol=${row.volume_1h_usd.toFixed(2)} below threshold but proceeding for pipeline validation`)
   }
 
@@ -291,7 +262,7 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
   }
 
   // ---- DRY RUN ----
-  if (DRY_RUN) {
+  if (dryRun) {
     const [{ priceUsd: entryPriceUsd, priceSol: entryPriceSol }, simulatedTokenAmount] = await Promise.all([
       fetchPrices(row.mint),
       simulateJupiterQuote(row.mint, buySol),
@@ -326,18 +297,13 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
       return
     }
 
-    console.log(`[spot-buyer] DRY-RUN row inserted for ${row.symbol}`)
-
-    await supabase
-      .from('pre_grad_watchlist')
-      .update({ status: 'opened' })
-      .eq('id', row.id)
+    await supabase.from('pre_grad_watchlist').update({ status: 'opened' }).eq('id', row.id)
 
     await sendTelegram(
       `🟡 [DRY-RUN] BUY ${row.symbol}\n` +
       `💰 ${buySol} SOL | TP +${cfg.exits.takeProfitPct}% | SL ${cfg.exits.stopLossPct}%\n` +
       `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL | Entry: $${entryPriceUsd > 0 ? entryPriceUsd.toExponential(3) : 'n/a'} (${entryPriceSol > 0 ? entryPriceSol.toExponential(3) : '?'} SOL) | ~${simulatedTokenAmount.toFixed(0)} tokens\n` +
-      `🔗 https://pump.fun/${row.mint}`
+      `📈 ${dexUrl}`
     )
 
     return
@@ -370,11 +336,6 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
     entryPriceSol   = buySol / tokensReceived
     entryPriceUsd   = priceUsd
 
-    console.log(
-      `[spot-buyer] quote: ${buySol} SOL → ${tokensReceived.toFixed(2)} ${row.symbol}` +
-      ` @ ${entryPriceSol.toExponential(4)} SOL | $${entryPriceUsd.toExponential(4)}`
-    )
-
     txSig = await executeJupiterSwap(quote as Record<string, unknown>, wallet)
     console.log(`[spot-buyer] BUY confirmed | tx=${txSig}`)
 
@@ -404,28 +365,31 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
   const { error: insertErr } = await supabase.from('spot_positions').insert(position)
   if (insertErr) {
     console.error(`[spot-buyer] DB insert error:`, insertErr.message)
-  } else {
-    console.log(`[spot-buyer] position saved for ${row.symbol}`)
   }
 
-  await supabase
-    .from('pre_grad_watchlist')
-    .update({ status: 'opened' })
-    .eq('id', row.id)
+  await supabase.from('pre_grad_watchlist').update({ status: 'opened' }).eq('id', row.id)
 
   await sendTelegram(
     `🟢 BUY ${row.symbol}\n` +
     `💰 ${buySol} SOL | TP +${cfg.exits.takeProfitPct}% | SL ${cfg.exits.stopLossPct}%\n` +
     `📊 Vol: ${row.volume_1h_usd.toFixed(1)} SOL | Entry: $${entryPriceUsd.toExponential(3)} (${entryPriceSol.toExponential(3)} SOL) | ${tokensReceived.toFixed(0)} tokens\n` +
-    `🔗 https://solscan.io/tx/${txSig}`
+    `📈 ${dexUrl}`
   )
 }
 
 async function tick(): Promise<void> {
+  // ██ BOT STATE GATE — respect /stop and dry_run from DB ██
+  const state  = await getBotState()
+  if (!state.enabled) {
+    console.log('[spot-buyer] bot is stopped — skipping tick')
+    return
+  }
+  const dryRun = state.dry_run
+
   const supabase = createServerClient()
 
   let walletPubkey: string | undefined
-  if (!DRY_RUN) {
+  if (!dryRun) {
     try {
       const pk = process.env.WALLET_PRIVATE_KEY
       if (pk) walletPubkey = Keypair.fromSecretKey(bs58.decode(pk)).publicKey.toBase58()
@@ -445,14 +409,18 @@ async function tick(): Promise<void> {
   }
 
   const rows = (watchlist ?? []) as WatchlistRow[]
-  console.log(`[spot-buyer] tick — ${rows.length} tokens on watchlist`)
+  console.log(`[spot-buyer] tick — ${rows.length} tokens on watchlist | dry_run=${dryRun}`)
 
   for (const row of rows) {
-    await buyToken(row, walletPubkey)
+    await buyToken(row, dryRun, walletPubkey)
   }
 }
 
 async function main(): Promise<void> {
+  const state = await getBotState()
+  console.log(`[spot-buyer] starting — dry_run=${state.dry_run} (from DB)`)
+  console.log(`[spot-buyer] buy=${cfg.position.spotBuySol} SOL | maxPos=${cfg.position.maxConcurrentSpots} | maxTotal=${cfg.position.maxTotalSpotSol} SOL`)
+  console.log(`[spot-buyer] SOL_RESERVE=${SOL_RESERVE} SOL`)
   await tick()
   setInterval(tick, POLL_INTERVAL)
 }
