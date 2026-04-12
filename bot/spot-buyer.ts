@@ -11,6 +11,8 @@
  *   MAX_CONCURRENT_SPOTS  — max open positions
  *   MAX_TOTAL_SPOT_SOL    — max SOL deployed in spots
  *   SOL_RESERVE           — SOL kept back for LP bin rent + tx fees (never spent on spots)
+ *
+ * Jupiter free tier: 1 req / 2s — enforced via jupiterDelay()
  */
 
 import 'dotenv/config'
@@ -25,21 +27,35 @@ import { createServerClient } from '@/lib/supabase'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
 import { sendTelegram } from './telegram'
 
-const DRY_RUN       = process.env.BOT_DRY_RUN !== 'false'
-const RPC_URL       = process.env.HELIUS_RPC_URL ?? 'https://api.mainnet-beta.solana.com'
-const JUPITER_API   = 'https://quote-api.jup.ag/v6'
-const SOL_PRICE_API = 'https://api.jup.ag/price/v2'
-const WSOL_MINT     = 'So11111111111111111111111111111111111111112'
-const SLIPPAGE_BPS  = parseInt(process.env.SPOT_BUY_SLIPPAGE_BPS ?? '300')
-const POLL_INTERVAL = parseInt(process.env.SPOT_BUYER_POLL_SEC   ?? '30') * 1_000
+const DRY_RUN         = process.env.BOT_DRY_RUN !== 'false'
+const RPC_URL         = process.env.HELIUS_RPC_URL ?? 'https://api.mainnet-beta.solana.com'
+const JUPITER_API     = 'https://api.jup.ag/swap/v1'
+const JUPITER_API_KEY = process.env.JUPITER_API_KEY ?? ''
+const SOL_PRICE_API   = 'https://api.jup.ag/price/v2'
+const WSOL_MINT       = 'So11111111111111111111111111111111111111112'
+const SLIPPAGE_BPS    = parseInt(process.env.SPOT_BUY_SLIPPAGE_BPS ?? '300')
+const POLL_INTERVAL   = parseInt(process.env.SPOT_BUYER_POLL_SEC   ?? '30') * 1_000
 
 const SOL_RESERVE = parseFloat(process.env.SOL_RESERVE ?? process.env.MIN_WALLET_BALANCE_SOL ?? '0.25')
 
 const cfg = PRE_GRAD_STRATEGY
 
+// Jupiter free tier: max 1 request every 2 seconds
+const JUPITER_MIN_INTERVAL_MS = 2_000
+let lastJupiterCallTs = 0
+async function jupiterDelay(): Promise<void> {
+  const now     = Date.now()
+  const elapsed = now - lastJupiterCallTs
+  if (elapsed < JUPITER_MIN_INTERVAL_MS) {
+    await new Promise(r => setTimeout(r, JUPITER_MIN_INTERVAL_MS - elapsed))
+  }
+  lastJupiterCallTs = Date.now()
+}
+
 console.log(`[spot-buyer] starting — DRY_RUN=${DRY_RUN}`)
 console.log(`[spot-buyer] buy=${cfg.position.spotBuySol} SOL | maxPos=${cfg.position.maxConcurrentSpots} | maxTotal=${cfg.position.maxTotalSpotSol} SOL`)
 console.log(`[spot-buyer] SOL_RESERVE=${SOL_RESERVE} SOL (LP rent + fee buffer)`)
+console.log(`[spot-buyer] Jupiter endpoint=${JUPITER_API} | apiKey=${JUPITER_API_KEY ? 'set' : 'MISSING'}`)
 
 interface WatchlistRow {
   id: string
@@ -131,6 +147,7 @@ async function getWalletSolBalance(publicKey: string): Promise<number> {
 }
 
 async function getJupiterQuote(inputMint: string, outputMint: string, amountLamports: number) {
+  await jupiterDelay()
   const res = await axios.get(`${JUPITER_API}/quote`, {
     params: {
       inputMint,
@@ -140,6 +157,7 @@ async function getJupiterQuote(inputMint: string, outputMint: string, amountLamp
       onlyDirectRoutes:    false,
       asLegacyTransaction: false,
     },
+    headers: { 'x-api-key': JUPITER_API_KEY },
     timeout: 10_000,
   })
   return res.data
@@ -165,6 +183,7 @@ async function executeJupiterSwap(
   quote:  Record<string, unknown>,
   wallet: Keypair,
 ): Promise<string> {
+  await jupiterDelay()
   const connection = new Connection(RPC_URL, 'confirmed')
 
   const swapRes = await axios.post(`${JUPITER_API}/swap`, {
@@ -173,7 +192,10 @@ async function executeJupiterSwap(
     wrapAndUnwrapSol:          true,
     dynamicComputeUnitLimit:   true,
     prioritizationFeeLamports: 'auto',
-  }, { timeout: 15_000 })
+  }, {
+    headers:  { 'x-api-key': JUPITER_API_KEY },
+    timeout:  15_000,
+  })
 
   const { swapTransaction } = swapRes.data as { swapTransaction: string }
   const txBuf = Buffer.from(swapTransaction, 'base64')
@@ -270,7 +292,6 @@ async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void>
 
   // ---- DRY RUN ----
   if (DRY_RUN) {
-    // Fetch prices and simulate quote in parallel
     const [{ priceUsd: entryPriceUsd, priceSol: entryPriceSol }, simulatedTokenAmount] = await Promise.all([
       fetchPrices(row.mint),
       simulateJupiterQuote(row.mint, buySol),
