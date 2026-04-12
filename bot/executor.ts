@@ -27,7 +27,7 @@ async function getStrategyType() {
   return mod.StrategyType
 }
 
-const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
+const DRY_RUN = process.env.BOT_DRY_RUN !== 'false'
 const METEORA_RENT_RESERVE_SOL = 0.07
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
@@ -109,13 +109,13 @@ export async function openPosition(
       return null
     }
 
-    // 3. Per-token cooldown (lp_positions)
+    // 3. Per-token cooldown (lp_positions) — uses mint column
     const cooldownHours = parseFloat(process.env.TOKEN_COOLDOWN_HOURS ?? '6')
     const cooldownCutoff = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
     const { data: recentClose } = await supabase
       .from('lp_positions')
       .select('id')
-      .eq('token_address', metrics.address)
+      .eq('mint', metrics.address)
       .eq('status', 'closed')
       .gte('closed_at', cooldownCutoff)
       .limit(1)
@@ -351,6 +351,10 @@ export async function closePosition(
   }
 }
 
+/**
+ * Persists a new LP position to lp_positions table.
+ * Column mapping aligned with actual DB schema.
+ */
 async function persistPosition(
   metrics: TokenMetrics,
   strategy: Strategy,
@@ -363,20 +367,25 @@ async function persistPosition(
   const { data, error } = await supabase
     .from('lp_positions')
     .insert({
+      mint:            metrics.address,
       symbol:          metrics.symbol,
-      token_address:   metrics.address,
       pool_address:    metrics.poolAddress,
-      strategy_id:     strategy.id,
-      bin_range_lower: entryPriceSol > 0 ? entryPriceSol * (1 - strategy.position.rangeDownPct / 100) : null,
-      bin_range_upper: entryPriceSol > 0 ? entryPriceSol * (1 + strategy.position.rangeUpPct / 100) : null,
-      entry_price:     entryPriceSol,
+      position_pubkey: positionPubKey ?? null,
+      token_amount:    0,
       sol_deposited:   solDeposited,
+      entry_price_usd: metrics.priceUsd ?? 0,
       fees_earned_sol: 0,
       status:          'active',
       in_range:        true,
+      dry_run:         DRY_RUN,
       opened_at:       new Date().toISOString(),
-      position_pubkey: positionPubKey ?? null,
-      metadata: { sig, entryPriceSol },
+      tx_open:         sig,
+      metadata: {
+        strategy_id:     strategy.id,
+        entry_price_sol: entryPriceSol,
+        bin_range_down:  strategy.position.rangeDownPct,
+        bin_range_up:    strategy.position.rangeUpPct,
+      },
     })
     .select('id')
     .single()
@@ -397,7 +406,7 @@ async function markPositionClosed(
       closed_at:       new Date().toISOString(),
       fees_earned_sol: feesEarnedSol,
       oor_since_at:    null,
-      metadata:        { closeReason: reason },
+      close_reason:    reason,
     })
     .eq('id', positionId)
 }

@@ -142,7 +142,7 @@ export async function runScanner(): Promise<{
   console.log('[scanner] step 3/4 — Supabase dedup check')
   const supabase = createServerClient()
 
-  // Use lp_positions (active Meteora LP positions)
+  // Count active LP positions (use 'mint' — correct column name)
   const countResult = await withTimeout(
     supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
     SUPABASE_TIMEOUT_MS, 'lp_positions count'
@@ -167,6 +167,7 @@ export async function runScanner(): Promise<{
     const vol24h       = pool.volume['24h']
     const liqUsd       = pool.tvl
 
+    // Dedup: candidates scanned in last 1h
     const recentResult = await withTimeout(
       supabase.from('candidates').select('id').eq('token_address', tokenAddress)
         .gte('scanned_at', new Date(Date.now() - 60 * 60 * 1000).toISOString()).limit(1),
@@ -174,9 +175,9 @@ export async function runScanner(): Promise<{
     )
     if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last 1h`); continue }
 
-    // Dedup against open LP positions
+    // Dedup: open LP positions — use 'mint' (correct column)
     const posResult = await withTimeout(
-      supabase.from('lp_positions').select('id').eq('token_address', tokenAddress)
+      supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
         .in('status', ['active', 'out_of_range']).limit(1),
       SUPABASE_TIMEOUT_MS, `lp_positions dedup ${symbol}`
     )
@@ -201,6 +202,10 @@ export async function runScanner(): Promise<{
       if (mh > holderCount) holderCount = mh
     }
 
+    // If Helius returned 0 holders (unreliable), use pool data and don't hard-reject
+    // Strategy filters will still apply — but a 0 from Helius != actually 0 holders
+    const holderCountForFilter = holderCount > 0 ? holderCount : (token.holders ?? 0)
+
     // Bonding curve check for pump.fun tokens
     let bondingCurvePct: number | undefined = undefined
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl) {
@@ -214,7 +219,7 @@ export async function runScanner(): Promise<{
     const metrics: TokenMetrics = {
       address: tokenAddress, symbol, mcUsd: resolvedMc,
       volume24h: vol24h, liquidityUsd: liqUsd,
-      topHolderPct, holderCount, ageHours,
+      topHolderPct, holderCount: holderCountForFilter, ageHours,
       rugcheckScore: rugScore, priceUsd: token.price,
       poolAddress: pool.address, dexId: 'meteora',
       bondingCurvePct,
@@ -241,7 +246,7 @@ export async function runScanner(): Promise<{
     )
 
     candidateCount++
-    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCount}, rug=${rugScore}, age=${ageHours.toFixed(1)}h${bondingInfo})`)
+    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (score >= MIN_SCORE_TO_OPEN) {
