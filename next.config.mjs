@@ -3,10 +3,9 @@ const nextConfig = {
   reactStrictMode: true,
   experimental: {
     typedRoutes: false,
-    // Keep heavy Node.js-only packages server-side only — never bundled by webpack.
-    // Required for @meteora-ag/dlmm, @solana/web3.js, @solana/spl-token, bn.js, bs58.
     serverComponentsExternalPackages: [
       '@meteora-ag/dlmm',
+      '@coral-xyz/anchor',
       '@solana/web3.js',
       '@solana/spl-token',
       '@solana/buffer-layout',
@@ -16,9 +15,36 @@ const nextConfig = {
       'borsh',
     ],
   },
+  // Prevent Next.js from tracing into these packages during page data collection.
+  // @meteora-ag/dlmm ships an .mjs that imports @coral-xyz/anchor with bare
+  // directory imports — unsupported by Node ESM. These packages are runtime-only
+  // (loaded by PM2 workers), never needed at build time.
+  outputFileTracingExcludes: {
+    '*': [
+      'node_modules/@meteora-ag/**',
+      'node_modules/@coral-xyz/**',
+      'node_modules/@project-serum/**',
+    ],
+  },
   webpack: (config, { isServer }) => {
+    // Hard-exclude the problematic ESM packages from webpack bundling.
+    // They are loaded at runtime by the server process, not bundled.
+    const esmExternals = [
+      '@meteora-ag/dlmm',
+      '@coral-xyz/anchor',
+    ]
+    const prevExternals = config.externals ?? []
+    config.externals = [
+      ...(Array.isArray(prevExternals) ? prevExternals : [prevExternals]),
+      ({ request }, callback) => {
+        if (esmExternals.some((pkg) => request === pkg || request?.startsWith(pkg + '/'))) {
+          return callback(null, 'commonjs ' + request)
+        }
+        callback()
+      },
+    ]
+
     if (!isServer) {
-      // Prevent webpack from trying to polyfill Node built-ins in the browser bundle.
       config.resolve.fallback = {
         ...config.resolve.fallback,
         fs: false,
