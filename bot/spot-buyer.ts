@@ -6,6 +6,11 @@
  *
  * BOT_DRY_RUN=true  (default) — logs only, no real transactions
  * BOT_DRY_RUN=false           — live mode, REAL money
+ *
+ * SOL budget guards (both dry-run and live):
+ *   MAX_CONCURRENT_SPOTS  — max open positions
+ *   MAX_TOTAL_SPOT_SOL    — max SOL deployed in spots
+ *   SOL_RESERVE           — SOL kept back for LP bin rent + tx fees (never spent on spots)
  */
 
 import 'dotenv/config'
@@ -26,12 +31,16 @@ const JUPITER_API   = 'https://quote-api.jup.ag/v6'
 const WSOL_MINT     = 'So11111111111111111111111111111111111111112'
 const SLIPPAGE_BPS  = parseInt(process.env.SPOT_BUY_SLIPPAGE_BPS ?? '300')
 const POLL_INTERVAL = parseInt(process.env.SPOT_BUYER_POLL_SEC   ?? '30') * 1_000
-const MIN_WALLET_BALANCE_SOL = parseFloat(process.env.MIN_WALLET_BALANCE_SOL ?? '0.05')
+
+// Minimum wallet balance kept in reserve for LP bin rent + tx fees.
+// SOL_RESERVE takes precedence over MIN_WALLET_BALANCE_SOL (legacy).
+const SOL_RESERVE = parseFloat(process.env.SOL_RESERVE ?? process.env.MIN_WALLET_BALANCE_SOL ?? '0.25')
 
 const cfg = PRE_GRAD_STRATEGY
 
 console.log(`[spot-buyer] starting — DRY_RUN=${DRY_RUN}`)
 console.log(`[spot-buyer] buy=${cfg.position.spotBuySol} SOL | maxPos=${cfg.position.maxConcurrentSpots} | maxTotal=${cfg.position.maxTotalSpotSol} SOL`)
+console.log(`[spot-buyer] SOL_RESERVE=${SOL_RESERVE} SOL (LP rent + fee buffer)`)
 
 interface WatchlistRow {
   id: string
@@ -127,7 +136,13 @@ async function executeJupiterSwap(
   return sig
 }
 
-async function canOpenNewPosition(): Promise<{ ok: boolean; reason?: string }> {
+/**
+ * Checks position count and capital caps.
+ * Also checks wallet balance vs SOL_RESERVE in live mode.
+ */
+async function canOpenNewPosition(
+  walletPubkey?: string,
+): Promise<{ ok: boolean; reason?: string }> {
   const supabase = createServerClient()
 
   const { data, error } = await supabase
@@ -148,10 +163,22 @@ async function canOpenNewPosition(): Promise<{ ok: boolean; reason?: string }> {
     return { ok: false, reason: `max total SOL exceeded (${totalSol.toFixed(3)} + ${cfg.position.spotBuySol} > ${cfg.position.maxTotalSpotSol})` }
   }
 
+  // Live-only: ensure wallet keeps SOL_RESERVE after this buy
+  if (!DRY_RUN && walletPubkey) {
+    const balance  = await getWalletSolBalance(walletPubkey)
+    const required = cfg.position.spotBuySol + SOL_RESERVE
+    if (balance < required) {
+      return {
+        ok:     false,
+        reason: `wallet balance too low (${balance.toFixed(4)} SOL < ${cfg.position.spotBuySol} buy + ${SOL_RESERVE} reserve = ${required.toFixed(4)})`,
+      }
+    }
+  }
+
   return { ok: true }
 }
 
-async function buyToken(row: WatchlistRow): Promise<void> {
+async function buyToken(row: WatchlistRow, walletPubkey?: string): Promise<void> {
   const supabase    = createServerClient()
   const buySol      = cfg.position.spotBuySol
   const buyLamports = Math.floor(buySol * 1e9)
@@ -183,10 +210,13 @@ async function buyToken(row: WatchlistRow): Promise<void> {
     return
   }
 
-  // Concurrency / capital guard
-  const guard = await canOpenNewPosition()
+  // Concurrency / capital / reserve guard
+  const guard = await canOpenNewPosition(walletPubkey)
   if (!guard.ok) {
     console.log(`[spot-buyer] BLOCKED — ${guard.reason}`)
+    if (guard.reason?.includes('wallet balance')) {
+      await sendTelegram(`⚠️ LOW BALANCE — skipped ${row.symbol}\n${guard.reason}`)
+    }
     return
   }
 
@@ -238,7 +268,6 @@ async function buyToken(row: WatchlistRow): Promise<void> {
   }
 
   // ---- LIVE BUY ----
-  // Volume filter enforced for live only (checked above)
   const privateKeyEnv = process.env.WALLET_PRIVATE_KEY
   if (!privateKeyEnv) {
     console.error('[spot-buyer] WALLET_PRIVATE_KEY not set — cannot execute live buy')
@@ -246,20 +275,6 @@ async function buyToken(row: WatchlistRow): Promise<void> {
   }
 
   const wallet = Keypair.fromSecretKey(bs58.decode(privateKeyEnv))
-
-  const walletBalance = await getWalletSolBalance(wallet.publicKey.toBase58())
-  const required      = buySol + MIN_WALLET_BALANCE_SOL
-  if (walletBalance < required) {
-    console.warn(
-      `[spot-buyer] SKIP ${row.symbol} — wallet balance too low` +
-      ` (${walletBalance.toFixed(4)} SOL < ${required.toFixed(4)} SOL required)`
-    )
-    await sendTelegram(
-      `⚠️ LOW BALANCE — skipped ${row.symbol}\n` +
-      `Wallet: ${walletBalance.toFixed(4)} SOL (need ${required.toFixed(4)})`
-    )
-    return
-  }
 
   let txSig:         string | undefined
   let tokensReceived = 0
@@ -333,6 +348,15 @@ async function buyToken(row: WatchlistRow): Promise<void> {
 async function tick(): Promise<void> {
   const supabase = createServerClient()
 
+  // Resolve wallet pubkey once per tick for live balance check
+  let walletPubkey: string | undefined
+  if (!DRY_RUN) {
+    try {
+      const pk = process.env.WALLET_PRIVATE_KEY
+      if (pk) walletPubkey = Keypair.fromSecretKey(bs58.decode(pk)).publicKey.toBase58()
+    } catch {}
+  }
+
   const { data: watchlist, error } = await supabase
     .from('pre_grad_watchlist')
     .select('*')
@@ -349,7 +373,7 @@ async function tick(): Promise<void> {
   console.log(`[spot-buyer] tick — ${rows.length} tokens on watchlist`)
 
   for (const row of rows) {
-    await buyToken(row)
+    await buyToken(row, walletPubkey)
   }
 }
 
