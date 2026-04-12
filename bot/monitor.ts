@@ -6,6 +6,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 import { closePosition, openPosition } from '@/bot/executor'
 import { sendAlert } from '@/bot/alerter'
 import { STRATEGIES } from '@/strategies'
@@ -36,6 +37,13 @@ export async function monitorPositions(): Promise<{
   claimed: number
   rebalanced: number
 }> {
+  // ██ BOT STATE GATE — respect /stop command ██
+  const state = await getBotState()
+  if (!state.enabled) {
+    console.log('[monitor] bot is stopped — skipping tick')
+    return { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
+  }
+
   const supabase = createServerClient()
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
 
@@ -60,8 +68,13 @@ export async function monitorPositions(): Promise<{
   for (const position of positions) {
     try {
       stats.checked++
-      const strategy = STRATEGIES.find((s) => s.id === position.strategy_id)
-      if (!strategy) continue
+      // strategy_id stored in metadata (aligned with new schema)
+      const strategyId = position.strategy_id ?? position.metadata?.strategy_id
+      const strategy = STRATEGIES.find((s) => s.id === strategyId)
+      if (!strategy) {
+        console.warn(`[monitor] no strategy found for position ${position.id} (strategy_id=${strategyId})`)
+        continue
+      }
       await checkPosition(position, strategy, stats)
     } catch (err) {
       console.error(`[monitor] error checking position ${position.id}:`, err)
@@ -93,7 +106,8 @@ async function checkPosition(
     position.position_pubkey
   )
 
-  const entryPriceSol: number = position.entry_price ?? position.metadata?.entryPriceSol ?? 0
+  // entry_price_usd stored in DB; entry_price_sol in metadata
+  const entryPriceSol: number = position.metadata?.entry_price_sol ?? position.entry_price ?? 0
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
     : 0
@@ -166,8 +180,8 @@ async function checkPosition(
   }
 
   if (inRange) {
-    const rangeLower = position.bin_range_lower ?? 0
-    const rangeUpper = position.bin_range_upper ?? 0
+    const rangeLower = position.metadata?.bin_range_down ? entryPriceSol * (1 + position.metadata.bin_range_down / 100) : 0
+    const rangeUpper = position.metadata?.bin_range_up   ? entryPriceSol * (1 + position.metadata.bin_range_up / 100)   : 0
     const rangeWidth = rangeUpper - rangeLower
     const positionInRange = rangeWidth > 0
       ? ((currentPriceSol - rangeLower) / rangeWidth) * 100
@@ -196,8 +210,9 @@ async function checkPosition(
         const isHardExit = HARD_EXIT_PREFIXES.some(prefix => rebalanceReason.startsWith(prefix))
         if (!isHardExit) {
           try {
+            // use 'mint' — correct DB column (was incorrectly token_address)
             const metrics: TokenMetrics = {
-              address: position.token_address,
+              address: position.mint,
               symbol: position.symbol,
               poolAddress: position.pool_address,
               priceUsd: currentPriceSol,
@@ -235,8 +250,8 @@ async function checkPosition(
       symbol: position.symbol,
       strategy: strategy.id,
       currentPrice: currentPriceSol,
-      binRangeLower: position.bin_range_lower,
-      binRangeUpper: position.bin_range_upper,
+      binRangeLower: rangeLower,
+      binRangeUpper: rangeUpper,
       oorExitMinutes: strategy.exits.outOfRangeMinutes,
     })
   }
@@ -296,7 +311,7 @@ async function fetchPositionState(
   }
 }
 
-// ─── Standalone entrypoint (PM2) ──────────────────────────────────────────────
+// ─── Standalone entrypoint (PM2) ──────────────────────────────────────────────────────────
 
 const standaloneMonitorTick = async (): Promise<void> => {
   const label = '[lp-monitor-dlmm]'

@@ -5,6 +5,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 import { STRATEGIES, getStrategyForToken } from '@/strategies'
 import { scoreCandidate } from './scorer'
 import { openPosition } from './executor'
@@ -95,6 +96,13 @@ let _orphanCheckDone = false
 export async function runScanner(): Promise<{
   scanned: number; candidates: number; opened: number; error?: string
 }> {
+  // ██ BOT STATE GATE — respect /stop command ██
+  const state = await getBotState()
+  if (!state.enabled) {
+    console.log('[scanner] bot is stopped — skipping tick')
+    return { scanned: 0, candidates: 0, opened: 0 }
+  }
+
   console.log('[scanner] step 1/4 — fetching Meteora pools')
   const { pools, error: fetchError } = await fetchMeteoraPools()
   if (fetchError) {
@@ -142,7 +150,6 @@ export async function runScanner(): Promise<{
   console.log('[scanner] step 3/4 — Supabase dedup check')
   const supabase = createServerClient()
 
-  // Count active LP positions (use 'mint' — correct column name)
   const countResult = await withTimeout(
     supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
     SUPABASE_TIMEOUT_MS, 'lp_positions count'
@@ -167,7 +174,6 @@ export async function runScanner(): Promise<{
     const vol24h       = pool.volume['24h']
     const liqUsd       = pool.tvl
 
-    // Dedup: candidates scanned in last 1h
     const recentResult = await withTimeout(
       supabase.from('candidates').select('id').eq('token_address', tokenAddress)
         .gte('scanned_at', new Date(Date.now() - 60 * 60 * 1000).toISOString()).limit(1),
@@ -202,11 +208,8 @@ export async function runScanner(): Promise<{
       if (mh > holderCount) holderCount = mh
     }
 
-    // If Helius returned 0 holders (unreliable), use pool data and don't hard-reject
-    // Strategy filters will still apply — but a 0 from Helius != actually 0 holders
     const holderCountForFilter = holderCount > 0 ? holderCount : (token.holders ?? 0)
 
-    // Bonding curve check for pump.fun tokens
     let bondingCurvePct: number | undefined = undefined
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl) {
       const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)

@@ -17,6 +17,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 import { sellTokenForSol } from './spot-seller'
 import { PRE_GRAD_STRATEGY } from '../strategies/pre-grad'
 import { sendTelegram } from './telegram'
@@ -50,7 +51,6 @@ type ExitReason = 'tp' | 'sl' | 'timeout'
 
 /** Try Jupiter first, fall back to pump.fun for pre-grad tokens */
 async function fetchPriceUsd(mint: string): Promise<number | null> {
-  // 1. Jupiter
   try {
     const res = await axios.get('https://api.jup.ag/price/v2', {
       params: { ids: mint },
@@ -62,7 +62,6 @@ async function fetchPriceUsd(mint: string): Promise<number | null> {
     // fall through
   }
 
-  // 2. pump.fun fallback
   try {
     const res = await axios.get(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
       timeout: 8_000,
@@ -71,8 +70,7 @@ async function fetchPriceUsd(mint: string): Promise<number | null> {
     const usdMc   = parseFloat(res.data?.usd_market_cap ?? '0')
     const supply  = parseFloat(res.data?.total_supply    ?? '0')
     if (usdMc > 0 && supply > 0) {
-      const price = usdMc / supply
-      return price
+      return usdMc / supply
     }
   } catch {
     // fall through
@@ -92,7 +90,7 @@ function checkExitCondition(
   return null
 }
 
-async function closePosition(
+async function closeSpotPosition(
   position:   SpotPosition,
   reason:     ExitReason,
   pnlSol:     number,
@@ -168,6 +166,13 @@ async function closePosition(
 }
 
 async function tick(): Promise<{ monitored: number; closed: number }> {
+  // ██ BOT STATE GATE — respect /stop command ██
+  const state = await getBotState()
+  if (!state.enabled) {
+    console.log('[spot-monitor] bot is stopped — skipping tick')
+    return { monitored: 0, closed: 0 }
+  }
+
   const supabase = createServerClient()
 
   const { data, error } = await supabase
@@ -203,7 +208,6 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
     let pricePctChange: number
 
     if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
-      // Seed entry price on first successful fetch
       priceMultiplier = 1.0
       pricePctChange  = 0
       await supabase
@@ -226,7 +230,7 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
     const exitReason = checkExitCondition(pos, pricePctChange, ageMinutes)
     if (exitReason) {
       const pnlSol = pos.amount_sol * (priceMultiplier - 1)
-      await closePosition(pos, exitReason, pnlSol, priceMultiplier)
+      await closeSpotPosition(pos, exitReason, pnlSol, priceMultiplier)
       closed++
     }
   }
