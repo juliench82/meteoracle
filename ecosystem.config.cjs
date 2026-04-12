@@ -19,16 +19,19 @@
  * INTERFACE
  *   telegram-bot     — Telegram command interface (/tick, /positions, etc.)
  *   dashboard        — Next.js dashboard on port 3000
+ *                      Uses start-dashboard.sh which cleans .next before every start.
  *
  * Setup:
  *   npm install -g pm2
+ *   chmod +x start-dashboard.sh
  *   set -a && source .env.local && set +a
  *   pm2 start ecosystem.config.cjs
  *   pm2 save
  *   pm2 startup   ← follow the printed command
  *
- * Deploy (ALWAYS use this — rm -rf .next prevents stale build cache):
- *   git pull && rm -rf .next && npm run build && pm2 restart all --update-env && pm2 save
+ * Deploy:
+ *   git pull && pm2 restart all --update-env && pm2 save
+ *   (start-dashboard.sh handles rm -rf .next && npm run build automatically)
  *
  * DRY-RUN vs LIVE:
  *   BOT_DRY_RUN=true  — simulate only, no real txs, no wallet needed
@@ -168,12 +171,11 @@ module.exports = {
     },
     {
       name:          'dashboard',
-      script:        'npm',
-      args:          'run start',
-      interpreter:   'none',
+      script:        './start-dashboard.sh',
+      interpreter:   'bash',
       cwd:           __dirname,
-      restart_delay:  5_000,
-      max_restarts:   10,
+      restart_delay:  10_000,
+      max_restarts:   5,
       env_file:      '.env.local',
       env: {
         NODE_ENV: 'production',
