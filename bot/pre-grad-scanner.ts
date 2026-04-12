@@ -2,19 +2,12 @@
  * pre-grad-scanner.ts
  *
  * Polls pump.fun /coins every 30s (limit=200, sorted by last_trade_timestamp).
- * Calculates bonding curve progress from virtual_sol_reserves — same math,
- * no on-chain decoder, no layout breakage risk.
+ * Calculates bonding curve progress from virtual_sol_reserves.
  *
- * Flow:
- *   GET pump.fun/coins (200 most recently traded)
- *     → calculate progress % from virtual_sol_reserves
- *     → filter 88–98% window
- *     → checkHolders via Helius DAS
- *     → upsert pre_grad_watchlist
- *
- * ENV VARS:
- *   HELIUS_RPC_URL            required
- *   PRE_GRAD_WATCH_WINDOW_H   watchlist TTL hours (default: 6)
+ * DB columns (pre_grad_watchlist):
+ *   id, mint, symbol, name, detected_at, bonding_progress, market_cap_usd,
+ *   volume_1h_usd, holder_count, graduated_at, status, reject_reason,
+ *   updated_at, bonding_curve_pct (legacy — keep for dashboard compat)
  */
 
 import 'dotenv/config'
@@ -84,41 +77,27 @@ async function processCandidate(mint: string, progressPct: number): Promise<void
   const supabase = createServerClient()
   const { data: existing } = await supabase
     .from('pre_grad_watchlist')
-    .select('id, status, first_seen_at, bonding_pct_at_first_seen')
+    .select('id, status, detected_at, bonding_progress')
     .eq('mint', mint)
     .maybeSingle()
 
   if (existing && ['graduated', 'opened', 'expired'].includes(existing.status)) return
 
   const now = new Date().toISOString()
-  let velocityPctPerMin = 0
 
-  if (existing?.first_seen_at && existing?.bonding_pct_at_first_seen != null) {
-    const elapsedMin  = (Date.now() - new Date(existing.first_seen_at).getTime()) / 60_000
-    const pctGained   = progressPct - (existing.bonding_pct_at_first_seen as number)
-    velocityPctPerMin = elapsedMin > 0 ? pctGained / elapsedMin : 0
-    if (cfg.minVelocitySolPerMin > 0 && velocityPctPerMin < cfg.minVelocitySolPerMin) {
-      console.log(`[pre-grad] ${shortSym}... skip: velocity ${velocityPctPerMin.toFixed(3)} < ${cfg.minVelocitySolPerMin}`)
-      return
-    }
-  }
-
+  // only columns that actually exist in the DB schema
   const upsertData: Record<string, unknown> = {
     mint,
-    symbol:               shortSym,
-    name:                 shortSym,
-    volume_1h_usd:        0,
-    status:               'watching',
-    bonding_curve_pct:    progressPct,
-    holder_count:         holderCount,
-    top_holder_pct:       topHolderPct,
-    dev_wallet_pct:       0,
-    velocity_pct_per_min: velocityPctPerMin,
+    symbol:           shortSym,
+    name:             shortSym,
+    volume_1h_usd:    0,
+    status:           'watching',
+    bonding_progress: progressPct,   // ← correct column name
+    holder_count:     holderCount,
+    updated_at:       now,
   }
   if (!existing) {
-    upsertData.detected_at               = now
-    upsertData.first_seen_at             = now
-    upsertData.bonding_pct_at_first_seen = progressPct
+    upsertData.detected_at = now
   }
 
   const { error } = await supabase
@@ -130,7 +109,7 @@ async function processCandidate(mint: string, progressPct: number): Promise<void
   } else if (!existing) {
     console.log(`[pre-grad] WATCHLIST ADD: ${shortSym}... (${mint}) curve=${progressPct.toFixed(1)}% holders=${holderCount} topHolder=${topHolderPct.toFixed(1)}%`)
   } else {
-    console.log(`[pre-grad] UPDATE: ${shortSym}... curve=${progressPct.toFixed(1)}% vel=${velocityPctPerMin.toFixed(3)}/min`)
+    console.log(`[pre-grad] UPDATE: ${shortSym}... curve=${progressPct.toFixed(1)}%`)
   }
 }
 
