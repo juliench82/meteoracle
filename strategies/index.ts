@@ -13,115 +13,156 @@ export const STRATEGIES: Strategy[] = [
 ]
 
 /**
- * Token tier classification.
+ * Token class classification.
  *
- * SHITCOIN   — fresh low-cap memecoins, expect dump, farm fees through it
- *              → Evil Panda (wide range, single-sided, high dump tolerance)
+ * MEME_SHITCOIN  — fresh low-cap memecoins, pump risk, wide-range fee farm
+ *                  → Evil Panda
  *
- * MEMECOIN   — established memecoins with sustained volume and proven age
- *              → Scalp Spike (tight range, fast exit, spike capture)
+ * SCALP_SPIKE    — established memecoins, sustained vol, predictable ranges
+ *                  → Scalp-Spike
  *
- * LARGE_CAP  — deep liquidity, high MC, long-lived pairs
- *              → Stable Farm (curve distribution, long duration)
+ * BLUECHIP       — deep liquidity, high MC, long-lived pairs
+ *                  → Stable Farm
  *
- * UNKNOWN    — doesn't cleanly fit any tier → no position opened
+ * STABLE         — known stablecoin mints or stable-stable pairs
+ *                  → Stable Farm (tight bid-ask)
+ *
+ * UNKNOWN        — doesn't cleanly fit any class → no position opened
+ *
+ * Criteria:
+ *   MEME_SHITCOIN : pool_age < 48h  OR  mcap < $3M  OR  vol1h/liq > 5%  OR  top10holders > 35%
+ *   SCALP_SPIKE   : 48h < age < 30d  AND  $3M < mc < $20M  AND  vol1h/liq <= 5%
+ *   BLUECHIP      : age > 30d  AND  mc > $20M  AND  top10holders < 25%
+ *   STABLE        : mint is USDC/USDT  OR  both tokens in pair are stables
  */
-type TokenTier = 'SHITCOIN' | 'MEMECOIN' | 'LARGE_CAP' | 'UNKNOWN'
+export type TokenClass = 'MEME_SHITCOIN' | 'SCALP_SPIKE' | 'BLUECHIP' | 'STABLE' | 'UNKNOWN'
 
-function classifyToken(token: {
-  mcUsd: number
-  volume24h: number
+// Known stablecoin mints
+const STABLE_MINTS = new Set([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  'USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX',  // USDH
+  'Ea5SjE2Y6yvCeW5dYTn7PYMuW5ikXkvbGdcmSnXeaLjS', // PAI
+  '7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj', // stSOL (treated as quasi-stable for range purposes)
+])
+
+export function classifyToken(token: {
+  address:      string
+  mcUsd:        number
+  volume24h:    number
+  volume1h?:    number
   liquidityUsd: number
-  ageHours: number
-  holderCount: number
+  ageHours:     number
+  topHolderPct: number
+  holderCount:  number
   rugcheckScore: number
-}): TokenTier {
-  const { mcUsd, liquidityUsd, ageHours, holderCount } = token
+}): TokenClass {
+  const { address, mcUsd, liquidityUsd, ageHours, topHolderPct } = token
 
-  // LARGE_CAP: deep liquidity + high MC — must check first to avoid misclassifying
-  if (mcUsd >= 10_000_000 && liquidityUsd >= 500_000 && holderCount >= 1_000) {
-    return 'LARGE_CAP'
+  // STABLE: known mint
+  if (STABLE_MINTS.has(address)) return 'STABLE'
+
+  // vol1h/liq ratio — proxy for 5min spike risk
+  // Uses volume['1h'] from Meteora. If unavailable falls back to vol24h/24.
+  const vol1h    = token.volume1h ?? (token.volume24h / 24)
+  const vol1hLiq = liquidityUsd > 0 ? vol1h / liquidityUsd : 0
+
+  // MEME_SHITCOIN: any one condition triggers it
+  if (
+    ageHours     <  48       ||
+    mcUsd        <  3_000_000 ||
+    vol1hLiq     >  0.05      || // vol1h > 5% of liquidity
+    topHolderPct >  35
+  ) {
+    return 'MEME_SHITCOIN'
   }
 
-  // MEMECOIN: established — not a fresh launch, meaningful MC, enough holders
-  // Minimum 72h old to rule out pump-and-dump launches
-  if (mcUsd >= 5_000_000 && mcUsd < 50_000_000 && ageHours >= 72 && holderCount >= 500) {
-    return 'MEMECOIN'
+  // BLUECHIP: check before SCALP_SPIKE so large-caps don't fall into spike bucket
+  if (ageHours > 720 && mcUsd > 20_000_000 && topHolderPct < 25) {
+    return 'BLUECHIP'
   }
 
-  // SHITCOIN: small MC fresh token — the classic memecoin dump profile
-  if (mcUsd < 5_000_000 && ageHours < 120) {
-    return 'SHITCOIN'
+  // SCALP_SPIKE
+  if (
+    ageHours >= 48 && ageHours <= 720 &&
+    mcUsd    >  3_000_000 && mcUsd <= 20_000_000 &&
+    vol1hLiq <= 0.05
+  ) {
+    return 'SCALP_SPIKE'
   }
 
   return 'UNKNOWN'
 }
 
-const TIER_STRATEGY: Record<Exclude<TokenTier, 'UNKNOWN'>, Strategy> = {
-  SHITCOIN:  evilPandaStrategy,
-  MEMECOIN:  scalpSpikeStrategy,
-  LARGE_CAP: stableFarmStrategy,
+const CLASS_STRATEGY: Record<Exclude<TokenClass, 'UNKNOWN'>, Strategy> = {
+  MEME_SHITCOIN: evilPandaStrategy,
+  SCALP_SPIKE:   scalpSpikeStrategy,
+  BLUECHIP:      stableFarmStrategy,
+  STABLE:        stableFarmStrategy,
 }
 
 /**
- * Returns the correct strategy for a token based on its tier.
+ * Returns the correct strategy for a token based on its class.
  * Applies the strategy's own filters as a second-pass safety check.
- * Returns null if tier is UNKNOWN, strategy is disabled, or filters fail.
+ * Returns null if class is UNKNOWN, strategy is disabled, or filters fail.
  */
 export function getStrategyForToken(token: {
-  mcUsd: number
-  volume24h: number
+  address?:     string
+  mcUsd:        number
+  volume24h:    number
+  volume1h?:    number
   liquidityUsd: number
   topHolderPct: number
-  holderCount: number
-  ageHours: number
+  holderCount:  number
+  ageHours:     number
   rugcheckScore: number
 }): Strategy | null {
-  const tier = classifyToken(token)
-  if (tier === 'UNKNOWN') return null
+  const tokenClass = classifyToken({ address: token.address ?? '', ...token })
+  if (tokenClass === 'UNKNOWN') return null
 
-  const strategy = TIER_STRATEGY[tier]
+  const strategy = CLASS_STRATEGY[tokenClass]
   if (!strategy.enabled) return null
 
-  // Second-pass: strategy's own filters still apply (vol, rugcheck, holder %, etc.)
   const f = strategy.filters
   const passes =
-    token.mcUsd >= f.minMcUsd &&
-    token.mcUsd <= f.maxMcUsd &&
-    token.volume24h >= f.minVolume24h &&
-    token.liquidityUsd >= f.minLiquidityUsd &&
-    token.topHolderPct <= f.maxTopHolderPct &&
-    token.holderCount >= f.minHolderCount &&
-    token.ageHours <= f.maxAgeHours &&
+    token.mcUsd        >= f.minMcUsd          &&
+    token.mcUsd        <= f.maxMcUsd          &&
+    token.volume24h    >= f.minVolume24h       &&
+    token.liquidityUsd >= f.minLiquidityUsd   &&
+    token.topHolderPct <= f.maxTopHolderPct   &&
+    token.holderCount  >= f.minHolderCount    &&
+    token.ageHours     <= f.maxAgeHours       &&
     token.rugcheckScore >= f.minRugcheckScore
 
   return passes ? strategy : null
 }
 
 /**
- * Returns all strategies that would match a token across all tiers.
+ * Returns all strategies that would match a token across all classes.
  * Used by the dashboard to show potential matches.
  */
 export function getAllMatchingStrategies(token: {
-  mcUsd: number
-  volume24h: number
+  address?:     string
+  mcUsd:        number
+  volume24h:    number
+  volume1h?:    number
   liquidityUsd: number
   topHolderPct: number
-  holderCount: number
-  ageHours: number
+  holderCount:  number
+  ageHours:     number
   rugcheckScore: number
 }): Strategy[] {
   return STRATEGIES.filter((s) => {
     if (!s.enabled) return false
     const f = s.filters
     return (
-      token.mcUsd >= f.minMcUsd &&
-      token.mcUsd <= f.maxMcUsd &&
-      token.volume24h >= f.minVolume24h &&
-      token.liquidityUsd >= f.minLiquidityUsd &&
-      token.topHolderPct <= f.maxTopHolderPct &&
-      token.holderCount >= f.minHolderCount &&
-      token.ageHours <= f.maxAgeHours &&
+      token.mcUsd        >= f.minMcUsd          &&
+      token.mcUsd        <= f.maxMcUsd          &&
+      token.volume24h    >= f.minVolume24h       &&
+      token.liquidityUsd >= f.minLiquidityUsd   &&
+      token.topHolderPct <= f.maxTopHolderPct   &&
+      token.holderCount  >= f.minHolderCount    &&
+      token.ageHours     <= f.maxAgeHours       &&
       token.rugcheckScore >= f.minRugcheckScore
     )
   })
