@@ -63,7 +63,7 @@ if (!BOT_TOKEN || !CHAT_ID) {
 
 let lastUpdateId = 0
 
-// ─── Telegram helpers ─────────────────────────────────────────────────
+// ─── Telegram helpers ────────────────────────────────────────────────────────────────────────────────────
 
 async function reply(text: string): Promise<void> {
   try {
@@ -107,7 +107,7 @@ async function drainPendingUpdates(): Promise<void> {
   }
 }
 
-// ─── PM2 helpers ──────────────────────────────────────────────────────────────
+// ─── PM2 helpers ──────────────────────────────────────────────────────────────────────────────────────
 
 async function pm2StopWorkers(): Promise<void> {
   const names = WORKER_PROCESSES.join(' ')
@@ -123,7 +123,7 @@ async function pm2RestartWorkers(): Promise<void> {
   )
 }
 
-// ─── Tick helper ──────────────────────────────────────────────────────────────
+// ─── Tick helper ────────────────────────────────────────────────────────────────────────────────────
 
 function withTickTimeout(fn: () => Promise<string>, name: string): Promise<string> {
   return Promise.race([
@@ -134,7 +134,7 @@ function withTickTimeout(fn: () => Promise<string>, name: string): Promise<strin
   ])
 }
 
-// ─── Price helper (for P&L on manual close) ───────────────────────────────────
+// ─── Price helper (for P&L on manual close) ────────────────────────────────────────────────────────────────────
 
 async function fetchCurrentPriceUsd(mint: string): Promise<number> {
   try {
@@ -155,7 +155,7 @@ async function fetchCurrentPriceUsd(mint: string): Promise<number> {
   return 0
 }
 
-// ─── Command handlers ──────────────────────────────────────────────────────
+// ─── Command handlers ─────────────────────────────────────────────────────────────────────────────────
 
 async function handleStop() {
   await reply('🛑 *EMERGENCY STOP initiated...*')
@@ -180,15 +180,33 @@ async function handleStop() {
 
   const { data: spotPositions } = await supabase
     .from('spot_positions')
-    .select('id, symbol')
+    .select('id, symbol, mint, amount_sol, token_amount, entry_price_usd, entry_price_sol, dry_run')
     .eq('status', 'open')
 
   let spotClosed = 0
+  const closedAt = new Date().toISOString()
+
   for (const pos of spotPositions ?? []) {
+    // Attempt to fetch current price for P&L estimate
+    const currentPriceUsd = await fetchCurrentPriceUsd(pos.mint)
+    let pnlSol: number | null = null
+    let pnlPct: number | null = null
+
+    if (currentPriceUsd > 0 && pos.entry_price_usd > 0) {
+      const mult = currentPriceUsd / pos.entry_price_usd
+      pnlSol     = parseFloat((pos.amount_sol * (mult - 1)).toFixed(6))
+      pnlPct     = parseFloat(((mult - 1) * 100).toFixed(2))
+    }
+
     const { error } = await supabase
       .from('spot_positions')
-      .update({ status: 'closed_manual', closed_at: new Date().toISOString() })
+      .update({
+        status:    'closed_manual',
+        closed_at: closedAt,
+        ...(pnlSol !== null ? { pnl_sol: pnlSol, pnl_pct: pnlPct } : {}),
+      })
       .eq('id', pos.id)
+
     if (!error) spotClosed++
   }
 
@@ -302,7 +320,7 @@ async function handleCloseSpot(positionId: string) {
       await reply([
         `✅ *CLOSED ${pos.symbol}* (manual)`,
         `💰 PnL: ${pnlStr}`,
-        `🧾 SOL received: ${solReceived.toFixed(4)}`,
+        `🧳 SOL received: ${solReceived.toFixed(4)}`,
         `📈 ${dexUrl}`,
       ].join('\n'))
 
@@ -327,216 +345,178 @@ async function handleCloseSpot(positionId: string) {
       await supabase.from('spot_positions').update({
         status:         'closed_manual',
         closed_at:      closedAt,
-        exit_price_sol: exitPrice || null,
-        pnl_sol:        pnlSol || null,
-        pnl_pct:        pnlPct ? parseFloat(pnlPct.toFixed(2)) : null,
+        exit_price_sol: exitPrice,
+        pnl_sol:        pnlSol,
+        pnl_pct:        parseFloat(pnlPct.toFixed(2)),
       }).eq('id', positionId)
 
       await reply([
-        `✅ *[DRY-RUN] CLOSED ${pos.symbol}* (manual)`,
-        `💰 Estimated PnL: ${pnlStr}`,
+        `✅ *CLOSED ${pos.symbol}* (dry-run / manual)`,
+        `💰 Est. PnL: ${pnlStr}`,
         `📈 ${dexUrl}`,
       ].join('\n'))
     }
-
   } catch (err) {
-    await reply(`❌ CloseSpot error: ${err instanceof Error ? err.message : String(err)}`)
+    await reply(`❌ Close error: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
 async function handleStatus() {
-  try {
-    const supabase = createServerClient()
-    const [stateRes, lpRes, spotRes, pm2Res] = await Promise.allSettled([
-      getBotState(),
-      supabase.from('lp_positions').select('id, symbol, status, sol_deposited').in('status', ['active', 'out_of_range']),
-      supabase.from('spot_positions').select('id, symbol, amount_sol, status').eq('status', 'open'),
-      execAsync(`${PM2} jlist`),
-    ])
+  const supabase = createServerClient()
+  const state    = await getBotState()
 
-    const state    = stateRes.status === 'fulfilled' ? stateRes.value    : { enabled: false, dry_run: true }
-    const lpRows   = lpRes.status    === 'fulfilled' ? (lpRes.value.data   ?? []) : []
-    const spotRows = spotRes.status  === 'fulfilled' ? (spotRes.value.data ?? []) : []
-    const lpSol    = lpRows.reduce((s: number,   r: { sol_deposited?: number }) => s + (r.sol_deposited ?? 0), 0)
-    const spotSol  = spotRows.reduce((s: number, r: { amount_sol?: number })    => s + (r.amount_sol    ?? 0), 0)
+  const [{ data: openSpot }, { data: openLp }] = await Promise.all([
+    supabase.from('spot_positions').select('id, symbol, amount_sol, opened_at').eq('status', 'open'),
+    supabase.from('lp_positions').select('id, symbol, sol_deposited, opened_at').in('status', ['active', 'out_of_range']),
+  ])
 
-    let pm2Summary = 'unknown'
-    if (pm2Res.status === 'fulfilled') {
-      try {
-        const procs   = JSON.parse(pm2Res.value.stdout) as Array<{ name: string; pm2_env: { status: string } }>
-        const running = procs.filter(p => p.pm2_env.status === 'online').map(p => p.name)
-        const stopped = procs.filter(p => p.pm2_env.status !== 'online').map(p => p.name)
-        pm2Summary    = running.length > 0 ? `${running.length} running: ${running.join(', ')}` : 'all stopped'
-        if (stopped.length > 0 && running.length > 0) pm2Summary += `\nStopped: ${stopped.join(', ')}`
-      } catch { pm2Summary = 'parse error' }
-    }
+  const spotLines = (openSpot ?? []).map(p => {
+    const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
+    return `  • ${p.symbol} — ${p.amount_sol.toFixed(3)} SOL | ${mins}min`
+  })
 
-    await reply([
-      `📊 *Bot Status*`,
-      ``,
-      `State:   ${state.enabled ? '✅ Running' : '🛑 Stopped'}`,
-      `Mode:    ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
-      `PM2:     ${pm2Summary}`,
-      ``,
-      `LP positions:   ${lpRows.length} open (${lpSol.toFixed(3)} SOL deployed)`,
-      `Spot positions: ${spotRows.length} open (${spotSol.toFixed(3)} SOL deployed)`,
-      `Total deployed: ${(lpSol + spotSol).toFixed(3)} SOL`,
-      ``,
-      `Use /positions for LP details, /spots for spot details.`,
-    ].join('\n'))
-  } catch (err) {
-    await reply(`❌ Status error: ${err instanceof Error ? err.message : String(err)}`)
-  }
+  const lpLines = (openLp ?? []).map(p => {
+    const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
+    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min`
+  })
+
+  const lines = [
+    `🤖 *Bot Status*`,
+    `State: ${state.enabled ? '🟢 Running' : '🛑 Stopped'}`,
+    `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
+    ``,
+    `🎯 Spot Positions (${(openSpot ?? []).length})`,
+    ...(spotLines.length ? spotLines : ['  none']),
+    ``,
+    `🏊 LP Positions (${(openLp ?? []).length})`,
+    ...(lpLines.length ? lpLines : ['  none']),
+  ]
+
+  await reply(lines.join('\n'))
 }
 
 async function handlePositions() {
-  try {
-    const supabase = createServerClient()
-    const { data, error } = await supabase
-      .from('lp_positions')
-      .select('id, symbol, status, sol_deposited, pool_address, opened_at')
-      .in('status', ['active', 'out_of_range'])
-      .order('opened_at', { ascending: false })
-      .limit(10)
+  const supabase = createServerClient()
+  const { data } = await supabase
+    .from('lp_positions')
+    .select('id, symbol, status, sol_deposited, pool_address, opened_at')
+    .in('status', ['active', 'out_of_range'])
+    .order('opened_at', { ascending: false })
 
-    if (error) { await reply(`❌ DB error: ${error.message}`); return }
-    const rows = data ?? []
-    if (rows.length === 0) { await reply('📭 No open LP positions.'); return }
-
-    const lines = rows.map((r: { id: string; symbol: string; status: string; sol_deposited?: number; pool_address?: string; opened_at: string }) => {
-      const age  = ((Date.now() - new Date(r.opened_at).getTime()) / 3_600_000).toFixed(1)
-      const pool = r.pool_address ? r.pool_address.slice(0, 8) + '...' : 'unknown'
-      return `• \`${r.id.slice(0, 8)}\` *${r.symbol}* — ${r.status} | ${(r.sol_deposited ?? 0).toFixed(3)} SOL | pool=${pool} | ${age}h\n  /close ${r.id}`
-    })
-    await reply([`🏊 *Open LP Positions (${rows.length})*`, '', ...lines].join('\n'))
-  } catch (err) {
-    await reply(`❌ Error: ${err instanceof Error ? err.message : String(err)}`)
+  if (!data || data.length === 0) {
+    await reply('🏊 No open LP positions.')
+    return
   }
+
+  const lines = [`🏊 *Open LP Positions (${data.length})*`, ``]
+  for (const p of data) {
+    const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
+    lines.push(
+      `• ${p.id.slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | pool=${(p.pool_address ?? 'n/a').slice(0, 8)}... | ${age}h`,
+      `  /close ${p.id}`
+    )
+  }
+  await reply(lines.join('\n'))
 }
 
 async function handleSpots() {
-  try {
-    const supabase = createServerClient()
-    const { data, error } = await supabase
-      .from('spot_positions')
-      .select('id, symbol, amount_sol, status, opened_at, pnl_pct')
-      .eq('status', 'open')
-      .order('opened_at', { ascending: false })
-      .limit(10)
+  const supabase = createServerClient()
+  const { data } = await supabase
+    .from('spot_positions')
+    .select('id, symbol, amount_sol, opened_at')
+    .eq('status', 'open')
+    .order('opened_at', { ascending: false })
 
-    if (error) { await reply(`❌ DB error: ${error.message}`); return }
-    const rows = data ?? []
-    if (rows.length === 0) { await reply('📭 No open spot positions.'); return }
-
-    const lines = rows.map((r: { id: string; symbol: string; amount_sol?: number; opened_at: string; pnl_pct?: number }) => {
-      const age    = ((Date.now() - new Date(r.opened_at).getTime()) / 3_600_000).toFixed(1)
-      const pnlStr = r.pnl_pct != null ? ` | P&L ${r.pnl_pct >= 0 ? '+' : ''}${r.pnl_pct.toFixed(1)}%` : ''
-      return `• \`${r.id.slice(0, 8)}\` *${r.symbol}* — ${(r.amount_sol ?? 0).toFixed(3)} SOL | ${age}h${pnlStr}\n  /closespot ${r.id}`
-    })
-    await reply([`🎯 *Open Spot Positions (${rows.length})*`, '', ...lines].join('\n'))
-  } catch (err) {
-    await reply(`❌ Error: ${err instanceof Error ? err.message : String(err)}`)
+  if (!data || data.length === 0) {
+    await reply('🎯 No open spot positions.')
+    return
   }
+
+  const lines = [`🎯 *Open Spot Positions (${data.length})*`, ``]
+  for (const p of data) {
+    const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
+    lines.push(
+      `• ${p.id.slice(0, 8)} ${p.symbol} — ${p.amount_sol.toFixed(3)} SOL | ${age}h`,
+      `  /closespot ${p.id}`
+    )
+  }
+  await reply(lines.join('\n'))
 }
 
 async function handleTick() {
-  await reply('⚡ *Manual tick triggered* — running all pipelines in parallel...')
-  const started = Date.now()
+  await reply('⏳ *Running all pipelines in parallel...*')
 
-  const [lpScanResult, lpMonitorResult, preGradResult, spotMonitorResult, lpMigratorResult] =
-    await Promise.all([
-      withTickTimeout(async () => {
-        const r = await runScanner()
-        return `✅ lp-scanner: scanned=${r.scanned} candidates=${r.candidates} opened=${r.opened}`
-      }, 'lp-scanner'),
-      withTickTimeout(async () => {
-        const r = await monitorPositions()
-        return `✅ lp-monitor: checked=${r.checked} closed=${r.closed} rebalanced=${r.rebalanced}`
-      }, 'lp-monitor'),
-      withTickTimeout(runPreGradScanner, 'pre-grad-scanner'),
-      withTickTimeout(runSpotMonitor,    'spot-monitor'),
-      withTickTimeout(runLpMigrator,     'lp-migrator'),
-    ])
+  const results = await Promise.all([
+    withTickTimeout(() => runScanner().then(r => typeof r === 'string' ? r : '✅ scanner done'), 'scanner'),
+    withTickTimeout(() => monitorPositions().then(r => typeof r === 'string' ? r : '✅ monitor done'), 'monitor'),
+    withTickTimeout(() => runPreGradScanner().then(r => typeof r === 'string' ? r : '✅ pre-grad-scanner done'), 'pre-grad-scanner'),
+    withTickTimeout(() => runSpotMonitor(), 'spot-monitor'),
+    withTickTimeout(() => runLpMigrator().then(r => typeof r === 'string' ? r : '✅ lp-migrator done'), 'lp-migrator'),
+  ])
 
-  await reply([
-    `📋 *Tick complete* (${((Date.now() - started) / 1000).toFixed(1)}s)`,
-    ``,
-    lpScanResult,
-    lpMonitorResult,
-    preGradResult,
-    spotMonitorResult,
-    lpMigratorResult,
-  ].join('\n'))
+  await reply(['*Tick complete:*', ...results.map(r => `• ${r}`)].join('\n'))
 }
 
 async function handleHelp() {
   await reply([
-    `🤖 *Meteoracle Commands*`,
+    `*Meteoracle Bot Commands*`,
     ``,
-    `*Control*`,
-    `/stop          — 🛑 Emergency: close all positions + stop worker services`,
-    `/restart       — ▶️ Resume: restart all worker services`,
-    `/dry           — dry-run mode (no real trades)`,
-    `/live          — live trading ⚠️`,
-    `/tick          — manual trigger all pipelines`,
-    ``,
-    `*Positions*`,
-    `/positions     — list open Meteora LP positions`,
-    `/spots         — list open pre-grad spot positions`,
-    `/close <id>    — force-close an LP position`,
+    `/stop — emergency stop (closes all positions, stops workers)`,
+    `/restart — resume all worker services`,
+    `/dry — switch to dry-run mode`,
+    `/live — switch to live trading`,
+    `/status — snapshot of bot state + open positions`,
+    `/positions — list all open LP positions`,
+    `/spots — list all open spot positions`,
+    `/close <id> — force-close an LP position`,
     `/closespot <id> — force-close a spot position`,
-    ``,
-    `*Info*`,
-    `/status        — state + PM2 status + deployed SOL snapshot`,
-    `/help          — this message`,
+    `/tick — manually trigger all pipelines`,
+    `/help — this message`,
   ].join('\n'))
 }
 
-// ─── Main poll loop ──────────────────────────────────────────────────────────────
+// ─── Main poll loop ────────────────────────────────────────────────────────────────────────────────────
 
-async function handleUpdate(update: TelegramUpdate): Promise<void> {
-  const msg = update.message
-  if (!msg?.text) return
-  if (String(msg.chat.id) !== String(CHAT_ID)) return
+async function processUpdate(update: TelegramUpdate): Promise<void> {
+  const text = update.message?.text?.trim() ?? ''
+  const chatId = update.message?.chat?.id
 
-  const parts   = msg.text.trim().split(/\s+/)
-  const command = parts[0].toLowerCase()
+  if (!text || String(chatId) !== CHAT_ID) return
 
-  console.log(`[telegram-bot] command: ${command}`)
+  const [rawCmd, ...args] = text.split(/\s+/)
+  const cmd = rawCmd.toLowerCase().replace(/^\//,'')
 
-  if      (command === '/stop')      await handleStop()
-  else if (command === '/restart')   await handleRestart()
-  else if (command === '/start')     await handleRestart()
-  else if (command === '/dry')       await handleDry()
-  else if (command === '/live')      await handleLive()
-  else if (command === '/close')     await handleClose(parts[1] ?? '')
-  else if (command === '/closespot') await handleCloseSpot(parts[1] ?? '')
-  else if (command === '/status')    await handleStatus()
-  else if (command === '/positions') await handlePositions()
-  else if (command === '/spots')     await handleSpots()
-  else if (command === '/tick')      await handleTick()
-  else if (command === '/help')      await handleHelp()
-  else await reply(`❓ Unknown command. Send /help for the list.`)
-}
+  console.log(`[telegram-bot] command: /${cmd}${args.length ? ' ' + args.join(' ') : ''}`)
 
-async function poll(): Promise<void> {
-  const updates = await getUpdates()
-  for (const update of updates) {
-    if (update.update_id > lastUpdateId) {
-      lastUpdateId = update.update_id
-      await handleUpdate(update).catch(err =>
-        console.error('[telegram-bot] handler error:', err)
-      )
-    }
+  switch (cmd) {
+    case 'stop':      await handleStop();                break
+    case 'restart':   await handleRestart();             break
+    case 'dry':       await handleDry();                 break
+    case 'live':      await handleLive();                break
+    case 'close':     await handleClose(args[0] ?? '');  break
+    case 'closespot': await handleCloseSpot(args[0] ?? ''); break
+    case 'status':    await handleStatus();              break
+    case 'positions': await handlePositions();           break
+    case 'spots':     await handleSpots();               break
+    case 'tick':      await handleTick();                break
+    case 'help':      await handleHelp();                break
+    default:
+      await reply(`❌ Unknown command: /${cmd}. Send /help for the list.`)
   }
 }
 
 async function main(): Promise<void> {
-  console.log(`[telegram-bot] starting — polling every ${POLL_MS}ms`)
+  console.log('[telegram-bot] starting long-poll loop...')
   await drainPendingUpdates()
-  await reply('🤖 *Meteoracle bot online.* Send /help for commands.')
-  await poll()
-  setInterval(poll, POLL_MS)
+
+  while (true) {
+    const updates = await getUpdates()
+    for (const update of updates) {
+      lastUpdateId = update.update_id
+      await processUpdate(update)
+    }
+    await new Promise(r => setTimeout(r, POLL_MS))
+  }
 }
 
 main().catch(err => {
