@@ -77,13 +77,17 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
     .sort((a, b) => new Date(b.closed_at ?? 0).getTime() - new Date(a.closed_at ?? 0).getTime())
     .slice(0, 50)
 
+  // Only trades with real P&L data — excludes null-pnl orphans from KPI stats
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tradesWithPnl = allClosed.filter((p: any) => p.pnl_sol !== null)
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const solDeployed = allOpen.reduce((s: number, p: any) => s + (p.amount_sol ?? 0), 0)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const totalPnl    = allClosed.reduce((s: number, p: any) => s + (p.pnl_sol ?? 0), 0)
+  const totalPnl    = tradesWithPnl.reduce((s: number, p: any) => s + p.pnl_sol, 0)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const wins        = allClosed.filter((p: any) => (p.pnl_sol ?? 0) > 0).length
-  const winRate     = allClosed.length > 0 ? Math.round((wins / allClosed.length) * 100) : null
+  const wins        = tradesWithPnl.filter((p: any) => p.pnl_sol > 0).length
+  const winRate     = tradesWithPnl.length > 0 ? Math.round((wins / tradesWithPnl.length) * 100) : null
 
   return (
     <div className="p-6 space-y-6">
@@ -104,7 +108,7 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
         openPositions={allOpen.length}
         totalPnlSol={totalPnl}
         winRate={winRate}
-        totalTrades={allClosed.length}
+        totalTrades={tradesWithPnl.length}
         watchlistCount={data.watchlist.length}
       />
       <SpotPnlChart closedPositions={allClosed} />
