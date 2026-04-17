@@ -53,7 +53,7 @@ Scans all Meteora pools every 15 minutes. Filters by market cap, volume, liquidi
 
 ## Pipeline 2 — Pre-grad Spot Buy
 
-Scans pump.fun tokens at 88–98% bonding curve progress every 60 seconds via the pump.fun REST API (no Bitquery, no API key required). Enriches each candidate with pump.fun API data: bonding curve %, holder count, top holder %, dev wallet %. Buys via Jupiter v6. Exits at +150% TP, -35% SL, or 90-minute timeout.
+Scans pump.fun tokens at 88–98% bonding curve progress every 60 seconds via the pump.fun REST API. Enriches each candidate with pump.fun API data: bonding curve %, holder count, top holder %, dev wallet %. Buys via Jupiter v6. Exits at +150% TP, -35% SL, or 90-minute timeout.
 
 ### Current filters
 
@@ -71,6 +71,12 @@ Scans pump.fun tokens at 88–98% bonding curve progress every 60 seconds via th
 ## Pipeline 3 — Post-grad LP Bridge
 
 Detects pump.fun graduation events every 60 seconds, then opens a Meteora DLMM LP position for the newly listed token. Monitors LP health and exits on the same conditions as Pipeline 1.
+
+---
+
+## Token Classifier
+
+Migration `20260417_add_token_class.sql` added `token_class` and `strategy_id` columns to both `candidates` and `lp_positions`. These fields tag each position/candidate with the strategy variant and token category that produced it, enabling per-class P&L breakdown in the dashboard and future routing logic.
 
 ---
 
@@ -137,9 +143,13 @@ meteoracle/
 │   └── types.ts
 ├── supabase/migrations/
 │   ├── 001_initial_schema.sql
+│   ├── 002_add_updated_at.sql
 │   ├── 002_entry_price_usd.sql
-│   ├── 003_meteora_lp_schema.sql
-│   └── 004_pre_grad_watchlist_velocity.sql
+│   ├── 003_bot_state.sql
+│   ├── 003_lp_positions.sql
+│   ├── 004_pre_grad_watchlist.sql
+│   ├── 004_pre_grad_watchlist_velocity.sql
+│   └── 20260417_add_token_class.sql
 ├── ecosystem.config.cjs        ← PM2 config (all 9 processes)
 ├── start-dashboard.sh          ← Cleans .next, builds, starts Next.js (called by PM2)
 └── .env.local.example          ← All env vars with descriptions
@@ -159,13 +169,17 @@ npm install
 
 ### 2. Supabase migrations
 
-Run all 4 migrations in order in the Supabase SQL editor:
+Run all migrations in order in the Supabase SQL editor:
 
 ```
 supabase/migrations/001_initial_schema.sql
+supabase/migrations/002_add_updated_at.sql
 supabase/migrations/002_entry_price_usd.sql
-supabase/migrations/003_meteora_lp_schema.sql
+supabase/migrations/003_bot_state.sql
+supabase/migrations/003_lp_positions.sql
+supabase/migrations/004_pre_grad_watchlist.sql
 supabase/migrations/004_pre_grad_watchlist_velocity.sql
+supabase/migrations/20260417_add_token_class.sql
 ```
 
 Also create the `bot_state` row manually once:
@@ -248,7 +262,7 @@ git pull && pm2 restart all --update-env && pm2 save
 
 ## Go-live checklist
 
-- [ ] All 4 Supabase migrations applied
+- [ ] All 8 Supabase migrations applied
 - [ ] `bot_state` row inserted (`id=1, enabled=true`)
 - [ ] Wallet funded (≥ 0.5 SOL — covers positions + gas)
 - [ ] `BOT_DRY_RUN=false` set in `.env.local` on VPS
@@ -267,8 +281,6 @@ git pull && pm2 restart all --update-env && pm2 save
 - [Rugcheck](https://rugcheck.xyz) — token safety scores (no key needed)
 - Telegram bot via @BotFather
 - Hetzner VPS (CX22 recommended — ~€4/mo)
-
-> **No Bitquery API key required.** The pre-grad scanner uses the pump.fun REST API directly.
 
 ---
 
