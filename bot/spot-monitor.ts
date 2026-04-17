@@ -188,8 +188,15 @@ async function tick(): Promise<{ monitored: number; closed: number }> {
     }
 
     if (!pos.entry_price_usd || pos.entry_price_usd === 0) {
+      // Seed entry price AND write zero P&L so dashboard shows +0.0% immediately
       await supabase.from('spot_positions')
-        .update({ entry_price_usd: currentPriceUsd }).eq('id', pos.id)
+        .update({
+          entry_price_usd:   currentPriceUsd,
+          current_price_usd: currentPriceUsd,
+          pnl_pct:           0,
+          pnl_sol:           0,
+        })
+        .eq('id', pos.id)
       console.log(`[spot-monitor] ${label} seeded entry_price_usd=$${currentPriceUsd.toExponential(4)} — skipping exit check this tick`)
       continue
     }
