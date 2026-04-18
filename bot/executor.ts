@@ -15,6 +15,7 @@ import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { swapTokenToSol } from '@/lib/swap'
+import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 async function getDLMM() {
@@ -124,22 +125,32 @@ export async function openPosition(
       return null
     }
 
-    const cooldownHours = parseFloat(process.env.TOKEN_COOLDOWN_HOURS ?? '6')
-    const cooldownCutoff = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
-    const { data: recentClose } = await supabase
+    // Cooldown check: emergency_stop uses a shorter cooldown window
+    const defaultCooldownHours   = parseFloat(process.env.TOKEN_COOLDOWN_HOURS          ?? '6')
+    const emergencyCooldownHours = parseFloat(process.env.TOKEN_EMERGENCY_COOLDOWN_HOURS ?? '1')
+
+    const { data: lastClose } = await supabase
       .from('lp_positions')
-      .select('id')
+      .select('id, close_reason, closed_at')
       .eq('mint', metrics.address)
       .eq('status', 'closed')
-      .gte('closed_at', cooldownCutoff)
+      .order('closed_at', { ascending: false })
       .limit(1)
-    if (recentClose?.length) {
-      console.warn(`${label} token in cooldown — closed within last ${cooldownHours}h`)
-      await supabase.from('bot_logs').insert({
-        level: 'warn', event: 'open_position_skipped_cooldown',
-        payload: { symbol: metrics.symbol, cooldownHours },
-      })
-      return null
+
+    if (lastClose?.length) {
+      const isEmergency    = lastClose[0].close_reason?.startsWith('emergency_stop')
+      const cooldownHours  = isEmergency ? emergencyCooldownHours : defaultCooldownHours
+      const cutoff         = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
+
+      if (lastClose[0].closed_at >= cutoff) {
+        console.warn(`${label} token in cooldown — closed within last ${cooldownHours}h (reason: ${lastClose[0].close_reason})`)
+        await supabase.from('bot_logs').insert({
+          level: 'warn', event: 'open_position_skipped_cooldown',
+          payload: { symbol: metrics.symbol, cooldownHours, closeReason: lastClose[0].close_reason },
+        })
+        await sendAlert({ type: 'cooldown_skip', symbol: metrics.symbol, strategy: strategy.id, cooldownHours })
+        return null
+      }
     }
 
     const balanceLamports = await connection.getBalance(wallet.publicKey)
