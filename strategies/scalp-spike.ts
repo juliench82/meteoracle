@@ -26,6 +26,7 @@ export const scalpSpikeStrategy: Strategy = {
     maxAgeHours:             120, // up to 5 days old
     minRugcheckScore:         65,
     requireSocialSignal:   false,
+    minFeeTvl24hPct:          15,
   },
 
   position: {

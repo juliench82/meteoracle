@@ -47,6 +47,8 @@ export interface TokenMetrics {
   priceUsd: number
   poolAddress: string
   dexId: string
+  /** 24h fees / TVL expressed as a percentage, e.g. 131.35 means 131.35% */
+  feeTvl24hPct: number
   /** pump.fun bonding curve fill %, 0–100. undefined = not a pump.fun token or fetch failed. */
   bondingCurvePct?: number
 }
@@ -61,6 +63,8 @@ export interface TokenFilters {
   maxAgeHours: number
   minRugcheckScore: number
   requireSocialSignal: boolean
+  /** Minimum 24h Fee/TVL % required to enter this pool. Strategy-dependent. */
+  minFeeTvl24hPct: number
 }
 
 export interface PositionConfig {

@@ -1,4 +1,4 @@
-import type { TokenMetrics } from '@/lib/types'
+import type { TokenMetrics, Strategy } from '@/lib/types'
 
 /**
  * Composite candidate score (0–100).
@@ -22,8 +22,9 @@ import type { TokenMetrics } from '@/lib/types'
  * Hard disqualifiers:
  *   - pump.fun mint + age < 6h      — too early, classic dump window
  *   - vol/MC ratio > 3.0            — wash trading signal
+ *   - feeTvl24hPct < strategy.filters.minFeeTvl24hPct — pool not hot enough for this strategy
  */
-export function scoreCandidate(token: TokenMetrics): number {
+export function scoreCandidate(token: TokenMetrics, strategy: Strategy): number {
   const isPumpFun = token.address.endsWith('pump')
 
   if (isPumpFun && token.ageHours < 6) {
@@ -35,6 +36,11 @@ export function scoreCandidate(token: TokenMetrics): number {
 
   if (volMcRatio > 3.0) {
     console.log(`[scorer] ${token.symbol} DISQUALIFIED — vol/MC ratio ${volMcRatio.toFixed(2)} > 3.0`)
+    return 0
+  }
+
+  if (token.feeTvl24hPct < strategy.filters.minFeeTvl24hPct) {
+    console.log(`[scorer] ${token.symbol} DISQUALIFIED — feeTvl24hPct ${token.feeTvl24hPct.toFixed(2)}% < required ${strategy.filters.minFeeTvl24hPct}% for ${strategy.id}`)
     return 0
   }
 

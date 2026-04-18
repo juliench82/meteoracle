@@ -30,6 +30,7 @@ export const evilPandaStrategy: Strategy = {
     maxAgeHours:             120,
     minRugcheckScore:         40,
     requireSocialSignal:   false,
+    minFeeTvl24hPct:          35, // must be screaming hot or we skip
   },
 
   position: {

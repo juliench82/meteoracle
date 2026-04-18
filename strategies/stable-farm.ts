@@ -38,6 +38,8 @@ export const stableFarmStrategy: Strategy = {
     minRugcheckScore: 40,
 
     requireSocialSignal: false,
+
+    minFeeTvl24hPct: 4, // steady is enough here — BLUECHIP/STABLE doesn't need to be screaming hot
   },
 
   position: {
