@@ -80,10 +80,8 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const solDeployed = allOpen.reduce((s: number, p: any) => s + (p.amount_sol ?? 0), 0)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const totalPnl    = tradesWithPnl.reduce((s: number, p: any) => s + p.pnl_sol, 0)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const wins        = tradesWithPnl.filter((p: any) => p.pnl_sol > 0).length
-  const winRate     = tradesWithPnl.length > 0 ? Math.round((wins / tradesWithPnl.length) * 100) : null
+  const wins    = tradesWithPnl.filter((p: any) => p.pnl_sol > 0).length
+  const winRate = tradesWithPnl.length > 0 ? Math.round((wins / tradesWithPnl.length) * 100) : null
 
   return (
     <div className="p-6 space-y-6">
@@ -102,11 +100,10 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
       <SpotKPIBar
         solDeployed={solDeployed}
         openPositions={allOpen.length}
-        totalPnlSol={totalPnl}
         winRate={winRate}
         totalTrades={tradesWithPnl.length}
       />
-      <SpotPnlChart closedPositions={allClosed} />
+      <SpotPnlChart />
       <SpotPositionsTable
         openPositions={allOpen}
         closedPositions={allClosed.slice(0, 20)}
