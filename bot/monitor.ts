@@ -112,7 +112,9 @@ async function checkPosition(
     return
   }
 
-  const entryPriceSol: number = position.metadata?.entry_price_sol ?? position.entry_price ?? 0
+  // entry_price_sol is a top-level column, metadata fallback for legacy rows
+  const entryPriceSol: number = position.entry_price_sol ?? position.metadata?.entry_price_sol ?? 0
+
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
     : 0
