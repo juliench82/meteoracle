@@ -80,14 +80,15 @@ function explainNoStrategy(t: TokenMetrics): string {
   const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
     const f = s.filters
     const fails: string[] = []
-    if (t.mcUsd        < f.minMcUsd)          fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
-    if (t.mcUsd        > f.maxMcUsd)          fails.push(`mc too high`)
-    if (t.volume24h    < f.minVolume24h)       fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
-    if (t.liquidityUsd < f.minLiquidityUsd)   fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
-    if (t.topHolderPct > f.maxTopHolderPct)   fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
-    if (t.holderCount  < f.minHolderCount)    fails.push(`holders=${t.holderCount}<${f.minHolderCount}`)
-    if (t.ageHours     > f.maxAgeHours)       fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
-    if (t.rugcheckScore < f.minRugcheckScore) fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
+    if (t.mcUsd          < f.minMcUsd)          fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
+    if (t.mcUsd          > f.maxMcUsd)          fails.push(`mc too high`)
+    if (t.volume24h      < f.minVolume24h)       fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
+    if (t.liquidityUsd   < f.minLiquidityUsd)   fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
+    if (t.topHolderPct   > f.maxTopHolderPct)   fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
+    if (t.holderCount    < f.minHolderCount)    fails.push(`holders=${t.holderCount}<${f.minHolderCount}`)
+    if (t.ageHours       > f.maxAgeHours)       fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
+    if (t.rugcheckScore  < f.minRugcheckScore)  fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
+    if (t.feeTvl24hPct   < f.minFeeTvl24hPct)  fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
     return fails.length === 0 ? null : `[${s.id}: ${fails.join(', ')}]`
   }).filter(Boolean)
   return perStrat.join(' | ') || 'all strategies disabled'
@@ -176,6 +177,7 @@ export async function runScanner(): Promise<{
     const vol24h       = pool.volume['24h']
     const vol1h        = pool.volume['1h']
     const liqUsd       = pool.tvl
+    const feeTvl24hPct = pool.fee_tvl_ratio['24h'] * 100
 
     const recentResult = await withTimeout(
       supabase.from('candidates').select('id').eq('token_address', tokenAddress)
@@ -227,6 +229,7 @@ export async function runScanner(): Promise<{
       topHolderPct, holderCount: holderCountForFilter, ageHours,
       rugcheckScore: rugScore, priceUsd: token.price,
       poolAddress: pool.address, dexId: 'meteora',
+      feeTvl24hPct,
       bondingCurvePct,
     }
 
@@ -248,7 +251,7 @@ export async function runScanner(): Promise<{
       continue
     }
 
-    const score = scoreCandidate(metrics)
+    const score = scoreCandidate(metrics, strategy)
     const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
     await withTimeout(
@@ -270,7 +273,7 @@ export async function runScanner(): Promise<{
     )
 
     candidateCount++
-    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h${bondingInfo})`)
+    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(2)}%, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (score >= MIN_SCORE_TO_OPEN) {
