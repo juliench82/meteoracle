@@ -34,7 +34,7 @@ export const scalpSpikeStrategy: Strategy = {
     rangeUpPct:            20,
     distributionType:  'spot',
     solBias:              0.6,
-    maxSolPerPosition:    0.05, // debug cap
+    // maxSolPerPosition driven by MAX_SOL_PER_POSITION env var
   },
 
   exits: {

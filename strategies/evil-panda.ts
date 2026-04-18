@@ -38,7 +38,7 @@ export const evilPandaStrategy: Strategy = {
     rangeUpPct:           180,   // auto-sells SOL into token on moons
     distributionType: 'bid-ask', // fees explode on pumps
     solBias:              1.0,   // 100% single-sided SOL
-    maxSolPerPosition:    0.05,  // debug cap — increase once stable
+    // maxSolPerPosition driven by MAX_SOL_PER_POSITION env var
   },
 
   exits: {

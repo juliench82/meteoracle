@@ -29,6 +29,13 @@ const DRY_RUN = process.env.BOT_DRY_RUN !== 'false'
 const METEORA_RENT_RESERVE_SOL = 0.07
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
+// Dynamic wallet floor: scales automatically when you change position size or concurrency.
+// floor = MAX_CONCURRENT_POSITIONS × MAX_SOL_PER_POSITION × WALLET_RESERVE_MULTIPLIER
+const MAX_SOL_PER_POSITION    = parseFloat(process.env.MAX_SOL_PER_POSITION    ?? '0.05')
+const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS  ?? '5')
+const WALLET_RESERVE_MULTIPLIER = parseFloat(process.env.WALLET_RESERVE_MULTIPLIER ?? '1.5')
+const MIN_WALLET_BALANCE_SOL  = MAX_CONCURRENT_POSITIONS * MAX_SOL_PER_POSITION * WALLET_RESERVE_MULTIPLIER
+
 function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): TransactionInstruction[] {
   return Array.isArray(ix) ? ix : [ix]
 }
@@ -78,11 +85,11 @@ export async function openPosition(
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
     const dryRunEntryPriceUsd = metrics.priceUsd ?? 0
-    // Derive entry_price_sol from priceUsd if we have it
-    // We store 0 if unavailable — acceptable for dry-run, real value set on live
-    const dryRunEntryPriceSol = 0  // no on-chain pool access in dry-run
+    const dryRunEntryPriceSol = 0
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
-    const dryRunSolAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
+    const dryRunSolAmount = strategy.position.maxSolPerPosition
+      ? Math.min(strategy.position.maxSolPerPosition, envCap)
+      : envCap
     return await persistPosition(
       metrics, strategy,
       'dry-run-sig',
@@ -90,7 +97,7 @@ export async function openPosition(
       dryRunEntryPriceSol,
       dryRunSolAmount,
       undefined,
-      0  // token_amount: no on-chain quote in dry-run for LP (token goes into pool, not wallet)
+      0
     )
   }
 
@@ -99,9 +106,11 @@ export async function openPosition(
 
   try {
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
-    const solAmount = Math.min(strategy.position.maxSolPerPosition, envCap)
+    const solAmount = strategy.position.maxSolPerPosition
+      ? Math.min(strategy.position.maxSolPerPosition, envCap)
+      : envCap
 
-    const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '0.15')
+    const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1')
     const { data: openPositions } = await supabase
       .from('lp_positions').select('sol_deposited').eq('status', 'active')
     const totalDeployed = (openPositions ?? []).reduce((s: number, p: { sol_deposited: number }) => s + (p.sol_deposited ?? 0), 0)
@@ -135,12 +144,12 @@ export async function openPosition(
     const balanceLamports = await connection.getBalance(wallet.publicKey)
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
-    const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL
+    const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL + MIN_WALLET_BALANCE_SOL
     if (balanceSol < requiredSol) {
-      console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`)
+      console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL (position=${solAmount} + rent=${METEORA_RENT_RESERVE_SOL} + reserve=${MIN_WALLET_BALANCE_SOL.toFixed(3)}), have ${balanceSol.toFixed(4)} SOL`)
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_insufficient_balance',
-        payload: { symbol: metrics.symbol, balanceSol, requiredSol },
+        payload: { symbol: metrics.symbol, balanceSol, requiredSol, minWalletBalance: MIN_WALLET_BALANCE_SOL },
       })
       return null
     }
@@ -249,7 +258,6 @@ export async function openPosition(
       }
     }
 
-    // Query on-chain to get actual token amount deposited into the LP position
     let tokenAmountDeposited = 0
     if (positionKeypairForQuery) {
       try {
@@ -258,7 +266,6 @@ export async function openPosition(
           p => p.publicKey.toBase58() === positionKeypairForQuery!.publicKey.toBase58()
         )
         if (userPos) {
-          // positionData.totalXAmount is token X in the position (non-SOL side)
           const rawAmount = userPos.positionData.totalXAmount
           tokenAmountDeposited = typeof rawAmount === 'object'
             ? (rawAmount as BN).toNumber() / 1e6
@@ -376,11 +383,6 @@ export async function closePosition(
   }
 }
 
-/**
- * Persists a new LP position to lp_positions.
- * entry_price_sol is now a top-level column (not buried in metadata).
- * token_amount is populated from on-chain query after live open; 0 for dry-run (token goes into pool).
- */
 async function persistPosition(
   metrics: TokenMetrics,
   strategy: Strategy,
