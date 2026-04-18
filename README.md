@@ -57,9 +57,6 @@ Telegram — bidirectional (alerts out + commands in)
 | `strategies/evil-panda.ts` | `evil-panda` | ✅ Active | MEME_SHITCOIN |
 | `strategies/scalp-spike.ts` | `scalp-spike` | ✅ Active | SCALP_SPIKE |
 | `strategies/stable-farm.ts` | `stable-farm` | ✅ Active | BLUECHIP / STABLE |
-| `strategies/pre-grad-legacy.ts` | `pre-grad-legacy` | ❄️ Frozen (disabled) | — |
-
-`pre-grad.ts` is a retained reference file; it is not registered in `STRATEGIES` and not executed.
 
 ---
 
@@ -110,9 +107,7 @@ meteoracle/
 │   ├── index.ts                    ← STRATEGIES registry + classifyToken() + getStrategyForToken()
 │   ├── evil-panda.ts               ← MEME_SHITCOIN strategy
 │   ├── scalp-spike.ts              ← SCALP_SPIKE strategy
-│   ├── stable-farm.ts              ← BLUECHIP/STABLE strategy
-│   ├── pre-grad-legacy.ts          ← Frozen (disabled, not in STRATEGIES)
-│   └── pre-grad.ts                 ← Retained reference (not executed)
+│   └── stable-farm.ts              ← BLUECHIP/STABLE strategy
 ├── lib/
 │   ├── supabase.ts
 │   ├── solana.ts
