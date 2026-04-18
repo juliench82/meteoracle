@@ -3,18 +3,9 @@
  *
  * Processes:
  *
- * PIPELINE 1: Meteora DLMM LP
- *   lp-scanner       — polls Meteora pools every 15min
- *   lp-monitor-dlmm  — monitors LP range health + exits every 5min
- *
- * PIPELINE 2: Pre-grad spot buy (pump.fun)
- *   scanner          — polls pump.fun every 60s for 80–99% bonding curve tokens
- *   buyer            — buys watchlist tokens via Jupiter every 30s
- *   monitor          — checks TP/SL/timeout on spot positions every 30s
- *
- * PIPELINE 3: Post-grad LP bridge
- *   migrator         — detects graduation, opens Meteora DLMM LP every 60s
- *   lp-monitor       — monitors post-grad LP positions every 5min
+ * PIPELINE 1: Meteora DLMM LP (the only pipeline)
+ *   lp-scanner       — polls Meteora pools every 15min, classifies token, opens LP
+ *   lp-monitor-dlmm  — monitors LP range health, rebalances, exits every 5min
  *
  * INTERFACE
  *   telegram-bot     — Telegram command interface (/tick, /positions, etc.)
@@ -28,9 +19,8 @@
  *   pm2 save
  *   pm2 startup   ← follow the printed command
  *
- * Deploy (env vars now injected via env_file — no manual source needed):
+ * Deploy:
  *   git pull && pm2 restart all --update-env && pm2 save
- *   (start-dashboard.sh handles rm -rf .next && npm run build automatically)
  *
  * DRY-RUN vs LIVE:
  *   BOT_DRY_RUN=true  — simulate only, no real txs, no wallet needed
@@ -39,7 +29,7 @@
 
 module.exports = {
   apps: [
-    // ── PIPELINE 1: Meteora DLMM LP ──
+    // ── PIPELINE 1: Meteora DLMM LP ──────────────────────────────────────────
     {
       name:          'lp-scanner',
       script:        'npx',
@@ -77,86 +67,7 @@ module.exports = {
       merge_logs: true,
     },
 
-    // ── PIPELINE 2: Pre-grad spot buy ──
-    {
-      name:          'scanner',
-      script:        'npx',
-      args:          'tsx bot/pre-grad-scanner.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  5_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
-      env: { NODE_ENV: 'production' },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/scanner-error.log',
-      out_file:   './logs/scanner-out.log',
-      merge_logs: true,
-    },
-    {
-      name:          'buyer',
-      script:        'npx',
-      args:          'tsx bot/spot-buyer.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  5_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
-      env: { NODE_ENV: 'production' },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/buyer-error.log',
-      out_file:   './logs/buyer-out.log',
-      merge_logs: true,
-    },
-    {
-      name:          'monitor',
-      script:        'npx',
-      args:          'tsx bot/spot-monitor.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  5_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
-      env: { NODE_ENV: 'production' },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/monitor-error.log',
-      out_file:   './logs/monitor-out.log',
-      merge_logs: true,
-    },
-
-    // ── PIPELINE 3: Post-grad LP bridge ──
-    {
-      name:          'migrator',
-      script:        'npx',
-      args:          'tsx bot/lp-migrator.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  10_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
-      env: { NODE_ENV: 'production' },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/migrator-error.log',
-      out_file:   './logs/migrator-out.log',
-      merge_logs: true,
-    },
-    {
-      name:          'lp-monitor',
-      script:        'npx',
-      args:          'tsx bot/lp-monitor.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  10_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
-      env: { NODE_ENV: 'production' },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/lp-monitor-error.log',
-      out_file:   './logs/lp-monitor-out.log',
-      merge_logs: true,
-    },
-
-    // ── INTERFACE ──
+    // ── INTERFACE ─────────────────────────────────────────────────────────────
     {
       name:          'telegram-bot',
       script:        'npx',
