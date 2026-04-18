@@ -4,7 +4,6 @@ interface SpotKPIBarProps {
   totalPnlSol:    number
   winRate:        number | null
   totalTrades:    number
-  watchlistCount: number
 }
 
 export function SpotKPIBar({
@@ -13,7 +12,6 @@ export function SpotKPIBar({
   totalPnlSol,
   winRate,
   totalTrades,
-  watchlistCount,
 }: SpotKPIBarProps) {
   const pnlColor = totalPnlSol >= 0 ? 'text-green-400' : 'text-red-400'
   const pnlSign  = totalPnlSol >= 0 ? '+' : ''
@@ -37,16 +35,10 @@ export function SpotKPIBar({
       sub:   `${totalTrades} trades`,
       color: winRate !== null && winRate >= 50 ? 'text-green-400' : 'text-yellow-400',
     },
-    {
-      label: 'Watchlist',
-      value: String(watchlistCount),
-      sub:   'tokens being tracked',
-      color: 'text-blue-400',
-    },
   ]
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
       {cards.map(card => (
         <div key={card.label} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">{card.label}</p>

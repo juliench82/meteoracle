@@ -3,7 +3,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { SpotKPIBar } from '@/components/dashboard/SpotKPIBar'
 import { SpotPositionsTable } from '@/components/dashboard/SpotPositionsTable'
-import { WatchlistFeed } from '@/components/dashboard/WatchlistFeed'
 import { SpotPnlChart } from '@/components/dashboard/SpotPnlChart'
 
 const POLL_INTERVAL_MS = 30_000
@@ -39,8 +38,6 @@ interface InitialData {
   openLp:     any[]
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   closedLp:   any[]
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  watchlist:  any[]
 }
 
 export function DashboardClient({ initialData }: { initialData: InitialData }) {
@@ -64,8 +61,8 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
   }, [])
 
   useEffect(() => {
-    fetchData()                                         // fetch immediately on mount
-    const id = setInterval(fetchData, POLL_INTERVAL_MS) // then every 30s
+    fetchData()
+    const id = setInterval(fetchData, POLL_INTERVAL_MS)
     return () => clearInterval(id)
   }, [fetchData])
 
@@ -77,7 +74,6 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
     .sort((a, b) => new Date(b.closed_at ?? 0).getTime() - new Date(a.closed_at ?? 0).getTime())
     .slice(0, 50)
 
-  // Only trades with real P&L data — excludes null-pnl orphans from KPI stats
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tradesWithPnl = allClosed.filter((p: any) => p.pnl_sol !== null)
 
@@ -109,20 +105,12 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
         totalPnlSol={totalPnl}
         winRate={winRate}
         totalTrades={tradesWithPnl.length}
-        watchlistCount={data.watchlist.length}
       />
       <SpotPnlChart closedPositions={allClosed} />
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="xl:col-span-2">
-          <SpotPositionsTable
-            openPositions={allOpen}
-            closedPositions={allClosed.slice(0, 20)}
-          />
-        </div>
-        <div>
-          <WatchlistFeed watchlist={data.watchlist} />
-        </div>
-      </div>
+      <SpotPositionsTable
+        openPositions={allOpen}
+        closedPositions={allClosed.slice(0, 20)}
+      />
     </div>
   )
 }
