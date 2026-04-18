@@ -9,6 +9,7 @@ type AlertPayload =
   | { type: 'position_oor'; symbol: string; strategy: string; currentPrice: number; binRangeLower: number; binRangeUpper: number; oorExitMinutes: number }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string }
+  | { type: 'cooldown_skip'; symbol: string; strategy: string; cooldownHours: number }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -79,6 +80,14 @@ function formatMessage(payload: AlertPayload): string {
         `Position: \`${payload.positionPubKey}\``,
         `Pool: \`${payload.poolAddress}\``,
         `_On-chain but missing from DB — marked orphaned_`,
+      ].join('\n')
+
+    case 'cooldown_skip':
+      return [
+        `⏳ *Cooldown Skip*`,
+        `Token: \`${payload.symbol}\``,
+        `Strategy: ${payload.strategy}`,
+        `Skipped — closed within last ${payload.cooldownHours}h`,
       ].join('\n')
 
     case 'error':
