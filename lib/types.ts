@@ -69,7 +69,7 @@ export interface PositionConfig {
   rangeUpPct: number
   distributionType: 'spot' | 'curve' | 'bid-ask'
   solBias: number
-  maxSolPerPosition: number
+  maxSolPerPosition?: number   // optional — overridden by MAX_SOL_PER_POSITION env var
 }
 
 export interface ExitRules {
