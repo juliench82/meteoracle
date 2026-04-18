@@ -6,7 +6,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
-import { STRATEGIES, getStrategyForToken } from '@/strategies'
+import { STRATEGIES, getStrategyForToken, classifyToken } from '@/strategies'
 import { scoreCandidate } from './scorer'
 import { openPosition } from './executor'
 import { sendAlert } from './alerter'
@@ -173,6 +173,7 @@ export async function runScanner(): Promise<{
     const tokenAddress = token.address
     const symbol       = pool.name ?? token.symbol
     const vol24h       = pool.volume['24h']
+    const vol1h        = pool.volume['1h']
     const liqUsd       = pool.tvl
 
     const recentResult = await withTimeout(
@@ -228,9 +229,21 @@ export async function runScanner(): Promise<{
       bondingCurvePct,
     }
 
-    const strategy = getStrategyForToken(metrics)
+    const tokenClass = classifyToken({
+      address:      metrics.address,
+      mcUsd:        metrics.mcUsd,
+      volume24h:    metrics.volume24h,
+      volume1h:     vol1h,
+      liquidityUsd: metrics.liquidityUsd,
+      ageHours:     metrics.ageHours,
+      topHolderPct: metrics.topHolderPct,
+      holderCount:  metrics.holderCount,
+      rugcheckScore: metrics.rugcheckScore,
+    })
+
+    const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
-      console.log(`[scanner] ${symbol} — no strategy: ${explainNoStrategy(metrics)}`)
+      console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}): ${explainNoStrategy(metrics)}`)
       continue
     }
 
@@ -239,17 +252,24 @@ export async function runScanner(): Promise<{
 
     await withTimeout(
       supabase.from('candidates').insert({
-        token_address: metrics.address, symbol: metrics.symbol, score,
-        strategy_matched: strategy.id, mc_at_scan: metrics.mcUsd,
-        volume_24h: metrics.volume24h, holder_count: metrics.holderCount,
-        rugcheck_score: metrics.rugcheckScore, top_holder_pct: metrics.topHolderPct,
-        scanned_at: new Date().toISOString(),
+        token_address:    metrics.address,
+        symbol:           metrics.symbol,
+        score,
+        strategy_matched: strategy.id,
+        strategy_id:      strategy.id,
+        token_class:      tokenClass,
+        mc_at_scan:       metrics.mcUsd,
+        volume_24h:       metrics.volume24h,
+        holder_count:     metrics.holderCount,
+        rugcheck_score:   metrics.rugcheckScore,
+        top_holder_pct:   metrics.topHolderPct,
+        scanned_at:       new Date().toISOString(),
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
 
     candidateCount++
-    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h${bondingInfo})`)
+    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (score >= MIN_SCORE_TO_OPEN) {
