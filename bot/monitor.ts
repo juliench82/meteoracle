@@ -105,6 +105,13 @@ async function checkPosition(
     position.position_pubkey
   )
 
+  // Guard: RPC returned fallback zeros — skip this tick entirely to avoid
+  // ghost OOR alerts and false status flips
+  if (currentPriceSol === 0) {
+    console.warn(`${label} price read returned 0 — RPC fallback hit, skipping tick`)
+    return
+  }
+
   const entryPriceSol: number = position.metadata?.entry_price_sol ?? position.entry_price ?? 0
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
