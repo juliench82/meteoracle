@@ -5,7 +5,6 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
-import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import { closePosition, openPosition } from '@/bot/executor'
 import { sendAlert } from '@/bot/alerter'
@@ -17,19 +16,64 @@ async function getDLMM() {
   return mod.default as typeof import('@meteora-ag/dlmm').default
 }
 
-const SUPABASE_TIMEOUT_MS = 15_000
+const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
-const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
-
 const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
 
-async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
-  const timer = new Promise<null>((resolve) =>
-    setTimeout(() => { console.warn(`[monitor] timeout (${ms}ms): ${label}`); resolve(null) }, ms)
-  )
-  return Promise.race([Promise.resolve(promise), timer])
+// ── Direct REST helpers (bypasses supabase-js connection pooling issues) ──────
+
+function sbUrl(): string {
+  const u = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL
+  if (!u) throw new Error('SUPABASE_URL not set')
+  return u
 }
+
+function sbKey(): string {
+  const k = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!k) throw new Error('SUPABASE_SERVICE_ROLE_KEY not set')
+  return k
+}
+
+function sbHeaders() {
+  return {
+    'apikey': sbKey(),
+    'Authorization': `Bearer ${sbKey()}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=minimal',
+  }
+}
+
+async function sbSelect<T>(table: string, params: string): Promise<T[]> {
+  const res = await fetch(`${sbUrl()}/rest/v1/${table}?${params}`, {
+    headers: { ...sbHeaders(), 'Prefer': 'return=representation' },
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!res.ok) throw new Error(`sbSelect ${table} ${res.status}: ${await res.text()}`)
+  return res.json()
+}
+
+async function sbUpdate(table: string, matchParam: string, body: Record<string, unknown>): Promise<void> {
+  const res = await fetch(`${sbUrl()}/rest/v1/${table}?${matchParam}`, {
+    method: 'PATCH',
+    headers: sbHeaders(),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!res.ok) throw new Error(`sbUpdate ${table} ${res.status}: ${await res.text()}`)
+}
+
+async function sbInsert(table: string, body: Record<string, unknown>): Promise<void> {
+  const res = await fetch(`${sbUrl()}/rest/v1/${table}`, {
+    method: 'POST',
+    headers: sbHeaders(),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!res.ok) throw new Error(`sbInsert ${table} ${res.status}: ${await res.text()}`)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function monitorPositions(): Promise<{
   checked: number
@@ -37,32 +81,25 @@ export async function monitorPositions(): Promise<{
   claimed: number
   rebalanced: number
 }> {
-  // ██ BOT STATE GATE — respect /stop command ██
   const state = await getBotState()
   if (!state.enabled) {
     console.log('[monitor] bot is stopped — skipping tick')
     return { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
   }
 
-  const supabase = createServerClient()
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
 
   console.log('[monitor] fetching open LP positions')
-  const result = await withTimeout(
-    supabase.from('lp_positions').select('*').in('status', ['active', 'out_of_range']),
-    SUPABASE_TIMEOUT_MS,
-    'lp_positions select'
-  )
-
-  if (!result) {
-    console.warn('[monitor] Supabase timed out — skipping monitor this tick')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let positions: any[]
+  try {
+    positions = await sbSelect('lp_positions', 'status=in.(active,out_of_range)&order=opened_at.desc')
+  } catch (err) {
+    console.warn('[monitor] lp_positions fetch error:', err)
     return stats
   }
 
-  const { data: positions, error } = result
-  if (error) { console.warn('[monitor] lp_positions fetch error:', error.message); return stats }
-  if (!positions?.length) { console.log('[monitor] no open LP positions'); return stats }
-
+  if (!positions.length) { console.log('[monitor] no open LP positions'); return stats }
   console.log(`[monitor] checking ${positions.length} LP positions`)
 
   for (const position of positions) {
@@ -77,13 +114,12 @@ export async function monitorPositions(): Promise<{
       await checkPosition(position, strategy, stats)
     } catch (err) {
       console.error(`[monitor] error checking position ${position.id}:`, err)
-      await withTimeout(
-        supabase.from('bot_logs').insert({
+      try {
+        await sbInsert('bot_logs', {
           level: 'error', event: 'monitor_check_failed',
           payload: { positionId: position.id, error: String(err) },
-        }),
-        SUPABASE_TIMEOUT_MS, 'bot_logs insert'
-      )
+        })
+      } catch { /* non-fatal */ }
     }
   }
 
@@ -96,7 +132,6 @@ async function checkPosition(
   strategy: Strategy,
   stats: { checked: number; closed: number; claimed: number; rebalanced: number }
 ): Promise<void> {
-  const supabase = createServerClient()
   const label = `[monitor][${position.symbol}][${strategy.id}]`
   const now = Date.now()
 
@@ -105,14 +140,12 @@ async function checkPosition(
     position.position_pubkey
   )
 
-  // Guard: RPC returned fallback zeros — skip this tick entirely to avoid
-  // ghost OOR alerts and false status flips
   if (currentPriceSol === 0) {
     console.warn(`${label} price read returned 0 — RPC fallback hit, skipping tick`)
     return
   }
 
-  // entry_price_sol is a top-level column, metadata fallback for legacy rows
+  // entry_price_sol is a top-level column; metadata fallback for legacy rows
   const entryPriceSol: number = position.entry_price_sol ?? position.metadata?.entry_price_sol ?? 0
 
   const pricePct = entryPriceSol > 0
@@ -141,29 +174,27 @@ async function checkPosition(
     ? entryPriceSol * (1 + position.metadata.bin_range_up / 100)
     : 0
 
-  const updatePayload: Record<string, unknown> = {
-    current_price:   currentPriceSol,
-    in_range:        inRange,
-    fees_earned_sol: feesEarnedSol,
-    il_pct:          ilPct,
-    pnl_sol:         pnlSol,
-    status:          inRange ? 'active' : 'out_of_range',
-    oor_since_at:    oorSinceAt,
+  try {
+    await sbUpdate('lp_positions', `id=eq.${position.id}`, {
+      current_price:   currentPriceSol,
+      in_range:        inRange,
+      fees_earned_sol: feesEarnedSol,
+      il_pct:          ilPct,
+      pnl_sol:         pnlSol,
+      status:          inRange ? 'active' : 'out_of_range',
+      oor_since_at:    oorSinceAt,
+    })
+  } catch (err) {
+    console.error(`${label} DB update failed:`, err)
   }
-
-  await withTimeout(
-    supabase.from('lp_positions').update(updatePayload).eq('id', position.id),
-    SUPABASE_TIMEOUT_MS, 'lp_positions update'
-  )
 
   const openedAt = new Date(position.opened_at).getTime()
   const ageHours = (now - openedAt) / (1000 * 60 * 60)
-
   const oorSince = !inRange && oorSinceAt
     ? (now - new Date(oorSinceAt).getTime()) / 60_000
     : 0
 
-  console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)} age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
+  console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)} pnl=${pnlSol.toFixed(6)} age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
 
   let closeReason: string | null = null
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes)
@@ -204,7 +235,6 @@ async function checkPosition(
 
     if ((driftedHighInRange || driftedLowInRange) && volume1hUsd >= MIN_VOLUME_USD_FOR_REBALANCE) {
       console.log(`${label} SMART REBALANCE — price at ${positionInRange.toFixed(0)}% of range, vol=$${volume1hUsd.toFixed(0)}/h`)
-
       const rebalanceReason = `smart_rebalance_${positionInRange.toFixed(0)}pct`
       const closed = await closePosition(position.id, rebalanceReason)
       if (closed) {
@@ -218,7 +248,6 @@ async function checkPosition(
           ilPct,
           ageHours: Math.round(ageHours * 10) / 10,
         })
-
         const isHardExit = HARD_EXIT_PREFIXES.some(prefix => rebalanceReason.startsWith(prefix))
         if (!isHardExit) {
           try {
@@ -246,13 +275,12 @@ async function checkPosition(
   if (strategy.exits.claimFeesBeforeClose && feesEarnedSol >= strategy.exits.minFeesToClaim) {
     console.log(`${label} claiming fees: ${feesEarnedSol.toFixed(4)} SOL`)
     stats.claimed++
-    await withTimeout(
-      supabase.from('bot_logs').insert({
+    try {
+      await sbInsert('bot_logs', {
         level: 'info', event: 'fees_claimable',
         payload: { positionId: position.id, symbol: position.symbol, feesEarnedSol },
-      }),
-      SUPABASE_TIMEOUT_MS, 'bot_logs fees'
-    )
+      })
+    } catch { /* non-fatal */ }
   }
 
   if (justWentOOR) {
@@ -284,7 +312,7 @@ async function fetchPositionState(
 ): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number }> {
   const fallback = { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
   try {
-    const DLMM      = await getDLMM()
+    const DLMM       = await getDLMM()
     const connection = getConnection()
     const wallet     = getWallet()
     const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
@@ -301,14 +329,14 @@ async function fetchPositionState(
     } catch { /* non-fatal */ }
 
     if (!positionPubKeyStr) {
-      console.warn(`[monitor] fetchPositionState: no position_pubkey for pool ${poolAddress} — assuming inRange=true`)
+      console.warn(`[monitor] no position_pubkey for pool ${poolAddress} — assuming inRange=true`)
       return { inRange: true, currentPriceSol, feesEarnedSol: 0, volume1hUsd }
     }
 
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const pos = userPositions.find((p) => p.publicKey.toBase58() === positionPubKeyStr)
     if (!pos) {
-      console.warn(`[monitor] fetchPositionState: position ${positionPubKeyStr} not found on-chain — assuming closed/OOR`)
+      console.warn(`[monitor] position ${positionPubKeyStr} not found on-chain — assuming closed/OOR`)
       return { ...fallback, currentPriceSol, volume1hUsd }
     }
 
