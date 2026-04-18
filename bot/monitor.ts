@@ -251,15 +251,22 @@ async function checkPosition(
         const isHardExit = HARD_EXIT_PREFIXES.some(prefix => rebalanceReason.startsWith(prefix))
         if (!isHardExit) {
           try {
+            // feeTvl24hPct is unknown at reopen time — default 0 so scorer re-evaluates
+            // the live pool. If the pool has gone cold it will be rejected by the fee gate.
             const metrics: TokenMetrics = {
-              address: position.mint,
-              symbol: position.symbol,
-              poolAddress: position.pool_address,
-              priceUsd: currentPriceSol,
-              dexId: position.metadata?.dexId ?? 'meteora',
-              mcUsd: 0, volume24h: 0, liquidityUsd: 0,
-              topHolderPct: 0, holderCount: 0, ageHours,
-              rugcheckScore: 0,
+              address:      position.mint,
+              symbol:       position.symbol,
+              poolAddress:  position.pool_address,
+              priceUsd:     currentPriceSol,
+              dexId:        position.metadata?.dexId ?? 'meteora',
+              mcUsd:        0,
+              volume24h:    0,
+              liquidityUsd: 0,
+              topHolderPct: 0,
+              holderCount:  0,
+              ageHours,
+              rugcheckScore:  0,
+              feeTvl24hPct:   0, // re-evaluated by scorer against strategy.filters.minFeeTvl24hPct
             }
             await openPosition(metrics, strategy)
             console.log(`${label} reopened centered at ${currentPriceSol}`)
