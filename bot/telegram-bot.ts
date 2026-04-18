@@ -2,20 +2,18 @@
  * telegram-bot.ts
  *
  * Standalone Telegram command bot using long-polling (getUpdates).
- * No webhook, no HTTPS, no Vercel needed — runs as a PM2 process on the VPS.
+ * No webhook, no HTTPS needed — runs as a PM2 process on the VPS.
  *
  * Commands:
- *   /stop              — EMERGENCY: close all positions + pm2 stop workers (bot stays alive)
- *   /restart           — resume: setBotState enabled + pm2 restart workers
- *   /dry               — switch to dry-run mode
- *   /live              — switch to live trading
- *   /close <id>        — force-close an LP position by ID
- *   /closespot <id>    — force-close a spot position by ID
- *   /status            — snapshot: state, open positions, wallet SOL
- *   /positions         — list all open LP positions
- *   /spots             — list all open spot positions
- *   /tick              — manually trigger all pipelines in parallel
- *   /help              — command list
+ *   /stop        — EMERGENCY: close all LP positions + pm2 stop workers
+ *   /restart     — resume: setBotState enabled + pm2 restart workers
+ *   /dry         — switch to dry-run mode
+ *   /live        — switch to live trading
+ *   /close <id>  — force-close an LP position by ID
+ *   /positions   — list all open LP positions
+ *   /status      — snapshot: state, open positions, wallet SOL
+ *   /tick        — manually trigger scanner + monitor in parallel
+ *   /help        — command list
  */
 
 import 'dotenv/config'
@@ -31,10 +29,6 @@ import { getBotState, setBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { runPreGradScanner } from '@/bot/pre-grad-scanner'
-import { runSpotMonitor } from '@/bot/spot-monitor'
-import { runLpMigrator } from '@/bot/lp-migrator'
-import { sellTokenForSol } from '@/bot/spot-seller'
 
 const execAsync = promisify(exec)
 const PM2 = '/usr/local/bin/pm2'
@@ -42,11 +36,6 @@ const PM2 = '/usr/local/bin/pm2'
 const WORKER_PROCESSES = [
   'lp-scanner',
   'lp-monitor-dlmm',
-  'scanner',
-  'buyer',
-  'monitor',
-  'migrator',
-  'lp-monitor',
   'dashboard',
 ]
 
@@ -63,7 +52,7 @@ if (!BOT_TOKEN || !CHAT_ID) {
 
 let lastUpdateId = 0
 
-// ─── Telegram helpers ────────────────────────────────────────────────────────────────────────────────────
+// ─── Telegram helpers ─────────────────────────────────────────────────────────────────────────────────────
 
 async function reply(text: string): Promise<void> {
   try {
@@ -107,23 +96,23 @@ async function drainPendingUpdates(): Promise<void> {
   }
 }
 
-// ─── PM2 helpers ──────────────────────────────────────────────────────────────────────────────────────
+// ─── PM2 helpers ──────────────────────────────────────────────────────────────────────────────────────────
 
 async function pm2StopWorkers(): Promise<void> {
   const names = WORKER_PROCESSES.join(' ')
   await execAsync(`${PM2} stop ${names} --silent`).catch(err =>
-    console.warn('[telegram-bot] pm2 stop workers failed:', err.message)
+    console.warn('[telegram-bot] pm2 stop failed:', err.message)
   )
 }
 
 async function pm2RestartWorkers(): Promise<void> {
   const names = WORKER_PROCESSES.join(' ')
   await execAsync(`${PM2} restart ${names} --silent`).catch(err =>
-    console.warn('[telegram-bot] pm2 restart workers failed:', err.message)
+    console.warn('[telegram-bot] pm2 restart failed:', err.message)
   )
 }
 
-// ─── Tick helper ────────────────────────────────────────────────────────────────────────────────────
+// ─── Tick helper ──────────────────────────────────────────────────────────────────────────────────────
 
 function withTickTimeout(fn: () => Promise<string>, name: string): Promise<string> {
   return Promise.race([
@@ -134,80 +123,26 @@ function withTickTimeout(fn: () => Promise<string>, name: string): Promise<strin
   ])
 }
 
-// ─── Price helper (for P&L on manual close) ────────────────────────────────────────────────────────────────────
-
-async function fetchCurrentPriceUsd(mint: string): Promise<number> {
-  try {
-    const res = await axios.get('https://api.jup.ag/price/v2', {
-      params: { ids: mint }, timeout: 8_000,
-    })
-    const price = parseFloat(res.data?.data?.[mint]?.price ?? '0')
-    if (price > 0) return price
-  } catch {}
-  try {
-    const res = await axios.get(`https://frontend-api-v3.pump.fun/coins/${mint}`, {
-      timeout: 8_000, headers: { 'User-Agent': 'meteoracle-bot/1.0' },
-    })
-    const usdMc  = parseFloat(res.data?.usd_market_cap ?? '0')
-    const supply = parseFloat(res.data?.total_supply    ?? '0')
-    if (usdMc > 0 && supply > 0) return usdMc / supply
-  } catch {}
-  return 0
-}
-
 // ─── Command handlers ─────────────────────────────────────────────────────────────────────────────────
 
 async function handleStop() {
   await reply('🛑 *EMERGENCY STOP initiated...*')
-
   await setBotState({ enabled: false })
 
   const supabase = createServerClient()
-  const { data: lpPositions } = await supabase
+  const { data: positions } = await supabase
     .from('lp_positions')
     .select('id, symbol, status')
     .in('status', ['active', 'out_of_range'])
 
-  let lpClosed = 0
-  for (const pos of lpPositions ?? []) {
+  let closed = 0
+  for (const pos of positions ?? []) {
     try {
       const ok = await closePosition(pos.id, 'emergency_stop')
-      if (ok) lpClosed++
+      if (ok) closed++
     } catch (err) {
-      console.error(`[telegram-bot] emergency close LP ${pos.id} failed:`, err)
+      console.error(`[telegram-bot] emergency close ${pos.id} failed:`, err)
     }
-  }
-
-  const { data: spotPositions } = await supabase
-    .from('spot_positions')
-    .select('id, symbol, mint, amount_sol, token_amount, entry_price_usd, entry_price_sol, dry_run')
-    .eq('status', 'open')
-
-  let spotClosed = 0
-  const closedAt = new Date().toISOString()
-
-  for (const pos of spotPositions ?? []) {
-    // Attempt to fetch current price for P&L estimate
-    const currentPriceUsd = await fetchCurrentPriceUsd(pos.mint)
-    let pnlSol: number | null = null
-    let pnlPct: number | null = null
-
-    if (currentPriceUsd > 0 && pos.entry_price_usd > 0) {
-      const mult = currentPriceUsd / pos.entry_price_usd
-      pnlSol     = parseFloat((pos.amount_sol * (mult - 1)).toFixed(6))
-      pnlPct     = parseFloat(((mult - 1) * 100).toFixed(2))
-    }
-
-    const { error } = await supabase
-      .from('spot_positions')
-      .update({
-        status:    'closed_manual',
-        closed_at: closedAt,
-        ...(pnlSol !== null ? { pnl_sol: pnlSol, pnl_pct: pnlPct } : {}),
-      })
-      .eq('id', pos.id)
-
-    if (!error) spotClosed++
   }
 
   await pm2StopWorkers()
@@ -215,25 +150,21 @@ async function handleStop() {
   await reply([
     `🛑 *Emergency stop complete.*`,
     ``,
-    `• LP positions closed: ${lpClosed}/${(lpPositions ?? []).length}`,
-    `• Spot positions marked closed: ${spotClosed}/${(spotPositions ?? []).length}`,
-    `• All worker services stopped (telegram-bot alive ✅)`,
+    `• LP positions closed: ${closed}/${(positions ?? []).length}`,
+    `• Worker services stopped (telegram-bot alive ✅)`,
     ``,
-    `Send /restart to resume all services.`,
+    `Send /restart to resume.`,
   ].join('\n'))
 }
 
 async function handleRestart() {
   await reply('⏳ *Restarting worker services...*')
-
   await setBotState({ enabled: true })
-
   await pm2RestartWorkers()
-
   const state = await getBotState()
   await reply([
     `✅ *All worker services restarted.*`,
-    `Mode: ${state.dry_run ? '🟡 Dry-run (no real trades)' : '🟢 Live trading'}`,
+    `Mode: ${state.dry_run ? '🟡 Dry-run' : '🟢 Live trading'}`,
     `Send /status for a full snapshot.`,
   ].join('\n'))
 }
@@ -271,128 +202,28 @@ async function handleClose(positionId: string) {
   }
 }
 
-async function handleCloseSpot(positionId: string) {
-  if (!positionId) { await reply('❌ Usage: `/closespot <position_id>`'); return }
-  await reply(`⏳ Closing spot position \`${positionId}\`...`)
-
-  try {
-    const supabase = createServerClient()
-    const { data: pos, error } = await supabase
-      .from('spot_positions')
-      .select('id, symbol, mint, status, dry_run, token_amount, amount_sol, entry_price_sol, entry_price_usd')
-      .eq('id', positionId)
-      .single()
-
-    if (error || !pos) { await reply(`❌ Spot position \`${positionId}\` not found.`); return }
-    if (pos.status !== 'open') { await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) already closed (status=${pos.status}).`); return }
-
-    const dexUrl    = `https://dexscreener.com/solana/${pos.mint}`
-    const closedAt  = new Date().toISOString()
-    const state     = await getBotState()
-    const isRealSell = !state.dry_run && !pos.dry_run && pos.token_amount > 0
-
-    if (isRealSell) {
-      // ── LIVE SELL ──
-      const sellResult = await sellTokenForSol(
-        pos.mint, pos.token_amount, 6, pos.symbol,
-      )
-
-      if (!sellResult.success) {
-        await reply(`❌ Sell tx failed for ${pos.symbol}: ${sellResult.error}`)
-        return
-      }
-
-      const solReceived   = sellResult.solReceived ?? 0
-      const pnlSol        = solReceived - pos.amount_sol
-      const exitPriceSol  = pos.token_amount > 0 ? solReceived / pos.token_amount : 0
-      const pnlPct        = pos.amount_sol > 0 ? (pnlSol / pos.amount_sol) * 100 : 0
-      const pnlStr        = `${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`
-
-      await supabase.from('spot_positions').update({
-        status:         'closed_manual',
-        closed_at:      closedAt,
-        exit_price_sol: exitPriceSol,
-        pnl_sol:        pnlSol,
-        pnl_pct:        parseFloat(pnlPct.toFixed(2)),
-        tx_sell:        sellResult.txSignature ?? null,
-      }).eq('id', positionId)
-
-      await reply([
-        `✅ *CLOSED ${pos.symbol}* (manual)`,
-        `💰 PnL: ${pnlStr}`,
-        `🧳 SOL received: ${solReceived.toFixed(4)}`,
-        `📈 ${dexUrl}`,
-      ].join('\n'))
-
-    } else {
-      // ── DRY-RUN / no tokens — fetch current price for P&L estimate ──
-      const currentPriceUsd = await fetchCurrentPriceUsd(pos.mint)
-      let pnlSol    = 0
-      let pnlPct    = 0
-      let exitPrice = 0
-
-      if (currentPriceUsd > 0 && pos.entry_price_usd > 0) {
-        const mult   = currentPriceUsd / pos.entry_price_usd
-        pnlSol       = pos.amount_sol * (mult - 1)
-        pnlPct       = (mult - 1) * 100
-        exitPrice    = pos.entry_price_sol * mult
-      }
-
-      const pnlStr = pnlSol !== 0
-        ? `${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`
-        : 'n/a (price unavailable)'
-
-      await supabase.from('spot_positions').update({
-        status:         'closed_manual',
-        closed_at:      closedAt,
-        exit_price_sol: exitPrice,
-        pnl_sol:        pnlSol,
-        pnl_pct:        parseFloat(pnlPct.toFixed(2)),
-      }).eq('id', positionId)
-
-      await reply([
-        `✅ *CLOSED ${pos.symbol}* (dry-run / manual)`,
-        `💰 Est. PnL: ${pnlStr}`,
-        `📈 ${dexUrl}`,
-      ].join('\n'))
-    }
-  } catch (err) {
-    await reply(`❌ Close error: ${err instanceof Error ? err.message : String(err)}`)
-  }
-}
-
 async function handleStatus() {
   const supabase = createServerClient()
   const state    = await getBotState()
 
-  const [{ data: openSpot }, { data: openLp }] = await Promise.all([
-    supabase.from('spot_positions').select('id, symbol, amount_sol, opened_at').eq('status', 'open'),
-    supabase.from('lp_positions').select('id, symbol, sol_deposited, opened_at').in('status', ['active', 'out_of_range']),
-  ])
-
-  const spotLines = (openSpot ?? []).map(p => {
-    const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
-    return `  • ${p.symbol} — ${p.amount_sol.toFixed(3)} SOL | ${mins}min`
-  })
+  const { data: openLp } = await supabase
+    .from('lp_positions')
+    .select('id, symbol, sol_deposited, opened_at')
+    .in('status', ['active', 'out_of_range'])
 
   const lpLines = (openLp ?? []).map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min`
   })
 
-  const lines = [
+  await reply([
     `🤖 *Bot Status*`,
     `State: ${state.enabled ? '🟢 Running' : '🛑 Stopped'}`,
     `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
     ``,
-    `🎯 Spot Positions (${(openSpot ?? []).length})`,
-    ...(spotLines.length ? spotLines : ['  none']),
-    ``,
     `🏊 LP Positions (${(openLp ?? []).length})`,
     ...(lpLines.length ? lpLines : ['  none']),
-  ]
-
-  await reply(lines.join('\n'))
+  ].join('\n'))
 }
 
 async function handlePositions() {
@@ -412,46 +243,19 @@ async function handlePositions() {
   for (const p of data) {
     const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
     lines.push(
-      `• ${p.id.slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | pool=${(p.pool_address ?? 'n/a').slice(0, 8)}... | ${age}h`,
+      `• ${p.id.slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h`,
       `  /close ${p.id}`
     )
   }
   await reply(lines.join('\n'))
 }
 
-async function handleSpots() {
-  const supabase = createServerClient()
-  const { data } = await supabase
-    .from('spot_positions')
-    .select('id, symbol, amount_sol, opened_at')
-    .eq('status', 'open')
-    .order('opened_at', { ascending: false })
-
-  if (!data || data.length === 0) {
-    await reply('🎯 No open spot positions.')
-    return
-  }
-
-  const lines = [`🎯 *Open Spot Positions (${data.length})*`, ``]
-  for (const p of data) {
-    const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
-    lines.push(
-      `• ${p.id.slice(0, 8)} ${p.symbol} — ${p.amount_sol.toFixed(3)} SOL | ${age}h`,
-      `  /closespot ${p.id}`
-    )
-  }
-  await reply(lines.join('\n'))
-}
-
 async function handleTick() {
-  await reply('⏳ *Running all pipelines in parallel...*')
+  await reply('⏳ *Running scanner + monitor...*')
 
   const results = await Promise.all([
-    withTickTimeout(() => runScanner().then(r => typeof r === 'string' ? r : '✅ scanner done'), 'scanner'),
-    withTickTimeout(() => monitorPositions().then(r => typeof r === 'string' ? r : '✅ monitor done'), 'monitor'),
-    withTickTimeout(() => runPreGradScanner().then(r => typeof r === 'string' ? r : '✅ pre-grad-scanner done'), 'pre-grad-scanner'),
-    withTickTimeout(() => runSpotMonitor(), 'spot-monitor'),
-    withTickTimeout(() => runLpMigrator().then(r => typeof r === 'string' ? r : '✅ lp-migrator done'), 'lp-migrator'),
+    withTickTimeout(() => runScanner().then(() => '✅ scanner done'), 'scanner'),
+    withTickTimeout(() => monitorPositions().then(() => '✅ monitor done'), 'monitor'),
   ])
 
   await reply(['*Tick complete:*', ...results.map(r => `• ${r}`)].join('\n'))
@@ -461,45 +265,41 @@ async function handleHelp() {
   await reply([
     `*Meteoracle Bot Commands*`,
     ``,
-    `/stop — emergency stop (closes all positions, stops workers)`,
+    `/stop — emergency stop (closes all LP positions, stops workers)`,
     `/restart — resume all worker services`,
     `/dry — switch to dry-run mode`,
     `/live — switch to live trading`,
-    `/status — snapshot of bot state + open positions`,
+    `/status — snapshot of bot state + open LP positions`,
     `/positions — list all open LP positions`,
-    `/spots — list all open spot positions`,
     `/close <id> — force-close an LP position`,
-    `/closespot <id> — force-close a spot position`,
-    `/tick — manually trigger all pipelines`,
+    `/tick — manually trigger scanner + monitor`,
     `/help — this message`,
   ].join('\n'))
 }
 
-// ─── Main poll loop ────────────────────────────────────────────────────────────────────────────────────
+// ─── Main poll loop ───────────────────────────────────────────────────────────────────────────────────
 
 async function processUpdate(update: TelegramUpdate): Promise<void> {
-  const text = update.message?.text?.trim() ?? ''
+  const text   = update.message?.text?.trim() ?? ''
   const chatId = update.message?.chat?.id
 
   if (!text || String(chatId) !== CHAT_ID) return
 
   const [rawCmd, ...args] = text.split(/\s+/)
-  const cmd = rawCmd.toLowerCase().replace(/^\//,'')
+  const cmd = rawCmd.toLowerCase().replace(/^\//, '')
 
   console.log(`[telegram-bot] command: /${cmd}${args.length ? ' ' + args.join(' ') : ''}`)
 
   switch (cmd) {
-    case 'stop':      await handleStop();                break
-    case 'restart':   await handleRestart();             break
-    case 'dry':       await handleDry();                 break
-    case 'live':      await handleLive();                break
-    case 'close':     await handleClose(args[0] ?? '');  break
-    case 'closespot': await handleCloseSpot(args[0] ?? ''); break
-    case 'status':    await handleStatus();              break
-    case 'positions': await handlePositions();           break
-    case 'spots':     await handleSpots();               break
-    case 'tick':      await handleTick();                break
-    case 'help':      await handleHelp();                break
+    case 'stop':      await handleStop();               break
+    case 'restart':   await handleRestart();            break
+    case 'dry':       await handleDry();                break
+    case 'live':      await handleLive();               break
+    case 'close':     await handleClose(args[0] ?? ''); break
+    case 'status':    await handleStatus();             break
+    case 'positions': await handlePositions();          break
+    case 'tick':      await handleTick();               break
+    case 'help':      await handleHelp();               break
     default:
       await reply(`❌ Unknown command: /${cmd}. Send /help for the list.`)
   }
