@@ -14,6 +14,7 @@ import {
 import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
+import { swapTokenToSol } from '@/lib/swap'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 async function getDLMM() {
@@ -368,6 +369,17 @@ export async function closePosition(
       }
     } else {
       console.warn(`${label} position not found on-chain — may already be closed`)
+    }
+
+    // Swap any remaining token balance → SOL (no-op for SOL pools or zero balance)
+    try {
+      await swapTokenToSol(position.mint, label)
+    } catch (err) {
+      console.warn(`${label} token→SOL swap failed (continuing):`, err)
+      await supabase.from('bot_logs').insert({
+        level: 'warn', event: 'swap_token_to_sol_failed',
+        payload: { positionId, mint: position.mint, reason, error: err instanceof Error ? err.message : String(err) },
+      })
     }
 
     await markPositionClosed(positionId, feesClaimedSol, reason)
