@@ -1,21 +1,16 @@
 interface SpotKPIBarProps {
-  solDeployed:    number
-  openPositions:  number
-  totalPnlSol:    number
-  winRate:        number | null
-  totalTrades:    number
+  solDeployed:   number
+  openPositions: number
+  winRate:       number | null
+  totalTrades:   number
 }
 
 export function SpotKPIBar({
   solDeployed,
   openPositions,
-  totalPnlSol,
   winRate,
   totalTrades,
 }: SpotKPIBarProps) {
-  const pnlColor = totalPnlSol >= 0 ? 'text-green-400' : 'text-red-400'
-  const pnlSign  = totalPnlSol >= 0 ? '+' : ''
-
   const cards = [
     {
       label: 'SOL Deployed',
@@ -24,16 +19,16 @@ export function SpotKPIBar({
       color: 'text-white',
     },
     {
-      label: 'Total P&L',
-      value: `${pnlSign}${totalPnlSol.toFixed(4)} SOL`,
-      sub:   `${totalTrades} closed trades`,
-      color: pnlColor,
-    },
-    {
       label: 'Win Rate',
       value: winRate !== null ? `${winRate}%` : '—',
-      sub:   `${totalTrades} trades`,
+      sub:   `${totalTrades} closed trades`,
       color: winRate !== null && winRate >= 50 ? 'text-green-400' : 'text-yellow-400',
+    },
+    {
+      label: 'Total Trades',
+      value: String(totalTrades),
+      sub:   'closed positions',
+      color: 'text-zinc-300',
     },
   ]
 
