@@ -38,6 +38,7 @@ const CHEAP_FILTER = {
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
+const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?? '0.05')
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const WSOL = 'So11111111111111111111111111111111111111112'
 const SUPABASE_TIMEOUT_MS = 10_000
@@ -276,7 +277,7 @@ export async function runScanner(): Promise<{
       const positionId = await openPosition(metrics, strategy)
       if (positionId) {
         openedCount++
-        await sendAlert({ type: 'position_opened', symbol, strategy: strategy.id, solDeposited: strategy.position.maxSolPerPosition, entryPrice: metrics.priceUsd, positionId })
+        await sendAlert({ type: 'position_opened', symbol, strategy: strategy.id, solDeposited: MAX_SOL_PER_POSITION, entryPrice: metrics.priceUsd, positionId })
       }
     }
   }
