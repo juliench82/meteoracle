@@ -2,11 +2,11 @@ import type { Strategy } from '@/lib/types'
 
 /**
  * Evil Panda Strategy
- * Wide-range (−80% to +20%) fee farming on fresh low-cap memecoins.
- * Assumes the token WILL dump. Earns fees as price falls through the range.
+ * Wide-range (−70% / +180%) bid-ask fee farming on fresh low-cap memecoins.
+ * Bid-ask distribution maximises fees on pumps — SOL auto-sells into token on moons.
  * Single-sided SOL deposit below current price.
  *
- * Tier: SHITCOIN — MC < $5M, age < 120h
+ * Tier: MEME_SHITCOIN — age < 48h OR mc < $3M OR vol1h/liq > 5% OR top10holders > 35%
  * Profile: HIGH risk / fee-only yield / SHORT-MEDIUM duration
  *
  * Credit: @tendorian9 on X
@@ -15,35 +15,37 @@ export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
   name: 'Evil Panda',
   description:
-    'Wide-range memecoin fee farming. Deploys single-sided SOL into −80% to +20% ranges on fresh low-cap pairs. Holds through the dump, earns fees, exits when volume dies.',
+    'Wide-range memecoin fee farming. Bid-ask distribution, 100% single-sided SOL. ' +
+    '−70% / +180% range captures dumps and moons, auto-sells SOL into token on pumps. ' +
+    'Exits when volume dies or profit target hits.',
   enabled: true,
 
   filters: {
     minMcUsd:             50_000,
-    maxMcUsd:          5_000_000, // shitcoins only — above this goes to scalp-spike or stable-farm
+    maxMcUsd:          5_000_000,
     minVolume24h:         40_000,
     minLiquidityUsd:      20_000,
     maxTopHolderPct:          25,
     minHolderCount:          200,
-    maxAgeHours:             120, // fresh launches only
+    maxAgeHours:             120,
     minRugcheckScore:         40,
     requireSocialSignal:   false,
   },
 
   position: {
     binStep:              100,
-    rangeDownPct:         -80,
-    rangeUpPct:            20,
-    distributionType:  'spot',
-    solBias:              0.8,
-    maxSolPerPosition:    0.05, // debug cap — increase once stable
+    rangeDownPct:         -70,   // stays in range on hard dumps
+    rangeUpPct:           180,   // auto-sells SOL into token on moons
+    distributionType: 'bid-ask', // fees explode on pumps
+    solBias:              1.0,   // 100% single-sided SOL
+    maxSolPerPosition:    0.05,  // debug cap — increase once stable
   },
 
   exits: {
-    stopLossPct:           -90, // only exit if near-zero — range is designed to hold through dumps
-    takeProfitPct:         300,
-    outOfRangeMinutes:     120, // 2h OOR before exit
-    maxDurationHours:       48,
+    stopLossPct:           -90,
+    takeProfitPct:          60,  // withdraw + redeposit on big winner
+    outOfRangeMinutes:     120,
+    maxDurationHours:      168,  // 7 days
     claimFeesBeforeClose:  true,
     minFeesToClaim:       0.001,
   },
