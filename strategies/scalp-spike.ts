@@ -41,7 +41,7 @@ export const scalpSpikeStrategy: Strategy = {
   exits: {
     stopLossPct:           -30,
     takeProfitPct:         100,
-    outOfRangeMinutes:      30,
+    outOfRangeMinutes:      30,  // already tight — unchanged
     maxDurationHours:       12,
     claimFeesBeforeClose:  true,
     minFeesToClaim:       0.0005,

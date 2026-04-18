@@ -45,7 +45,7 @@ export const evilPandaStrategy: Strategy = {
   exits: {
     stopLossPct:           -90,
     takeProfitPct:          60,  // withdraw + redeposit on big winner
-    outOfRangeMinutes:     120,
+    outOfRangeMinutes:      60,  // tightened from 120
     maxDurationHours:      168,  // 7 days
     claimFeesBeforeClose:  true,
     minFeesToClaim:       0.001,

@@ -47,7 +47,6 @@ export const stableFarmStrategy: Strategy = {
     binStep: 5,
 
     // Tight range: ±10% around current price
-    // For stables this is wide enough; for SOL/USDC adjust dynamically
     rangeDownPct: -10,
     rangeUpPct: 10,
 
@@ -68,8 +67,8 @@ export const stableFarmStrategy: Strategy = {
     // No rush to take profit — compound fees over time
     takeProfitPct: 500,
 
-    // More tolerant of OOR — rebalance after 4h not 30min
-    outOfRangeMinutes: 240,
+    // Tightened from 240 — rebalance after 60min OOR
+    outOfRangeMinutes: 60,
 
     // Long duration — this is a farming strategy, not a trade
     maxDurationHours: 168, // 7 days

@@ -1,9 +1,11 @@
 import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { closePosition } from '@/bot/executor'
+import { closePosition, openPosition } from '@/bot/executor'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
+import { STRATEGIES } from '@/strategies'
+import type { TokenMetrics } from '@/lib/types'
 import axios from 'axios'
 
 export const dynamic = 'force-dynamic'
@@ -124,30 +126,108 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true })
       }
       await reply(chatId, `⏳ Closing position \`${positionId}\`...`)
+      const supabase = createServerClient()
+      const { data: pos, error } = await supabase
+        .from('lp_positions')
+        .select('id, symbol, status')
+        .eq('id', positionId)
+        .single()
+      if (error || !pos) {
+        await reply(chatId, `❌ Position \`${positionId}\` not found.`)
+        return NextResponse.json({ ok: true })
+      }
+      if (pos.status === 'closed') {
+        await reply(chatId, `ℹ️ Position \`${positionId}\` (${pos.symbol}) is already closed.`)
+        return NextResponse.json({ ok: true })
+      }
+      let closeOk = false
+      let closeErr = ''
       try {
-        const supabase = createServerClient()
-        const { data: pos, error } = await supabase
-          .from('lp_positions')
-          .select('id, symbol, status')
-          .eq('id', positionId)
-          .single()
-        if (error || !pos) {
-          await reply(chatId, `❌ Position \`${positionId}\` not found.`)
-          return NextResponse.json({ ok: true })
-        }
-        if (pos.status === 'closed') {
-          await reply(chatId, `ℹ️ Position \`${positionId}\` (${pos.symbol}) is already closed.`)
-          return NextResponse.json({ ok: true })
-        }
-        const ok = await closePosition(positionId, 'manual_telegram')
-        if (ok) {
-          await reply(chatId, `✅ Position \`${positionId}\` (${pos.symbol}) closed successfully.`)
-        } else {
-          await reply(chatId, `❌ Failed to close \`${positionId}\` — check logs.`)
-        }
+        closeOk = await closePosition(positionId, 'manual_telegram')
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        await reply(chatId, `❌ Close error: ${msg}`)
+        closeErr = err instanceof Error ? err.message : String(err)
+      }
+      if (closeOk) {
+        await reply(chatId, `✅ Position \`${positionId}\` (${pos.symbol}) closed successfully.`)
+      } else {
+        const detail = closeErr ? `: ${closeErr}` : ' — check logs'
+        await reply(chatId, `❌ Failed to close \`${positionId}\` (${pos.symbol})${detail}`)
+      }
+      return NextResponse.json({ ok: true })
+    }
+
+    // --------------------------------------------------------------- /rebalance
+    if (command === '/rebalance') {
+      const positionId = parts[1]
+      if (!positionId) {
+        await reply(chatId, '❌ Usage: `/rebalance <position_id>`')
+        return NextResponse.json({ ok: true })
+      }
+      await reply(chatId, `⏳ Rebalancing position \`${positionId}\`...`)
+      const supabase = createServerClient()
+      const { data: pos, error } = await supabase
+        .from('lp_positions')
+        .select('*')
+        .eq('id', positionId)
+        .single()
+      if (error || !pos) {
+        await reply(chatId, `❌ Position \`${positionId}\` not found.`)
+        return NextResponse.json({ ok: true })
+      }
+      if (pos.status === 'closed') {
+        await reply(chatId, `ℹ️ Position \`${positionId}\` (${pos.symbol}) is already closed.`)
+        return NextResponse.json({ ok: true })
+      }
+      const strategyId = pos.strategy_id ?? pos.metadata?.strategy_id
+      const strategy = STRATEGIES.find((s) => s.id === strategyId)
+      if (!strategy) {
+        await reply(chatId, `❌ Strategy \`${strategyId}\` not found for position \`${positionId}\`.`)
+        return NextResponse.json({ ok: true })
+      }
+      let closeOk = false
+      let closeErr = ''
+      try {
+        closeOk = await closePosition(positionId, 'manual_rebalance')
+      } catch (err) {
+        closeErr = err instanceof Error ? err.message : String(err)
+      }
+      if (!closeOk) {
+        const detail = closeErr ? `: ${closeErr}` : ' — check logs'
+        await reply(chatId, `❌ Rebalance: failed to close \`${positionId}\` (${pos.symbol})${detail}`)
+        return NextResponse.json({ ok: true })
+      }
+      // Reopen centered at current price using the same strategy
+      let reopenId: string | null = null
+      let reopenErr = ''
+      try {
+        const metrics: TokenMetrics = {
+          address:       pos.mint,
+          symbol:        pos.symbol,
+          poolAddress:   pos.pool_address,
+          priceUsd:      pos.current_price ?? pos.entry_price_sol ?? 0,
+          dexId:         pos.metadata?.dexId ?? 'meteora',
+          mcUsd:         0,
+          volume24h:     0,
+          liquidityUsd:  0,
+          topHolderPct:  0,
+          holderCount:   0,
+          ageHours:      0,
+          rugcheckScore: 0,
+          feeTvl24hPct:  0, // scorer re-evaluates live pool against strategy.filters.minFeeTvl24hPct
+        }
+        reopenId = await openPosition(metrics, strategy)
+      } catch (err) {
+        reopenErr = err instanceof Error ? err.message : String(err)
+      }
+      if (reopenId) {
+        await reply(chatId, [
+          `✅ *Rebalance complete* for ${pos.symbol}`,
+          `Old: \`${positionId}\` closed`,
+          `New: \`${reopenId}\` opened centered at current price`,
+        ].join('\n'))
+      } else {
+        const detail = reopenErr ? `: ${reopenErr}` : ' — check logs'
+        await reply(chatId, `⚠️ Position \`${positionId}\` closed but reopen failed${detail}`)
       }
       return NextResponse.json({ ok: true })
     }
@@ -273,7 +353,8 @@ export async function POST(req: Request) {
         `/tick    — run scan + monitor together`,
         ``,
         `*Positions*`,
-        `/close <id> — manually force-close a position`,
+        `/close <id>     — manually force-close a position`,
+        `/rebalance <id> — close + reopen centered at current price`,
         ``,
         `*Control*`,
         `/stop    — pause all scanning & monitoring`,
