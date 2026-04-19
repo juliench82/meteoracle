@@ -35,6 +35,12 @@ const CHEAP_FILTER = {
   maxAgeHours:     999_999,
 }
 
+// Max tokens to run deep (Helius) checks on per tick — sorted by feeTvl24hPct descending
+const MAX_DEEP_CHECKS = parseInt(process.env.MAX_DEEP_CHECKS ?? '20')
+
+// Inter-token delay between deep checks to pace Helius calls
+const DEEP_CHECK_DELAY_MS = 1_500
+
 // Best-pool selection constants
 const POOL_MIN_TVL_USD      = 20_000
 // Bin-step preference score: lower step = tighter range = more fees captured
@@ -166,7 +172,6 @@ export async function runScanner(): Promise<{
   for (const pool of pools) {
     const isXSol = pool.token_x.address === WSOL
     const token = isXSol ? pool.token_y : pool.token_x
-    const symbol = pool.name ?? token.symbol
     const vol24h = pool.volume['24h']
     const liqUsd = pool.tvl
     const mcUsd = token.market_cap ?? 0
@@ -187,13 +192,19 @@ export async function runScanner(): Promise<{
     }
   }
 
-  const survivors = Array.from(mintBestMap.values())
-  console.log(`[scanner] step 2/4 — ${survivors.length} unique tokens passed cheap filter (from ${pools.length} pools)`)
+  const allSurvivors = Array.from(mintBestMap.values())
+  console.log(`[scanner] step 2/4 — ${allSurvivors.length} unique tokens passed cheap filter (from ${pools.length} pools)`)
 
-  if (survivors.length === 0) {
+  if (allSurvivors.length === 0) {
     console.log('[scanner] done — no survivors')
     return { scanned: pools.length, candidates: 0, opened: 0 }
   }
+
+  // Cap deep checks: sort by feeTvl24hPct desc, take top MAX_DEEP_CHECKS
+  // This is the primary lever against Helius 429s — cuts load ~70% per tick
+  const survivors = allSurvivors
+    .sort((a, b) => (b.pool.fee_tvl_ratio['24h'] ?? 0) - (a.pool.fee_tvl_ratio['24h'] ?? 0))
+    .slice(0, MAX_DEEP_CHECKS)
 
   console.log('[scanner] step 3/4 — Supabase dedup check')
   const supabase = createServerClient()
@@ -208,7 +219,7 @@ export async function runScanner(): Promise<{
     return { scanned: pools.length, candidates: 0, opened: 0 }
   }
 
-  console.log('[scanner] step 4/4 — deep checks on survivors')
+  console.log(`[scanner] step 4/4 — deep checks on ${survivors.length} top survivors (capped from ${allSurvivors.length})`)
   let candidateCount = 0
   let openedCount = 0
 
@@ -264,7 +275,7 @@ export async function runScanner(): Promise<{
     ])
 
     let holderCount = holderData.holderCount
-    let topHolderPct = holderData.topHolderPct
+    const topHolderPct = holderData.topHolderPct
     if (!holderData.reliable) {
       const mh = token.holders ?? 0
       if (mh > holderCount) holderCount = mh
@@ -299,7 +310,7 @@ export async function runScanner(): Promise<{
       ageHours,
       rugcheckScore: rugScore,
       priceUsd:     token.price,
-      poolAddress:  bestPool.address,   // <-- best pool, not representative
+      poolAddress:  bestPool.address,
       dexId:        'meteora',
       feeTvl24hPct,
       bondingCurvePct,
@@ -320,7 +331,8 @@ export async function runScanner(): Promise<{
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
       console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}): ${explainNoStrategy(metrics)}`)
-      await new Promise(r => setTimeout(r, 800))
+      // no sleep here — the guaranteed delay at the bottom of the loop handles pacing
+      await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
       continue
     }
 
@@ -357,10 +369,11 @@ export async function runScanner(): Promise<{
       }
     }
 
-    await new Promise(r => setTimeout(r, 800))
+    // Guaranteed inter-token delay on every path — paces Helius calls
+    await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
   }
 
-  console.log(`[scanner] done — scanned: ${pools.length}, survivors: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
+  console.log(`[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
   return { scanned: pools.length, candidates: candidateCount, opened: openedCount }
 }
 

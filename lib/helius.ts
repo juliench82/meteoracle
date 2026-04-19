@@ -3,7 +3,7 @@ import axios from 'axios'
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
 const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1')
 
-const HOLDER_CACHE_TTL_MS = 30 * 60 * 1_000
+const HOLDER_CACHE_TTL_MS = 60 * 60 * 1_000  // 60min — was 30min
 const _holderCache = new Map<string, { data: HolderData; ts: number }>()
 
 export interface HolderData {
@@ -29,7 +29,7 @@ class RateLimiter {
   }
 }
 
-// Single limiter — DAS only now. 1/s vs Helius 2/s hard limit.
+// 1/s vs Helius 2/s hard limit — conservative headroom
 const dasLimiter = new RateLimiter(1)
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -64,9 +64,10 @@ async function fetchDasHolderCount(
   let total = 0
   for (let page = 1; page <= maxPages; page++) {
     let res
-    for (let attempt = 0; attempt < 6; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      // acquire() is OUTSIDE try so it gates retries too, not just first attempts
+      await dasLimiter.acquire()
       try {
-        await dasLimiter.acquire()   // blocks until we're under 1 req/s
         res = await axios.post(
           HELIUS_RPC_URL,
           {
@@ -86,6 +87,10 @@ async function fetchDasHolderCount(
           throw err
         }
       }
+    }
+    if (!res) {
+      console.warn(`[helius] ${mint} — getTokenAccounts exhausted retries, returning null`)
+      return null
     }
     const accounts: unknown[] = (res?.data?.result?.token_accounts as unknown[]) ?? []
     total += accounts.length
