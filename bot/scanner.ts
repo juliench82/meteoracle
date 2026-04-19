@@ -24,16 +24,17 @@ const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 const PRE_FILTER = {
   minVolume24hUsd: 10_000,
   minLiquidityUsd: 20_000,
-  maxLiquidityUsd: 500_000_000, // raised: allow deep Stable Farm pools
-  maxAgeHours:     999_999,     // no age cap here — strategies enforce their own
+  maxLiquidityUsd: 500_000_000,
+  maxAgeHours:     999_999,
 }
 
 const CHEAP_FILTER = {
-  minMcUsd:     50_000,
-  maxMcUsd: 500_000_000, // raised: allow large-cap tokens for Stable Farm
-  minVol24h:    10_000,  // lowered: pre-filter already gates on 10k, avoid double-filtering
-  minLiqUsd:    20_000,
-  maxAgeHours:  999_999, // no age cap — strategies enforce their own
+  minMcUsd:        50_000,
+  maxMcUsd:     500_000_000,
+  minVol24h:        10_000,
+  minLiqUsd:        20_000,
+  minFeeTvl24hPct:       3, // skip low-fee pools before hitting Helius/Rugcheck
+  maxAgeHours:     999_999,
 }
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
@@ -47,6 +48,10 @@ const METEORA_FETCH_TIMEOUT_MS = 45_000
 // Orphan detector: run at most once every 4 hours to avoid Helius 429s
 const ORPHAN_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1_000
 let _lastOrphanCheck = 0
+
+// Bonding curve TTL cache: avoid redundant Helius RPC calls within 10 min
+const _bondingCurveCache = new Map<string, { pct: number; ts: number }>()
+const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
 
 interface MeteoraPool {
   address: string; name: string; created_at: number; tvl: number; current_price: number
@@ -128,22 +133,24 @@ export async function runScanner(): Promise<{
   const survivors: Array<{ pool: MeteoraPool; mcUsd: number; ageHours: number }> = []
 
   for (const pool of pools) {
-    const isXSol   = pool.token_x.address === WSOL
-    const token    = isXSol ? pool.token_y : pool.token_x
-    const symbol   = pool.name ?? token.symbol
-    const vol24h   = pool.volume['24h']
-    const liqUsd   = pool.tvl
-    const mcUsd    = token.market_cap ?? 0
-    const ageHours = pool.created_at
+    const isXSol      = pool.token_x.address === WSOL
+    const token       = isXSol ? pool.token_y : pool.token_x
+    const symbol      = pool.name ?? token.symbol
+    const vol24h      = pool.volume['24h']
+    const liqUsd      = pool.tvl
+    const mcUsd       = token.market_cap ?? 0
+    const feeTvl24h   = pool.fee_tvl_ratio['24h'] * 100
+    const ageHours    = pool.created_at
       ? (Date.now() / 1000 - toUnixSeconds(pool.created_at)) / 3600
       : 0
 
-    if (mcUsd    < CHEAP_FILTER.minMcUsd)  { console.log(`[scanner] ${symbol} — skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
-    if (mcUsd    > CHEAP_FILTER.maxMcUsd)  { console.log(`[scanner] ${symbol} — skip: mc too high`); continue }
-    if (vol24h   < CHEAP_FILTER.minVol24h) { console.log(`[scanner] ${symbol} — skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
-    if (liqUsd   < CHEAP_FILTER.minLiqUsd) { console.log(`[scanner] ${symbol} — skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
+    if (mcUsd    < CHEAP_FILTER.minMcUsd)         { console.log(`[scanner] ${symbol} — skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
+    if (mcUsd    > CHEAP_FILTER.maxMcUsd)         { console.log(`[scanner] ${symbol} — skip: mc too high`); continue }
+    if (vol24h   < CHEAP_FILTER.minVol24h)        { console.log(`[scanner] ${symbol} — skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
+    if (liqUsd   < CHEAP_FILTER.minLiqUsd)        { console.log(`[scanner] ${symbol} — skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
+    if (feeTvl24h < CHEAP_FILTER.minFeeTvl24hPct) { console.log(`[scanner] ${symbol} — skip: feeTvl=${feeTvl24h.toFixed(2)}% < ${CHEAP_FILTER.minFeeTvl24hPct}%`); continue }
 
-    console.log(`[scanner] ${symbol} — passed cheap filter (mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, liq=$${liqUsd.toFixed(0)}, age=${ageHours.toFixed(1)}h)`)
+    console.log(`[scanner] ${symbol} — passed cheap filter (mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, liq=$${liqUsd.toFixed(0)}, feeTvl=${feeTvl24h.toFixed(2)}%, age=${ageHours.toFixed(1)}h)`)
     survivors.push({ pool, mcUsd, ageHours })
   }
   console.log(`[scanner] step 2/4 — ${survivors.length}/${pools.length} passed cheap filter`)
@@ -219,12 +226,20 @@ export async function runScanner(): Promise<{
 
     // Only fetch bonding curve for pump.fun tokens young enough to still be graduating.
     // Tokens older than 48h are already fully graduated — skip the RPC call.
+    // TTL cache: avoid redundant Helius calls within 10 min for the same token.
     let bondingCurvePct: number | undefined = undefined
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
-      const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
-      bondingCurvePct = curve?.progressPct ?? undefined
-      if (bondingCurvePct !== undefined) {
-        console.log(`[pumpfun] ${symbol} bonding curve: ${bondingCurvePct.toFixed(1)}% (complete=${curve?.complete})`)
+      const cached = _bondingCurveCache.get(tokenAddress)
+      if (cached && Date.now() - cached.ts < BONDING_CACHE_TTL_MS) {
+        bondingCurvePct = cached.pct
+        console.log(`[pumpfun] ${symbol} bonding curve (cached): ${bondingCurvePct.toFixed(1)}%`)
+      } else {
+        const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
+        bondingCurvePct = curve?.progressPct ?? undefined
+        if (bondingCurvePct !== undefined) {
+          _bondingCurveCache.set(tokenAddress, { pct: bondingCurvePct, ts: Date.now() })
+          console.log(`[pumpfun] ${symbol} bonding curve: ${bondingCurvePct.toFixed(1)}% (complete=${curve?.complete})`)
+        }
       }
     }
 
@@ -253,7 +268,6 @@ export async function runScanner(): Promise<{
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
       console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}): ${explainNoStrategy(metrics)}`)
-      // throttle between survivors to avoid Helius burst 429s
       await new Promise(r => setTimeout(r, 300))
       continue
     }
@@ -309,7 +323,6 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
 }
 
 async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPool[]> {
-  // Fetch up to 3 pages to surface large-cap pools buried by volume sort
   const allPools: MeteoraPool[] = []
   for (let page = 1; page <= 3; page++) {
     try {
@@ -319,7 +332,7 @@ async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPo
       })
       const data = res.data?.data ?? []
       allPools.push(...data)
-      if (data.length < 1000) break // last page
+      if (data.length < 1000) break
     } catch {
       break
     }
