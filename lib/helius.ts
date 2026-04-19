@@ -7,6 +7,10 @@ const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
 // Override with HELIUS_HOLDER_MAX_PAGES env var.
 const DAS_MAX_PAGES = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '3')
 
+// In-memory cache: avoid re-fetching holder data for repeat survivors within 30min
+const HOLDER_CACHE_TTL_MS = 30 * 60 * 1_000
+const _holderCache = new Map<string, { data: HolderData; ts: number }>()
+
 function heliusDasUrl(): string {
   try {
     const url = new URL(HELIUS_RPC_URL)
@@ -23,6 +27,12 @@ export interface HolderData {
 }
 
 export async function checkHolders(mintAddress: string): Promise<HolderData> {
+  const cached = _holderCache.get(mintAddress)
+  if (cached && Date.now() - cached.ts < HOLDER_CACHE_TTL_MS) {
+    console.log(`[helius] ${mintAddress} — holder data from cache (age=${Math.round((Date.now() - cached.ts) / 60_000)}min)`)
+    return cached.data
+  }
+
   const PAGE_SIZE = 1000
 
   const [rpcResult, dasResult] = await Promise.allSettled([
@@ -40,19 +50,27 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
       rpcResult.status === 'rejected' ? rpcResult.reason : 'no data')
   }
 
+  let result: HolderData
+
   if (dasResult.status === 'fulfilled' && dasResult.value !== null) {
     const holderCount = dasResult.value
     console.log(`[helius] ${mintAddress} — ${holderCount} holders (fully paginated)`)
-    return { holderCount, topHolderPct, reliable: true }
+    result = { holderCount, topHolderPct, reliable: true }
+  } else {
+    console.warn(`[helius] DAS failed for ${mintAddress}; using heuristic`)
+    if (rpcAccounts.length > 0) {
+      result = { holderCount: rpcAccounts.length * 50, topHolderPct, reliable: false }
+    } else {
+      result = { holderCount: 0, topHolderPct: 0, reliable: false }
+    }
   }
 
-  console.warn(`[helius] DAS failed for ${mintAddress}; using heuristic`)
-
-  if (rpcAccounts.length > 0) {
-    return { holderCount: rpcAccounts.length * 50, topHolderPct, reliable: false }
+  // Only cache reliable results — don't cache 0-holder fallbacks
+  if (result.reliable) {
+    _holderCache.set(mintAddress, { data: result, ts: Date.now() })
   }
 
-  return { holderCount: 0, topHolderPct: 0, reliable: false }
+  return result
 }
 
 async function fetchTopAccountsAndSupply(mint: string): Promise<{
