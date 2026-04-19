@@ -26,11 +26,11 @@ export const evilPandaStrategy: Strategy = {
     minVolume24h:         40_000,
     minLiquidityUsd:      20_000,
     maxTopHolderPct:          25,
-    minHolderCount:          200,
+    minHolderCount:          100,  // lowered from 200 — fresh memes won't have 200 holders fast
     maxAgeHours:             120,
-    minRugcheckScore:         40,
+    minRugcheckScore:         25,  // lowered from 40 — Solana meme tokens routinely score 15-30
     requireSocialSignal:   false,
-    minFeeTvl24hPct:          35, // must be screaming hot or we skip
+    minFeeTvl24hPct:          15,  // lowered from 35 — 35% was unrealistic as a floor
   },
 
   position: {

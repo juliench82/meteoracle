@@ -19,11 +19,11 @@ export const scalpSpikeStrategy: Strategy = {
   filters: {
     minMcUsd:          5_000_000, // established only — no fresh shitcoins
     maxMcUsd:         50_000_000,
-    minVolume24h:        500_000,
+    minVolume24h:        200_000,  // lowered from 500_000
     minLiquidityUsd:      30_000,
-    maxTopHolderPct:          10,
-    minHolderCount:          500, // raised from 300 — more established community
-    maxAgeHours:             120, // up to 5 days old
+    maxTopHolderPct:          30,  // raised from 10 — 10% is near-impossible on Solana
+    minHolderCount:          300,  // lowered from 500
+    maxAgeHours:             120,  // up to 5 days old
     minRugcheckScore:         65,
     requireSocialSignal:   false,
     minFeeTvl24hPct:          15,

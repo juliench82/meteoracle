@@ -30,7 +30,7 @@ export const STRATEGIES: Strategy[] = [
  * UNKNOWN        — doesn't cleanly fit any class → no position opened
  *
  * Criteria:
- *   MEME_SHITCOIN : ANY TWO of: pool_age < 24h, mcap < $3M, vol1h/liq > 5%, top10holders > 35%
+ *   MEME_SHITCOIN : ANY TWO of: pool_age < 48h, mcap < $3M, vol1h/liq > 5%, top10holders > 35%
  *   SCALP_SPIKE   : 48h < age < 30d  AND  $3M < mc < $20M  AND  vol1h/liq <= 5%
  *   BLUECHIP      : age > 30d  AND  mc > $20M  AND  top10holders < 25%
  *   STABLE        : mint is USDC/USDT  OR  both tokens in pair are stables
@@ -67,11 +67,10 @@ export function classifyToken(token: {
   const vol1h    = token.volume1h ?? (token.volume24h / 24)
   const vol1hLiq = liquidityUsd > 0 ? vol1h / liquidityUsd : 0
 
-  // MEME_SHITCOIN: require ANY TWO conditions (not greedy OR-1)
-  // fresh post-grad capture window: age < 24h catches immediate post-graduation pools
-  // alongside small-cap, vol spike, or concentrated holder signals.
+  // MEME_SHITCOIN: require ANY TWO conditions
+  // age < 48h extended from 24h to close the 24-48h UNKNOWN gap
   let memeCount = 0
-  if (ageHours     <  24)        memeCount++ // fresh post-grad capture window
+  if (ageHours     <  48)        memeCount++ // extended from 24h — was dropping 24-48h tokens into UNKNOWN
   if (mcUsd        <  3_000_000) memeCount++
   if (vol1hLiq     >  0.05)      memeCount++
   if (topHolderPct >  35)        memeCount++
