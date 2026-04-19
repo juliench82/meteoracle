@@ -3,9 +3,9 @@ import axios from 'axios'
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
 
 // Full pagination: fetch all pages until exhausted.
-// Each page = 1000 accounts. Cap at 20 pages (20k holders) to avoid runaway calls.
+// Each page = 1000 accounts. Cap at 3 pages (3k holders) to avoid runaway calls.
 // Override with HELIUS_HOLDER_MAX_PAGES env var.
-const DAS_MAX_PAGES = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '20')
+const DAS_MAX_PAGES = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '3')
 
 function heliusDasUrl(): string {
   try {
@@ -82,26 +82,40 @@ async function fetchDasHolderCount(
   let page  = 1
 
   while (page <= maxPages) {
-    const res = await axios.post(
-      HELIUS_RPC_URL,
-      {
-        jsonrpc: '2.0',
-        id:      `das-${page}`,
-        method:  'getTokenAccounts',
-        params:  {
-          mint,
-          limit:   pageSize,
-          page,
-          options: { showZeroBalance: false },
-        },
-      },
-      { timeout: 12_000 },
-    )
+    let res
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        res = await axios.post(
+          HELIUS_RPC_URL,
+          {
+            jsonrpc: '2.0',
+            id:      `das-${page}`,
+            method:  'getTokenAccounts',
+            params:  {
+              mint,
+              limit:   pageSize,
+              page,
+              options: { showZeroBalance: false },
+            },
+          },
+          { timeout: 12_000 },
+        )
+        break
+      } catch (err: unknown) {
+        const status = (err as { response?: { status?: number } })?.response?.status
+        if (status === 429 && attempt < 2) {
+          const delay = 1_000 * 2 ** attempt
+          console.warn(`[helius] 429 on getTokenAccounts page ${page}, retry ${attempt + 1} in ${delay}ms`)
+          await new Promise(r => setTimeout(r, delay))
+        } else {
+          throw err
+        }
+      }
+    }
 
-    const tokenAccounts: unknown[] = res.data?.result?.token_accounts ?? []
+    const tokenAccounts: unknown[] = res?.data?.result?.token_accounts ?? []
     total += tokenAccounts.length
 
-    // If we got fewer than a full page, we've reached the end
     if (tokenAccounts.length < pageSize) break
     page++
   }
@@ -113,11 +127,24 @@ async function fetchDasHolderCount(
   return total > 0 ? total : null
 }
 
-async function rpcCall(method: string, params: unknown[]) {
-  const res = await axios.post(
-    HELIUS_RPC_URL,
-    { jsonrpc: '2.0', id: 1, method, params },
-    { timeout: 8_000 },
-  )
-  return res.data?.result
+async function rpcCall(method: string, params: unknown[], retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await axios.post(
+        HELIUS_RPC_URL,
+        { jsonrpc: '2.0', id: 1, method, params },
+        { timeout: 8_000 },
+      )
+      return res.data?.result
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      if (status === 429 && i < retries - 1) {
+        const delay = 1_000 * 2 ** i
+        console.warn(`[helius] 429 on ${method}, retry ${i + 1} in ${delay}ms`)
+        await new Promise(r => setTimeout(r, delay))
+      } else {
+        throw err
+      }
+    }
+  }
 }

@@ -257,7 +257,7 @@ export async function runScanner(): Promise<{
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
       console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}): ${explainNoStrategy(metrics)}`)
-      await new Promise(r => setTimeout(r, 300))
+      await new Promise(r => setTimeout(r, 800))
       continue
     }
 
@@ -294,7 +294,7 @@ export async function runScanner(): Promise<{
       }
     }
 
-    await new Promise(r => setTimeout(r, 300))
+    await new Promise(r => setTimeout(r, 800))
   }
 
   console.log(`[scanner] done — scanned: ${pools.length}, survivors: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
