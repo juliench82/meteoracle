@@ -13,7 +13,6 @@ export interface HolderData {
 }
 
 // ── Rate limiters ─────────────────────────────────────────────────────────────
-// Conservative vs Helius hard limits: DAS=2/s → we use 1/s; RPC=10/s → we use 8/s
 class RateLimiter {
   private window: number[] = []
   constructor(private maxPerSecond: number) {}
@@ -41,10 +40,16 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
     return cached.data
   }
 
-  const [dasResult, rpcResult] = await Promise.allSettled([
-    fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES),
-    fetchTopAccountsAndSupply(mintAddress),
-  ])
+  // Fully sequential — DAS completes before RPC starts, no concurrent Helius requests
+  console.log(`[helius:req] ${mintAddress} — starting DAS @ ${Date.now()}`)
+  const dasResult = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES)
+    .then(v  => ({ status: 'fulfilled' as const, value: v }))
+    .catch(e => ({ status: 'rejected'  as const, reason: e }))
+
+  console.log(`[helius:req] ${mintAddress} — starting RPC @ ${Date.now()}`)
+  const rpcResult = await fetchTopAccountsAndSupply(mintAddress)
+    .then(v  => ({ status: 'fulfilled' as const, value: v }))
+    .catch(e => ({ status: 'rejected'  as const, reason: e }))
 
   let topHolderPct = 0
   let rpcAccounts: Array<{ uiAmount: number | null }> = []
@@ -73,7 +78,6 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
   accounts:     Array<{ uiAmount: number | null }>
   topHolderPct: number
 } | null> {
-  // Sequential — not Promise.all — to avoid saturating Helius burst window
   const largestRes = await rpcCall('getTokenLargestAccounts', [mint])
   const supplyRes  = await rpcCall('getTokenSupply',          [mint])
 
@@ -144,7 +148,6 @@ async function rpcCall(method: string, params: unknown[], retries = 5): Promise<
         const delay = 1_500 * 2 ** i + Math.random() * 500
         console.warn(`[helius] 429 on ${method}, retry ${i + 1} in ${Math.round(delay)}ms`)
         await new Promise(r => setTimeout(r, delay))
-        // intentionally no throw — continue loop
       } else {
         throw err
       }
