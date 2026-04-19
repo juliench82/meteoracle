@@ -44,6 +44,10 @@ const WSOL = 'So11111111111111111111111111111111111111112'
 const SUPABASE_TIMEOUT_MS = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 
+// Orphan detector: run at most once every 4 hours to avoid Helius 429s
+const ORPHAN_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1_000
+let _lastOrphanCheck = 0
+
 interface MeteoraPool {
   address: string; name: string; created_at: number; tvl: number; current_price: number
   volume: { '24h': number; '1h': number }
@@ -94,8 +98,6 @@ function explainNoStrategy(t: TokenMetrics): string {
   return perStrat.join(' | ') || 'all strategies disabled'
 }
 
-let _orphanCheckDone = false
-
 export async function runScanner(): Promise<{
   scanned: number; candidates: number; opened: number; error?: string
 }> {
@@ -113,8 +115,9 @@ export async function runScanner(): Promise<{
   }
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
 
-  if (!_orphanCheckDone) {
-    _orphanCheckDone = true
+  // Orphan detector: throttled to once every 4h to avoid Helius 429s
+  if (Date.now() - _lastOrphanCheck > ORPHAN_CHECK_INTERVAL_MS) {
+    _lastOrphanCheck = Date.now()
     const poolAddresses = pools.map(p => p.address)
     detectOrphanedPositions(poolAddresses).catch(err =>
       console.warn('[scanner] orphan detector error:', err)
@@ -214,8 +217,10 @@ export async function runScanner(): Promise<{
 
     const holderCountForFilter = holderCount > 0 ? holderCount : (token.holders ?? 0)
 
+    // Only fetch bonding curve for pump.fun tokens young enough to still be graduating.
+    // Tokens older than 48h are already fully graduated — skip the RPC call.
     let bondingCurvePct: number | undefined = undefined
-    if (isPumpFunToken(tokenAddress) && heliusRpcUrl) {
+    if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
       const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
       bondingCurvePct = curve?.progressPct ?? undefined
       if (bondingCurvePct !== undefined) {
@@ -248,6 +253,8 @@ export async function runScanner(): Promise<{
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
       console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}): ${explainNoStrategy(metrics)}`)
+      // throttle between survivors to avoid Helius burst 429s
+      await new Promise(r => setTimeout(r, 300))
       continue
     }
 
@@ -283,6 +290,9 @@ export async function runScanner(): Promise<{
         await sendAlert({ type: 'position_opened', symbol, strategy: strategy.id, solDeposited: MAX_SOL_PER_POSITION, entryPrice: metrics.priceUsd, positionId })
       }
     }
+
+    // throttle between survivors to avoid Helius burst 429s
+    await new Promise(r => setTimeout(r, 300))
   }
 
   console.log(`[scanner] done — scanned: ${pools.length}, survivors: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
