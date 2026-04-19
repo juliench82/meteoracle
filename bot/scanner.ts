@@ -38,8 +38,10 @@ const CHEAP_FILTER = {
 // Max tokens to run deep (Helius) checks on per tick — sorted by feeTvl24hPct descending
 const MAX_DEEP_CHECKS = parseInt(process.env.MAX_DEEP_CHECKS ?? '20')
 
-// Inter-token delay between deep checks to pace Helius calls
-const DEEP_CHECK_DELAY_MS = 1_500
+// Inter-token delay between deep checks to pace Helius calls.
+// 3 sequential Helius calls per token (DAS + getTokenLargestAccounts + getTokenSupply)
+// at 1/s each = ~3s minimum. 3000ms gives the rate limiter window time to fully drain.
+const DEEP_CHECK_DELAY_MS = 3_000
 
 // Best-pool selection constants
 const POOL_MIN_TVL_USD      = 20_000
@@ -331,7 +333,6 @@ export async function runScanner(): Promise<{
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
       console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}): ${explainNoStrategy(metrics)}`)
-      // no sleep here — the guaranteed delay at the bottom of the loop handles pacing
       await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
       continue
     }
