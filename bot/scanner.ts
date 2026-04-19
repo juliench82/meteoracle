@@ -38,14 +38,13 @@ const CHEAP_FILTER = {
 // Max tokens to run deep (Helius) checks on per tick — sorted by feeTvl24hPct descending
 const MAX_DEEP_CHECKS = parseInt(process.env.MAX_DEEP_CHECKS ?? '20')
 
-// Inter-token delay between deep checks to pace Helius calls.
-// 3 sequential Helius calls per token (DAS + getTokenLargestAccounts + getTokenSupply)
-// at 1/s each = ~3s minimum. 3000ms gives the rate limiter window time to fully drain.
-const DEEP_CHECK_DELAY_MS = 3_000
+// Inter-token delay at the TOP of the deep-check loop.
+// Fires before every token including early-continue paths so no two tokens
+// ever start Helius calls within this window of each other.
+const DEEP_CHECK_DELAY_MS = parseInt(process.env.DEEP_CHECK_DELAY_MS ?? '3000')
 
 // Best-pool selection constants
 const POOL_MIN_TVL_USD      = 20_000
-// Bin-step preference score: lower step = tighter range = more fees captured
 const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
@@ -109,11 +108,6 @@ function explainNoStrategy(t: TokenMetrics): string {
   return perStrat.join(' | ') || 'all strategies disabled'
 }
 
-/**
- * Given all pools already fetched, find the best pool for a specific mint.
- * Scoring: fee/TVL is primary yield signal. Bin-step preference (50>100>200>300)
- * breaks ties. Pools below POOL_MIN_TVL_USD are excluded (too thin to enter safely).
- */
 function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPool | null {
   const candidates = allPools.filter(p => {
     if (p.is_blacklisted) return false
@@ -128,22 +122,16 @@ function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPo
   if (candidates.length === 0) return null
   if (candidates.length === 1) return candidates[0]
 
-  // Score each pool: normalise fee/TVL to 0-10 range across candidates, add bin-step preference
   const maxFeeTvl = Math.max(...candidates.map(p => p.fee_tvl_ratio['24h']))
-
   let best: MeteoraPool | null = null
   let bestScore = -Infinity
 
   for (const p of candidates) {
-    const feeTvlNorm    = maxFeeTvl > 0 ? (p.fee_tvl_ratio['24h'] / maxFeeTvl) * 10 : 0
-    const binStep       = p.pool_config?.bin_step ?? 999
-    const binStepBonus  = BIN_STEP_SCORE[binStep] ?? 0
-    const score         = feeTvlNorm + binStepBonus
-
-    if (score > bestScore) {
-      bestScore = score
-      best = p
-    }
+    const feeTvlNorm   = maxFeeTvl > 0 ? (p.fee_tvl_ratio['24h'] / maxFeeTvl) * 10 : 0
+    const binStep      = p.pool_config?.bin_step ?? 999
+    const binStepBonus = BIN_STEP_SCORE[binStep] ?? 0
+    const score        = feeTvlNorm + binStepBonus
+    if (score > bestScore) { bestScore = score; best = p }
   }
 
   return best
@@ -167,8 +155,6 @@ export async function runScanner(): Promise<{
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
 
   console.log('[scanner] step 2/4 — cheap pre-screen')
-  // Dedupe by mint: keep highest-volume pool per token for the pre-screen pass,
-  // but retain all pools so selectBestPool can compare them later.
   const mintBestMap = new Map<string, { pool: MeteoraPool; mcUsd: number; ageHours: number }>()
 
   for (const pool of pools) {
@@ -202,8 +188,6 @@ export async function runScanner(): Promise<{
     return { scanned: pools.length, candidates: 0, opened: 0 }
   }
 
-  // Cap deep checks: sort by feeTvl24hPct desc, take top MAX_DEEP_CHECKS
-  // This is the primary lever against Helius 429s — cuts load ~70% per tick
   const survivors = allSurvivors
     .sort((a, b) => (b.pool.fee_tvl_ratio['24h'] ?? 0) - (a.pool.fee_tvl_ratio['24h'] ?? 0))
     .slice(0, MAX_DEEP_CHECKS)
@@ -224,10 +208,13 @@ export async function runScanner(): Promise<{
   console.log(`[scanner] step 4/4 — deep checks on ${survivors.length} top survivors (capped from ${allSurvivors.length})`)
   let candidateCount = 0
   let openedCount = 0
-
   const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
 
   for (const { pool: representativePool, mcUsd, ageHours } of survivors) {
+    // Gate EVERY token at the top — including early-continue paths.
+    // Ensures no two tokens start Helius/Rugcheck calls within DEEP_CHECK_DELAY_MS.
+    await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
+
     const isXSol = representativePool.token_x.address === WSOL
     const token = isXSol ? representativePool.token_y : representativePool.token_x
     const tokenAddress = token.address
@@ -247,18 +234,17 @@ export async function runScanner(): Promise<{
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
 
-    // Pick the best pool for this mint across all fetched pools
     const bestPool = selectBestPool(pools, tokenAddress)
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
       continue
     }
 
-    const vol24h      = bestPool.volume['24h']
-    const vol1h       = bestPool.volume['1h']
-    const liqUsd      = bestPool.tvl
+    const vol24h       = bestPool.volume['24h']
+    const vol1h        = bestPool.volume['1h']
+    const liqUsd       = bestPool.tvl
     const feeTvl24hPct = bestPool.fee_tvl_ratio['24h'] * 100
-    const binStep     = bestPool.pool_config?.bin_step ?? '?'
+    const binStep      = bestPool.pool_config?.bin_step ?? '?'
 
     if (bestPool.address !== representativePool.address) {
       console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStep}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)} (was bin_step=${representativePool.pool_config?.bin_step}, feeTvl=${(representativePool.fee_tvl_ratio['24h'] * 100).toFixed(2)}%)`)
@@ -270,11 +256,11 @@ export async function runScanner(): Promise<{
       if (!resolvedMc || resolvedMc < 1) { console.log(`[scanner] ${symbol} — skip: no market_cap`); continue }
     }
 
-    console.log(`[scanner] ${symbol} — calling Helius + Rugcheck`)
-    const [holderData, rugScore] = await Promise.all([
-      checkHolders(tokenAddress),
-      checkRugscore(tokenAddress),
-    ])
+    // Sequential Helius then Rugcheck — no concurrent external API calls
+    console.log(`[scanner] ${symbol} — calling Helius`)
+    const holderData = await checkHolders(tokenAddress)
+    console.log(`[scanner] ${symbol} — calling Rugcheck`)
+    const rugScore = await checkRugscore(tokenAddress)
 
     let holderCount = holderData.holderCount
     const topHolderPct = holderData.topHolderPct
@@ -333,7 +319,6 @@ export async function runScanner(): Promise<{
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
       console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}): ${explainNoStrategy(metrics)}`)
-      await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
       continue
     }
 
@@ -369,9 +354,6 @@ export async function runScanner(): Promise<{
         await sendAlert({ type: 'position_opened', symbol, strategy: strategy.id, solDeposited: MAX_SOL_PER_POSITION, entryPrice: metrics.priceUsd, positionId })
       }
     }
-
-    // Guaranteed inter-token delay on every path — paces Helius calls
-    await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
   }
 
   console.log(`[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
