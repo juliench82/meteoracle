@@ -35,10 +35,15 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
 
   const PAGE_SIZE = 1000
 
-  const [rpcResult, dasResult] = await Promise.allSettled([
-    fetchTopAccountsAndSupply(mintAddress),
-    fetchDasHolderCount(mintAddress, PAGE_SIZE, DAS_MAX_PAGES),
-  ])
+  // Sequential: DAS first (most expensive), then RPC — avoids simultaneous burst
+  const dasResult = await fetchDasHolderCount(mintAddress, PAGE_SIZE, DAS_MAX_PAGES).then(
+    v => ({ status: 'fulfilled' as const, value: v }),
+    e => ({ status: 'rejected' as const, reason: e }),
+  )
+  const rpcResult = await fetchTopAccountsAndSupply(mintAddress).then(
+    v => ({ status: 'fulfilled' as const, value: v }),
+    e => ({ status: 'rejected' as const, reason: e }),
+  )
 
   let topHolderPct = 0
   let rpcAccounts: Array<{ uiAmount: number | null }> = []
@@ -78,8 +83,8 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
   topHolderPct: number
 } | null> {
   const [largestRes, supplyRes] = await Promise.all([
-    rpcCall('getTokenLargestAccounts', [mint]),
-    rpcCall('getTokenSupply',          [mint]),
+    rpcCall('getTokenLargestAccounts', [mint], 5),
+    rpcCall('getTokenSupply',          [mint], 5),
   ])
 
   const accounts: Array<{ uiAmount: number | null }> = largestRes?.value ?? []
@@ -101,7 +106,7 @@ async function fetchDasHolderCount(
 
   while (page <= maxPages) {
     let res
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       try {
         res = await axios.post(
           HELIUS_RPC_URL,
@@ -121,9 +126,9 @@ async function fetchDasHolderCount(
         break
       } catch (err: unknown) {
         const status = (err as { response?: { status?: number } })?.response?.status
-        if (status === 429 && attempt < 2) {
-          const delay = 1_000 * 2 ** attempt
-          console.warn(`[helius] 429 on getTokenAccounts page ${page}, retry ${attempt + 1} in ${delay}ms`)
+        if (status === 429 && attempt < 4) {
+          const delay = 1_000 * 2 ** attempt + Math.random() * 500
+          console.warn(`[helius] 429 on getTokenAccounts page ${page}, retry ${attempt + 1} in ${Math.round(delay)}ms`)
           await new Promise(r => setTimeout(r, delay))
         } else {
           throw err
@@ -157,8 +162,8 @@ async function rpcCall(method: string, params: unknown[], retries = 3) {
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status
       if (status === 429 && i < retries - 1) {
-        const delay = 1_000 * 2 ** i
-        console.warn(`[helius] 429 on ${method}, retry ${i + 1} in ${delay}ms`)
+        const delay = 1_000 * 2 ** i + Math.random() * 500
+        console.warn(`[helius] 429 on ${method}, retry ${i + 1} in ${Math.round(delay)}ms`)
         await new Promise(r => setTimeout(r, delay))
       } else {
         throw err
