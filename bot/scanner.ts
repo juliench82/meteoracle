@@ -19,7 +19,6 @@ const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM    = 'https://dlmm-api.meteora.ag'
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
-// Pre-filter: broad pass to limit API cost — strategy filters are the real gate
 const PRE_FILTER = {
   minVolume24hUsd: 10_000,
   minLiquidityUsd: 20_000,
@@ -35,6 +34,11 @@ const CHEAP_FILTER = {
   minFeeTvl24hPct:       3,
   maxAgeHours:     999_999,
 }
+
+// Best-pool selection constants
+const POOL_MIN_TVL_USD      = 20_000
+// Bin-step preference score: lower step = tighter range = more fees captured
+const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
@@ -97,6 +101,46 @@ function explainNoStrategy(t: TokenMetrics): string {
   return perStrat.join(' | ') || 'all strategies disabled'
 }
 
+/**
+ * Given all pools already fetched, find the best pool for a specific mint.
+ * Scoring: fee/TVL is primary yield signal. Bin-step preference (50>100>200>300)
+ * breaks ties. Pools below POOL_MIN_TVL_USD are excluded (too thin to enter safely).
+ */
+function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPool | null {
+  const candidates = allPools.filter(p => {
+    if (p.is_blacklisted) return false
+    if (p.tvl < POOL_MIN_TVL_USD) return false
+    const hasMint = p.token_x.address === mintAddress || p.token_y.address === mintAddress
+    if (!hasMint) return false
+    const hasSol  = p.token_x.address === WSOL || p.token_y.address === WSOL
+    if (!hasSol) return false
+    return true
+  })
+
+  if (candidates.length === 0) return null
+  if (candidates.length === 1) return candidates[0]
+
+  // Score each pool: normalise fee/TVL to 0-10 range across candidates, add bin-step preference
+  const maxFeeTvl = Math.max(...candidates.map(p => p.fee_tvl_ratio['24h']))
+
+  let best: MeteoraPool | null = null
+  let bestScore = -Infinity
+
+  for (const p of candidates) {
+    const feeTvlNorm    = maxFeeTvl > 0 ? (p.fee_tvl_ratio['24h'] / maxFeeTvl) * 10 : 0
+    const binStep       = p.pool_config?.bin_step ?? 999
+    const binStepBonus  = BIN_STEP_SCORE[binStep] ?? 0
+    const score         = feeTvlNorm + binStepBonus
+
+    if (score > bestScore) {
+      bestScore = score
+      best = p
+    }
+  }
+
+  return best
+}
+
 export async function runScanner(): Promise<{
   scanned: number; candidates: number; opened: number; error?: string
 }> {
@@ -115,7 +159,9 @@ export async function runScanner(): Promise<{
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
 
   console.log('[scanner] step 2/4 — cheap pre-screen')
-  const survivors: Array<{ pool: MeteoraPool; mcUsd: number; ageHours: number }> = []
+  // Dedupe by mint: keep highest-volume pool per token for the pre-screen pass,
+  // but retain all pools so selectBestPool can compare them later.
+  const mintBestMap = new Map<string, { pool: MeteoraPool; mcUsd: number; ageHours: number }>()
 
   for (const pool of pools) {
     const isXSol = pool.token_x.address === WSOL
@@ -129,16 +175,20 @@ export async function runScanner(): Promise<{
       ? (Date.now() / 1000 - toUnixSeconds(pool.created_at)) / 3600
       : 0
 
-    if (mcUsd < CHEAP_FILTER.minMcUsd) { console.log(`[scanner] ${symbol} — skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
-    if (mcUsd > CHEAP_FILTER.maxMcUsd) { console.log(`[scanner] ${symbol} — skip: mc too high`); continue }
-    if (vol24h < CHEAP_FILTER.minVol24h) { console.log(`[scanner] ${symbol} — skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
-    if (liqUsd < CHEAP_FILTER.minLiqUsd) { console.log(`[scanner] ${symbol} — skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
-    if (feeTvl24h < CHEAP_FILTER.minFeeTvl24hPct) { console.log(`[scanner] ${symbol} — skip: feeTvl=${feeTvl24h.toFixed(2)}% < ${CHEAP_FILTER.minFeeTvl24hPct}%`); continue }
+    if (mcUsd < CHEAP_FILTER.minMcUsd) continue
+    if (mcUsd > CHEAP_FILTER.maxMcUsd) continue
+    if (vol24h < CHEAP_FILTER.minVol24h) continue
+    if (liqUsd < CHEAP_FILTER.minLiqUsd) continue
+    if (feeTvl24h < CHEAP_FILTER.minFeeTvl24hPct) continue
 
-    console.log(`[scanner] ${symbol} — passed cheap filter (mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, liq=$${liqUsd.toFixed(0)}, feeTvl=${feeTvl24h.toFixed(2)}%, age=${ageHours.toFixed(1)}h)`)
-    survivors.push({ pool, mcUsd, ageHours })
+    const existing = mintBestMap.get(token.address)
+    if (!existing || vol24h > existing.pool.volume['24h']) {
+      mintBestMap.set(token.address, { pool, mcUsd, ageHours })
+    }
   }
-  console.log(`[scanner] step 2/4 — ${survivors.length}/${pools.length} passed cheap filter`)
+
+  const survivors = Array.from(mintBestMap.values())
+  console.log(`[scanner] step 2/4 — ${survivors.length} unique tokens passed cheap filter (from ${pools.length} pools)`)
 
   if (survivors.length === 0) {
     console.log('[scanner] done — no survivors')
@@ -164,15 +214,11 @@ export async function runScanner(): Promise<{
 
   const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
 
-  for (const { pool, mcUsd, ageHours } of survivors) {
-    const isXSol = pool.token_x.address === WSOL
-    const token = isXSol ? pool.token_y : pool.token_x
+  for (const { pool: representativePool, mcUsd, ageHours } of survivors) {
+    const isXSol = representativePool.token_x.address === WSOL
+    const token = isXSol ? representativePool.token_y : representativePool.token_x
     const tokenAddress = token.address
-    const symbol = pool.name ?? token.symbol
-    const vol24h = pool.volume['24h']
-    const vol1h = pool.volume['1h']
-    const liqUsd = pool.tvl
-    const feeTvl24hPct = pool.fee_tvl_ratio['24h'] * 100
+    const symbol = representativePool.name ?? token.symbol
 
     const recentResult = await withTimeout(
       supabase.from('candidates').select('id').eq('token_address', tokenAddress)
@@ -187,6 +233,23 @@ export async function runScanner(): Promise<{
       SUPABASE_TIMEOUT_MS, `lp_positions dedup ${symbol}`
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
+
+    // Pick the best pool for this mint across all fetched pools
+    const bestPool = selectBestPool(pools, tokenAddress)
+    if (!bestPool) {
+      console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
+      continue
+    }
+
+    const vol24h      = bestPool.volume['24h']
+    const vol1h       = bestPool.volume['1h']
+    const liqUsd      = bestPool.tvl
+    const feeTvl24hPct = bestPool.fee_tvl_ratio['24h'] * 100
+    const binStep     = bestPool.pool_config?.bin_step ?? '?'
+
+    if (bestPool.address !== representativePool.address) {
+      console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStep}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)} (was bin_step=${representativePool.pool_config?.bin_step}, feeTvl=${(representativePool.fee_tvl_ratio['24h'] * 100).toFixed(2)}%)`)
+    }
 
     let resolvedMc = mcUsd
     if (!resolvedMc || resolvedMc < 1) {
@@ -226,31 +289,31 @@ export async function runScanner(): Promise<{
     }
 
     const metrics: TokenMetrics = {
-      address: tokenAddress,
+      address:      tokenAddress,
       symbol,
-      mcUsd: resolvedMc,
-      volume24h: vol24h,
+      mcUsd:        resolvedMc,
+      volume24h:    vol24h,
       liquidityUsd: liqUsd,
       topHolderPct,
-      holderCount: holderCountForFilter,
+      holderCount:  holderCountForFilter,
       ageHours,
       rugcheckScore: rugScore,
-      priceUsd: token.price,
-      poolAddress: pool.address,
-      dexId: 'meteora',
+      priceUsd:     token.price,
+      poolAddress:  bestPool.address,   // <-- best pool, not representative
+      dexId:        'meteora',
       feeTvl24hPct,
       bondingCurvePct,
     }
 
     const tokenClass = classifyToken({
-      address: metrics.address,
-      mcUsd: metrics.mcUsd,
-      volume24h: metrics.volume24h,
-      volume1h: vol1h,
+      address:      metrics.address,
+      mcUsd:        metrics.mcUsd,
+      volume24h:    metrics.volume24h,
+      volume1h:     vol1h,
       liquidityUsd: metrics.liquidityUsd,
-      ageHours: metrics.ageHours,
+      ageHours:     metrics.ageHours,
       topHolderPct: metrics.topHolderPct,
-      holderCount: metrics.holderCount,
+      holderCount:  metrics.holderCount,
       rugcheckScore: metrics.rugcheckScore,
     })
 
@@ -266,24 +329,24 @@ export async function runScanner(): Promise<{
 
     await withTimeout(
       supabase.from('candidates').insert({
-        token_address: metrics.address,
-        symbol: metrics.symbol,
+        token_address:    metrics.address,
+        symbol:           metrics.symbol,
         score,
         strategy_matched: strategy.id,
-        strategy_id: strategy.id,
-        token_class: tokenClass,
-        mc_at_scan: metrics.mcUsd,
-        volume_24h: metrics.volume24h,
-        holder_count: metrics.holderCount,
-        rugcheck_score: metrics.rugcheckScore,
-        top_holder_pct: metrics.topHolderPct,
-        scanned_at: new Date().toISOString(),
+        strategy_id:      strategy.id,
+        token_class:      tokenClass,
+        mc_at_scan:       metrics.mcUsd,
+        volume_24h:       metrics.volume24h,
+        holder_count:     metrics.holderCount,
+        rugcheck_score:   metrics.rugcheckScore,
+        top_holder_pct:   metrics.topHolderPct,
+        scanned_at:       new Date().toISOString(),
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
 
     candidateCount++
-    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(2)}%, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h${bondingInfo})`)
+    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(2)}%, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStep}${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (score >= MIN_SCORE_TO_OPEN) {
