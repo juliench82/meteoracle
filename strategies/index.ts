@@ -30,7 +30,7 @@ export const STRATEGIES: Strategy[] = [
  * UNKNOWN        — doesn't cleanly fit any class → no position opened
  *
  * Criteria:
- *   MEME_SHITCOIN : pool_age < 48h  OR  mcap < $3M  OR  vol1h/liq > 5%  OR  top10holders > 35%
+ *   MEME_SHITCOIN : ANY TWO of: pool_age < 48h, mcap < $3M, vol1h/liq > 5%, top10holders > 35%
  *   SCALP_SPIKE   : 48h < age < 30d  AND  $3M < mc < $20M  AND  vol1h/liq <= 5%
  *   BLUECHIP      : age > 30d  AND  mc > $20M  AND  top10holders < 25%
  *   STABLE        : mint is USDC/USDT  OR  both tokens in pair are stables
@@ -67,13 +67,15 @@ export function classifyToken(token: {
   const vol1h    = token.volume1h ?? (token.volume24h / 24)
   const vol1hLiq = liquidityUsd > 0 ? vol1h / liquidityUsd : 0
 
-  // MEME_SHITCOIN: any one condition triggers it
-  if (
-    ageHours     <  48       ||
-    mcUsd        <  3_000_000 ||
-    vol1hLiq     >  0.05      || // vol1h > 5% of liquidity
-    topHolderPct >  35
-  ) {
+  // MEME_SHITCOIN: require ANY TWO conditions (not greedy OR-1)
+  // This allows tokens that are only young OR only small-cap to still
+  // qualify for SCALP_SPIKE / BLUECHIP classification.
+  let memeCount = 0
+  if (ageHours     <  48)        memeCount++
+  if (mcUsd        <  3_000_000) memeCount++
+  if (vol1hLiq     >  0.05)      memeCount++
+  if (topHolderPct >  35)        memeCount++
+  if (memeCount >= 2) {
     return 'MEME_SHITCOIN'
   }
 

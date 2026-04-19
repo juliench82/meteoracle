@@ -23,16 +23,16 @@ const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 // Pre-filter: broad pass to limit API cost — strategy filters are the real gate
 const PRE_FILTER = {
   minVolume24hUsd: 10_000,
-  minLiquidityUsd: 10_000,
+  minLiquidityUsd: 20_000,
   maxLiquidityUsd: 500_000_000, // raised: allow deep Stable Farm pools
   maxAgeHours:     999_999,     // no age cap here — strategies enforce their own
 }
 
 const CHEAP_FILTER = {
-  minMcUsd:    100_000,
+  minMcUsd:     50_000,
   maxMcUsd: 500_000_000, // raised: allow large-cap tokens for Stable Farm
   minVol24h:    10_000,  // lowered: pre-filter already gates on 10k, avoid double-filtering
-  minLiqUsd:    10_000,
+  minLiqUsd:    20_000,
   maxAgeHours:  999_999, // no age cap — strategies enforce their own
 }
 
