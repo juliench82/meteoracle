@@ -5,15 +5,16 @@
  * No webhook, no HTTPS needed — runs as a PM2 process on the VPS.
  *
  * Commands:
- *   /stop        — EMERGENCY: close all LP positions + pm2 stop workers
- *   /restart     — resume: setBotState enabled + pm2 restart workers
- *   /dry         — switch to dry-run mode
- *   /live        — switch to live trading
- *   /close <id>  — force-close an LP position by ID
- *   /positions   — list all open LP positions
- *   /status      — snapshot: state, open positions, wallet SOL
- *   /tick        — manually trigger scanner + monitor in parallel
- *   /help        — command list
+ *   /stop           — EMERGENCY: close all LP positions + pm2 stop workers
+ *   /restart        — resume: setBotState enabled + pm2 restart workers
+ *   /dry            — switch to dry-run mode
+ *   /live           — switch to live trading
+ *   /close <id>     — force-close an LP position by ID
+ *   /positions      — list all open LP positions
+ *   /status         — snapshot: state, open positions, wallet SOL
+ *   /tick           — manually trigger scanner + monitor in parallel
+ *   /check-orphans  — manually run orphan detector on demand
+ *   /help           — command list
  */
 
 import 'dotenv/config'
@@ -29,6 +30,7 @@ import { getBotState, setBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
+import { detectOrphanedPositions } from '@/bot/orphan-detector'
 
 const execAsync = promisify(exec)
 const PM2 = '/usr/local/bin/pm2'
@@ -39,11 +41,11 @@ const WORKER_PROCESSES = [
   'dashboard',
 ]
 
-const BOT_TOKEN       = process.env.TELEGRAM_BOT_TOKEN ?? ''
-const CHAT_ID         = process.env.TELEGRAM_CHAT_ID   ?? ''
-const POLL_MS         = 2_000
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? ''
+const POLL_MS = 2_000
 const TICK_TIMEOUT_MS = 55_000
-const API             = `https://api.telegram.org/bot${BOT_TOKEN}`
+const API = `https://api.telegram.org/bot${BOT_TOKEN}`
 
 if (!BOT_TOKEN || !CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — exiting')
@@ -52,14 +54,12 @@ if (!BOT_TOKEN || !CHAT_ID) {
 
 let lastUpdateId = 0
 
-// ─── Telegram helpers ─────────────────────────────────────────────────────────────────────────────────────
-
 async function reply(text: string): Promise<void> {
   try {
     await axios.post(`${API}/sendMessage`, {
-      chat_id:                  CHAT_ID,
+      chat_id: CHAT_ID,
       text,
-      parse_mode:               'Markdown',
+      parse_mode: 'Markdown',
       disable_web_page_preview: true,
     }, { timeout: 5_000 })
   } catch (err) {
@@ -96,8 +96,6 @@ async function drainPendingUpdates(): Promise<void> {
   }
 }
 
-// ─── PM2 helpers ──────────────────────────────────────────────────────────────────────────────────────────
-
 async function pm2StopWorkers(): Promise<void> {
   const names = WORKER_PROCESSES.join(' ')
   await execAsync(`${PM2} stop ${names} --silent`).catch(err =>
@@ -112,8 +110,6 @@ async function pm2RestartWorkers(): Promise<void> {
   )
 }
 
-// ─── Tick helper ──────────────────────────────────────────────────────────────────────────────────────
-
 function withTickTimeout(fn: () => Promise<string>, name: string): Promise<string> {
   return Promise.race([
     fn(),
@@ -122,8 +118,6 @@ function withTickTimeout(fn: () => Promise<string>, name: string): Promise<strin
     ),
   ])
 }
-
-// ─── Command handlers ─────────────────────────────────────────────────────────────────────────────────
 
 async function handleStop() {
   await reply('🛑 *EMERGENCY STOP initiated...*')
@@ -184,14 +178,23 @@ async function handleLive() {
 }
 
 async function handleClose(positionId: string) {
-  if (!positionId) { await reply('❌ Usage: `/close <position_id>`'); return }
+  if (!positionId) {
+    await reply('❌ Usage: `/close <position_id>`')
+    return
+  }
   await reply(`⏳ Closing LP position \`${positionId}\`...`)
   try {
     const supabase = createServerClient()
     const { data: pos, error } = await supabase
       .from('lp_positions').select('id, symbol, status').eq('id', positionId).single()
-    if (error || !pos) { await reply(`❌ LP position \`${positionId}\` not found.`); return }
-    if (pos.status === 'closed') { await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) is already closed.`); return }
+    if (error || !pos) {
+      await reply(`❌ LP position \`${positionId}\` not found.`)
+      return
+    }
+    if (pos.status === 'closed') {
+      await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) is already closed.`)
+      return
+    }
     const ok = await closePosition(positionId, 'manual_telegram')
     await reply(ok
       ? `✅ \`${positionId}\` (${pos.symbol}) closed successfully.`
@@ -204,7 +207,7 @@ async function handleClose(positionId: string) {
 
 async function handleStatus() {
   const supabase = createServerClient()
-  const state    = await getBotState()
+  const state = await getBotState()
 
   const { data: openLp } = await supabase
     .from('lp_positions')
@@ -261,6 +264,28 @@ async function handleTick() {
   await reply(['*Tick complete:*', ...results.map(r => `• ${r}`)].join('\n'))
 }
 
+async function handleCheckOrphans() {
+  await reply('⏳ *Running orphan detector on demand...*')
+  try {
+    const supabase = createServerClient()
+    const { data } = await supabase
+      .from('lp_positions')
+      .select('pool_address')
+      .in('status', ['active', 'out_of_range'])
+
+    const poolAddresses = Array.from(new Set((data ?? []).map(row => row.pool_address).filter(Boolean)))
+    if (poolAddresses.length === 0) {
+      await reply('ℹ️ No active LP positions to check for orphans.')
+      return
+    }
+
+    await detectOrphanedPositions(poolAddresses)
+    await reply(`✅ Orphan detector finished for ${poolAddresses.length} active pool(s). Check logs/dashboard for any closures.`)
+  } catch (err) {
+    await reply(`❌ Orphan check error: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 async function handleHelp() {
   await reply([
     `*Meteoracle Bot Commands*`,
@@ -273,14 +298,13 @@ async function handleHelp() {
     `/positions — list all open LP positions`,
     `/close <id> — force-close an LP position`,
     `/tick — manually trigger scanner + monitor`,
+    `/check-orphans — manually run orphan detector`,
     `/help — this message`,
   ].join('\n'))
 }
 
-// ─── Main poll loop ───────────────────────────────────────────────────────────────────────────────────
-
 async function processUpdate(update: TelegramUpdate): Promise<void> {
-  const text   = update.message?.text?.trim() ?? ''
+  const text = update.message?.text?.trim() ?? ''
   const chatId = update.message?.chat?.id
 
   if (!text || String(chatId) !== CHAT_ID) return
@@ -291,15 +315,16 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
   console.log(`[telegram-bot] command: /${cmd}${args.length ? ' ' + args.join(' ') : ''}`)
 
   switch (cmd) {
-    case 'stop':      await handleStop();               break
-    case 'restart':   await handleRestart();            break
-    case 'dry':       await handleDry();                break
-    case 'live':      await handleLive();               break
-    case 'close':     await handleClose(args[0] ?? ''); break
-    case 'status':    await handleStatus();             break
-    case 'positions': await handlePositions();          break
-    case 'tick':      await handleTick();               break
-    case 'help':      await handleHelp();               break
+    case 'stop': await handleStop(); break
+    case 'restart': await handleRestart(); break
+    case 'dry': await handleDry(); break
+    case 'live': await handleLive(); break
+    case 'close': await handleClose(args[0] ?? ''); break
+    case 'status': await handleStatus(); break
+    case 'positions': await handlePositions(); break
+    case 'tick': await handleTick(); break
+    case 'check-orphans': await handleCheckOrphans(); break
+    case 'help': await handleHelp(); break
     default:
       await reply(`❌ Unknown command: /${cmd}. Send /help for the list.`)
   }

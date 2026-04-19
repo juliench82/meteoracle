@@ -12,7 +12,6 @@ import { openPosition } from './executor'
 import { sendAlert } from './alerter'
 import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
-import { detectOrphanedPositions } from './orphan-detector'
 import { fetchBondingCurve, isPumpFunToken } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
 
@@ -33,7 +32,7 @@ const CHEAP_FILTER = {
   maxMcUsd:     500_000_000,
   minVol24h:        10_000,
   minLiqUsd:        20_000,
-  minFeeTvl24hPct:       3, // skip low-fee pools before hitting Helius/Rugcheck
+  minFeeTvl24hPct:       3,
   maxAgeHours:     999_999,
 }
 
@@ -45,11 +44,6 @@ const WSOL = 'So11111111111111111111111111111111111111112'
 const SUPABASE_TIMEOUT_MS = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 
-// Orphan detector: run at most once every 4 hours to avoid Helius 429s
-const ORPHAN_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1_000
-let _lastOrphanCheck = 0
-
-// Bonding curve TTL cache: avoid redundant Helius RPC calls within 10 min
 const _bondingCurveCache = new Map<string, { pct: number; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
 
@@ -89,15 +83,15 @@ function explainNoStrategy(t: TokenMetrics): string {
   const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
     const f = s.filters
     const fails: string[] = []
-    if (t.mcUsd          < f.minMcUsd)          fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
-    if (t.mcUsd          > f.maxMcUsd)          fails.push(`mc too high`)
-    if (t.volume24h      < f.minVolume24h)       fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
-    if (t.liquidityUsd   < f.minLiquidityUsd)   fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
-    if (t.topHolderPct   > f.maxTopHolderPct)   fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
-    if (t.holderCount    < f.minHolderCount)    fails.push(`holders=${t.holderCount}<${f.minHolderCount}`)
-    if (t.ageHours       > f.maxAgeHours)       fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
-    if (t.rugcheckScore  < f.minRugcheckScore)  fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
-    if (t.feeTvl24hPct   < f.minFeeTvl24hPct)  fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
+    if (t.mcUsd < f.minMcUsd) fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
+    if (t.mcUsd > f.maxMcUsd) fails.push(`mc too high`)
+    if (t.volume24h < f.minVolume24h) fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
+    if (t.liquidityUsd < f.minLiquidityUsd) fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
+    if (t.topHolderPct > f.maxTopHolderPct) fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
+    if (t.holderCount < f.minHolderCount) fails.push(`holders=${t.holderCount}<${f.minHolderCount}`)
+    if (t.ageHours > f.maxAgeHours) fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
+    if (t.rugcheckScore < f.minRugcheckScore) fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
+    if (t.feeTvl24hPct < f.minFeeTvl24hPct) fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
     return fails.length === 0 ? null : `[${s.id}: ${fails.join(', ')}]`
   }).filter(Boolean)
   return perStrat.join(' | ') || 'all strategies disabled'
@@ -120,34 +114,25 @@ export async function runScanner(): Promise<{
   }
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
 
-  // Orphan detector: throttled to once every 4h to avoid Helius 429s
-  if (Date.now() - _lastOrphanCheck > ORPHAN_CHECK_INTERVAL_MS) {
-    _lastOrphanCheck = Date.now()
-    const poolAddresses = pools.map(p => p.address)
-    detectOrphanedPositions(poolAddresses).catch(err =>
-      console.warn('[scanner] orphan detector error:', err)
-    )
-  }
-
   console.log('[scanner] step 2/4 — cheap pre-screen')
   const survivors: Array<{ pool: MeteoraPool; mcUsd: number; ageHours: number }> = []
 
   for (const pool of pools) {
-    const isXSol      = pool.token_x.address === WSOL
-    const token       = isXSol ? pool.token_y : pool.token_x
-    const symbol      = pool.name ?? token.symbol
-    const vol24h      = pool.volume['24h']
-    const liqUsd      = pool.tvl
-    const mcUsd       = token.market_cap ?? 0
-    const feeTvl24h   = pool.fee_tvl_ratio['24h'] * 100
-    const ageHours    = pool.created_at
+    const isXSol = pool.token_x.address === WSOL
+    const token = isXSol ? pool.token_y : pool.token_x
+    const symbol = pool.name ?? token.symbol
+    const vol24h = pool.volume['24h']
+    const liqUsd = pool.tvl
+    const mcUsd = token.market_cap ?? 0
+    const feeTvl24h = pool.fee_tvl_ratio['24h'] * 100
+    const ageHours = pool.created_at
       ? (Date.now() / 1000 - toUnixSeconds(pool.created_at)) / 3600
       : 0
 
-    if (mcUsd    < CHEAP_FILTER.minMcUsd)         { console.log(`[scanner] ${symbol} — skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
-    if (mcUsd    > CHEAP_FILTER.maxMcUsd)         { console.log(`[scanner] ${symbol} — skip: mc too high`); continue }
-    if (vol24h   < CHEAP_FILTER.minVol24h)        { console.log(`[scanner] ${symbol} — skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
-    if (liqUsd   < CHEAP_FILTER.minLiqUsd)        { console.log(`[scanner] ${symbol} — skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
+    if (mcUsd < CHEAP_FILTER.minMcUsd) { console.log(`[scanner] ${symbol} — skip: mc=$${mcUsd.toFixed(0)} < $${CHEAP_FILTER.minMcUsd}`); continue }
+    if (mcUsd > CHEAP_FILTER.maxMcUsd) { console.log(`[scanner] ${symbol} — skip: mc too high`); continue }
+    if (vol24h < CHEAP_FILTER.minVol24h) { console.log(`[scanner] ${symbol} — skip: vol=$${vol24h.toFixed(0)} < $${CHEAP_FILTER.minVol24h}`); continue }
+    if (liqUsd < CHEAP_FILTER.minLiqUsd) { console.log(`[scanner] ${symbol} — skip: liq=$${liqUsd.toFixed(0)} < $${CHEAP_FILTER.minLiqUsd}`); continue }
     if (feeTvl24h < CHEAP_FILTER.minFeeTvl24hPct) { console.log(`[scanner] ${symbol} — skip: feeTvl=${feeTvl24h.toFixed(2)}% < ${CHEAP_FILTER.minFeeTvl24hPct}%`); continue }
 
     console.log(`[scanner] ${symbol} — passed cheap filter (mc=$${mcUsd.toFixed(0)}, vol=$${vol24h.toFixed(0)}, liq=$${liqUsd.toFixed(0)}, feeTvl=${feeTvl24h.toFixed(2)}%, age=${ageHours.toFixed(1)}h)`)
@@ -175,18 +160,18 @@ export async function runScanner(): Promise<{
 
   console.log('[scanner] step 4/4 — deep checks on survivors')
   let candidateCount = 0
-  let openedCount    = 0
+  let openedCount = 0
 
   const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
 
   for (const { pool, mcUsd, ageHours } of survivors) {
-    const isXSol       = pool.token_x.address === WSOL
-    const token        = isXSol ? pool.token_y : pool.token_x
+    const isXSol = pool.token_x.address === WSOL
+    const token = isXSol ? pool.token_y : pool.token_x
     const tokenAddress = token.address
-    const symbol       = pool.name ?? token.symbol
-    const vol24h       = pool.volume['24h']
-    const vol1h        = pool.volume['1h']
-    const liqUsd       = pool.tvl
+    const symbol = pool.name ?? token.symbol
+    const vol24h = pool.volume['24h']
+    const vol1h = pool.volume['1h']
+    const liqUsd = pool.tvl
     const feeTvl24hPct = pool.fee_tvl_ratio['24h'] * 100
 
     const recentResult = await withTimeout(
@@ -215,7 +200,7 @@ export async function runScanner(): Promise<{
       checkRugscore(tokenAddress),
     ])
 
-    let holderCount  = holderData.holderCount
+    let holderCount = holderData.holderCount
     let topHolderPct = holderData.topHolderPct
     if (!holderData.reliable) {
       const mh = token.holders ?? 0
@@ -224,9 +209,6 @@ export async function runScanner(): Promise<{
 
     const holderCountForFilter = holderCount > 0 ? holderCount : (token.holders ?? 0)
 
-    // Only fetch bonding curve for pump.fun tokens young enough to still be graduating.
-    // Tokens older than 48h are already fully graduated — skip the RPC call.
-    // TTL cache: avoid redundant Helius calls within 10 min for the same token.
     let bondingCurvePct: number | undefined = undefined
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
       const cached = _bondingCurveCache.get(tokenAddress)
@@ -244,24 +226,31 @@ export async function runScanner(): Promise<{
     }
 
     const metrics: TokenMetrics = {
-      address: tokenAddress, symbol, mcUsd: resolvedMc,
-      volume24h: vol24h, liquidityUsd: liqUsd,
-      topHolderPct, holderCount: holderCountForFilter, ageHours,
-      rugcheckScore: rugScore, priceUsd: token.price,
-      poolAddress: pool.address, dexId: 'meteora',
+      address: tokenAddress,
+      symbol,
+      mcUsd: resolvedMc,
+      volume24h: vol24h,
+      liquidityUsd: liqUsd,
+      topHolderPct,
+      holderCount: holderCountForFilter,
+      ageHours,
+      rugcheckScore: rugScore,
+      priceUsd: token.price,
+      poolAddress: pool.address,
+      dexId: 'meteora',
       feeTvl24hPct,
       bondingCurvePct,
     }
 
     const tokenClass = classifyToken({
-      address:      metrics.address,
-      mcUsd:        metrics.mcUsd,
-      volume24h:    metrics.volume24h,
-      volume1h:     vol1h,
+      address: metrics.address,
+      mcUsd: metrics.mcUsd,
+      volume24h: metrics.volume24h,
+      volume1h: vol1h,
       liquidityUsd: metrics.liquidityUsd,
-      ageHours:     metrics.ageHours,
+      ageHours: metrics.ageHours,
       topHolderPct: metrics.topHolderPct,
-      holderCount:  metrics.holderCount,
+      holderCount: metrics.holderCount,
       rugcheckScore: metrics.rugcheckScore,
     })
 
@@ -277,18 +266,18 @@ export async function runScanner(): Promise<{
 
     await withTimeout(
       supabase.from('candidates').insert({
-        token_address:    metrics.address,
-        symbol:           metrics.symbol,
+        token_address: metrics.address,
+        symbol: metrics.symbol,
         score,
         strategy_matched: strategy.id,
-        strategy_id:      strategy.id,
-        token_class:      tokenClass,
-        mc_at_scan:       metrics.mcUsd,
-        volume_24h:       metrics.volume24h,
-        holder_count:     metrics.holderCount,
-        rugcheck_score:   metrics.rugcheckScore,
-        top_holder_pct:   metrics.topHolderPct,
-        scanned_at:       new Date().toISOString(),
+        strategy_id: strategy.id,
+        token_class: tokenClass,
+        mc_at_scan: metrics.mcUsd,
+        volume_24h: metrics.volume24h,
+        holder_count: metrics.holderCount,
+        rugcheck_score: metrics.rugcheckScore,
+        top_holder_pct: metrics.topHolderPct,
+        scanned_at: new Date().toISOString(),
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
@@ -305,7 +294,6 @@ export async function runScanner(): Promise<{
       }
     }
 
-    // throttle between survivors to avoid Helius burst 429s
     await new Promise(r => setTimeout(r, 300))
   }
 
@@ -319,7 +307,9 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
     const pairs: Array<{ fdv?: number; marketCap?: number }> = res.data?.pairs ?? []
     if (pairs.length === 0) return 0
     return pairs[0].marketCap ?? pairs[0].fdv ?? 0
-  } catch { return 0 }
+  } catch {
+    return 0
+  }
 }
 
 async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPool[]> {
@@ -353,7 +343,7 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
-      const status  = (err as { response?: { status?: number } })?.response?.status
+      const status = (err as { response?: { status?: number } })?.response?.status
       console.warn(`[scanner] endpoint ${endpoint} failed: ${status ? `HTTP ${status}: ` : ''}${message}`)
     }
   }
@@ -375,8 +365,6 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
   console.log(`[scanner] ${allPools.length} pools fetched; ${pools.length} passed JS pre-filter`)
   return { pools }
 }
-
-// ─── Standalone entrypoint (PM2) ──────────────────────────────────────────────
 
 const standaloneScannerTick = async (): Promise<void> => {
   const label = '[lp-scanner]'
