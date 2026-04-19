@@ -73,10 +73,9 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
   accounts:     Array<{ uiAmount: number | null }>
   topHolderPct: number
 } | null> {
-  const [largestRes, supplyRes] = await Promise.all([
-    rpcCall('getTokenLargestAccounts', [mint]),
-    rpcCall('getTokenSupply',          [mint]),
-  ])
+  // Sequential — not Promise.all — to avoid saturating Helius burst window
+  const largestRes = await rpcCall('getTokenLargestAccounts', [mint])
+  const supplyRes  = await rpcCall('getTokenSupply',          [mint])
 
   const accounts: Array<{ uiAmount: number | null }> = (largestRes as { value?: Array<{ uiAmount: number | null }> })?.value ?? []
   const totalSupply = parseFloat(
