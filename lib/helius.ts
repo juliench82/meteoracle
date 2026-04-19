@@ -3,7 +3,7 @@ import axios from 'axios'
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
 const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1')
 
-const HOLDER_CACHE_TTL_MS = 60 * 60 * 1_000  // 60min — was 30min
+const HOLDER_CACHE_TTL_MS = 60 * 60 * 1_000
 const _holderCache = new Map<string, { data: HolderData; ts: number }>()
 
 export interface HolderData {
@@ -12,7 +12,8 @@ export interface HolderData {
   reliable:     boolean
 }
 
-// ── Rate limiter ───────────────────────────────────────────────────────────────
+// ── Rate limiters ─────────────────────────────────────────────────────────────
+// Conservative vs Helius hard limits: DAS=2/s → we use 1/s; RPC=10/s → we use 8/s
 class RateLimiter {
   private window: number[] = []
   constructor(private maxPerSecond: number) {}
@@ -29,12 +30,10 @@ class RateLimiter {
   }
 }
 
-// 1/s vs Helius 2/s hard limit — conservative headroom
-const dasLimiter = new RateLimiter(1)
+const dasLimiter = new RateLimiter(1)   // 1/s (Helius DAS limit: 2/s)
+const rpcLimiter = new RateLimiter(8)   // 8/s (Helius RPC limit: 10/s)
 
 // ── Public API ────────────────────────────────────────────────────────────────
-// topHolderPct is always 0 — we removed the RPC calls that computed it.
-// The scanner falls back to token.holders from Meteora pool data when reliable=false.
 export async function checkHolders(mintAddress: string): Promise<HolderData> {
   const cached = _holderCache.get(mintAddress)
   if (cached && Date.now() - cached.ts < HOLDER_CACHE_TTL_MS) {
@@ -42,15 +41,27 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
     return cached.data
   }
 
-  const holderCount = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES)
+  const [dasResult, rpcResult] = await Promise.allSettled([
+    fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES),
+    fetchTopAccountsAndSupply(mintAddress),
+  ])
+
+  let topHolderPct = 0
+  let rpcAccounts: Array<{ uiAmount: number | null }> = []
+  if (rpcResult.status === 'fulfilled' && rpcResult.value) {
+    rpcAccounts  = rpcResult.value.accounts
+    topHolderPct = rpcResult.value.topHolderPct
+  }
 
   let result: HolderData
-  if (holderCount !== null) {
-    console.log(`[helius] ${mintAddress} — ${holderCount} holders (DAS)`)
-    result = { holderCount, topHolderPct: 0, reliable: true }
+  if (dasResult.status === 'fulfilled' && dasResult.value !== null) {
+    console.log(`[helius] ${mintAddress} — ${dasResult.value} holders (DAS), topHolder=${topHolderPct.toFixed(1)}%`)
+    result = { holderCount: dasResult.value, topHolderPct, reliable: true }
   } else {
-    console.warn(`[helius] DAS failed for ${mintAddress}; caller should use Meteora token.holders`)
-    result = { holderCount: 0, topHolderPct: 0, reliable: false }
+    console.warn(`[helius] DAS failed for ${mintAddress}; using heuristic`)
+    result = rpcAccounts.length > 0
+      ? { holderCount: rpcAccounts.length * 50, topHolderPct, reliable: false }
+      : { holderCount: 0, topHolderPct: 0, reliable: false }
   }
 
   if (result.reliable) _holderCache.set(mintAddress, { data: result, ts: Date.now() })
@@ -58,14 +69,32 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
+async function fetchTopAccountsAndSupply(mint: string): Promise<{
+  accounts:     Array<{ uiAmount: number | null }>
+  topHolderPct: number
+} | null> {
+  const [largestRes, supplyRes] = await Promise.all([
+    rpcCall('getTokenLargestAccounts', [mint]),
+    rpcCall('getTokenSupply',          [mint]),
+  ])
+
+  const accounts: Array<{ uiAmount: number | null }> = (largestRes as { value?: Array<{ uiAmount: number | null }> })?.value ?? []
+  const totalSupply = parseFloat(
+    (supplyRes as { value?: { uiAmountString?: string } })?.value?.uiAmountString ?? '0',
+  )
+  if (!totalSupply || accounts.length === 0) return null
+
+  const topHolderPct = ((accounts[0]?.uiAmount ?? 0) / totalSupply) * 100
+  return { accounts, topHolderPct }
+}
+
 async function fetchDasHolderCount(
   mint: string, pageSize: number, maxPages: number,
 ): Promise<number | null> {
   let total = 0
   for (let page = 1; page <= maxPages; page++) {
     let res
-    for (let attempt = 0; attempt < 5; attempt++) {
-      // acquire() is OUTSIDE try so it gates retries too, not just first attempts
+    for (let attempt = 0; attempt < 6; attempt++) {
       await dasLimiter.acquire()
       try {
         res = await axios.post(
@@ -98,4 +127,30 @@ async function fetchDasHolderCount(
     if (page === maxPages) console.warn(`[helius] ${mint} — hit max pages (${maxPages}), count is ${total}+`)
   }
   return total > 0 ? total : null
+}
+
+async function rpcCall(method: string, params: unknown[], retries = 5): Promise<unknown> {
+  for (let i = 0; i < retries; i++) {
+    await rpcLimiter.acquire()
+    try {
+      const res = await axios.post(
+        HELIUS_RPC_URL,
+        { jsonrpc: '2.0', id: 1, method, params },
+        { timeout: 8_000 },
+      )
+      return res.data?.result
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      if (status === 429) {
+        const delay = 1_500 * 2 ** i + Math.random() * 500
+        console.warn(`[helius] 429 on ${method}, retry ${i + 1} in ${Math.round(delay)}ms`)
+        await new Promise(r => setTimeout(r, delay))
+        // intentionally no throw — continue loop
+      } else {
+        throw err
+      }
+    }
+  }
+  console.warn(`[helius] ${method} exhausted ${retries} retries, returning null`)
+  return null
 }
