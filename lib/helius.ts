@@ -1,9 +1,9 @@
 import axios from 'axios'
 
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
-const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '0')
+const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1') // default 1 page = 1000 holders
 
-const HOLDER_CACHE_TTL_MS = 60 * 60 * 1_000
+const HOLDER_CACHE_TTL_MS = 30 * 60 * 1_000 // 30 min (was 60 min — fresher data)
 const _holderCache = new Map<string, { data: HolderData; ts: number }>()
 
 export interface HolderData {
@@ -29,7 +29,8 @@ class RateLimiter {
   }
 }
 
-const rpcLimiter = new RateLimiter(8) // 8/s (Helius RPC limit: 10/s)
+const dasLimiter = new RateLimiter(1) // 1/s conservative (Helius DAS limit: 2/s)
+const rpcLimiter = new RateLimiter(8) // 8/s conservative (Helius RPC limit: 10/s)
 
 // ── Public API ────────────────────────────────────────────────────────────────
 export async function checkHolders(mintAddress: string): Promise<HolderData> {
@@ -44,17 +45,16 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
     return cached.data
   }
 
-  let holderCount: number | null = null
-  if (DAS_MAX_PAGES > 0) {
-    console.log(`[helius:req] ${mintAddress} — starting DAS @ ${Date.now()}`)
-    holderCount = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES).catch(() => null)
-  }
+  // Run DAS and RPC concurrently — each gated by its own rate limiter
+  const [dasResult, rpcResult] = await Promise.allSettled([
+    fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES),
+    fetchTopAccountsAndSupply(mintAddress),
+  ])
 
-  console.log(`[helius:req] ${mintAddress} — starting RPC @ ${Date.now()}`)
-  const rpcResult = await fetchTopAccountsAndSupply(mintAddress).catch(() => null)
-
-  const topHolderPct = rpcResult?.topHolderPct ?? 0
-  const rpcAccounts  = rpcResult?.accounts ?? []
+  const holderCount  = dasResult.status === 'fulfilled' ? dasResult.value : null
+  const rpcData      = rpcResult.status === 'fulfilled'  ? rpcResult.value  : null
+  const topHolderPct = rpcData?.topHolderPct ?? 0
+  const rpcAccounts  = rpcData?.accounts ?? []
 
   let result: HolderData
   if (holderCount !== null) {
@@ -62,11 +62,11 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
     result = { holderCount, topHolderPct, reliable: true }
   } else {
     const estimated = rpcAccounts.length > 0 ? rpcAccounts.length * 50 : 0
-    console.log(`[helius] ${mintAddress} — ~${estimated} holders (RPC heuristic), topHolder=${topHolderPct.toFixed(1)}%`)
+    console.warn(`[helius] ${mintAddress} — DAS failed; ~${estimated} holders (heuristic), topHolder=${topHolderPct.toFixed(1)}%`)
     result = { holderCount: estimated, topHolderPct, reliable: false }
   }
 
-  _holderCache.set(mintAddress, { data: result, ts: Date.now() })
+  if (result.reliable) _holderCache.set(mintAddress, { data: result, ts: Date.now() })
   return result
 }
 
@@ -97,6 +97,7 @@ async function fetchDasHolderCount(
     let res
     for (let attempt = 0; attempt < 6; attempt++) {
       try {
+        await dasLimiter.acquire() // gate every DAS request
         res = await axios.post(
           HELIUS_RPC_URL,
           {
@@ -124,6 +125,9 @@ async function fetchDasHolderCount(
     const accounts: unknown[] = (res?.data?.result?.token_accounts as unknown[]) ?? []
     total += accounts.length
     if (accounts.length < pageSize) break
+    if (page === maxPages) {
+      console.warn(`[helius] ${mint} — hit max pages (${maxPages}), count is ${total}+`)
+    }
   }
   return total > 0 ? total : null
 }
@@ -144,6 +148,7 @@ async function rpcCall(method: string, params: unknown[], retries = 5): Promise<
         const delay = 1_500 * 2 ** i + Math.random() * 500
         console.warn(`[helius] 429 on ${method}, retry ${i + 1} in ${Math.round(delay)}ms`)
         await new Promise(r => setTimeout(r, delay))
+        // never throw on 429 — exhaust retries first
       } else {
         throw err
       }
