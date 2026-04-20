@@ -1,7 +1,6 @@
 import axios from 'axios'
 
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
-// Default 0 = DAS disabled. Set HELIUS_HOLDER_MAX_PAGES=1 on paid plan.
 const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '0')
 
 const HOLDER_CACHE_TTL_MS = 60 * 60 * 1_000
@@ -30,11 +29,12 @@ class RateLimiter {
   }
 }
 
-const rpcLimiter = new RateLimiter(8)   // 8/s (Helius RPC limit: 10/s)
+const rpcLimiter = new RateLimiter(8) // 8/s (Helius RPC limit: 10/s)
 
 // ── Public API ────────────────────────────────────────────────────────────────
 export async function checkHolders(mintAddress: string): Promise<HolderData> {
-  if (process.env.HELIUS_ENABLED === 'false') {
+  // Must explicitly opt-in: HELIUS_ENABLED=true
+  if (process.env.HELIUS_ENABLED !== 'true') {
     return { holderCount: 0, topHolderPct: 0, reliable: false }
   }
 
@@ -44,7 +44,6 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
     return cached.data
   }
 
-  // DAS skipped when DAS_MAX_PAGES=0 (default on free plan)
   let holderCount: number | null = null
   if (DAS_MAX_PAGES > 0) {
     console.log(`[helius:req] ${mintAddress} — starting DAS @ ${Date.now()}`)
@@ -79,7 +78,8 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
   const largestRes = await rpcCall('getTokenLargestAccounts', [mint])
   const supplyRes  = await rpcCall('getTokenSupply',          [mint])
 
-  const accounts: Array<{ uiAmount: number | null }> = (largestRes as { value?: Array<{ uiAmount: number | null }> })?.value ?? []
+  const accounts: Array<{ uiAmount: number | null }> =
+    (largestRes as { value?: Array<{ uiAmount: number | null }> })?.value ?? []
   const totalSupply = parseFloat(
     (supplyRes as { value?: { uiAmountString?: string } })?.value?.uiAmountString ?? '0',
   )
