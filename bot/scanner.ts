@@ -40,10 +40,11 @@ const DEEP_CHECK_DELAY_MS = parseInt(process.env.DEEP_CHECK_DELAY_MS ?? '3000')
 const POOL_MIN_TVL_USD      = 20_000
 const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
 
-const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '60')  // was 65
+const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '60')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?? '0.05')
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
+const CANDIDATE_DEDUP_HOURS    = parseInt(process.env.CANDIDATE_DEDUP_HOURS    ?? '6')
 const WSOL = 'So11111111111111111111111111111111111111112'
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
@@ -124,10 +125,10 @@ function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPo
   let bestScore = -Infinity
 
   for (const p of candidates) {
-    const feeTvlNorm   = maxFeeTvl > 0 ? (p.fee_tvl_ratio['24h'] / maxFeeTvl) * 10 : 0
-    const binStep      = p.pool_config?.bin_step ?? 999
+    const feeTvlNorm = maxFeeTvl > 0 ? (p.fee_tvl_ratio['24h'] / maxFeeTvl) * 10 : 0
+    const binStep = p.pool_config?.bin_step ?? 999
     const binStepBonus = BIN_STEP_SCORE[binStep] ?? 0
-    const score        = feeTvlNorm + binStepBonus
+    const score = feeTvlNorm + binStepBonus
     if (score > bestScore) { bestScore = score; best = p }
   }
 
@@ -215,10 +216,10 @@ export async function runScanner(): Promise<{
 
     const recentResult = await withTimeout(
       supabase.from('candidates').select('id').eq('token_address', tokenAddress)
-        .gte('scanned_at', new Date(Date.now() - 60 * 60 * 1000).toISOString()).limit(1),
+        .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString()).limit(1),
       SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
     )
-    if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last 1h`); continue }
+    if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last ${CANDIDATE_DEDUP_HOURS}h`); continue }
 
     const posResult = await withTimeout(
       supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
@@ -233,11 +234,11 @@ export async function runScanner(): Promise<{
       continue
     }
 
-    const vol24h       = bestPool.volume['24h']
-    const vol1h        = bestPool.volume['1h']
-    const liqUsd       = bestPool.tvl
+    const vol24h = bestPool.volume['24h']
+    const vol1h = bestPool.volume['1h']
+    const liqUsd = bestPool.tvl
     const feeTvl24hPct = bestPool.fee_tvl_ratio['24h'] * 100
-    const binStep      = bestPool.pool_config?.bin_step ?? '?'
+    const binStep = bestPool.pool_config?.bin_step ?? '?'
 
     if (bestPool.address !== representativePool.address) {
       console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStep}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)} (was bin_step=${representativePool.pool_config?.bin_step}, feeTvl=${(representativePool.fee_tvl_ratio['24h'] * 100).toFixed(2)}%)`)
@@ -288,31 +289,31 @@ export async function runScanner(): Promise<{
     }
 
     const metrics: TokenMetrics = {
-      address:      tokenAddress,
+      address: tokenAddress,
       symbol,
-      mcUsd:        resolvedMc,
-      volume24h:    vol24h,
+      mcUsd: resolvedMc,
+      volume24h: vol24h,
       liquidityUsd: liqUsd,
       topHolderPct,
-      holderCount:  holderCountForFilter,
+      holderCount: holderCountForFilter,
       ageHours,
       rugcheckScore: rugScore,
-      priceUsd:     token.price,
-      poolAddress:  bestPool.address,
-      dexId:        'meteora',
+      priceUsd: token.price,
+      poolAddress: bestPool.address,
+      dexId: 'meteora',
       feeTvl24hPct,
       bondingCurvePct,
     }
 
     const tokenClass = classifyToken({
-      address:      metrics.address,
-      mcUsd:        metrics.mcUsd,
-      volume24h:    metrics.volume24h,
-      volume1h:     vol1h,
+      address: metrics.address,
+      mcUsd: metrics.mcUsd,
+      volume24h: metrics.volume24h,
+      volume1h: vol1h,
       liquidityUsd: metrics.liquidityUsd,
-      ageHours:     metrics.ageHours,
+      ageHours: metrics.ageHours,
       topHolderPct: metrics.topHolderPct,
-      holderCount:  metrics.holderCount,
+      holderCount: metrics.holderCount,
       rugcheckScore: metrics.rugcheckScore,
     })
 
@@ -327,18 +328,18 @@ export async function runScanner(): Promise<{
 
     await withTimeout(
       supabase.from('candidates').insert({
-        token_address:    metrics.address,
-        symbol:           metrics.symbol,
+        token_address: metrics.address,
+        symbol: metrics.symbol,
         score,
         strategy_matched: strategy.id,
-        strategy_id:      strategy.id,
-        token_class:      tokenClass,
-        mc_at_scan:       metrics.mcUsd,
-        volume_24h:       metrics.volume24h,
-        holder_count:     metrics.holderCount,
-        rugcheck_score:   metrics.rugcheckScore,
-        top_holder_pct:   metrics.topHolderPct,
-        scanned_at:       new Date().toISOString(),
+        strategy_id: strategy.id,
+        token_class: tokenClass,
+        mc_at_scan: metrics.mcUsd,
+        volume_24h: metrics.volume24h,
+        holder_count: metrics.holderCount,
+        rugcheck_score: metrics.rugcheckScore,
+        top_holder_pct: metrics.topHolderPct,
+        scanned_at: new Date().toISOString(),
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
