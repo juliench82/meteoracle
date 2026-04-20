@@ -40,14 +40,14 @@ const DEEP_CHECK_DELAY_MS = parseInt(process.env.DEEP_CHECK_DELAY_MS ?? '3000')
 const POOL_MIN_TVL_USD      = 20_000
 const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
 
-const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
+const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '60')  // was 65
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?? '0.05')
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const WSOL = 'So11111111111111111111111111111111111111112'
 const SUPABASE_TIMEOUT_MS = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
-const USE_HELIUS = process.env.HELIUS_ENABLED !== 'false'
+const USE_HELIUS = process.env.HELIUS_ENABLED === 'true'
 
 const _bondingCurveCache = new Map<string, { pct: number; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
@@ -256,7 +256,6 @@ export async function runScanner(): Promise<{
       const holderData = await checkHolders(tokenAddress)
       holderCount = holderData.holderCount
       topHolderPct = holderData.topHolderPct
-
       if (!holderData.reliable && token.holders) {
         holderCount = Math.max(holderCount, token.holders)
       }

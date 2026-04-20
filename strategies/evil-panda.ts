@@ -22,13 +22,13 @@ export const evilPandaStrategy: Strategy = {
 
   filters: {
     minMcUsd:             50_000,
-    maxMcUsd:          5_000_000,
+    maxMcUsd:         10_000_000,  // was 5M — covers unc, BULL, BELIEF, EITHER
     minVolume24h:         40_000,
     minLiquidityUsd:      20_000,
     maxTopHolderPct:         100,
     minHolderCount:          100,
-    maxAgeHours:             720,   // 30 days — high-feeTvl pools spike at any age
-    minRugcheckScore:         25,
+    maxAgeHours:             720,
+    minRugcheckScore:          0,  // was 25 — pump.fun score 0-15 = noise, not rug
     requireSocialSignal:   false,
     minFeeTvl24hPct:          15,
   },
