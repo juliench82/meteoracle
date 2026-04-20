@@ -34,6 +34,10 @@ const rpcLimiter = new RateLimiter(8)   // 8/s (Helius RPC limit: 10/s)
 
 // ── Public API ────────────────────────────────────────────────────────────────
 export async function checkHolders(mintAddress: string): Promise<HolderData> {
+  if (process.env.HELIUS_ENABLED === 'false') {
+    return { holderCount: 0, topHolderPct: 0, reliable: false }
+  }
+
   const cached = _holderCache.get(mintAddress)
   if (cached && Date.now() - cached.ts < HOLDER_CACHE_TTL_MS) {
     console.log(`[helius] ${mintAddress} — cache hit (age=${Math.round((Date.now() - cached.ts) / 60_000)}min)`)
@@ -63,7 +67,6 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
     result = { holderCount: estimated, topHolderPct, reliable: false }
   }
 
-  // Cache even heuristic results for 1h to avoid hammering RPC
   _holderCache.set(mintAddress, { data: result, ts: Date.now() })
   return result
 }

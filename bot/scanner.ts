@@ -35,15 +35,8 @@ const CHEAP_FILTER = {
   maxAgeHours:     999_999,
 }
 
-// Max tokens to run deep (Helius) checks on per tick — sorted by feeTvl24hPct descending
 const MAX_DEEP_CHECKS = parseInt(process.env.MAX_DEEP_CHECKS ?? '20')
-
-// Inter-token delay at the TOP of the deep-check loop.
-// Fires before every token including early-continue paths so no two tokens
-// ever start Helius calls within this window of each other.
 const DEEP_CHECK_DELAY_MS = parseInt(process.env.DEEP_CHECK_DELAY_MS ?? '3000')
-
-// Best-pool selection constants
 const POOL_MIN_TVL_USD      = 20_000
 const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
 
@@ -54,6 +47,7 @@ const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?
 const WSOL = 'So11111111111111111111111111111111111111112'
 const SUPABASE_TIMEOUT_MS = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
+const USE_HELIUS = process.env.HELIUS_ENABLED !== 'false'
 
 const _bondingCurveCache = new Map<string, { pct: number; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
@@ -211,8 +205,6 @@ export async function runScanner(): Promise<{
   const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
 
   for (const { pool: representativePool, mcUsd, ageHours } of survivors) {
-    // Gate EVERY token at the top — including early-continue paths.
-    // Ensures no two tokens start Helius/Rugcheck calls within DEEP_CHECK_DELAY_MS.
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
 
     const isXSol = representativePool.token_x.address === WSOL
@@ -256,18 +248,26 @@ export async function runScanner(): Promise<{
       if (!resolvedMc || resolvedMc < 1) { console.log(`[scanner] ${symbol} — skip: no market_cap`); continue }
     }
 
-    // Sequential Helius then Rugcheck — no concurrent external API calls
-    console.log(`[scanner] ${symbol} — calling Helius`)
-    const holderData = await checkHolders(tokenAddress)
+    let holderCount = 0
+    let topHolderPct = 0
+
+    if (USE_HELIUS) {
+      console.log(`[scanner] ${symbol} — calling Helius`)
+      const holderData = await checkHolders(tokenAddress)
+      holderCount = holderData.holderCount
+      topHolderPct = holderData.topHolderPct
+
+      if (!holderData.reliable && token.holders) {
+        holderCount = Math.max(holderCount, token.holders)
+      }
+    } else {
+      holderCount = token.holders ?? 0
+      topHolderPct = 0
+      console.log(`[scanner] ${symbol} — using Meteora holders (Helius disabled)`)
+    }
+
     console.log(`[scanner] ${symbol} — calling Rugcheck`)
     const rugScore = await checkRugscore(tokenAddress)
-
-    let holderCount = holderData.holderCount
-    const topHolderPct = holderData.topHolderPct
-    if (!holderData.reliable) {
-      const mh = token.holders ?? 0
-      if (mh > holderCount) holderCount = mh
-    }
 
     const holderCountForFilter = holderCount > 0 ? holderCount : (token.holders ?? 0)
 

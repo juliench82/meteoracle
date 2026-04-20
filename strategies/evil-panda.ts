@@ -25,28 +25,27 @@ export const evilPandaStrategy: Strategy = {
     maxMcUsd:          5_000_000,
     minVolume24h:         40_000,
     minLiquidityUsd:      20_000,
-    maxTopHolderPct:          25,
-    minHolderCount:          100,  // lowered from 200 — fresh memes won't have 200 holders fast
+    maxTopHolderPct:         100,
+    minHolderCount:          100,
     maxAgeHours:             120,
-    minRugcheckScore:         25,  // lowered from 40 — Solana meme tokens routinely score 15-30
+    minRugcheckScore:         25,
     requireSocialSignal:   false,
-    minFeeTvl24hPct:          15,  // lowered from 35 — 35% was unrealistic as a floor
+    minFeeTvl24hPct:          15,
   },
 
   position: {
     binStep:              100,
-    rangeDownPct:         -70,   // stays in range on hard dumps
-    rangeUpPct:           180,   // auto-sells SOL into token on moons
-    distributionType: 'bid-ask', // fees explode on pumps
-    solBias:              1.0,   // 100% single-sided SOL
-    // maxSolPerPosition driven by MAX_SOL_PER_POSITION env var
+    rangeDownPct:         -70,
+    rangeUpPct:           180,
+    distributionType: 'bid-ask',
+    solBias:              1.0,
   },
 
   exits: {
     stopLossPct:           -90,
-    takeProfitPct:          60,  // withdraw + redeposit on big winner
-    outOfRangeMinutes:      60,  // tightened from 120
-    maxDurationHours:      168,  // 7 days
+    takeProfitPct:          60,
+    outOfRangeMinutes:      60,
+    maxDurationHours:      168,
     claimFeesBeforeClose:  true,
     minFeesToClaim:       0.001,
   },

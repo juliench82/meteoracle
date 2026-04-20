@@ -17,13 +17,13 @@ export const scalpSpikeStrategy: Strategy = {
   enabled: true,
 
   filters: {
-    minMcUsd:          5_000_000, // established only — no fresh shitcoins
+    minMcUsd:          5_000_000,
     maxMcUsd:         50_000_000,
-    minVolume24h:        200_000,  // lowered from 500_000
+    minVolume24h:        200_000,
     minLiquidityUsd:      30_000,
-    maxTopHolderPct:          30,  // raised from 10 — 10% is near-impossible on Solana
-    minHolderCount:          300,  // lowered from 500
-    maxAgeHours:             120,  // up to 5 days old
+    maxTopHolderPct:         100,
+    minHolderCount:          300,
+    maxAgeHours:             120,
     minRugcheckScore:         65,
     requireSocialSignal:   false,
     minFeeTvl24hPct:          15,
@@ -35,13 +35,12 @@ export const scalpSpikeStrategy: Strategy = {
     rangeUpPct:            20,
     distributionType:  'spot',
     solBias:              0.6,
-    // maxSolPerPosition driven by MAX_SOL_PER_POSITION env var
   },
 
   exits: {
     stopLossPct:           -30,
     takeProfitPct:         100,
-    outOfRangeMinutes:      30,  // already tight — unchanged
+    outOfRangeMinutes:      30,
     maxDurationHours:       12,
     claimFeesBeforeClose:  true,
     minFeesToClaim:       0.0005,
