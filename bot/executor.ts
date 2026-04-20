@@ -1,3 +1,8 @@
+import 'dotenv/config'
+import * as dotenvLocal from 'dotenv'
+import * as path from 'path'
+dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
+
 import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
@@ -379,7 +384,9 @@ export async function closePosition(
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
       }
     } else {
-      console.warn(`${label} position not found on-chain — may already be closed`)
+      console.warn(`${label} position not found on-chain — marking closed in DB`)
+      await markPositionClosed(positionId, feesClaimedSol, `${reason}_external`)
+      return true
     }
 
     // Swap any remaining token balance → SOL (no-op for SOL pools or zero balance)
