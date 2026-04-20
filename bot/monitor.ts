@@ -94,7 +94,6 @@ export async function monitorPositions(): Promise<{
 
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
 
-  // ── Automatic orphan reconciliation every N ticks ──────────────────────────
   tickCount++
   if (tickCount % ORPHAN_CHECK_EVERY_N === 0) {
     console.log(`[monitor] tick ${tickCount} — running auto orphan scan`)
@@ -104,10 +103,8 @@ export async function monitorPositions(): Promise<{
       console.warn('[monitor] auto orphan scan failed (non-fatal):', err)
     }
   }
-  // ───────────────────────────────────────────────────────────────────────────
 
   console.log('[monitor] fetching open LP positions')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let positions: any[]
   try {
     positions = await sbSelect('lp_positions', 'status=in.(active,out_of_range)&order=opened_at.desc')
@@ -136,7 +133,7 @@ export async function monitorPositions(): Promise<{
           level: 'error', event: 'monitor_check_failed',
           payload: { positionId: position.id, error: String(err) },
         })
-      } catch { /* non-fatal */ }
+      } catch {}
     }
   }
 
@@ -144,7 +141,6 @@ export async function monitorPositions(): Promise<{
 }
 
 async function checkPosition(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   position: Record<string, any>,
   strategy: Strategy,
   stats: { checked: number; closed: number; claimed: number; rebalanced: number }
@@ -152,17 +148,34 @@ async function checkPosition(
   const label = `[monitor][${position.symbol}][${strategy.id}]`
   const now = Date.now()
 
-  const { inRange, currentPriceSol, feesEarnedSol, volume1hUsd } = await fetchPositionState(
+  const { inRange, currentPriceSol, feesEarnedSol, volume1hUsd, externallyClosed } = await fetchPositionState(
     position.pool_address,
     position.position_pubkey
   )
+
+  if (externallyClosed) {
+    console.warn(`${label} position missing on-chain — marking closed in DB`)
+    try {
+      await sbUpdate('lp_positions', `id=eq.${position.id}`, {
+        status: 'closed',
+        closed_at: new Date().toISOString(),
+        in_range: false,
+        oor_since_at: null,
+        close_reason: 'external_close_detected',
+        fees_earned_sol: feesEarnedSol,
+      })
+      stats.closed++
+    } catch (err) {
+      console.error(`${label} external-close DB update failed:`, err)
+    }
+    return
+  }
 
   if (currentPriceSol === 0) {
     console.warn(`${label} price read returned 0 — RPC fallback hit, skipping tick`)
     return
   }
 
-  // entry_price_sol is a top-level column; metadata fallback for legacy rows
   const entryPriceSol: number = position.entry_price_sol ?? position.metadata?.entry_price_sol ?? 0
 
   const pricePct = entryPriceSol > 0
@@ -193,13 +206,13 @@ async function checkPosition(
 
   try {
     await sbUpdate('lp_positions', `id=eq.${position.id}`, {
-      current_price:   currentPriceSol,
-      in_range:        inRange,
+      current_price: currentPriceSol,
+      in_range: inRange,
       fees_earned_sol: feesEarnedSol,
-      il_pct:          ilPct,
-      pnl_sol:         pnlSol,
-      status:          inRange ? 'active' : 'out_of_range',
-      oor_since_at:    oorSinceAt,
+      il_pct: ilPct,
+      pnl_sol: pnlSol,
+      status: inRange ? 'active' : 'out_of_range',
+      oor_since_at: oorSinceAt,
     })
   } catch (err) {
     console.error(`${label} DB update failed:`, err)
@@ -248,7 +261,7 @@ async function checkPosition(
       : 50
 
     const driftedHighInRange = positionInRange > (50 + SMART_REBALANCE_THRESHOLD_PCT / 2)
-    const driftedLowInRange  = positionInRange < (50 - SMART_REBALANCE_THRESHOLD_PCT / 2)
+    const driftedLowInRange = positionInRange < (50 - SMART_REBALANCE_THRESHOLD_PCT / 2)
 
     if ((driftedHighInRange || driftedLowInRange) && volume1hUsd >= MIN_VOLUME_USD_FOR_REBALANCE) {
       console.log(`${label} SMART REBALANCE — price at ${positionInRange.toFixed(0)}% of range, vol=$${volume1hUsd.toFixed(0)}/h`)
@@ -269,19 +282,19 @@ async function checkPosition(
         if (!isHardExit) {
           try {
             const metrics: TokenMetrics = {
-              address:      position.mint,
-              symbol:       position.symbol,
-              poolAddress:  position.pool_address,
-              priceUsd:     currentPriceSol,
-              dexId:        position.metadata?.dexId ?? 'meteora',
-              mcUsd:        0,
-              volume24h:    0,
+              address: position.mint,
+              symbol: position.symbol,
+              poolAddress: position.pool_address,
+              priceUsd: currentPriceSol,
+              dexId: position.metadata?.dexId ?? 'meteora',
+              mcUsd: 0,
+              volume24h: 0,
               liquidityUsd: 0,
               topHolderPct: 0,
-              holderCount:  0,
+              holderCount: 0,
               ageHours,
-              rugcheckScore:  0,
-              feeTvl24hPct:   0,
+              rugcheckScore: 0,
+              feeTvl24hPct: 0,
             }
             await openPosition(metrics, strategy)
             console.log(`${label} reopened centered at ${currentPriceSol}`)
@@ -297,7 +310,7 @@ async function checkPosition(
 async function fetchPositionState(
   poolAddress: string,
   positionPubKey: string
-): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number }> {
+): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number; externallyClosed: boolean }> {
   const connection = getConnection()
   const DLMM = await getDLMM()
 
@@ -310,7 +323,7 @@ async function fetchPositionState(
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const pos = userPositions.find(p => p.publicKey.toBase58() === positionPubKey)
 
-    if (!pos) return { inRange: false, currentPriceSol, feesEarnedSol: 0, volume1hUsd: 0 }
+    if (!pos) return { inRange: false, currentPriceSol, feesEarnedSol: 0, volume1hUsd: 0, externallyClosed: true }
 
     const { lowerBinId, upperBinId, feeX, feeY } = pos.positionData
     const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId
@@ -318,24 +331,19 @@ async function fetchPositionState(
 
     let volume1hUsd = 0
     try {
-      const resp = await fetch(
-        `https://dlmm-api.meteora.ag/pair/${poolAddress}`,
-        { signal: AbortSignal.timeout(5_000) }
-      )
+      const resp = await fetch(`https://dlmm-api.meteora.ag/pair/${poolAddress}`, { signal: AbortSignal.timeout(5_000) })
       if (resp.ok) {
         const data = await resp.json()
         volume1hUsd = data?.trade_volume_1h_usd ?? data?.volume?.h1 ?? 0
       }
-    } catch { /* non-fatal */ }
+    } catch {}
 
-    return { inRange, currentPriceSol, feesEarnedSol, volume1hUsd }
+    return { inRange, currentPriceSol, feesEarnedSol, volume1hUsd, externallyClosed: false }
   } catch (err) {
     console.warn(`[monitor] fetchPositionState failed for ${poolAddress}:`, err)
-    return { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
+    return { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0, externallyClosed: false }
   }
 }
-
-// ── Main loop ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   console.log(`[lp-monitor-dlmm] starting — interval=${MONITOR_INTERVAL_MS / 1000}s orphan-check-every=${ORPHAN_CHECK_EVERY_N}-ticks`)
