@@ -45,6 +45,9 @@ const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?
 const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?? '0.05')
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const WSOL = 'So11111111111111111111111111111111111111112'
+const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
+const QUOTE_ASSETS = new Set([WSOL, USDC, USDT])
 const SUPABASE_TIMEOUT_MS = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 const USE_HELIUS = process.env.HELIUS_ENABLED === 'true'
@@ -108,8 +111,8 @@ function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPo
     if (p.tvl < POOL_MIN_TVL_USD) return false
     const hasMint = p.token_x.address === mintAddress || p.token_y.address === mintAddress
     if (!hasMint) return false
-    const hasSol  = p.token_x.address === WSOL || p.token_y.address === WSOL
-    if (!hasSol) return false
+    const hasQuote = QUOTE_ASSETS.has(p.token_x.address) || QUOTE_ASSETS.has(p.token_y.address)
+    if (!hasQuote) return false
     return true
   })
 
@@ -152,8 +155,7 @@ export async function runScanner(): Promise<{
   const mintBestMap = new Map<string, { pool: MeteoraPool; mcUsd: number; ageHours: number }>()
 
   for (const pool of pools) {
-    const isXSol = pool.token_x.address === WSOL
-    const token = isXSol ? pool.token_y : pool.token_x
+    const token = QUOTE_ASSETS.has(pool.token_x.address) ? pool.token_y : pool.token_x
     const vol24h = pool.volume['24h']
     const liqUsd = pool.tvl
     const mcUsd = token.market_cap ?? 0
@@ -207,8 +209,7 @@ export async function runScanner(): Promise<{
   for (const { pool: representativePool, mcUsd, ageHours } of survivors) {
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
 
-    const isXSol = representativePool.token_x.address === WSOL
-    const token = isXSol ? representativePool.token_y : representativePool.token_x
+    const token = QUOTE_ASSETS.has(representativePool.token_x.address) ? representativePool.token_y : representativePool.token_x
     const tokenAddress = token.address
     const symbol = representativePool.name ?? token.symbol
 
@@ -415,8 +416,8 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
     if (p.volume['24h'] < PRE_FILTER.minVolume24hUsd) return false
     if (p.tvl < PRE_FILTER.minLiquidityUsd) return false
     if (p.tvl > PRE_FILTER.maxLiquidityUsd) return false
-    const hasSol = p.token_x.address === WSOL || p.token_y.address === WSOL
-    if (!hasSol) return false
+    const hasQuote = QUOTE_ASSETS.has(p.token_x.address) || QUOTE_ASSETS.has(p.token_y.address)
+    if (!hasQuote) return false
     return true
   })
 
