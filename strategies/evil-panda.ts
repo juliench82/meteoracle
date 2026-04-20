@@ -27,7 +27,7 @@ export const evilPandaStrategy: Strategy = {
     minLiquidityUsd:      20_000,
     maxTopHolderPct:         100,
     minHolderCount:          100,
-    maxAgeHours:             120,
+    maxAgeHours:             720,   // 30 days — high-feeTvl pools spike at any age
     minRugcheckScore:         25,
     requireSocialSignal:   false,
     minFeeTvl24hPct:          15,

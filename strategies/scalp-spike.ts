@@ -19,11 +19,11 @@ export const scalpSpikeStrategy: Strategy = {
   filters: {
     minMcUsd:          5_000_000,
     maxMcUsd:         50_000_000,
-    minVolume24h:        200_000,
+    minVolume24h:        100_000,   // was 200k — lowered to catch real spikes
     minLiquidityUsd:      30_000,
     maxTopHolderPct:         100,
     minHolderCount:          300,
-    maxAgeHours:             120,
+    maxAgeHours:           2_160,   // 90 days — established tokens spike at any age
     minRugcheckScore:         65,
     requireSocialSignal:   false,
     minFeeTvl24hPct:          15,
