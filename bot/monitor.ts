@@ -8,6 +8,7 @@ import { getConnection, getWallet } from '@/lib/solana'
 import { getBotState } from '@/lib/botState'
 import { closePosition, openPosition } from '@/bot/executor'
 import { sendAlert } from '@/bot/alerter'
+import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
 import { STRATEGIES } from '@/strategies'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
@@ -20,6 +21,10 @@ const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
 const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
+
+// Run full-wallet orphan scan every N ticks (default 15 ≈ 15 min at 60s interval)
+const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '15')
+let tickCount = 0
 
 // ── Direct REST helpers (bypasses supabase-js connection pooling issues) ──────
 
@@ -88,6 +93,18 @@ export async function monitorPositions(): Promise<{
   }
 
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
+
+  // ── Automatic orphan reconciliation every N ticks ──────────────────────────
+  tickCount++
+  if (tickCount % ORPHAN_CHECK_EVERY_N === 0) {
+    console.log(`[monitor] tick ${tickCount} — running auto orphan scan`)
+    try {
+      await detectAllOrphanedPositions()
+    } catch (err) {
+      console.warn('[monitor] auto orphan scan failed (non-fatal):', err)
+    }
+  }
+  // ───────────────────────────────────────────────────────────────────────────
 
   console.log('[monitor] fetching open LP positions')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -251,8 +268,6 @@ async function checkPosition(
         const isHardExit = HARD_EXIT_PREFIXES.some(prefix => rebalanceReason.startsWith(prefix))
         if (!isHardExit) {
           try {
-            // feeTvl24hPct is unknown at reopen time — default 0 so scorer re-evaluates
-            // the live pool. If the pool has gone cold it will be rejected by the fee gate.
             const metrics: TokenMetrics = {
               address:      position.mint,
               symbol:       position.symbol,
@@ -266,7 +281,7 @@ async function checkPosition(
               holderCount:  0,
               ageHours,
               rugcheckScore:  0,
-              feeTvl24hPct:   0, // re-evaluated by scorer against strategy.filters.minFeeTvl24hPct
+              feeTvl24hPct:   0,
             }
             await openPosition(metrics, strategy)
             console.log(`${label} reopened centered at ${currentPriceSol}`)
@@ -275,102 +290,67 @@ async function checkPosition(
           }
         }
       }
-      return
     }
   }
-
-  if (strategy.exits.claimFeesBeforeClose && feesEarnedSol >= strategy.exits.minFeesToClaim) {
-    console.log(`${label} claiming fees: ${feesEarnedSol.toFixed(4)} SOL`)
-    stats.claimed++
-    try {
-      await sbInsert('bot_logs', {
-        level: 'info', event: 'fees_claimable',
-        payload: { positionId: position.id, symbol: position.symbol, feesEarnedSol },
-      })
-    } catch { /* non-fatal */ }
-  }
-
-  if (justWentOOR) {
-    await sendAlert({
-      type: 'position_oor',
-      symbol: position.symbol,
-      strategy: strategy.id,
-      currentPrice: currentPriceSol,
-      binRangeLower: rangeLower,
-      binRangeUpper: rangeUpper,
-      oorExitMinutes: strategy.exits.outOfRangeMinutes,
-    })
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pricePerToken: string }): number {
-  try {
-    const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price))
-    const price = parseFloat(adjusted)
-    if (isFinite(price) && price > 0) return price
-  } catch { /* fall through */ }
-  return parseFloat(activeBin.pricePerToken)
 }
 
 async function fetchPositionState(
   poolAddress: string,
-  positionPubKeyStr?: string
+  positionPubKey: string
 ): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number }> {
-  const fallback = { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
+  const connection = getConnection()
+  const DLMM = await getDLMM()
+
   try {
-    const DLMM       = await getDLMM()
-    const connection = getConnection()
-    const wallet     = getWallet()
-    const dlmmPool   = await DLMM.create(connection, new PublicKey(poolAddress))
-    const activeBin  = await dlmmPool.getActiveBin()
-    const currentPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin)
+    const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddress))
+    const activeBin = await dlmmPool.getActiveBin()
+    const currentPriceSol = parseFloat(activeBin.pricePerToken)
+
+    const wallet = getWallet()
+    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
+    const pos = userPositions.find(p => p.publicKey.toBase58() === positionPubKey)
+
+    if (!pos) return { inRange: false, currentPriceSol, feesEarnedSol: 0, volume1hUsd: 0 }
+
+    const { lowerBinId, upperBinId, feeX, feeY } = pos.positionData
+    const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId
+    const feesEarnedSol = (Number(feeX) + Number(feeY)) / 1e9
 
     let volume1hUsd = 0
     try {
-      const statsRes = await fetch(`https://dlmm-api.meteora.ag/pair/${poolAddress}`, { signal: AbortSignal.timeout(4000) })
-      if (statsRes.ok) {
-        const stats = await statsRes.json()
-        volume1hUsd = stats?.trade_volume_usd ?? stats?.volume?.h1 ?? 0
+      const resp = await fetch(
+        `https://dlmm-api.meteora.ag/pair/${poolAddress}`,
+        { signal: AbortSignal.timeout(5_000) }
+      )
+      if (resp.ok) {
+        const data = await resp.json()
+        volume1hUsd = data?.trade_volume_1h_usd ?? data?.volume?.h1 ?? 0
       }
     } catch { /* non-fatal */ }
 
-    if (!positionPubKeyStr) {
-      console.warn(`[monitor] no position_pubkey for pool ${poolAddress} — assuming inRange=true`)
-      return { inRange: true, currentPriceSol, feesEarnedSol: 0, volume1hUsd }
-    }
-
-    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
-    const pos = userPositions.find((p) => p.publicKey.toBase58() === positionPubKeyStr)
-    if (!pos) {
-      console.warn(`[monitor] position ${positionPubKeyStr} not found on-chain — assuming closed/OOR`)
-      return { ...fallback, currentPriceSol, volume1hUsd }
-    }
-
-    const { lowerBinId, upperBinId, feeY } = pos.positionData
-    const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId
-    const feesEarnedSol = feeY.toNumber() / 1e9
     return { inRange, currentPriceSol, feesEarnedSol, volume1hUsd }
   } catch (err) {
-    console.error(`[monitor] fetchPositionState failed for pool ${poolAddress}:`, err)
-    return fallback
+    console.warn(`[monitor] fetchPositionState failed for ${poolAddress}:`, err)
+    return { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0 }
   }
 }
 
-// ─── Standalone entrypoint (PM2) ──────────────────────────────────────────────
+// ── Main loop ─────────────────────────────────────────────────────────────────
 
-const standaloneMonitorTick = async (): Promise<void> => {
-  const label = '[lp-monitor-dlmm]'
-  try {
-    const result = await monitorPositions()
-    console.log(`${label} tick done — checked=${result.checked} closed=${result.closed} claimed=${result.claimed} rebalanced=${result.rebalanced}`)
-  } catch (err) {
-    console.error(`${label} tick error:`, err)
+async function main(): Promise<void> {
+  console.log(`[lp-monitor-dlmm] starting — interval=${MONITOR_INTERVAL_MS / 1000}s orphan-check-every=${ORPHAN_CHECK_EVERY_N}-ticks`)
+  while (true) {
+    try {
+      const stats = await monitorPositions()
+      console.log(`[lp-monitor-dlmm] tick done — checked=${stats.checked} closed=${stats.closed} claimed=${stats.claimed} rebalanced=${stats.rebalanced}`)
+    } catch (err) {
+      console.error('[lp-monitor-dlmm] tick error:', err)
+    }
+    await new Promise(r => setTimeout(r, MONITOR_INTERVAL_MS))
   }
 }
 
-if (require.main === module || process.env.LP_MONITOR_STANDALONE === 'true') {
-  const label = '[lp-monitor-dlmm]'
-  console.log(`${label} starting — poll every ${MONITOR_INTERVAL_MS / 1000}s`)
-  standaloneMonitorTick().then(() => setInterval(standaloneMonitorTick, MONITOR_INTERVAL_MS))
-}
+main().catch(err => {
+  console.error('[lp-monitor-dlmm] fatal:', err)
+  process.exit(1)
+})
