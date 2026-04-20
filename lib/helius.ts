@@ -1,7 +1,8 @@
 import axios from 'axios'
 
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
-const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1')
+// Default 0 = DAS disabled. Set HELIUS_HOLDER_MAX_PAGES=1 on paid plan.
+const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '0')
 
 const HOLDER_CACHE_TTL_MS = 60 * 60 * 1_000
 const _holderCache = new Map<string, { data: HolderData; ts: number }>()
@@ -29,7 +30,6 @@ class RateLimiter {
   }
 }
 
-const dasLimiter = new RateLimiter(1)   // 1/s (Helius DAS limit: 2/s)
 const rpcLimiter = new RateLimiter(8)   // 8/s (Helius RPC limit: 10/s)
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -40,36 +40,31 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
     return cached.data
   }
 
-  // Fully sequential — DAS completes before RPC starts, no concurrent Helius requests
-  console.log(`[helius:req] ${mintAddress} — starting DAS @ ${Date.now()}`)
-  const dasResult = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES)
-    .then(v  => ({ status: 'fulfilled' as const, value: v }))
-    .catch(e => ({ status: 'rejected'  as const, reason: e }))
+  // DAS skipped when DAS_MAX_PAGES=0 (default on free plan)
+  let holderCount: number | null = null
+  if (DAS_MAX_PAGES > 0) {
+    console.log(`[helius:req] ${mintAddress} — starting DAS @ ${Date.now()}`)
+    holderCount = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES).catch(() => null)
+  }
 
   console.log(`[helius:req] ${mintAddress} — starting RPC @ ${Date.now()}`)
-  const rpcResult = await fetchTopAccountsAndSupply(mintAddress)
-    .then(v  => ({ status: 'fulfilled' as const, value: v }))
-    .catch(e => ({ status: 'rejected'  as const, reason: e }))
+  const rpcResult = await fetchTopAccountsAndSupply(mintAddress).catch(() => null)
 
-  let topHolderPct = 0
-  let rpcAccounts: Array<{ uiAmount: number | null }> = []
-  if (rpcResult.status === 'fulfilled' && rpcResult.value) {
-    rpcAccounts  = rpcResult.value.accounts
-    topHolderPct = rpcResult.value.topHolderPct
-  }
+  const topHolderPct = rpcResult?.topHolderPct ?? 0
+  const rpcAccounts  = rpcResult?.accounts ?? []
 
   let result: HolderData
-  if (dasResult.status === 'fulfilled' && dasResult.value !== null) {
-    console.log(`[helius] ${mintAddress} — ${dasResult.value} holders (DAS), topHolder=${topHolderPct.toFixed(1)}%`)
-    result = { holderCount: dasResult.value, topHolderPct, reliable: true }
+  if (holderCount !== null) {
+    console.log(`[helius] ${mintAddress} — ${holderCount} holders (DAS), topHolder=${topHolderPct.toFixed(1)}%`)
+    result = { holderCount, topHolderPct, reliable: true }
   } else {
-    console.warn(`[helius] DAS failed for ${mintAddress}; using heuristic`)
-    result = rpcAccounts.length > 0
-      ? { holderCount: rpcAccounts.length * 50, topHolderPct, reliable: false }
-      : { holderCount: 0, topHolderPct: 0, reliable: false }
+    const estimated = rpcAccounts.length > 0 ? rpcAccounts.length * 50 : 0
+    console.log(`[helius] ${mintAddress} — ~${estimated} holders (RPC heuristic), topHolder=${topHolderPct.toFixed(1)}%`)
+    result = { holderCount: estimated, topHolderPct, reliable: false }
   }
 
-  if (result.reliable) _holderCache.set(mintAddress, { data: result, ts: Date.now() })
+  // Cache even heuristic results for 1h to avoid hammering RPC
+  _holderCache.set(mintAddress, { data: result, ts: Date.now() })
   return result
 }
 
@@ -98,7 +93,6 @@ async function fetchDasHolderCount(
   for (let page = 1; page <= maxPages; page++) {
     let res
     for (let attempt = 0; attempt < 6; attempt++) {
-      await dasLimiter.acquire()
       try {
         res = await axios.post(
           HELIUS_RPC_URL,
@@ -127,7 +121,6 @@ async function fetchDasHolderCount(
     const accounts: unknown[] = (res?.data?.result?.token_accounts as unknown[]) ?? []
     total += accounts.length
     if (accounts.length < pageSize) break
-    if (page === maxPages) console.warn(`[helius] ${mint} — hit max pages (${maxPages}), count is ${total}+`)
   }
   return total > 0 ? total : null
 }
