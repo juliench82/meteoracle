@@ -33,41 +33,62 @@ const dasLimiter = new RateLimiter(1) // 1/s conservative (Helius DAS limit: 2/s
 const rpcLimiter = new RateLimiter(8) // 8/s conservative (Helius RPC limit: 10/s)
 
 // ── Public API ────────────────────────────────────────────────────────────────
+const inFlightChecks = new Set<string>()
+
 export async function checkHolders(mintAddress: string): Promise<HolderData> {
-  // Must explicitly opt-in: HELIUS_ENABLED=true
-  if (process.env.HELIUS_ENABLED !== 'true') {
-    return { holderCount: 0, topHolderPct: 0, reliable: false }
+  if (inFlightChecks.has(mintAddress)) {
+    console.log(`[helius] ${mintAddress} — already in flight, waiting...`)
+    await new Promise(r => setTimeout(r, 300))
+    return checkHolders(mintAddress)
   }
+  inFlightChecks.add(mintAddress)
 
-  const cached = _holderCache.get(mintAddress)
-  if (cached && Date.now() - cached.ts < HOLDER_CACHE_TTL_MS) {
-    console.log(`[helius] ${mintAddress} — cache hit (age=${Math.round((Date.now() - cached.ts) / 60_000)}min)`)
-    return cached.data
+  try {
+    // Must explicitly opt-in: HELIUS_ENABLED=true
+    if (process.env.HELIUS_ENABLED !== 'true') {
+      return { holderCount: 0, topHolderPct: 0, reliable: false }
+    }
+
+    const cached = _holderCache.get(mintAddress)
+    if (cached && Date.now() - cached.ts < HOLDER_CACHE_TTL_MS) {
+      console.log(`[helius] ${mintAddress} — cache hit (age=${Math.round((Date.now() - cached.ts) / 60_000)}min)`)
+      return cached.data
+    }
+
+    const startTime = Date.now()
+    console.log(`[helius:req] ${mintAddress} — checkHolders started @ ${startTime}`)
+
+    // 1. DAS (if enabled) — sequential
+    let holderCount: number | null = null
+    if (DAS_MAX_PAGES > 0) {
+      await dasLimiter.acquire()
+      console.log(`[helius:req] ${mintAddress} — DAS start @ ${Date.now()}`)
+      holderCount = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES).catch(() => null)
+    }
+
+    // 2. RPC — sequential after DAS
+    await rpcLimiter.acquire()
+    console.log(`[helius:req] ${mintAddress} — RPC start @ ${Date.now()}`)
+    const rpcResult = await fetchTopAccountsAndSupply(mintAddress).catch(() => null)
+
+    const topHolderPct = rpcResult?.topHolderPct ?? 0
+    const rpcAccounts  = rpcResult?.accounts ?? []
+
+    let result: HolderData
+    if (holderCount !== null) {
+      console.log(`[helius] ${mintAddress} — ${holderCount} holders (DAS), topHolder=${topHolderPct.toFixed(1)}%`)
+      result = { holderCount, topHolderPct, reliable: true }
+    } else {
+      const estimated = rpcAccounts.length > 0 ? rpcAccounts.length * 50 : 0
+      console.warn(`[helius] ${mintAddress} — DAS failed; ~${estimated} holders (heuristic), topHolder=${topHolderPct.toFixed(1)}%`)
+      result = { holderCount: estimated, topHolderPct, reliable: false }
+    }
+
+    if (result.reliable) _holderCache.set(mintAddress, { data: result, ts: Date.now() })
+    return result
+  } finally {
+    inFlightChecks.delete(mintAddress)
   }
-
-  // Run DAS and RPC concurrently — each gated by its own rate limiter
-  const [dasResult, rpcResult] = await Promise.allSettled([
-    fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES),
-    fetchTopAccountsAndSupply(mintAddress),
-  ])
-
-  const holderCount  = dasResult.status === 'fulfilled' ? dasResult.value : null
-  const rpcData      = rpcResult.status === 'fulfilled'  ? rpcResult.value  : null
-  const topHolderPct = rpcData?.topHolderPct ?? 0
-  const rpcAccounts  = rpcData?.accounts ?? []
-
-  let result: HolderData
-  if (holderCount !== null) {
-    console.log(`[helius] ${mintAddress} — ${holderCount} holders (DAS), topHolder=${topHolderPct.toFixed(1)}%`)
-    result = { holderCount, topHolderPct, reliable: true }
-  } else {
-    const estimated = rpcAccounts.length > 0 ? rpcAccounts.length * 50 : 0
-    console.warn(`[helius] ${mintAddress} — DAS failed; ~${estimated} holders (heuristic), topHolder=${topHolderPct.toFixed(1)}%`)
-    result = { holderCount: estimated, topHolderPct, reliable: false }
-  }
-
-  if (result.reliable) _holderCache.set(mintAddress, { data: result, ts: Date.now() })
-  return result
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
