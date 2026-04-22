@@ -10,6 +10,9 @@ type AlertPayload =
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string }
   | { type: 'cooldown_skip'; symbol: string; strategy: string; cooldownHours: number }
+  | { type: 'pre_grad_opened'; symbol: string; positionId: string; poolAddress: string; bondingCurvePct: number }
+  | { type: 'pre_grad_closed'; symbol: string; positionId: string; ageMin: number; reason: string }
+  | { type: 'pre_grad_graduated'; symbol: string; positionId: string; bondingCurvePct: number }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -88,6 +91,33 @@ function formatMessage(payload: AlertPayload): string {
         `Token: \`${payload.symbol}\``,
         `Strategy: ${payload.strategy}`,
         `Skipped — closed within last ${payload.cooldownHours}h`,
+      ].join('\n')
+
+    case 'pre_grad_opened':
+      return [
+        `🌱 *Pre-Grad Position Opened*`,
+        `Token: \`${payload.symbol}\``,
+        `ID: \`${payload.positionId}\``,
+        `Pool: \`${payload.poolAddress}\``,
+        `Curve: ${payload.bondingCurvePct.toFixed(1)}% ${bondingCurveEmoji(payload.bondingCurvePct)}`,
+      ].join('\n')
+
+    case 'pre_grad_closed':
+      return [
+        `🌿 *Pre-Grad Position Closed*`,
+        `Token: \`${payload.symbol}\``,
+        `ID: \`${payload.positionId}\``,
+        `Reason: ${payload.reason}`,
+        `Age: ${payload.ageMin}min`,
+      ].join('\n')
+
+    case 'pre_grad_graduated':
+      return [
+        `🎓 *Token Graduated!*`,
+        `Token: \`${payload.symbol}\``,
+        `ID: \`${payload.positionId}\``,
+        `Curve: ${payload.bondingCurvePct.toFixed(1)}% ✅`,
+        `_Position should be closed and re-evaluated on DLMM_`,
       ].join('\n')
 
     case 'error':
