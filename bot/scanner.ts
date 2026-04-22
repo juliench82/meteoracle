@@ -13,6 +13,7 @@ import { sendAlert } from './alerter'
 import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
 import { fetchBondingCurve, isPumpFunToken } from '@/lib/pumpfun'
+import { createPreGradPool } from '@/lib/pre-grad'
 import type { TokenMetrics } from '@/lib/types'
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
@@ -227,6 +228,18 @@ export async function runScanner(): Promise<{
       SUPABASE_TIMEOUT_MS, `lp_positions dedup ${symbol}`
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
+
+    // === PRE-GRAD DAMM v2 SHORT-CIRCUIT (before selectBestPool) ===
+    if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
+      const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
+      const bondingCurvePct = curve?.progressPct ?? 0
+
+      if (bondingCurvePct >= 95 && curve?.complete === false) {
+        console.log(`[scanner] ${symbol} — ${bondingCurvePct.toFixed(1)}% pre-grad candidate → DAMM v2 path`)
+        await createPreGradPool({ mintAddress: tokenAddress, symbol, strategy: null })
+        continue  // skip DLMM path entirely
+      }
+    }
 
     const bestPool = selectBestPool(pools, tokenAddress)
     if (!bestPool) {
