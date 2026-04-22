@@ -10,6 +10,8 @@ type AlertPayload =
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string }
   | { type: 'cooldown_skip'; symbol: string; strategy: string; cooldownHours: number }
+  | { type: 'pre_grad_pool_created'; symbol: string; mint: string; pool: string; sol: number }
+  | { type: 'pre_grad_create_failed'; mint: string; error: string }
   | { type: 'pre_grad_opened'; symbol: string; positionId: string; poolAddress: string; bondingCurvePct: number }
   | { type: 'pre_grad_closed'; symbol: string; positionId: string; ageMin: number; reason: string }
   | { type: 'pre_grad_graduated'; symbol: string; positionId: string; bondingCurvePct: number }
@@ -91,6 +93,22 @@ function formatMessage(payload: AlertPayload): string {
         `Token: \`${payload.symbol}\``,
         `Strategy: ${payload.strategy}`,
         `Skipped — closed within last ${payload.cooldownHours}h`,
+      ].join('\n')
+
+    case 'pre_grad_pool_created':
+      return [
+        `🌱 *Pre-Grad DAMM v2 Pool Created*`,
+        `Token: \`${payload.symbol}\``,
+        `Mint: \`${payload.mint}\``,
+        `Pool: \`${payload.pool}\``,
+        `Deployed: ${payload.sol.toFixed(4)} SOL`,
+      ].join('\n')
+
+    case 'pre_grad_create_failed':
+      return [
+        `❌ *Pre-Grad Pool Create Failed*`,
+        `Mint: \`${payload.mint}\``,
+        `Error: ${payload.error}`,
       ].join('\n')
 
     case 'pre_grad_opened':

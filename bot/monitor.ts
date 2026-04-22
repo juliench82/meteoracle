@@ -108,7 +108,7 @@ export async function monitorPositions(): Promise<{
   console.log('[monitor] fetching open LP positions')
   let positions: any[]
   try {
-    positions = await sbSelect('lp_positions', 'status=in.(active,out_of_range)&order=opened_at.desc')
+    positions = await sbSelect('lp_positions', 'status=in.(active,open,out_of_range)&order=opened_at.desc')
   } catch (err) {
     console.warn('[monitor] lp_positions fetch error:', err)
     return stats
@@ -120,6 +120,14 @@ export async function monitorPositions(): Promise<{
   for (const position of positions) {
     try {
       stats.checked++
+
+      // Pre-grad DAMM v2 positions — routed to their own close handler
+      if (position.position_type === 'pre_grad') {
+        const closed = await closePreGradPosition(position)
+        if (closed) stats.closed++
+        continue
+      }
+
       const strategyId = position.strategy_id ?? position.metadata?.strategy_id
       const strategy = STRATEGIES.find((s) => s.id === strategyId)
       if (!strategy) {
