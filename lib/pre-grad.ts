@@ -1,5 +1,5 @@
 // lib/pre-grad.ts
-import { Keypair, PublicKey } from '@solana/web3.js';
+import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { CpAmm } from '@meteora-ag/cp-amm-sdk';
 import BN from 'bn.js';
 import { getConnection, getWallet } from '@/lib/solana';
@@ -64,9 +64,10 @@ export async function createPreGradPool(params: {
     // CpAmm is instantiated with connection — methods are NOT static
     const cpAmm = new CpAmm(connection);
 
-    // TODO: confirm exact createPool params shape against installed SDK version.
-    // The SDK's createPool() returns a TxBuilder — call .transaction() + sendAndConfirm.
-    const txBuilder = await cpAmm.createPool({
+    // createPool() returns a Transaction directly (not a TxBuilder)
+    // TODO: compute initSqrtPrice via getSqrtPriceFromPrice()
+    // TODO: compute liquidityDelta via cpAmm.preparePoolCreationParams()
+    const tx = await cpAmm.createPool({
       payer: wallet.publicKey,
       creator: wallet.publicKey,
       positionNft: positionNftKeypair.publicKey,
@@ -75,13 +76,12 @@ export async function createPreGradPool(params: {
       tokenAAmount: new BN(0),
       tokenBAmount: new BN(Math.floor(solAmount * 1e9)),
       activationPoint: null,
-      initSqrtPrice: new BN(0), // TODO: compute via getSqrtPriceFromPrice
-      liquidityDelta: new BN(0), // TODO: compute via preparePoolCreationParams
+      initSqrtPrice: new BN(0),
+      liquidityDelta: new BN(0),
       tokenAProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
       tokenBProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-    } as any);
+    } as any) as unknown as Transaction;
 
-    const tx = await txBuilder.transaction();
     const sig = await (wallet as any).sendTransaction(tx, connection);
     await connection.confirmTransaction(sig, 'confirmed');
 
@@ -135,7 +135,6 @@ export async function closePreGradPosition(position: Record<string, unknown>): P
     const positionNftKeypair = new Keypair();
 
     // TODO: confirm exact removeLiquidity / removeAllLiquidityAndClosePosition signature.
-    // Likely: { owner, positionNft, liquidityDelta, tokenAAmountThreshold, tokenBAmountThreshold }
     // Stubbed safely — DB is still updated; 45-min gate prevents hot-path blast.
     console.warn(`${label} removeLiquidity stubbed — on-chain close skipped, marking DB closed`);
     console.log(`${label} positionNft=${positionNftKeypair.publicKey.toBase58()} pool=${String(position.pool_address)}`);
