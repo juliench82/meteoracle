@@ -82,7 +82,9 @@ export async function detectAllOrphanedPositions(): Promise<void> {
 
   console.log('[orphan-detector] full-wallet scan for orphaned positions')
 
-  let allPositions: Map<string, { publicKey: PublicKey; positionData: { lowerBinId: number; upperBinId: number } }>
+  // Widened to Map<string, any> — getAllLbPairPositionsByUser return shape varies
+  // across SDK versions; runtime handling via (positionInfo as any) guards is unchanged.
+  let allPositions: Map<string, any>
   try {
     allPositions = await DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey)
   } catch (err) {
