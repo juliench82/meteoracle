@@ -6,7 +6,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
-import { STRATEGIES, getStrategyForToken, classifyToken } from '@/strategies'
+import { STRATEGIES, getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
 import { scoreCandidate } from './scorer'
 import { openPosition } from './executor'
 import { sendAlert } from './alerter'
@@ -36,9 +36,9 @@ const CHEAP_FILTER = {
   maxAgeHours:     999_999,
 }
 
-const MAX_DEEP_CHECKS = parseInt(process.env.MAX_DEEP_CHECKS ?? '20')
-const DEEP_CHECK_DELAY_MS = parseInt(process.env.DEEP_CHECK_DELAY_MS ?? '3000')
-const POOL_MIN_TVL_USD      = 20_000
+const MAX_DEEP_CHECKS          = parseInt(process.env.MAX_DEEP_CHECKS          ?? '20')
+const DEEP_CHECK_DELAY_MS      = parseInt(process.env.DEEP_CHECK_DELAY_MS      ?? '3000')
+const POOL_MIN_TVL_USD         = 20_000
 const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '60')
@@ -46,13 +46,15 @@ const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?
 const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?? '0.05')
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const CANDIDATE_DEDUP_HOURS    = parseInt(process.env.CANDIDATE_DEDUP_HOURS    ?? '6')
+
 const WSOL = 'So11111111111111111111111111111111111111112'
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
 const QUOTE_ASSETS = new Set([WSOL, USDC, USDT])
-const SUPABASE_TIMEOUT_MS = 10_000
+
+const SUPABASE_TIMEOUT_MS      = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
-const USE_HELIUS = process.env.HELIUS_ENABLED === 'true'
+const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
 const _bondingCurveCache = new Map<string, { pct: number; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
@@ -89,22 +91,11 @@ async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string
   return result
 }
 
-function explainNoStrategy(t: TokenMetrics): string {
-  const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
-    const f = s.filters
-    const fails: string[] = []
-    if (t.mcUsd < f.minMcUsd) fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
-    if (t.mcUsd > f.maxMcUsd) fails.push(`mc too high`)
-    if (t.volume24h < f.minVolume24h) fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
-    if (t.liquidityUsd < f.minLiquidityUsd) fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
-    if (t.topHolderPct > f.maxTopHolderPct) fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
-    if (t.holderCount < f.minHolderCount) fails.push(`holders=${t.holderCount}<${f.minHolderCount}`)
-    if (t.ageHours > f.maxAgeHours) fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
-    if (t.rugcheckScore < f.minRugcheckScore) fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
-    if (t.feeTvl24hPct < f.minFeeTvl24hPct) fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
-    return fails.length === 0 ? null : `[${s.id}: ${fails.join(', ')}]`
-  }).filter(Boolean)
-  return perStrat.join(' | ') || 'all strategies disabled'
+/** Returns the quote token mint address for a pool (the side that is WSOL/USDC/USDT). */
+function getQuoteTokenMint(pool: MeteoraPool): string {
+  return QUOTE_ASSETS.has(pool.token_x.address)
+    ? pool.token_x.address
+    : pool.token_y.address
 }
 
 function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPool | null {
@@ -247,11 +238,14 @@ export async function runScanner(): Promise<{
       continue
     }
 
-    const vol24h = bestPool.volume['24h']
-    const vol1h = bestPool.volume['1h']
-    const liqUsd = bestPool.tvl
-    const feeTvl24hPct = bestPool.fee_tvl_ratio['24h'] * 100
-    const binStep = bestPool.pool_config?.bin_step ?? '?'
+    // Identify which side of the pool is the quote asset (WSOL / USDC / USDT).
+    const quoteTokenMint = getQuoteTokenMint(bestPool)
+
+    const vol24h        = bestPool.volume['24h']
+    const vol1h         = bestPool.volume['1h']
+    const liqUsd        = bestPool.tvl
+    const feeTvl24hPct  = bestPool.fee_tvl_ratio['24h'] * 100
+    const binStep       = bestPool.pool_config?.bin_step ?? '?'
 
     if (bestPool.address !== representativePool.address) {
       console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStep}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)} (was bin_step=${representativePool.pool_config?.bin_step}, feeTvl=${(representativePool.fee_tvl_ratio['24h'] * 100).toFixed(2)}%)`)
@@ -263,19 +257,19 @@ export async function runScanner(): Promise<{
       if (!resolvedMc || resolvedMc < 1) { console.log(`[scanner] ${symbol} — skip: no market_cap`); continue }
     }
 
-    let holderCount = 0
+    let holderCount  = 0
     let topHolderPct = 0
 
     if (USE_HELIUS) {
       console.log(`[scanner] ${symbol} — calling Helius`)
       const holderData = await checkHolders(tokenAddress)
-      holderCount = holderData.holderCount
+      holderCount  = holderData.holderCount
       topHolderPct = holderData.topHolderPct
       if (!holderData.reliable && token.holders) {
         holderCount = Math.max(holderCount, token.holders)
       }
     } else {
-      holderCount = token.holders ?? 0
+      holderCount  = token.holders ?? 0
       topHolderPct = 0
       console.log(`[scanner] ${symbol} — using Meteora holders (Helius disabled)`)
     }
@@ -302,63 +296,65 @@ export async function runScanner(): Promise<{
     }
 
     const metrics: TokenMetrics = {
-      address: tokenAddress,
+      address:        tokenAddress,
       symbol,
-      mcUsd: resolvedMc,
-      volume24h: vol24h,
-      liquidityUsd: liqUsd,
+      mcUsd:          resolvedMc,
+      volume24h:      vol24h,
+      liquidityUsd:   liqUsd,
       topHolderPct,
-      holderCount: holderCountForFilter,
+      holderCount:    holderCountForFilter,
       ageHours,
-      rugcheckScore: rugScore,
-      priceUsd: token.price,
-      poolAddress: bestPool.address,
-      dexId: 'meteora',
+      rugcheckScore:  rugScore,
+      priceUsd:       token.price,
+      poolAddress:    bestPool.address,
+      dexId:          'meteora',
       feeTvl24hPct,
       bondingCurvePct,
+      quoteTokenMint,   // ← wired: WSOL/USDC/USDT — used by BLUECHIP gate
     }
 
     const tokenClass = classifyToken({
-      address: metrics.address,
-      mcUsd: metrics.mcUsd,
-      volume24h: metrics.volume24h,
-      volume1h: vol1h,
-      liquidityUsd: metrics.liquidityUsd,
-      ageHours: metrics.ageHours,
-      topHolderPct: metrics.topHolderPct,
-      holderCount: metrics.holderCount,
-      rugcheckScore: metrics.rugcheckScore,
+      address:        metrics.address,
+      mcUsd:          metrics.mcUsd,
+      volume24h:      metrics.volume24h,
+      volume1h:       vol1h,
+      liquidityUsd:   metrics.liquidityUsd,
+      ageHours:       metrics.ageHours,
+      topHolderPct:   metrics.topHolderPct,
+      holderCount:    metrics.holderCount,
+      rugcheckScore:  metrics.rugcheckScore,
+      quoteTokenMint: metrics.quoteTokenMint,  // ← wired
     })
 
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
-      console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}): ${explainNoStrategy(metrics)}`)
+      console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}, quote=${quoteTokenMint}): ${explainNoStrategy(metrics)}`)
       continue
     }
 
-    const score = scoreCandidate(metrics, strategy)
+    const score       = scoreCandidate(metrics, strategy)
     const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
     await withTimeout(
       supabase.from('candidates').insert({
-        token_address: metrics.address,
-        symbol: metrics.symbol,
+        token_address:  metrics.address,
+        symbol:         metrics.symbol,
         score,
         strategy_matched: strategy.id,
-        strategy_id: strategy.id,
-        token_class: tokenClass,
-        mc_at_scan: metrics.mcUsd,
-        volume_24h: metrics.volume24h,
-        holder_count: metrics.holderCount,
+        strategy_id:    strategy.id,
+        token_class:    tokenClass,
+        mc_at_scan:     metrics.mcUsd,
+        volume_24h:     metrics.volume24h,
+        holder_count:   metrics.holderCount,
         rugcheck_score: metrics.rugcheckScore,
         top_holder_pct: metrics.topHolderPct,
-        scanned_at: new Date().toISOString(),
+        scanned_at:     new Date().toISOString(),
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
 
     candidateCount++
-    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(2)}%, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStep}${bondingInfo})`)
+    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, quote=${quoteTokenMint}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(2)}%, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStep}${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (score >= MIN_SCORE_TO_OPEN) {
@@ -416,7 +412,7 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
-      const status = (err as { response?: { status?: number } })?.response?.status
+      const status  = (err as { response?: { status?: number } })?.response?.status
       console.warn(`[scanner] endpoint ${endpoint} failed: ${status ? `HTTP ${status}: ` : ''}${message}`)
     }
   }
