@@ -51,6 +51,8 @@ export interface TokenMetrics {
   feeTvl24hPct: number
   /** pump.fun bonding curve fill %, 0–100. undefined = not a pump.fun token or fetch failed. */
   bondingCurvePct?: number
+  /** Quote token mint address of the selected pool (e.g. WSOL, USDC, USDT). */
+  quoteTokenMint?: string
 }
 
 export interface TokenFilters {
@@ -65,6 +67,12 @@ export interface TokenFilters {
   requireSocialSignal: boolean
   /** Minimum 24h Fee/TVL % required to enter this pool. Strategy-dependent. */
   minFeeTvl24hPct: number
+  /**
+   * If set, the pool's quote token mint must be one of these addresses.
+   * Used by bluechip-farm to enforce USDC/USDT-only pairs.
+   * Leave undefined to allow any quote token (SOL, USDC, USDT).
+   */
+  requiredQuoteMints?: string[]
 }
 
 export interface PositionConfig {
