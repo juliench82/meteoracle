@@ -4,9 +4,6 @@ import { scalpSpikeStrategy } from './scalp-spike'
 import { stableFarmStrategy } from './stable-farm'
 import { bluechipFarmStrategy } from './bluechip-farm'
 
-/**
- * All registered strategies.
- */
 export const STRATEGIES: Strategy[] = [
   evilPandaStrategy,
   scalpSpikeStrategy,
@@ -17,20 +14,23 @@ export const STRATEGIES: Strategy[] = [
 /**
  * Token class classification.
  *
- * MEME_SHITCOIN  — fresh low-cap memecoins, pump risk, wide-range fee farm
- *                  → Evil Panda
+ * MEME_SHITCOIN  — default for all SOL-paired tokens that don't qualify for
+ *                  SCALP_SPIKE or BLUECHIP. MC is irrelevant — a $100M utility
+ *                  token on SOL is still treated as a shitcoin for LP purposes.
+ *                  → Evil Panda (wide range, short duration)
  *
- * SCALP_SPIKE    — established memecoins, sustained vol, predictable ranges
- *                  → Scalp-Spike
+ * SCALP_SPIKE    — any token (meme or utility) age>=48h + MC>=500K experiencing
+ *                  a real volume surge (vol1h >= SCALP_SPIKE_VOL_RATIO × 24h avg).
+ *                  → Scalp-Spike (tight range, hard exit)
  *
- * BLUECHIP       — large-cap, long-lived, broadly-held pairs quoted in USDC/USDT
- *                  → Bluechip Farm
- *                  NOTE: SOL-paired tokens can never be BLUECHIP regardless of MC.
+ * BLUECHIP       — large-cap, long-lived, broadly-held, USDC/USDT-quoted pool.
+ *                  SOL-paired tokens never qualify regardless of MC.
+ *                  → Bluechip Farm (moderate range, medium duration)
  *
- * STABLE         — known stablecoin mints or stable-stable pairs
+ * STABLE         — known stablecoin mints or stable-stable pairs.
  *                  → Stable Farm (tight bid-ask)
  *
- * UNKNOWN        — doesn't cleanly fit any class → no position opened
+ * UNKNOWN        — passes no class → no position opened
  */
 export type TokenClass = 'MEME_SHITCOIN' | 'SCALP_SPIKE' | 'BLUECHIP' | 'STABLE' | 'UNKNOWN'
 
@@ -42,64 +42,59 @@ const STABLE_MINTS = new Set([
   '7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj',
 ])
 
-// Bluechip pools MUST be quoted in one of these stables — never SOL.
 const BLUECHIP_QUOTE_MINTS = new Set([
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
   'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
   '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // USDC.e (Wormhole)
 ])
 
+// Tunable via env — default 3.0× the 24h hourly average
+const SCALP_SPIKE_VOL_RATIO = parseFloat(process.env.SCALP_SPIKE_VOL_RATIO ?? '3.0')
+
 export function classifyToken(token: {
-  address:       string
-  mcUsd:         number
-  volume24h:     number
-  volume1h?:     number
-  liquidityUsd:  number
-  ageHours:      number
-  topHolderPct:  number
-  holderCount:   number
-  rugcheckScore: number
-  /** Quote token mint of the selected pool. Required for BLUECHIP classification. */
+  address:        string
+  mcUsd:          number
+  volume24h:      number
+  volume1h?:      number
+  liquidityUsd:   number
+  ageHours:       number
+  topHolderPct:   number
+  holderCount:    number
+  rugcheckScore:  number
   quoteTokenMint?: string
 }): TokenClass {
-  const { address, mcUsd, liquidityUsd, ageHours, topHolderPct, holderCount } = token
+  const { address, mcUsd, ageHours, topHolderPct, holderCount } = token
 
   if (STABLE_MINTS.has(address)) return 'STABLE'
 
-  const vol1h    = token.volume1h ?? (token.volume24h / 24)
-  const vol1hLiq = liquidityUsd > 0 ? vol1h / liquidityUsd : 0
-
-  let memeCount = 0
-  if (ageHours     <  48)        memeCount++
-  if (mcUsd        <  3_000_000) memeCount++
-  if (vol1hLiq     >  0.05)      memeCount++
-  if (topHolderPct >  35)        memeCount++
-  if (memeCount >= 2) {
-    return 'MEME_SHITCOIN'
-  }
-
-  // BLUECHIP: large-cap, long-lived, broad ownership AND stable-quoted pool.
-  // A SOL-paired token with $100M MC is still a shitcoin — not a bluechip.
+  // BLUECHIP: large-cap, long-lived, stable-quoted only
   if (
-    ageHours > 720 &&
-    mcUsd > 100_000_000 &&
-    topHolderPct < 25 &&
-    holderCount > 5_000 &&
+    ageHours        >  720          &&
+    mcUsd           >  100_000_000  &&
+    topHolderPct    <  25           &&
+    holderCount     >  5_000        &&
     token.quoteTokenMint !== undefined &&
     BLUECHIP_QUOTE_MINTS.has(token.quoteTokenMint)
   ) {
     return 'BLUECHIP'
   }
 
+  // SCALP_SPIKE: any token age>=48h + MC>=500K with a real volume surge
+  const vol1h    = token.volume1h ?? (token.volume24h / 24)
+  const avgVol1h = token.volume24h / 24
+  const volRatio = avgVol1h > 0 ? vol1h / avgVol1h : 0
+
   if (
-    ageHours >= 48 && ageHours <= 720 &&
-    mcUsd    >  3_000_000 && mcUsd <= 20_000_000 &&
-    vol1hLiq <= 0.05
+    ageHours >= 48          &&
+    mcUsd    >= 500_000     &&
+    volRatio >= SCALP_SPIKE_VOL_RATIO
   ) {
     return 'SCALP_SPIKE'
   }
 
-  return 'UNKNOWN'
+  // MEME_SHITCOIN: default fallback — SOL-paired, didn't qualify above
+  // MC ceiling deliberately removed: a $100M utility token is still a shitcoin for LP
+  return 'MEME_SHITCOIN'
 }
 
 const CLASS_STRATEGY: Record<Exclude<TokenClass, 'UNKNOWN'>, Strategy> = {
@@ -178,7 +173,6 @@ export function getAllMatchingStrategies(token: {
   })
 }
 
-/** For scanner debug logging — explains why each strategy rejected a token. */
 export function explainNoStrategy(t: {
   mcUsd: number; volume24h: number; liquidityUsd: number
   topHolderPct: number; holderCount: number; ageHours: number
@@ -198,7 +192,7 @@ export function explainNoStrategy(t: {
     if (t.feeTvl24hPct   < f.minFeeTvl24hPct) fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
     if (f.requiredQuoteMints && f.requiredQuoteMints.length > 0) {
       if (!t.quoteTokenMint || !f.requiredQuoteMints.includes(t.quoteTokenMint)) {
-        fails.push(`quote=${t.quoteTokenMint ?? 'unknown'} not in [${f.requiredQuoteMints.join(',')}]`)
+        fails.push(`quote=${t.quoteTokenMint ?? 'unknown'} not in [USDC/USDT]`)
       }
     }
     return fails.length === 0 ? null : `[${s.id}: ${fails.join(', ')}]`
