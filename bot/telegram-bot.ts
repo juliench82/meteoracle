@@ -13,7 +13,7 @@
  *   /positions      — list all open LP positions
  *   /status         — snapshot: state, open positions, wallet SOL
  *   /tick           — manually trigger scanner + monitor in parallel
- *   /check-orphans  — manually run orphan detector on demand
+ *   /orphans        — manually run orphan detector on demand
  *   /help           — command list
  */
 
@@ -209,14 +209,28 @@ async function handleStatus() {
   const supabase = createServerClient()
   const state = await getBotState()
 
+  // DLMM positions
   const { data: openLp } = await supabase
     .from('lp_positions')
-    .select('id, symbol, sol_deposited, opened_at')
+    .select('id, symbol, sol_deposited, opened_at, status')
     .in('status', ['active', 'out_of_range'])
 
-  const lpLines = (openLp ?? []).map(p => {
+  const dlmmLines = (openLp ?? []).map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
-    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min`
+    const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
+    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${oor}`
+  })
+
+  // DAMM v2 (pre-grad) positions
+  const { data: openDamm } = await supabase
+    .from('pre_grad_positions')
+    .select('id, symbol, sol_deposited, opened_at, bonding_curve_pct')
+    .eq('status', 'open')
+
+  const dammLines = (openDamm ?? []).map(p => {
+    const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
+    const curve = p.bonding_curve_pct != null ? ` | curve ${Number(p.bonding_curve_pct).toFixed(1)}%` : ''
+    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${curve}`
   })
 
   await reply([
@@ -224,8 +238,11 @@ async function handleStatus() {
     `State: ${state.enabled ? '🟢 Running' : '🛑 Stopped'}`,
     `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
     ``,
-    `🏊 LP Positions (${(openLp ?? []).length})`,
-    ...(lpLines.length ? lpLines : ['  none']),
+    `📊 *DLMM Positions (${(openLp ?? []).length})*`,
+    ...(dlmmLines.length ? dlmmLines : ['  none']),
+    ``,
+    `🌱 *DAMM v2 Pre-Grad (${(openDamm ?? []).length})*`,
+    ...(dammLines.length ? dammLines : ['  none']),
   ].join('\n'))
 }
 
@@ -264,7 +281,7 @@ async function handleTick() {
   await reply(['*Tick complete:*', ...results.map(r => `• ${r}`)].join('\n'))
 }
 
-async function handleCheckOrphans() {
+async function handleOrphans() {
   await reply('⏳ *Running orphan detector on demand...*')
   try {
     const supabase = createServerClient()
@@ -294,11 +311,11 @@ async function handleHelp() {
     `/restart — resume all worker services`,
     `/dry — switch to dry-run mode`,
     `/live — switch to live trading`,
-    `/status — snapshot of bot state + open LP positions`,
-    `/positions — list all open LP positions`,
+    `/status — snapshot: bot state + DLMM + DAMM v2 positions`,
+    `/positions — list all open DLMM LP positions`,
     `/close <id> — force-close an LP position`,
     `/tick — manually trigger scanner + monitor`,
-    `/check-orphans — manually run orphan detector`,
+    `/orphans — manually run orphan detector`,
     `/help — this message`,
   ].join('\n'))
 }
@@ -323,7 +340,7 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
     case 'status': await handleStatus(); break
     case 'positions': await handlePositions(); break
     case 'tick': await handleTick(); break
-    case 'check-orphans': await handleCheckOrphans(); break
+    case 'orphans': await handleOrphans(); break
     case 'help': await handleHelp(); break
     default:
       await reply(`❌ Unknown command: /${cmd}. Send /help for the list.`)

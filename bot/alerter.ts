@@ -22,6 +22,15 @@ export async function sendAlert(payload: AlertPayload): Promise<void> {
   await sendTelegram(message)
 }
 
+function strategyBadge(strategy: string): string {
+  // Pre-grad / DAMM v2 strategies contain 'damm', 'pre_grad', or 'pre-grad'
+  const s = strategy.toLowerCase()
+  if (s.includes('damm') || s.includes('pre_grad') || s.includes('pre-grad')) {
+    return '🌱 DAMM v2'
+  }
+  return '📊 DLMM'
+}
+
 function formatMessage(payload: AlertPayload): string {
   switch (payload.type) {
     case 'position_opened':
@@ -65,11 +74,12 @@ function formatMessage(payload: AlertPayload): string {
       ].join('\n')
 
     case 'candidate_found': {
+      const badge = strategyBadge(payload.strategy)
       const curveLine = payload.bondingCurvePct !== undefined
         ? `\nCurve: ${payload.bondingCurvePct.toFixed(1)}% ${bondingCurveEmoji(payload.bondingCurvePct)}`
         : ''
       return [
-        `🔍 *New Candidate*`,
+        `🔍 *New Candidate* — ${badge}`,
         `Token: \`${payload.symbol}\``,
         `Strategy: ${payload.strategy}`,
         `Score: ${payload.score}/100`,
