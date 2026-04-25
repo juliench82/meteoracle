@@ -3,7 +3,7 @@ import axios from 'axios'
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
 const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1') // default 1 page = 1000 holders
 
-const HOLDER_CACHE_TTL_MS = 30 * 60 * 1_000 // 30 min (was 60 min — fresher data)
+const HOLDER_CACHE_TTL_MS = 30 * 60 * 1_000 // 30 min
 const _holderCache = new Map<string, { data: HolderData; ts: number }>()
 
 export interface HolderData {
@@ -12,83 +12,73 @@ export interface HolderData {
   reliable:     boolean
 }
 
-// ── Rate limiters ─────────────────────────────────────────────────────────────
-class RateLimiter {
-  private window: number[] = []
-  constructor(private maxPerSecond: number) {}
+// ── Global serial gate ────────────────────────────────────────────────────────
+// All Helius calls (DAS + RPC) share ONE queue. This prevents the burst where
+// 3 concurrent calls per token × N queued tokens = instant 429 storm.
+// Min spacing: 400ms → max ~2.5 req/s, safely under the 3 req/s shared limit.
+const MIN_CALL_SPACING_MS = 400
+let _lastCallTs = 0
 
-  async acquire(): Promise<void> {
-    const now = Date.now()
-    this.window = this.window.filter(t => now - t < 1_000)
-    if (this.window.length >= this.maxPerSecond) {
-      const wait = 1_000 - (now - this.window[0]) + 60
-      await new Promise(r => setTimeout(r, wait))
-      return this.acquire()
-    }
-    this.window.push(Date.now())
-  }
+async function acquireGlobalSlot(): Promise<void> {
+  const now = Date.now()
+  const wait = Math.max(0, _lastCallTs + MIN_CALL_SPACING_MS - now)
+  if (wait > 0) await new Promise(r => setTimeout(r, wait))
+  _lastCallTs = Date.now()
 }
 
-const dasLimiter = new RateLimiter(1) // 1/s conservative (Helius DAS limit: 2/s)
-const rpcLimiter = new RateLimiter(8) // 8/s conservative (Helius RPC limit: 10/s)
-
-// ── Public API ────────────────────────────────────────────────────────────────
-const inFlightChecks = new Set<string>()
+// ── Inflight dedup ────────────────────────────────────────────────────────────
+// Prevents the same mint from stacking duplicate in-flight calls while
+// waiting in the retry queue.
+const _inflight = new Map<string, Promise<HolderData>>()
 
 export async function checkHolders(mintAddress: string): Promise<HolderData> {
-  if (inFlightChecks.has(mintAddress)) {
-    console.log(`[helius] ${mintAddress} — already in flight, waiting...`)
-    await new Promise(r => setTimeout(r, 300))
-    return checkHolders(mintAddress)
+  const existing = _inflight.get(mintAddress)
+  if (existing) {
+    console.log(`[helius] ${mintAddress} — deduped (already in-flight)`)
+    return existing
   }
-  inFlightChecks.add(mintAddress)
 
-  try {
-    // Must explicitly opt-in: HELIUS_ENABLED=true
-    if (process.env.HELIUS_ENABLED !== 'true') {
-      return { holderCount: 0, topHolderPct: 0, reliable: false }
-    }
+  const p = _checkHoldersInner(mintAddress).finally(() => _inflight.delete(mintAddress))
+  _inflight.set(mintAddress, p)
+  return p
+}
 
-    const cached = _holderCache.get(mintAddress)
-    if (cached && Date.now() - cached.ts < HOLDER_CACHE_TTL_MS) {
-      console.log(`[helius] ${mintAddress} — cache hit (age=${Math.round((Date.now() - cached.ts) / 60_000)}min)`)
-      return cached.data
-    }
-
-    const startTime = Date.now()
-    console.log(`[helius:req] ${mintAddress} — checkHolders started @ ${startTime}`)
-
-    // 1. DAS (if enabled) — sequential
-    let holderCount: number | null = null
-    if (DAS_MAX_PAGES > 0) {
-      await dasLimiter.acquire()
-      console.log(`[helius:req] ${mintAddress} — DAS start @ ${Date.now()}`)
-      holderCount = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES).catch(() => null)
-    }
-
-    // 2. RPC — sequential after DAS
-    await rpcLimiter.acquire()
-    console.log(`[helius:req] ${mintAddress} — RPC start @ ${Date.now()}`)
-    const rpcResult = await fetchTopAccountsAndSupply(mintAddress).catch(() => null)
-
-    const topHolderPct = rpcResult?.topHolderPct ?? 0
-    const rpcAccounts  = rpcResult?.accounts ?? []
-
-    let result: HolderData
-    if (holderCount !== null) {
-      console.log(`[helius] ${mintAddress} — ${holderCount} holders (DAS), topHolder=${topHolderPct.toFixed(1)}%`)
-      result = { holderCount, topHolderPct, reliable: true }
-    } else {
-      const estimated = rpcAccounts.length > 0 ? rpcAccounts.length * 50 : 0
-      console.warn(`[helius] ${mintAddress} — DAS failed; ~${estimated} holders (heuristic), topHolder=${topHolderPct.toFixed(1)}%`)
-      result = { holderCount: estimated, topHolderPct, reliable: false }
-    }
-
-    if (result.reliable) _holderCache.set(mintAddress, { data: result, ts: Date.now() })
-    return result
-  } finally {
-    inFlightChecks.delete(mintAddress)
+async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
+  // Must explicitly opt-in: HELIUS_ENABLED=true
+  if (process.env.HELIUS_ENABLED !== 'true') {
+    return { holderCount: 0, topHolderPct: 0, reliable: false }
   }
+
+  const cached = _holderCache.get(mintAddress)
+  if (cached && Date.now() - cached.ts < HOLDER_CACHE_TTL_MS) {
+    console.log(`[helius] ${mintAddress} — cache hit (age=${Math.round((Date.now() - cached.ts) / 60_000)}min)`)
+    return cached.data
+  }
+
+  // 1. DAS — sequential, globally gated
+  let holderCount: number | null = null
+  if (DAS_MAX_PAGES > 0) {
+    holderCount = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES).catch(() => null)
+  }
+
+  // 2. RPC — sequential after DAS, same global gate
+  const rpcResult = await fetchTopAccountsAndSupply(mintAddress).catch(() => null)
+
+  const topHolderPct = rpcResult?.topHolderPct ?? 0
+  const rpcAccounts  = rpcResult?.accounts ?? []
+
+  let result: HolderData
+  if (holderCount !== null) {
+    console.log(`[helius] ${mintAddress} — ${holderCount} holders (DAS), topHolder=${topHolderPct.toFixed(1)}%`)
+    result = { holderCount, topHolderPct, reliable: true }
+  } else {
+    const estimated = rpcAccounts.length > 0 ? rpcAccounts.length * 50 : 0
+    console.warn(`[helius] ${mintAddress} — DAS failed; ~${estimated} holders (heuristic), topHolder=${topHolderPct.toFixed(1)}%`)
+    result = { holderCount: estimated, topHolderPct, reliable: false }
+  }
+
+  if (result.reliable) _holderCache.set(mintAddress, { data: result, ts: Date.now() })
+  return result
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -96,6 +86,7 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
   accounts:     Array<{ uiAmount: number | null }>
   topHolderPct: number
 } | null> {
+  // Sequential — each awaits the global gate individually
   const largestRes = await rpcCall('getTokenLargestAccounts', [mint])
   const supplyRes  = await rpcCall('getTokenSupply',          [mint])
 
@@ -116,9 +107,11 @@ async function fetchDasHolderCount(
   let total = 0
   for (let page = 1; page <= maxPages; page++) {
     let res
-    for (let attempt = 0; attempt < 6; attempt++) {
+    // 3 retries max — at 8s max backoff (~14s total ceiling).
+    // Data is stale after 64s anyway; fail fast and use heuristic.
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await dasLimiter.acquire() // gate every DAS request
+        await acquireGlobalSlot()
         res = await axios.post(
           HELIUS_RPC_URL,
           {
@@ -131,7 +124,7 @@ async function fetchDasHolderCount(
       } catch (err: unknown) {
         const status = (err as { response?: { status?: number } })?.response?.status
         if (status === 429) {
-          const delay = 2_000 * 2 ** attempt + Math.random() * 1_000
+          const delay = Math.min(500 * 2 ** attempt + Math.random() * 400, 8_000)
           console.warn(`[helius] 429 on getTokenAccounts page ${page}, retry ${attempt + 1} in ${Math.round(delay)}ms`)
           await new Promise(r => setTimeout(r, delay))
         } else {
@@ -153,9 +146,9 @@ async function fetchDasHolderCount(
   return total > 0 ? total : null
 }
 
-async function rpcCall(method: string, params: unknown[], retries = 5): Promise<unknown> {
+async function rpcCall(method: string, params: unknown[], retries = 3): Promise<unknown> {
   for (let i = 0; i < retries; i++) {
-    await rpcLimiter.acquire()
+    await acquireGlobalSlot()
     try {
       const res = await axios.post(
         HELIUS_RPC_URL,
@@ -166,10 +159,9 @@ async function rpcCall(method: string, params: unknown[], retries = 5): Promise<
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status
       if (status === 429) {
-        const delay = 1_500 * 2 ** i + Math.random() * 500
+        const delay = Math.min(500 * 2 ** i + Math.random() * 400, 8_000)
         console.warn(`[helius] 429 on ${method}, retry ${i + 1} in ${Math.round(delay)}ms`)
         await new Promise(r => setTimeout(r, delay))
-        // never throw on 429 — exhaust retries first
       } else {
         throw err
       }
