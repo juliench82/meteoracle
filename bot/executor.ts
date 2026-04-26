@@ -36,12 +36,21 @@ const DRY_RUN = process.env.BOT_DRY_RUN !== 'false'
 const METEORA_RENT_RESERVE_SOL = 0.07
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
-// Dynamic wallet floor: scales automatically when you change position size or concurrency.
-// floor = MAX_CONCURRENT_POSITIONS × MAX_SOL_PER_POSITION × WALLET_RESERVE_MULTIPLIER
 const MAX_SOL_PER_POSITION    = parseFloat(process.env.MAX_SOL_PER_POSITION    ?? '0.05')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS  ?? '5')
 const WALLET_RESERVE_MULTIPLIER = parseFloat(process.env.WALLET_RESERVE_MULTIPLIER ?? '1.5')
 const MIN_WALLET_BALANCE_SOL  = MAX_CONCURRENT_POSITIONS * MAX_SOL_PER_POSITION * WALLET_RESERVE_MULTIPLIER
+
+const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
+
+/**
+ * Strip any ComputeBudget instructions already present in an ix array.
+ * Prevents 'duplicate instruction' simulation failure when we prepend
+ * our own setComputeUnitPrice + setComputeUnitLimit.
+ */
+function stripComputeBudgetIxs(ixs: TransactionInstruction[]): TransactionInstruction[] {
+  return ixs.filter(ix => ix.programId.toBase58() !== COMPUTE_BUDGET_PROGRAM_ID)
+}
 
 function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): TransactionInstruction[] {
   return Array.isArray(ix) ? ix : [ix]
@@ -80,9 +89,6 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
   return parseFloat(activeBin.pricePerToken)
 }
 
-// Poll until the position account is owned by the DLMM program.
-// The SDK's addLiquidityByStrategy will fail with AccountOwnedByWrongProgram
-// (0xbbf) if called before the init tx has propagated to the validator.
 async function waitForPositionAccount(
   positionPubkey: PublicKey,
   label: string,
@@ -153,7 +159,6 @@ export async function openPosition(
       return null
     }
 
-    // Cooldown check: emergency_stop uses a shorter cooldown window
     const defaultCooldownHours   = parseFloat(process.env.TOKEN_COOLDOWN_HOURS          ?? '6')
     const emergencyCooldownHours = parseFloat(process.env.TOKEN_EMERGENCY_COOLDOWN_HOURS ?? '1')
 
@@ -218,7 +223,7 @@ export async function openPosition(
       const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID)
       const ataInfo = await connection.getAccountInfo(ata)
       if (!ataInfo) {
-        console.log(`${label} creating ATA for token ${label_token} (${mint.toBase58().slice(0, 8)}...) program=${tokenProgramId.toBase58().slice(0, 8)}`)
+        console.log(`${label} creating ATA for token ${label_token} (${mint.toBase58().slice(0, 8)}…) program=${tokenProgramId.toBase58().slice(0, 8)}`)
         ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
           wallet.publicKey, ata, wallet.publicKey, mint, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
         ))
@@ -283,8 +288,9 @@ export async function openPosition(
       if (!positionKeypairForQuery) positionKeypairForQuery = positionKeypair
       posIndex++
 
-      // Step 1: send init tx with priority fee
-      const initIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
+      // Step 1: init tx — strip any SDK-injected ComputeBudget ixs, prepend ours
+      const rawInitIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
+      const initIxs = stripComputeBudgetIxs(rawInitIxs)
       const initTx = new Transaction().add(
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
         ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
@@ -293,13 +299,10 @@ export async function openPosition(
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      // Step 2: poll until position account is owned by DLMM program before adding liquidity.
-      // The pre-built addLiquidityIxs from the SDK response are constructed before init lands
-      // and can reference the position as uninitialized (System Program owned), causing 0xbbf.
-      // We rebuild the liquidity instructions fresh after confirming the account exists.
+      // Step 2: wait for position account to be owned by DLMM program
       await waitForPositionAccount(positionKeypair.publicKey, label)
 
-      // Step 3: rebuild liquidity ixs against the now-live position account
+      // Step 3: rebuild liquidity ixs fresh against the now-live position account
       const liqResponse = await dlmmPool.addLiquidityByStrategy({
         positionPubKey: positionKeypair.publicKey,
         user: wallet.publicKey,
@@ -308,7 +311,9 @@ export async function openPosition(
         strategy: { minBinId, maxBinId, strategyType },
       })
 
-      const liqIxs = toIxArray(liqResponse as unknown as TransactionInstruction | TransactionInstruction[])
+      // Strip SDK ComputeBudget ixs before prepending ours — prevents 'duplicate instruction' error
+      const rawLiqIxs = toIxArray(liqResponse as unknown as TransactionInstruction | TransactionInstruction[])
+      const liqIxs = stripComputeBudgetIxs(rawLiqIxs)
       const liqTx = new Transaction().add(
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
         ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
@@ -432,7 +437,6 @@ export async function closePosition(
       return true
     }
 
-    // Swap any remaining token balance → SOL (no-op for SOL pools or zero balance)
     try {
       await swapTokenToSol(position.mint, label)
     } catch (err) {
