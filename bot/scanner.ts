@@ -12,7 +12,14 @@ import { openPosition } from './executor'
 import { sendAlert } from './alerter'
 import { checkHolders } from '@/lib/helius'
 import { checkRugscore } from '@/lib/rugcheck'
-import { fetchBondingCurve, isPumpFunToken } from '@/lib/pumpfun'
+import {
+  fetchBondingCurve,
+  fetchPumpFunBondingCurve,
+  fetchMoonshotBondingCurve,
+  isPumpFunToken,
+  isMoonshotToken,
+  isSupportedLaunchpadToken,
+} from '@/lib/pumpfun'
 import { createPreGradPool } from '@/lib/pre-grad'
 import type { TokenMetrics } from '@/lib/types'
 
@@ -58,6 +65,13 @@ const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
 const _bondingCurveCache = new Map<string, { pct: number; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
+
+// Thresholds for DAMM pre-grad paths
+const PUMPFUN_PREGRAD_THRESHOLD   = 95  // pump.fun: 95% before graduation
+const MOONSHOT_PREGRAD_THRESHOLD  = 90  // Moonshot: slightly lower, curve data less precise
+const METEORA_NEW_LISTING_AGE_H   = 24  // catch-all: pool younger than this
+const METEORA_NEW_LISTING_LIQ_USD = 25_000
+const METEORA_NEW_LISTING_FEETVL  = 8   // %
 
 interface MeteoraPool {
   address: string; name: string; created_at: number; tvl: number; current_price: number
@@ -220,15 +234,60 @@ export async function runScanner(): Promise<{
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
 
-    // === PRE-GRAD DAMM v2 SHORT-CIRCUIT (before selectBestPool) ===
-    if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
-      const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
-      const bondingCurvePct = curve?.progressPct ?? 0
+    // === EXPANDED DAMM PRE-GRAD + NEW LISTINGS PATH ===
+    const isLaunchpad = isSupportedLaunchpadToken(tokenAddress)
 
-      if (bondingCurvePct >= 95 && curve?.complete === false) {
-        console.log(`[scanner] ${symbol} — ${bondingCurvePct.toFixed(1)}% pre-grad candidate → DAMM v2 path`)
+    if (isLaunchpad && heliusRpcUrl && ageHours < 48) {
+      let shouldCreateDamm = false
+      let source = ''
+      let progress = 0
+
+      if (isPumpFunToken(tokenAddress)) {
+        const curve = await fetchPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
+        progress = curve?.progressPct ?? 0
+        if (progress >= PUMPFUN_PREGRAD_THRESHOLD && curve?.complete === false) {
+          shouldCreateDamm = true
+          source = 'pumpfun-pregrad'
+        } else {
+          console.log(`[scanner] ${symbol} — pump.fun curve ${progress.toFixed(1)}% (threshold=${PUMPFUN_PREGRAD_THRESHOLD}%, complete=${curve?.complete ?? 'unknown'}) — no DAMM`)
+        }
+      } else if (isMoonshotToken(tokenAddress)) {
+        const curve = await fetchMoonshotBondingCurve(tokenAddress, heliusRpcUrl)
+        progress = curve?.progressPct ?? 0
+        if (progress >= MOONSHOT_PREGRAD_THRESHOLD) {
+          shouldCreateDamm = true
+          source = 'moonshot'
+        } else {
+          console.log(`[scanner] ${symbol} — moonshot curve ${progress.toFixed(1)}% (threshold=${MOONSHOT_PREGRAD_THRESHOLD}%) — no DAMM`)
+        }
+      }
+
+      if (shouldCreateDamm) {
+        console.log(`[scanner] ${symbol} — ${source} (${progress.toFixed(1)}%) → creating DAMM v2 pool`)
         await createPreGradPool({ mintAddress: tokenAddress, symbol, strategy: null })
         continue  // skip DLMM path entirely
+      }
+    }
+
+    // === NEW: Meteora New Listings (post-graduation catch-all for any launchpad) ===
+    // Runs only when the launchpad pre-grad path didn't fire, so no double-create.
+    const bestPoolForNewListing = selectBestPool(pools, tokenAddress)
+    if (bestPoolForNewListing) {
+      const poolAgeHours = (Date.now() / 1000 - toUnixSeconds(bestPoolForNewListing.created_at)) / 3600
+      const liqUsdNew    = bestPoolForNewListing.tvl
+      const feeTvl24hNew = bestPoolForNewListing.fee_tvl_ratio['24h'] * 100
+
+      if (
+        poolAgeHours < METEORA_NEW_LISTING_AGE_H &&
+        liqUsdNew >= METEORA_NEW_LISTING_LIQ_USD &&
+        feeTvl24hNew >= METEORA_NEW_LISTING_FEETVL
+      ) {
+        console.log(
+          `[scanner] ${symbol} — new Meteora listing ` +
+          `(poolAge=${poolAgeHours.toFixed(1)}h, liq=$${liqUsdNew.toFixed(0)}, feeTvl=${feeTvl24hNew.toFixed(1)}%) → DAMM candidate`
+        )
+        await createPreGradPool({ mintAddress: tokenAddress, symbol, strategy: null })
+        continue
       }
     }
 

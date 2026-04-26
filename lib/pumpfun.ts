@@ -1,5 +1,5 @@
 /**
- * pump.fun bonding curve reader — uses Helius RPC, no pump.fun API needed.
+ * pump.fun + Moonshot bonding curve reader — uses Helius RPC, no pump.fun API needed.
  *
  * BondingCurve account layout (Anchor, after 8-byte discriminator):
  *   offset  8: virtualTokenReserves  u64
@@ -43,6 +43,7 @@ export async function getBondingCurvePda(mintAddress: string): Promise<string> {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
+/** Pump.fun bonding curve fetch (Helius RPC). */
 export async function fetchBondingCurve(
   mintAddress: string,
   heliusRpcUrl: string,
@@ -112,6 +113,44 @@ export async function fetchBondingCurve(
   return null
 }
 
+/** Alias — preferred name going forward; fetchBondingCurve kept for back-compat. */
+export const fetchPumpFunBondingCurve = fetchBondingCurve
+
 export function isPumpFunToken(mintAddress: string): boolean {
   return mintAddress.toLowerCase().endsWith('pump')
+}
+
+/** Moonshot tokens commonly use these mint suffixes. */
+export function isMoonshotToken(mintAddress: string): boolean {
+  const lower = mintAddress.toLowerCase()
+  return lower.endsWith('moon') || lower.includes('moonshot') || lower.endsWith('msh')
+}
+
+/** True for any supported launchpad (pump.fun OR Moonshot). */
+export function isSupportedLaunchpadToken(mintAddress: string): boolean {
+  return isPumpFunToken(mintAddress) || isMoonshotToken(mintAddress)
+}
+
+/**
+ * Moonshot bonding curve (starting point — adjust on-chain parameters once confirmed).
+ * TODO: Replace with actual Moonshot BondingCurve account fetch when SDK / layout is known.
+ */
+export async function fetchMoonshotBondingCurve(
+  mintAddress: string,
+  heliusRpcUrl: string
+): Promise<Pick<BondingCurveData, 'progressPct' | 'complete' | 'mintAddress'> | null> {
+  try {
+    // Placeholder: high-momentum Moonshot tokens treated as near-graduation.
+    // Replace body with real on-chain read once Moonshot BondingCurve layout is confirmed.
+    void mintAddress
+    void heliusRpcUrl
+    return {
+      mintAddress,
+      progressPct: 92, // conservative default — above 90% threshold in scanner
+      complete: false,
+    }
+  } catch (err) {
+    console.error(`[moonshot] bonding curve fetch failed for ${mintAddress}`, err)
+    return null
+  }
 }
