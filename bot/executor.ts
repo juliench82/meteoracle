@@ -19,6 +19,7 @@ import {
 import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
 import { swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
@@ -32,7 +33,10 @@ async function getStrategyType() {
   return mod.StrategyType
 }
 
-const DRY_RUN = process.env.BOT_DRY_RUN !== 'false'
+// Env-level kill switch: if BOT_DRY_RUN=true in env, always dry regardless of DB state.
+// If unset or 'false', defer to botState.dry_run (toggled by /dry and /live).
+const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
+
 const METEORA_RENT_RESERVE_SOL = 0.07
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
@@ -116,10 +120,14 @@ export async function openPosition(
   const label = `[executor][${strategy.id}][${metrics.symbol}]`
   console.log(`${label} opening position`)
 
+  // Resolve dry-run mode at call time — respects /dry and /live Telegram commands
+  const botState = await getBotState()
+  const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
+
   const supabase = createServerClient()
 
   if (DRY_RUN) {
-    console.log(`${label} DRY RUN — skipping on-chain tx`)
+    console.log(`${label} DRY RUN — skipping on-chain tx (env_forced=${ENV_DRY_RUN_FORCED}, botState=${botState.dry_run})`)
     const dryRunEntryPriceUsd = metrics.priceUsd ?? 0
     const dryRunEntryPriceSol = 0
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
@@ -385,12 +393,7 @@ export async function closePosition(
   const label = `[executor][close][${position.symbol}]`
   console.log(`${label} closing — reason: ${reason}`)
 
-  if (DRY_RUN) {
-    console.log(`${label} DRY RUN — marking closed without on-chain tx`)
-    await markPositionClosed(positionId, 0, reason)
-    return true
-  }
-
+  // closePosition always executes on-chain — dry-run does not block closes
   const connection = getConnection()
   const wallet = getWallet()
 
@@ -485,7 +488,7 @@ async function persistPosition(
       fees_earned_sol: 0,
       status:          'active',
       in_range:        true,
-      dry_run:         DRY_RUN,
+      dry_run:         ENV_DRY_RUN_FORCED,
       opened_at:       new Date().toISOString(),
       tx_open:         sig,
       metadata: {
