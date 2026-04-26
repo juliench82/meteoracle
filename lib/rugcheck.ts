@@ -14,20 +14,25 @@ import axios from 'axios'
  * Rate floor: at least 350 ms between outbound requests.
  */
 
-const CACHE_TTL_MS       = 10 * 60 * 1_000   // 10 minutes for successful hits
-const ERROR_CACHE_TTL_MS =  2 * 60 * 1_000   // 2 minutes for fallback values
-const MIN_REQUEST_GAP_MS = 350               // max ~2.8 req/s — safely under the 3/s limit
+const CACHE_TTL_MS       = 10 * 60 * 1_000
+const ERROR_CACHE_TTL_MS =  2 * 60 * 1_000
+const MIN_REQUEST_GAP_MS = 350
+
+interface RugcheckSummary {
+  score?:            number
+  score_normalised?: number
+}
 
 const _cache = new Map<string, { score: number; ts: number; isError: boolean }>()
 let _lastRequestAt = 0
 
-async function rateLimitedFetch(mintAddress: string): Promise<{ raw?: number; normalised?: number } | null> {
-  const now   = Date.now()
-  const wait  = MIN_REQUEST_GAP_MS - (now - _lastRequestAt)
+async function rateLimitedFetch(mintAddress: string): Promise<RugcheckSummary | null> {
+  const now  = Date.now()
+  const wait = MIN_REQUEST_GAP_MS - (now - _lastRequestAt)
   if (wait > 0) await new Promise(r => setTimeout(r, wait))
   _lastRequestAt = Date.now()
 
-  const res = await axios.get(
+  const res = await axios.get<RugcheckSummary>(
     `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`,
     { timeout: 8_000 },
   )
