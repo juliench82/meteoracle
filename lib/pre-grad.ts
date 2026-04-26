@@ -7,28 +7,36 @@ import { createServerClient } from '@/lib/supabase';
 import { sendAlert } from '@/bot/alerter';
 
 const PRE_GRAD_MAX_POSITIONS = parseInt(process.env.PRE_GRAD_MAX_POSITIONS ?? '2');
-const PRE_GRAD_SOL_USD = parseInt(process.env.PRE_GRAD_SOL_USD ?? '50');
+const PRE_GRAD_SOL_USD = parseInt(process.env.PRE_GRAD_SOL_USD ?? '35');
 const PRE_GRAD_CLOSE_AFTER_MIN = 45;
 
 export async function fetchSolPriceUsd(): Promise<number> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
+  const timeout = setTimeout(() => controller.abort(), 4000);
+
   try {
     const res = await fetch(
-      'https://price.jup.ag/v4/price?ids=So11111111111111111111111111111111111111112',
+      'https://price.jup.ag/v6/price?ids=So11111111111111111111111111111111111111112',
       {
         headers: { 'x-api-key': process.env.JUPITER_API_KEY ?? '' },
         signal: controller.signal,
       }
     );
     clearTimeout(timeout);
-    if (!res.ok) throw new Error('Jupiter price fetch failed');
+
+    if (!res.ok) throw new Error('Jupiter v6 failed');
+
     const data = await res.json();
-    return data.data?.So11111111111111111111111111111111111111112?.price ?? 150;
+    const price = data.data?.So11111111111111111111111111111111111111112?.price;
+
+    if (price && price > 50 && price < 200) {
+      return price;
+    }
+    throw new Error('Invalid price from Jupiter');
   } catch (err) {
     clearTimeout(timeout);
-    console.warn('[pre-grad] Jupiter price fetch failed, using fallback 150', err);
-    return 150;
+    console.warn('[pre-grad] Jupiter v6 failed, using fallback SOL price', err);
+    return 86; // ~current SOL price — update PRE_GRAD_SOL_USD env if this drifts
   }
 }
 
@@ -58,15 +66,9 @@ export async function createPreGradPool(params: {
   const wallet = getWallet();
 
   try {
-    // positionNft must be a freshly generated Keypair().publicKey per SDK docs
     const positionNftKeypair = new Keypair();
-
-    // CpAmm is instantiated with connection — methods are NOT static
     const cpAmm = new CpAmm(connection);
 
-    // createPool() returns a Transaction directly (not a TxBuilder)
-    // TODO: compute initSqrtPrice via getSqrtPriceFromPrice()
-    // TODO: compute liquidityDelta via cpAmm.preparePoolCreationParams()
     const tx = await cpAmm.createPool({
       payer: wallet.publicKey,
       creator: wallet.publicKey,
@@ -85,7 +87,6 @@ export async function createPreGradPool(params: {
     const sig = await (wallet as any).sendTransaction(tx, connection);
     await connection.confirmTransaction(sig, 'confirmed');
 
-    // Derive pool address from positionNft keypair for DB storage
     const poolAddress = positionNftKeypair.publicKey.toString();
 
     await supabase.from('lp_positions').insert({
@@ -106,7 +107,7 @@ export async function createPreGradPool(params: {
       sol: solAmount,
     });
 
-    console.log(`[pre-grad] ✅ ${symbol} DAMM v2 pool ${poolAddress}`);
+    console.log(`[pre-grad] ✅ ${symbol} DAMM v2 pool ${poolAddress} — ${solAmount.toFixed(4)} SOL ($${PRE_GRAD_SOL_USD})`);
     return poolAddress;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -118,7 +119,6 @@ export async function createPreGradPool(params: {
 
 export async function closePreGradPosition(position: Record<string, unknown>): Promise<boolean> {
   const ageMs = Date.now() - new Date(position.created_at as string).getTime();
-  // 45-min gate — do not remove; protects hot path
   if (ageMs < PRE_GRAD_CLOSE_AFTER_MIN * 60 * 1000) return false;
 
   const supabase = createServerClient();
@@ -128,17 +128,12 @@ export async function closePreGradPosition(position: Record<string, unknown>): P
   const wallet = getWallet();
 
   try {
-    // CpAmm is instantiated with connection — methods are NOT static
     const cpAmm = new CpAmm(connection);
-
-    // positionNft must be a freshly generated Keypair().publicKey per SDK docs
     const positionNftKeypair = new Keypair();
 
-    // TODO: confirm exact removeLiquidity / removeAllLiquidityAndClosePosition signature.
-    // Stubbed safely — DB is still updated; 45-min gate prevents hot-path blast.
     console.warn(`${label} removeLiquidity stubbed — on-chain close skipped, marking DB closed`);
     console.log(`${label} positionNft=${positionNftKeypair.publicKey.toBase58()} pool=${String(position.pool_address)}`);
-    void cpAmm; // suppress unused warning until stub is replaced
+    void cpAmm;
 
     await supabase
       .from('lp_positions')
@@ -166,7 +161,7 @@ export async function closePreGradPosition(position: Record<string, unknown>): P
   }
 }
 
-/** Call this when a pre-grad position's token is confirmed graduated (bonding curve = 100%). */
+/** Call when a pre-grad position's token is confirmed graduated (bonding curve = 100%). */
 export async function handlePreGradGraduated(
   position: Record<string, unknown>,
   finalFeesSol: number

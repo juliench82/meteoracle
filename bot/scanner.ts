@@ -54,6 +54,11 @@ const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const CANDIDATE_DEDUP_HOURS    = parseInt(process.env.CANDIDATE_DEDUP_HOURS    ?? '6')
 
+// Strict 15-min gate for new Meteora listings (0.25h)
+const METEORA_NEW_LISTING_AGE_H   = 0.25
+const METEORA_NEW_LISTING_LIQ_USD = 25_000
+const METEORA_NEW_LISTING_FEETVL  = 8   // %
+
 const WSOL = 'So11111111111111111111111111111111111111112'
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
@@ -69,9 +74,6 @@ const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
 // Thresholds for DAMM pre-grad paths
 const PUMPFUN_PREGRAD_THRESHOLD   = 95  // pump.fun: 95% before graduation
 const MOONSHOT_PREGRAD_THRESHOLD  = 90  // Moonshot: slightly lower, curve data less precise
-const METEORA_NEW_LISTING_AGE_H   = 24  // catch-all: pool younger than this
-const METEORA_NEW_LISTING_LIQ_USD = 25_000
-const METEORA_NEW_LISTING_FEETVL  = 8   // %
 
 interface MeteoraPool {
   address: string; name: string; created_at: number; tvl: number; current_price: number
@@ -234,7 +236,7 @@ export async function runScanner(): Promise<{
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
 
-    // === EXPANDED DAMM PRE-GRAD + NEW LISTINGS PATH ===
+    // === EXPANDED DAMM PRE-GRAD PATH ===
     const isLaunchpad = isSupportedLaunchpadToken(tokenAddress)
 
     if (isLaunchpad && heliusRpcUrl && ageHours < 48) {
@@ -265,46 +267,37 @@ export async function runScanner(): Promise<{
       if (shouldCreateDamm) {
         console.log(`[scanner] ${symbol} — ${source} (${progress.toFixed(1)}%) → creating DAMM v2 pool`)
         await createPreGradPool({ mintAddress: tokenAddress, symbol, strategy: null })
-        continue  // skip DLMM path entirely
-      }
-    }
-
-    // === NEW: Meteora New Listings (post-graduation catch-all for any launchpad) ===
-    // Runs only when the launchpad pre-grad path didn't fire, so no double-create.
-    const bestPoolForNewListing = selectBestPool(pools, tokenAddress)
-    if (bestPoolForNewListing) {
-      const poolAgeHours = (Date.now() / 1000 - toUnixSeconds(bestPoolForNewListing.created_at)) / 3600
-      const liqUsdNew    = bestPoolForNewListing.tvl
-      const feeTvl24hNew = bestPoolForNewListing.fee_tvl_ratio['24h'] * 100
-
-      if (
-        poolAgeHours < METEORA_NEW_LISTING_AGE_H &&
-        liqUsdNew >= METEORA_NEW_LISTING_LIQ_USD &&
-        feeTvl24hNew >= METEORA_NEW_LISTING_FEETVL
-      ) {
-        console.log(
-          `[scanner] ${symbol} — new Meteora listing ` +
-          `(poolAge=${poolAgeHours.toFixed(1)}h, liq=$${liqUsdNew.toFixed(0)}, feeTvl=${feeTvl24hNew.toFixed(1)}%) → DAMM candidate`
-        )
-        await createPreGradPool({ mintAddress: tokenAddress, symbol, strategy: null })
         continue
       }
     }
 
+    // === NEW: Meteora New Listings (strict < 15 minutes) ===
+    // Runs only when the launchpad pre-grad path didn't fire, so no double-create.
     const bestPool = selectBestPool(pools, tokenAddress)
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
       continue
     }
 
+    const poolAgeHours = (Date.now() / 1000 - toUnixSeconds(bestPool.created_at)) / 3600
+    const liqUsd       = bestPool.tvl
+    const feeTvl24hPct = bestPool.fee_tvl_ratio['24h'] * 100
+
+    if (poolAgeHours < METEORA_NEW_LISTING_AGE_H && liqUsd >= METEORA_NEW_LISTING_LIQ_USD && feeTvl24hPct >= METEORA_NEW_LISTING_FEETVL) {
+      console.log(
+        `[scanner] ${symbol} — new Meteora listing ` +
+        `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(1)}%) → DAMM candidate`
+      )
+      await createPreGradPool({ mintAddress: tokenAddress, symbol, strategy: null })
+      continue
+    }
+
     // Identify which side of the pool is the quote asset (WSOL / USDC / USDT).
     const quoteTokenMint = getQuoteTokenMint(bestPool)
 
-    const vol24h        = bestPool.volume['24h']
-    const vol1h         = bestPool.volume['1h']
-    const liqUsd        = bestPool.tvl
-    const feeTvl24hPct  = bestPool.fee_tvl_ratio['24h'] * 100
-    const binStep       = bestPool.pool_config?.bin_step ?? '?'
+    const vol24h  = bestPool.volume['24h']
+    const vol1h   = bestPool.volume['1h']
+    const binStep = bestPool.pool_config?.bin_step ?? '?'
 
     if (bestPool.address !== representativePool.address) {
       console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStep}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)} (was bin_step=${representativePool.pool_config?.bin_step}, feeTvl=${(representativePool.fee_tvl_ratio['24h'] * 100).toFixed(2)}%)`)
@@ -369,7 +362,7 @@ export async function runScanner(): Promise<{
       dexId:          'meteora',
       feeTvl24hPct,
       bondingCurvePct,
-      quoteTokenMint,   // ← wired: WSOL/USDC/USDT — used by BLUECHIP gate
+      quoteTokenMint,
     }
 
     const tokenClass = classifyToken({
@@ -382,7 +375,7 @@ export async function runScanner(): Promise<{
       topHolderPct:   metrics.topHolderPct,
       holderCount:    metrics.holderCount,
       rugcheckScore:  metrics.rugcheckScore,
-      quoteTokenMint: metrics.quoteTokenMint,  // ← wired
+      quoteTokenMint: metrics.quoteTokenMint,
     })
 
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
