@@ -12,13 +12,14 @@ import type { Strategy } from '@/lib/types'
  * Credit: @tendorian9 on X
  *
  * Exit logic (fee-yield-aware):
- * - stopLoss             : −90% price — rug guard only
- * - takeProfit           : +150% price — raised from 60%; don’t close a fee machine on a modest pump
- * - OOR                  : 60 min out of range (earning nothing)
- * - maxDuration          : 336h (14 days) base; extended dynamically by fee yield
- * - feeYieldExitPct      : close early if fees > 25% of deployed within first 12h (bank the moonshot)
- * - feeYieldExtendPct    : if daily yield ≥ 15% → add feeYieldExtensionHours per threshold hit
- * - feeYieldExtensionHours: 48h added per 15% daily yield threshold (keep winners running)
+ * - stopLoss             : −70% price — tightened from -90%
+ * - takeProfit           : +40% price — realistic exit, not waiting for a moon
+ * - OOR                  : 45 min out of range (earning nothing)
+ * - maxDuration          : 72h (3 days) — tightened from 14 days
+ * - minFeeYieldToExit    : exit if fees reach 10% of deployed (safety net even with IL)
+ * - feeYieldExitPct      : close early if fees > 25% of deployed within first 12h
+ * - feeYieldExtendPct    : if daily yield >= 12% → add feeYieldExtensionHours per threshold hit
+ * - feeYieldExtensionHours: 36h added per 12% daily yield threshold (shorter extension)
  */
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
@@ -26,7 +27,7 @@ export const evilPandaStrategy: Strategy = {
   description:
     'Wide-range memecoin fee farming. Bid-ask distribution, 100% single-sided SOL. ' +
     '−70% / +180% range captures dumps and moons, auto-sells SOL into token on pumps. ' +
-    'Fee-yield-aware exits keep winners running.',
+    'Fee-yield-aware exits — bank fees before IL compounds.',
   enabled: true,
 
   filters: {
@@ -51,14 +52,17 @@ export const evilPandaStrategy: Strategy = {
   },
 
   exits: {
-    stopLossPct:              -90,   // rug guard only
-    takeProfitPct:            150,   // raised from 60
-    outOfRangeMinutes:         60,   // OOR = earning nothing
-    maxDurationHours:         336,   // 14 days base — extended dynamically
+    stopLossPct:              -70,   // tightened from -90%
+    takeProfitPct:             40,   // realistic — don't wait for a moon
+    outOfRangeMinutes:         45,   // tightened from 60
+    maxDurationHours:          72,   // 3 days instead of 14
     claimFeesBeforeClose:    true,
     minFeesToClaim:          0.001,
+
+    // === Fee-based exits (key safety net) ===
+    minFeeYieldToExit:         10,   // exit if fees reach 10% of deployed even if price is down
     feeYieldExitPct:           25,   // early exit if fees > 25% of deployed in first 12h
-    feeYieldExtendPct:         15,   // extend duration if daily yield ≥ 15%
-    feeYieldExtensionHours:    48,   // +48h per 15% daily yield threshold hit
+    feeYieldExtendPct:         12,   // extend if daily yield >= 12% (down from 15%)
+    feeYieldExtensionHours:    36,   // +36h per threshold hit (down from 48h)
   },
 }

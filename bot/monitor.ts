@@ -21,7 +21,7 @@ async function getDLMM() {
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
-const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit', 'fee_yield']
+const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit', 'fee_yield', 'fee_target']
 
 // Run full-wallet orphan scan every N ticks (default 15 ≈ 15 min at 60s interval)
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '15')
@@ -253,7 +253,7 @@ async function checkPosition(
     ` age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`
   )
 
-  // === FEE-YIELD DYNAMIC EXIT LOGIC (non-spammy) ===
+  // === EXIT LOGIC ===
   let closeReason: string | null = null
 
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
@@ -265,7 +265,19 @@ async function checkPosition(
   } else if (strategy.exits.feeYieldExitPct && ageHours <= 12 && feeYieldPct >= strategy.exits.feeYieldExitPct) {
     // Moonshot profit-take: fees > threshold of deployed within first 12h — bank it
     closeReason = `fee_yield_early_${feeYieldPct.toFixed(1)}pct`
-  } else {
+  }
+
+  // === FEE-BASED EARLY EXIT (new rule — runs before max_duration) ===
+  if (!closeReason && strategy.exits.minFeeYieldToExit) {
+    const deployed = position.sol_deposited || 0
+    const feeYield = deployed > 0 ? (feesEarnedSol / deployed) * 100 : 0
+
+    if (feeYield >= strategy.exits.minFeeYieldToExit) {
+      closeReason = `fee_target_reached_${feeYield.toFixed(1)}%`
+    }
+  }
+
+  if (!closeReason) {
     // Fee-yield duration extension — only fire when crossing a NEW threshold level
     const currentExtensions: number = position.metadata?.feeYieldExtensions || 0
     let effectiveMaxDuration = strategy.exits.maxDurationHours
@@ -278,7 +290,7 @@ async function checkPosition(
       // Only extend (and alert) when we cross into a higher extension count
       if (potentialExtensions > currentExtensions) {
         newExtensions = potentialExtensions
-        const addedHours = (newExtensions - currentExtensions) * (strategy.exits.feeYieldExtensionHours ?? 48)
+        const addedHours = (newExtensions - currentExtensions) * (strategy.exits.feeYieldExtensionHours ?? 36)
         effectiveMaxDuration += addedHours
         shouldExtend = true
 
@@ -315,12 +327,12 @@ async function checkPosition(
         })
       } else {
         // Already at this extension level — recalculate effectiveMax silently
-        const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 48)
+        const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
         effectiveMaxDuration += totalAddedHours
       }
     } else if (currentExtensions > 0) {
       // Has prior extensions — honour them even if dailyYield dipped below threshold
-      const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 48)
+      const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
       effectiveMaxDuration += totalAddedHours
     }
 

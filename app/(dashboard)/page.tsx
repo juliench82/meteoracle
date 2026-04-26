@@ -1,24 +1,59 @@
-import { createServerClient } from '@/lib/supabase'
+'use client'
+
+import { useState, useEffect } from 'react'
 import { DashboardClient } from '@/components/dashboard/DashboardClient'
 
-export const dynamic = 'force-dynamic'
+export default function DashboardPage() {
+  const [data, setData] = useState<any>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [lastFetch, setLastFetch] = useState<Date | null>(null)
 
-export default async function DashboardPage() {
-  const supabase = createServerClient()
-
-  const [openSpotRes, closedSpotRes, openLpRes, closedLpRes] = await Promise.allSettled([
-    supabase.from('spot_positions').select('*').eq('status', 'open').order('opened_at', { ascending: false }),
-    supabase.from('spot_positions').select('*').in('status', ['closed_tp', 'closed_sl', 'closed_manual', 'closed_timeout']).order('closed_at', { ascending: false }).limit(50),
-    supabase.from('lp_positions').select('*').in('status', ['active', 'out_of_range']).order('opened_at', { ascending: false }),
-    supabase.from('lp_positions').select('*').eq('status', 'closed').order('closed_at', { ascending: false }).limit(50),
-  ])
-
-  const initialData = {
-    openSpot:   openSpotRes.status   === 'fulfilled' ? (openSpotRes.value.data   ?? []) : [],
-    closedSpot: closedSpotRes.status === 'fulfilled' ? (closedSpotRes.value.data ?? []) : [],
-    openLp:     openLpRes.status     === 'fulfilled' ? (openLpRes.value.data     ?? []) : [],
-    closedLp:   closedLpRes.status   === 'fulfilled' ? (closedLpRes.value.data   ?? []) : [],
+  const fetchData = async () => {
+    setIsRefreshing(true)
+    try {
+      const res = await fetch('/api/dashboard-data', { cache: 'no-store' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = await res.json()
+      setData(json)
+      setLastFetch(new Date())
+    } catch (err) {
+      console.error('Failed to refresh dashboard', err)
+    } finally {
+      setIsRefreshing(false)
+    }
   }
 
-  return <DashboardClient initialData={initialData} />
+  // Initial load
+  useEffect(() => { fetchData() }, [])
+
+  if (!data) {
+    return (
+      <div className="p-6 text-zinc-400 text-sm">
+        {isRefreshing ? 'Loading dashboard…' : 'No data yet.'}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div className="flex justify-between items-center px-6 pt-6 mb-2">
+        <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+        <div className="flex items-center gap-3">
+          {lastFetch && (
+            <span className="text-xs text-zinc-500">
+              Updated {lastFetch.toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            onClick={fetchData}
+            disabled={isRefreshing}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white disabled:opacity-50 transition-colors"
+          >
+            {isRefreshing ? 'Refreshing…' : '↻ Refresh'}
+          </button>
+        </div>
+      </div>
+      <DashboardClient initialData={data} />
+    </div>
+  )
 }

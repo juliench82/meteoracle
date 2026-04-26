@@ -12,6 +12,8 @@ interface Position {
   amount_sol:        number
   pnl_sol?:          number
   pnl_pct?:          number
+  fees_earned_sol?:  number
+  il_pct?:           number
   status:            string
   dry_run:           boolean
   opened_at:         string
@@ -59,17 +61,84 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
     return <span className="text-zinc-500">—</span>
   }
 
-  function pnlCell(pos: Position) {
-    // prefer live pnl_pct for open positions, fall back to pnl_sol
-    if (pos.status === 'open' && pos.pnl_pct !== undefined && pos.pnl_pct !== null) {
-      const color = pos.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'
-      return <span className={color}>{pos.pnl_pct >= 0 ? '+' : ''}{pos.pnl_pct.toFixed(1)}%</span>
+  // === IMPROVED PNL: Fees Earned | Price PnL | Total Return ===
+  function pnlCells(pos: Position) {
+    const isLp = pos._type === 'lp'
+
+    if (!isLp) {
+      // Spot: single P&L column
+      if (pos.pnl_pct !== undefined && pos.pnl_pct !== null) {
+        const color = pos.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'
+        return (
+          <>
+            <td className="text-right px-4 py-3 text-zinc-500">—</td>
+            <td className="text-right px-4 py-3">
+              <span className={color}>{pos.pnl_pct >= 0 ? '+' : ''}{pos.pnl_pct.toFixed(1)}%</span>
+            </td>
+            <td className="text-right px-4 py-3 text-zinc-500">—</td>
+          </>
+        )
+      }
+      if (pos.pnl_sol !== undefined && pos.pnl_sol !== null) {
+        const color = pos.pnl_sol >= 0 ? 'text-green-400' : 'text-red-400'
+        return (
+          <>
+            <td className="text-right px-4 py-3 text-zinc-500">—</td>
+            <td className="text-right px-4 py-3">
+              <span className={color}>{pos.pnl_sol >= 0 ? '+' : ''}{pos.pnl_sol.toFixed(4)}</span>
+            </td>
+            <td className="text-right px-4 py-3 text-zinc-500">—</td>
+          </>
+        )
+      }
+      return (
+        <>
+          <td className="text-right px-4 py-3 text-zinc-500">—</td>
+          <td className="text-right px-4 py-3 text-zinc-500">—</td>
+          <td className="text-right px-4 py-3 text-zinc-500">—</td>
+        </>
+      )
     }
-    if (pos.pnl_sol !== undefined && pos.pnl_sol !== null) {
-      const color = pos.pnl_sol >= 0 ? 'text-green-400' : 'text-red-400'
-      return <span className={color}>{pos.pnl_sol >= 0 ? '+' : ''}{pos.pnl_sol.toFixed(4)} SOL</span>
-    }
-    return <span className="text-zinc-500">—</span>
+
+    // LP: Fees | Price PnL | Total
+    const fees     = pos.fees_earned_sol ?? 0
+    const deployed = pos.amount_sol ?? 0
+    const ilPct    = pos.il_pct ?? null
+    const total    = pos.pnl_sol ?? null
+
+    const feesColor  = fees > 0 ? 'text-emerald-400' : 'text-zinc-500'
+    const ilColor    = ilPct !== null ? (ilPct >= 0 ? 'text-zinc-400' : 'text-red-400') : 'text-zinc-500'
+    const totalColor = total !== null ? (total >= 0 ? 'text-green-400' : 'text-red-400') : 'text-zinc-500'
+
+    const feeYield = deployed > 0 ? (fees / deployed) * 100 : 0
+
+    return (
+      <>
+        {/* Fees Earned */}
+        <td className="text-right px-4 py-3">
+          <span className={feesColor}>
+            {fees > 0 ? `+${fees.toFixed(4)}` : '—'}
+          </span>
+          {feeYield > 0 && (
+            <div className="text-xs text-zinc-500">{feeYield.toFixed(1)}%</div>
+          )}
+        </td>
+        {/* Price PnL / IL */}
+        <td className="text-right px-4 py-3">
+          {ilPct !== null
+            ? <span className={ilColor}>IL {ilPct >= 0 ? '+' : ''}{ilPct.toFixed(1)}%</span>
+            : <span className="text-zinc-500">—</span>
+          }
+        </td>
+        {/* Total Return */}
+        <td className="text-right px-4 py-3">
+          {total !== null
+            ? <span className={totalColor}>{total >= 0 ? '+' : ''}{total.toFixed(4)}</span>
+            : <span className="text-zinc-500">—</span>
+          }
+        </td>
+      </>
+    )
   }
 
   function age(openedAt: string) {
@@ -111,7 +180,9 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
                 <th className="text-left px-4 py-3">Token</th>
                 <th className="text-right px-4 py-3">Size</th>
                 <th className="text-right px-4 py-3">Entry</th>
-                <th className="text-right px-4 py-3">P&amp;L</th>
+                <th className="text-right px-4 py-3">Fees</th>
+                <th className="text-right px-4 py-3">Price PnL</th>
+                <th className="text-right px-4 py-3">Total</th>
                 <th className="text-right px-4 py-3">Age</th>
                 <th className="text-center px-4 py-3">Status</th>
                 <th className="text-center px-4 py-3">Tx</th>
@@ -133,9 +204,7 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
                   <td className="text-right px-4 py-3 text-zinc-300">
                     {entryCell(pos)}
                   </td>
-                  <td className="text-right px-4 py-3">
-                    {pnlCell(pos)}
-                  </td>
+                  {pnlCells(pos)}
                   <td className="text-right px-4 py-3 text-zinc-400">
                     {age(pos.opened_at)}
                   </td>
