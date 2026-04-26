@@ -21,7 +21,7 @@ async function getDLMM() {
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
-const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
+const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit', 'fee_yield']
 
 // Run full-wallet orphan scan every N ticks (default 15 ≈ 15 min at 60s interval)
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '15')
@@ -233,17 +233,37 @@ async function checkPosition(
     ? (now - new Date(oorSinceAt).getTime()) / 60_000
     : 0
 
-  console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)} pnl=${pnlSol.toFixed(6)} age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
+  // === FEE-YIELD METRICS ===
+  const deployedSol = position.sol_deposited || 0
+  const feeYieldPct = deployedSol > 0 ? (feesEarnedSol / deployedSol) * 100 : 0
+  const dailyYield = ageHours > 0 ? (feeYieldPct / ageHours) * 24 : 0
+
+  console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)} pnl=${pnlSol.toFixed(6)} fees=${feeYieldPct.toFixed(1)}%deployed dailyYield=${dailyYield.toFixed(1)}%/day age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
 
   let closeReason: string | null = null
-  if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes)
+
+  if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
     closeReason = `out_of_range_${Math.round(oorSince)}min`
-  else if (entryPriceSol > 0 && pricePct <= strategy.exits.stopLossPct)
+  } else if (entryPriceSol > 0 && pricePct <= strategy.exits.stopLossPct) {
     closeReason = `stoploss_${pricePct.toFixed(1)}pct`
-  else if (entryPriceSol > 0 && pricePct >= strategy.exits.takeProfitPct)
+  } else if (entryPriceSol > 0 && pricePct >= strategy.exits.takeProfitPct) {
     closeReason = `takeprofit_${pricePct.toFixed(1)}pct`
-  else if (ageHours >= strategy.exits.maxDurationHours)
-    closeReason = `max_duration_${Math.round(ageHours)}h`
+  } else if (strategy.exits.feeYieldExitPct && ageHours <= 12 && feeYieldPct >= strategy.exits.feeYieldExitPct) {
+    // Moonshot profit-take: fees > 25% of deployed within first 12h — bank it
+    closeReason = `fee_yield_early_${feeYieldPct.toFixed(1)}pct`
+  } else {
+    // Fee-yield duration extension: keep winners running
+    let effectiveMaxDuration = strategy.exits.maxDurationHours
+    if (strategy.exits.feeYieldExtendPct && dailyYield >= strategy.exits.feeYieldExtendPct) {
+      const extensions = Math.floor(dailyYield / strategy.exits.feeYieldExtendPct)
+      const extraHours = extensions * (strategy.exits.feeYieldExtensionHours ?? 24)
+      effectiveMaxDuration += extraHours
+      console.log(`${label} FEE-YIELD EXTENSION: dailyYield=${dailyYield.toFixed(1)}%/day ×${extensions} → +${extraHours}h (effective max=${effectiveMaxDuration}h)`)
+    }
+    if (ageHours >= effectiveMaxDuration) {
+      closeReason = `max_duration_${Math.round(ageHours)}h${effectiveMaxDuration > strategy.exits.maxDurationHours ? '_fee_extended' : ''}`
+    }
+  }
 
   if (closeReason) {
     console.log(`${label} EXIT triggered → ${closeReason}`)
