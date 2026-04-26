@@ -24,27 +24,39 @@ import type { TokenMetrics, Strategy } from '@/lib/types'
  *   - vol/MC ratio > 3.0            — wash trading signal
  *   - feeTvl24hPct < strategy.filters.minFeeTvl24hPct — pool not hot enough for this strategy
  */
+
+export interface ScoreBreakdown {
+  total:        number
+  volMcScore:   number
+  rugScore:     number
+  holderScore:  number
+  freshnessScore: number
+  curveBonus:   number
+}
+
 export function scoreCandidate(token: TokenMetrics, strategy: Strategy): number {
+  return scoreCandidateWithBreakdown(token, strategy).total
+}
+
+export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strategy): ScoreBreakdown {
+  const zero = (reason: string): ScoreBreakdown => {
+    console.log(`[scorer] ${token.symbol} DISQUALIFIED — ${reason}`)
+    return { total: 0, volMcScore: 0, rugScore: 0, holderScore: 0, freshnessScore: 0, curveBonus: 0 }
+  }
+
   const isPumpFun = token.address.endsWith('pump')
 
-  if (isPumpFun && token.ageHours < 6) {
-    console.log(`[scorer] ${token.symbol} DISQUALIFIED — pump.fun + age ${token.ageHours.toFixed(1)}h < 6h`)
-    return 0
-  }
+  if (isPumpFun && token.ageHours < 6)
+    return zero(`pump.fun + age ${token.ageHours.toFixed(1)}h < 6h`)
 
   const volMcRatio = token.mcUsd > 0 ? token.volume24h / token.mcUsd : 0
 
-  if (volMcRatio > 3.0) {
-    console.log(`[scorer] ${token.symbol} DISQUALIFIED — vol/MC ratio ${volMcRatio.toFixed(2)} > 3.0`)
-    return 0
-  }
+  if (volMcRatio > 3.0)
+    return zero(`vol/MC ratio ${volMcRatio.toFixed(2)} > 3.0`)
 
-  if (token.feeTvl24hPct < strategy.filters.minFeeTvl24hPct) {
-    console.log(`[scorer] ${token.symbol} DISQUALIFIED — feeTvl24hPct ${token.feeTvl24hPct.toFixed(2)}% < required ${strategy.filters.minFeeTvl24hPct}% for ${strategy.id}`)
-    return 0
-  }
+  if (token.feeTvl24hPct < strategy.filters.minFeeTvl24hPct)
+    return zero(`feeTvl24hPct ${token.feeTvl24hPct.toFixed(2)}% < required ${strategy.filters.minFeeTvl24hPct}% for ${strategy.id}`)
 
-  // Determine tier from MC + age for tier-aware freshness scoring
   const isLargeCap = token.mcUsd >= 10_000_000 && token.liquidityUsd >= 500_000
   const isMemecoin = !isLargeCap && token.mcUsd >= 5_000_000 && token.ageHours >= 72
 
@@ -68,13 +80,16 @@ export function scoreCandidate(token: TokenMetrics, strategy: Strategy): number 
     else if (pct === 100)            curveBonus = 5
   }
 
-  const total = base + curveBonus
+  const total = Math.round(Math.min(100, Math.max(0, base + curveBonus)))
 
-  if (curveBonus > 0) {
-    console.log(`[scorer] ${token.symbol} curve bonus +${curveBonus} (curve=${token.bondingCurvePct?.toFixed(1)}%)`)
-  }
+  console.log(
+    `[scorer] ${token.symbol} — ` +
+    `volMc=${volMcScore.toFixed(0)} rug=${rugScore.toFixed(0)} ` +
+    `holders=${holderScore.toFixed(0)} fresh=${freshnessScore.toFixed(0)} ` +
+    `bonus=${curveBonus} → ${total}`
+  )
 
-  return Math.round(Math.min(100, Math.max(0, total)))
+  return { total, volMcScore, rugScore, holderScore, freshnessScore, curveBonus }
 }
 
 function scoreVolumeMcRatio(ratio: number, isPumpFun: boolean): number {
@@ -121,15 +136,13 @@ function scoreFreshness(ageHours: number, isLargeCap: boolean, isMemecoin: boole
   if (isLargeCap) return 100
 
   if (isMemecoin) {
-    // 72–120h is the target window — full score
     if (ageHours >= 72 && ageHours <= 120) return 100
     if (ageHours >= 48 && ageHours < 72)   return 80
     if (ageHours >= 24 && ageHours < 48)   return 60
-    if (ageHours < 24)                     return 30  // too fresh for memecoin tier
-    return 50  // > 120h, still usable
+    if (ageHours < 24)                     return 30
+    return 50
   }
 
-  // Default (shitcoin): freshness = speed
   if (ageHours <= 1)  return 100
   if (ageHours <= 3)  return 90
   if (ageHours <= 6)  return 75
