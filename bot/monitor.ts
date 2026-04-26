@@ -238,12 +238,10 @@ async function checkPosition(
   const totalFeesSol = feesEarnedSol || 0
   const feeYieldPct = deployedSol > 0 ? (totalFeesSol / deployedSol) * 100 : 0
 
-  // Only calculate meaningful daily rate for positions >= 24h old to avoid absurd projections
   const avgDailyYield = ageHours >= 24
     ? (feeYieldPct / ageHours) * 24
     : null
 
-  // dailyYield used purely for extension threshold math — still computed regardless of age
   const dailyYield = ageHours > 0 ? (feeYieldPct / ageHours) * 24 : 0
 
   console.log(
@@ -263,22 +261,19 @@ async function checkPosition(
   } else if (entryPriceSol > 0 && pricePct >= strategy.exits.takeProfitPct) {
     closeReason = `takeprofit_${pricePct.toFixed(1)}pct`
   } else if (strategy.exits.feeYieldExitPct && ageHours <= 12 && feeYieldPct >= strategy.exits.feeYieldExitPct) {
-    // Moonshot profit-take: fees > threshold of deployed within first 12h — bank it
     closeReason = `fee_yield_early_${feeYieldPct.toFixed(1)}pct`
   }
 
-  // === FEE-BASED EARLY EXIT (new rule — runs before max_duration) ===
+  // === FEE-BASED EARLY EXIT (runs before max_duration) ===
   if (!closeReason && strategy.exits.minFeeYieldToExit) {
     const deployed = position.sol_deposited || 0
     const feeYield = deployed > 0 ? (feesEarnedSol / deployed) * 100 : 0
-
     if (feeYield >= strategy.exits.minFeeYieldToExit) {
       closeReason = `fee_target_reached_${feeYield.toFixed(1)}%`
     }
   }
 
   if (!closeReason) {
-    // Fee-yield duration extension — only fire when crossing a NEW threshold level
     const currentExtensions: number = position.metadata?.feeYieldExtensions || 0
     let effectiveMaxDuration = strategy.exits.maxDurationHours
     let shouldExtend = false
@@ -287,7 +282,6 @@ async function checkPosition(
     if (strategy.exits.feeYieldExtendPct && dailyYield >= strategy.exits.feeYieldExtendPct) {
       const potentialExtensions = Math.floor(dailyYield / strategy.exits.feeYieldExtendPct)
 
-      // Only extend (and alert) when we cross into a higher extension count
       if (potentialExtensions > currentExtensions) {
         newExtensions = potentialExtensions
         const addedHours = (newExtensions - currentExtensions) * (strategy.exits.feeYieldExtensionHours ?? 36)
@@ -313,7 +307,6 @@ async function checkPosition(
           console.error(`${label} failed to update fee-yield metadata:`, metaErr)
         }
 
-        // Alert fires ONCE per extension level crossing, not every tick
         await sendAlert({
           type: 'position_fee_yield_extended',
           symbol: position.symbol,
@@ -326,12 +319,10 @@ async function checkPosition(
           positionId: position.id,
         })
       } else {
-        // Already at this extension level — recalculate effectiveMax silently
         const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
         effectiveMaxDuration += totalAddedHours
       }
     } else if (currentExtensions > 0) {
-      // Has prior extensions — honour them even if dailyYield dipped below threshold
       const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
       effectiveMaxDuration += totalAddedHours
     }
@@ -456,3 +447,22 @@ async function fetchPositionState(
     return { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0, externallyClosed: false }
   }
 }
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+async function main() {
+  console.log(`[monitor] starting — interval=${MONITOR_INTERVAL_MS / 1000}s`)
+  await monitorPositions()
+  setInterval(async () => {
+    try {
+      await monitorPositions()
+    } catch (err) {
+      console.error('[monitor] unhandled tick error:', err)
+    }
+  }, MONITOR_INTERVAL_MS)
+}
+
+main().catch(err => {
+  console.error('[monitor] fatal startup error:', err)
+  process.exit(1)
+})
