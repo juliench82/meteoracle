@@ -12,12 +12,13 @@ import type { Strategy } from '@/lib/types'
  * Credit: @tendorian9 on X
  *
  * Exit logic (fee-yield-aware):
- * - stopLoss    : −90% price AND fee yield < 5% of deployed (don't stop a fee machine)
- * - takeProfit  : +150% price — raised from 60% to avoid closing fee earners early
- * - OOR         : 60 min out of range (earning nothing)
- * - maxDuration : 336h (14 days) — extended from 7d; fee machines should run
- * - feeYieldExitPct   : close early if fees > 25% of deployed within first 12h (bank the moonshot)
- * - feeYieldExtendPct : reset max-duration clock if fees > 15%/day (keep winners running)
+ * - stopLoss             : −90% price — rug guard only
+ * - takeProfit           : +150% price — raised from 60%; don’t close a fee machine on a modest pump
+ * - OOR                  : 60 min out of range (earning nothing)
+ * - maxDuration          : 336h (14 days) base; extended dynamically by fee yield
+ * - feeYieldExitPct      : close early if fees > 25% of deployed within first 12h (bank the moonshot)
+ * - feeYieldExtendPct    : if daily yield ≥ 15% → add feeYieldExtensionHours per threshold hit
+ * - feeYieldExtensionHours: 48h added per 15% daily yield threshold (keep winners running)
  */
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
@@ -25,7 +26,7 @@ export const evilPandaStrategy: Strategy = {
   description:
     'Wide-range memecoin fee farming. Bid-ask distribution, 100% single-sided SOL. ' +
     '−70% / +180% range captures dumps and moons, auto-sells SOL into token on pumps. ' +
-    'Exits when volume dies or profit target hits. Fee-yield-aware exits keep winners running.',
+    'Fee-yield-aware exits keep winners running.',
   enabled: true,
 
   filters: {
@@ -50,14 +51,14 @@ export const evilPandaStrategy: Strategy = {
   },
 
   exits: {
-    stopLossPct:           -90,   // rug guard only — won't fire unless near-zero collapse
-    takeProfitPct:         150,   // raised from 60 — don't close a fee machine on a modest pump
-    outOfRangeMinutes:      60,   // OOR = earning nothing, close promptly
-    maxDurationHours:      336,   // 14 days — extended from 7d; fee-yield extension applies
-    claimFeesBeforeClose:  true,
-    minFeesToClaim:       0.001,
-    // Fee-yield extensions (read by checkPosition in monitor.ts):
-    // feeYieldExitPct:     25    — close early if fees > 25% of deployed in first 12h
-    // feeYieldExtendPct:   15    — reset duration clock if fees > 15%/day (keep winners running)
+    stopLossPct:              -90,   // rug guard only
+    takeProfitPct:            150,   // raised from 60
+    outOfRangeMinutes:         60,   // OOR = earning nothing
+    maxDurationHours:         336,   // 14 days base — extended dynamically
+    claimFeesBeforeClose:    true,
+    minFeesToClaim:          0.001,
+    feeYieldExitPct:           25,   // early exit if fees > 25% of deployed in first 12h
+    feeYieldExtendPct:         15,   // extend duration if daily yield ≥ 15%
+    feeYieldExtensionHours:    48,   // +48h per 15% daily yield threshold hit
   },
 }
