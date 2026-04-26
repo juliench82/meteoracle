@@ -43,7 +43,7 @@ const CHEAP_FILTER = {
   maxAgeHours:     999_999,
 }
 
-const MAX_DEEP_CHECKS          = parseInt(process.env.MAX_DEEP_CHECKS          ?? '20')
+const MAX_DEEP_CHECKS          = parseInt(process.env.MAX_DEEP_CHECKS          ?? '12')
 const DEEP_CHECK_DELAY_MS      = parseInt(process.env.DEEP_CHECK_DELAY_MS      ?? '3000')
 const POOL_MIN_TVL_USD         = 20_000
 const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
@@ -272,7 +272,6 @@ export async function runScanner(): Promise<{
     }
 
     // === NEW: Meteora New Listings (strict < 15 minutes) ===
-    // Runs only when the launchpad pre-grad path didn't fire, so no double-create.
     const bestPool = selectBestPool(pools, tokenAddress)
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
@@ -292,7 +291,6 @@ export async function runScanner(): Promise<{
       continue
     }
 
-    // Identify which side of the pool is the quote asset (WSOL / USDC / USDT).
     const quoteTokenMint = getQuoteTokenMint(bestPool)
 
     const vol24h  = bestPool.volume['24h']
@@ -416,6 +414,11 @@ export async function runScanner(): Promise<{
         await sendAlert({ type: 'position_opened', symbol, strategy: strategy.id, solDeposited: MAX_SOL_PER_POSITION, entryPrice: metrics.priceUsd, positionId })
       }
     }
+  }
+
+  if (USE_HELIUS) {
+    const { getHolderCacheSize } = await import('@/lib/helius')
+    console.log(`[scanner] Helius cache: ${getHolderCacheSize()} entries`)
   }
 
   console.log(`[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
