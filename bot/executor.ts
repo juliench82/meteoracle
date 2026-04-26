@@ -80,6 +80,29 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
   return parseFloat(activeBin.pricePerToken)
 }
 
+// Poll until the position account is owned by the DLMM program.
+// The SDK's addLiquidityByStrategy will fail with AccountOwnedByWrongProgram
+// (0xbbf) if called before the init tx has propagated to the validator.
+async function waitForPositionAccount(
+  positionPubkey: PublicKey,
+  label: string,
+  maxAttempts = 10,
+  intervalMs = 1500
+): Promise<void> {
+  const connection = getConnection()
+  const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo')
+  for (let i = 1; i <= maxAttempts; i++) {
+    const info = await connection.getAccountInfo(positionPubkey, 'confirmed')
+    if (info && info.owner.equals(DLMM_PROGRAM_ID)) {
+      console.log(`${label} position account confirmed on-chain (attempt ${i})`)
+      return
+    }
+    console.log(`${label} waiting for position account… attempt ${i}/${maxAttempts}`)
+    await new Promise(r => setTimeout(r, intervalMs))
+  }
+  throw new Error(`Position account ${positionPubkey.toBase58()} not visible after ${maxAttempts} attempts`)
+}
+
 export async function openPosition(
   metrics: TokenMetrics,
   strategy: Strategy
@@ -256,23 +279,43 @@ export async function openPosition(
 
     let positionKeypairForQuery: Keypair | null = null
 
-    for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
+    for (const { positionKeypair, initializePositionIx } of response.instructionsByPositions) {
       if (!positionKeypairForQuery) positionKeypairForQuery = positionKeypair
       posIndex++
+
+      // Step 1: send init tx with priority fee
       const initIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
-      const initTx = new Transaction().add(...initIxs)
+      const initTx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
+        ...initIxs
+      )
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      const liqChunks: TransactionInstruction[][] = Array.isArray(addLiquidityIxs)
-        ? (addLiquidityIxs as (TransactionInstruction | TransactionInstruction[])[]).map(toIxArray)
-        : [toIxArray(addLiquidityIxs as TransactionInstruction | TransactionInstruction[])]
+      // Step 2: poll until position account is owned by DLMM program before adding liquidity.
+      // The pre-built addLiquidityIxs from the SDK response are constructed before init lands
+      // and can reference the position as uninitialized (System Program owned), causing 0xbbf.
+      // We rebuild the liquidity instructions fresh after confirming the account exists.
+      await waitForPositionAccount(positionKeypair.publicKey, label)
 
-      for (let i = 0; i < liqChunks.length; i++) {
-        const liqTx = new Transaction().add(...liqChunks[i])
-        lastSig = await sendLegacyTx(liqTx, [wallet])
-        console.log(`${label} seg ${posIndex}/${total} liq ${i + 1}/${liqChunks.length} confirmed ✔ sig: ${lastSig}`)
-      }
+      // Step 3: rebuild liquidity ixs against the now-live position account
+      const liqResponse = await dlmmPool.addLiquidityByStrategy({
+        positionPubKey: positionKeypair.publicKey,
+        user: wallet.publicKey,
+        totalXAmount: totalX,
+        totalYAmount: totalY,
+        strategy: { minBinId, maxBinId, strategyType },
+      })
+
+      const liqIxs = toIxArray(liqResponse as unknown as TransactionInstruction | TransactionInstruction[])
+      const liqTx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        ...liqIxs
+      )
+      lastSig = await sendLegacyTx(liqTx, [wallet])
+      console.log(`${label} seg ${posIndex}/${total} liq confirmed ✔ sig: ${lastSig}`)
     }
 
     let tokenAmountDeposited = 0
