@@ -3,8 +3,10 @@ import axios from 'axios'
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
 const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1') // default 1 page = 1000 holders
 
-const HOLDER_CACHE_TTL_MS = 30 * 60 * 1_000 // 30 min
-const _holderCache = new Map<string, { data: HolderData; ts: number }>()
+const DAS_CACHE_TTL_MS       = 8 * 60 * 1_000  // 8 min — reliable DAS result
+const HEURISTIC_CACHE_TTL_MS = 4 * 60 * 1_000  // 4 min — heuristic fallback
+
+const _holderCache = new Map<string, { data: HolderData; ts: number; reliable: boolean }>()
 
 export function getHolderCacheSize(): number {
   return _holderCache.size
@@ -54,9 +56,12 @@ async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
   }
 
   const cached = _holderCache.get(mintAddress)
-  if (cached && Date.now() - cached.ts < HOLDER_CACHE_TTL_MS) {
-    console.log(`[helius] ${mintAddress} — cache hit (age=${Math.round((Date.now() - cached.ts) / 60_000)}min)`)
-    return cached.data
+  if (cached) {
+    const ttl = cached.reliable ? DAS_CACHE_TTL_MS : HEURISTIC_CACHE_TTL_MS
+    if (Date.now() - cached.ts < ttl) {
+      console.log(`[helius] ${mintAddress} — cache hit (${cached.reliable ? 'reliable' : 'heuristic'}, age=${Math.round((Date.now() - cached.ts) / 60_000)}min)`)
+      return cached.data
+    }
   }
 
   // 1. DAS — sequential, globally gated
@@ -77,11 +82,12 @@ async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
     result = { holderCount, topHolderPct, reliable: true }
   } else {
     const estimated = rpcAccounts.length > 0 ? rpcAccounts.length * 50 : 0
-    console.warn(`[helius] ${mintAddress} — DAS failed; ~${estimated} holders (heuristic), topHolder=${topHolderPct.toFixed(1)}%`)
+    console.debug(`[helius] ${mintAddress} — DAS failed, using heuristic (~${estimated} holders, topHolder=${topHolderPct.toFixed(1)}%)`)
     result = { holderCount: estimated, topHolderPct, reliable: false }
   }
 
-  if (result.reliable) _holderCache.set(mintAddress, { data: result, ts: Date.now() })
+  // Always cache — both reliable and heuristic — with differentiated TTLs
+  _holderCache.set(mintAddress, { data: result, ts: Date.now(), reliable: result.reliable })
   return result
 }
 
