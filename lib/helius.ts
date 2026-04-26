@@ -6,6 +6,10 @@ const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1') // d
 const HOLDER_CACHE_TTL_MS = 30 * 60 * 1_000 // 30 min
 const _holderCache = new Map<string, { data: HolderData; ts: number }>()
 
+export function getHolderCacheSize(): number {
+  return _holderCache.size
+}
+
 export interface HolderData {
   holderCount:  number
   topHolderPct: number
