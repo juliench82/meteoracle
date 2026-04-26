@@ -7,6 +7,7 @@ type AlertPayload =
   | { type: 'position_opened'; symbol: string; strategy: string; solDeposited: number; entryPrice: number; positionId: string }
   | { type: 'position_closed'; symbol: string; strategy: string; reason: string; feesEarnedSol: number; ilPct: number; ageHours: number }
   | { type: 'position_oor'; symbol: string; strategy: string; currentPrice: number; binRangeLower: number; binRangeUpper: number; oorExitMinutes: number }
+  | { type: 'position_fee_yield_extended'; symbol: string; strategy: string; feeYieldPct: number; dailyYield: number; extensions: number; effectiveMaxDurationHours: number; positionId: string }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string }
   | { type: 'cooldown_skip'; symbol: string; strategy: string; cooldownHours: number }
@@ -23,7 +24,6 @@ export async function sendAlert(payload: AlertPayload): Promise<void> {
 }
 
 function strategyBadge(strategy: string): string {
-  // Pre-grad / DAMM v2 strategies contain 'damm', 'pre_grad', or 'pre-grad'
   const s = strategy.toLowerCase()
   if (s.includes('damm') || s.includes('pre_grad') || s.includes('pre-grad')) {
     return '🌱 DAMM v2'
@@ -71,6 +71,19 @@ function formatMessage(payload: AlertPayload): string {
         `Current price: $${payload.currentPrice.toFixed(8)}`,
         `Range: $${payload.binRangeLower.toFixed(8)} – $${payload.binRangeUpper.toFixed(8)}`,
         `Will close in: ${payload.oorExitMinutes}min if not recovered`,
+      ].join('\n')
+
+    case 'position_fee_yield_extended':
+      return [
+        `🚀 *Fee-Yield Extended*`,
+        `Token: \`${payload.symbol}\``,
+        `Strategy: ${payload.strategy}`,
+        `Current Yield: *${payload.feeYieldPct}%* (${payload.dailyYield}%/day)`,
+        `Extensions: ${payload.extensions}`,
+        `New Max Duration: ${payload.effectiveMaxDurationHours}h`,
+        `Position ID: \`${payload.positionId}\``,
+        ``,
+        `→ This winner keeps running thanks to strong fees!`,
       ].join('\n')
 
     case 'candidate_found': {

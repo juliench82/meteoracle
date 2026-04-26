@@ -30,7 +30,7 @@ export function PositionsTable({ positions }: { positions: any[] }) {
           <table className="w-full text-xs">
             <thead>
               <tr className="text-slate-500 border-b border-surface-border">
-                {['Token', 'Strategy', 'Entry', 'Current', 'Range', 'PnL', 'Fees', 'Deployed', 'Age'].map(
+                {['Token', 'Strategy', 'Entry', 'Current', 'Range', 'PnL', 'Fees', 'Deployed', 'Age', 'Duration'].map(
                   (h) => (
                     <th key={h} className="text-left py-2 pr-4 font-medium">
                       {h}
@@ -45,6 +45,8 @@ export function PositionsTable({ positions }: { positions: any[] }) {
                 const currentPrice: number | null = p.current_price ?? null
                 const pnlSol: number = p.pnl_sol ?? 0
                 const pnlPositive = pnlSol >= 0
+                const feeExtensions: number = p.metadata?.feeYieldExtensions ?? 0
+                const effectiveMax: number | undefined = p.metadata?.effectiveMaxDurationHours
 
                 return (
                   <tr
@@ -55,9 +57,19 @@ export function PositionsTable({ positions }: { positions: any[] }) {
                       {p.token_symbol}
                     </td>
                     <td className="py-3 pr-4">
-                      <Badge variant="brand">
-                        {STRATEGY_LABELS[p.strategy_id] ?? p.strategy_id}
-                      </Badge>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <Badge variant="brand">
+                          {STRATEGY_LABELS[p.strategy_id] ?? p.strategy_id}
+                        </Badge>
+                        {feeExtensions > 0 && (
+                          <span
+                            className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-900/60 text-emerald-300 border border-emerald-700/50"
+                            title={effectiveMax ? `Effective max duration: ${effectiveMax}h` : `Extended ${feeExtensions}× by fee yield`}
+                          >
+                            🚀 +{feeExtensions}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="py-3 pr-4 font-mono text-slate-400">
                       ${entryPrice.toFixed(7)}
@@ -81,7 +93,18 @@ export function PositionsTable({ positions }: { positions: any[] }) {
                     <td className="py-3 pr-4 font-mono text-slate-400">
                       {(p.sol_deposited ?? 0)} SOL
                     </td>
-                    <td className="py-3 text-slate-500">{formatAge(p.opened_at)}</td>
+                    <td className="py-3 pr-4 text-slate-500">{formatAge(p.opened_at)}</td>
+                    <td className="py-3 text-slate-500">
+                      {effectiveMax ? (
+                        <span className="text-emerald-400 font-mono" title="Extended by fee yield">
+                          {effectiveMax}h ✦
+                        </span>
+                      ) : (
+                        <span className="font-mono">
+                          {p.metadata?.maxDurationHours ?? '—'}
+                        </span>
+                      )}
+                    </td>
                   </tr>
                 )
               })}

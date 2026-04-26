@@ -240,6 +240,7 @@ async function checkPosition(
 
   console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)} pnl=${pnlSol.toFixed(6)} fees=${feeYieldPct.toFixed(1)}%deployed dailyYield=${dailyYield.toFixed(1)}%/day age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
 
+  // === FEE-YIELD DYNAMIC EXIT LOGIC ===
   let closeReason: string | null = null
 
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
@@ -254,14 +255,45 @@ async function checkPosition(
   } else {
     // Fee-yield duration extension: keep winners running
     let effectiveMaxDuration = strategy.exits.maxDurationHours
+    let extended = false
+
     if (strategy.exits.feeYieldExtendPct && dailyYield >= strategy.exits.feeYieldExtendPct) {
       const extensions = Math.floor(dailyYield / strategy.exits.feeYieldExtendPct)
-      const extraHours = extensions * (strategy.exits.feeYieldExtensionHours ?? 24)
+      const extraHours = extensions * (strategy.exits.feeYieldExtensionHours ?? 48)
       effectiveMaxDuration += extraHours
+      extended = true
+
       console.log(`${label} FEE-YIELD EXTENSION: dailyYield=${dailyYield.toFixed(1)}%/day ×${extensions} → +${extraHours}h (effective max=${effectiveMaxDuration}h)`)
+
+      // Persist extension metadata to DB (no migration needed — lives in jsonb metadata column)
+      try {
+        const currentMeta = position.metadata || {}
+        const newMeta = {
+          ...currentMeta,
+          feeYieldExtensions: (currentMeta.feeYieldExtensions || 0) + 1,
+          lastFeeYieldExtensionAt: new Date().toISOString(),
+          effectiveMaxDurationHours: effectiveMaxDuration,
+        }
+        await sbUpdate('lp_positions', `id=eq.${position.id}`, { metadata: newMeta })
+      } catch (metaErr) {
+        console.error(`${label} failed to update fee-yield metadata:`, metaErr)
+      }
+
+      // Telegram alert — fire once per extension event (extension count increments each tick it qualifies)
+      await sendAlert({
+        type: 'position_fee_yield_extended',
+        symbol: position.symbol,
+        strategy: strategy.id,
+        feeYieldPct: Math.round(feeYieldPct * 10) / 10,
+        dailyYield: Math.round(dailyYield * 10) / 10,
+        extensions: (position.metadata?.feeYieldExtensions || 0) + 1,
+        effectiveMaxDurationHours: effectiveMaxDuration,
+        positionId: position.id,
+      })
     }
+
     if (ageHours >= effectiveMaxDuration) {
-      closeReason = `max_duration_${Math.round(ageHours)}h${effectiveMaxDuration > strategy.exits.maxDurationHours ? '_fee_extended' : ''}`
+      closeReason = `max_duration_${Math.round(ageHours)}h${extended ? '_fee_extended' : ''}`
     }
   }
 
