@@ -5,7 +5,7 @@ import type { TokenMetrics, Strategy } from '@/lib/types'
  *
  * Components:
  *   - Volume/MC ratio    (40pts) — momentum signal
- *   - Rugcheck score     (25pts) — safety signal
+ *   - Rugcheck score     (25pts) — safety signal (raw: candidates.rugcheck_score)
  *   - Holder count       (20pts) — distribution signal
  *   - Token freshness    (15pts) — recency signal
  *
@@ -26,12 +26,11 @@ import type { TokenMetrics, Strategy } from '@/lib/types'
  */
 
 export interface ScoreBreakdown {
-  total:        number
-  volMcScore:   number
-  rugScore:     number
-  holderScore:  number
+  total:          number
+  volMcScore:     number
+  holderScore:    number
   freshnessScore: number
-  curveBonus:   number
+  curveBonus:     number
 }
 
 export function scoreCandidate(token: TokenMetrics, strategy: Strategy): number {
@@ -41,7 +40,7 @@ export function scoreCandidate(token: TokenMetrics, strategy: Strategy): number 
 export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strategy): ScoreBreakdown {
   const zero = (reason: string): ScoreBreakdown => {
     console.log(`[scorer] ${token.symbol} DISQUALIFIED — ${reason}`)
-    return { total: 0, volMcScore: 0, rugScore: 0, holderScore: 0, freshnessScore: 0, curveBonus: 0 }
+    return { total: 0, volMcScore: 0, holderScore: 0, freshnessScore: 0, curveBonus: 0 }
   }
 
   const isPumpFun = token.address.endsWith('pump')
@@ -60,14 +59,14 @@ export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strat
   const isLargeCap = token.mcUsd >= 10_000_000 && token.liquidityUsd >= 500_000
   const isMemecoin = !isLargeCap && token.mcUsd >= 5_000_000 && token.ageHours >= 72
 
-  const volMcScore     = scoreVolumeMcRatio(volMcRatio, isPumpFun)
-  const rugScore       = scoreRugcheck(token.rugcheckScore)
-  const holderScore    = scoreHolders(token.holderCount)
+  const rugWeight    = scoreRugcheck(token.rugcheckScore)
+  const volMcScore   = scoreVolumeMcRatio(volMcRatio, isPumpFun)
+  const holderScore  = scoreHolders(token.holderCount)
   const freshnessScore = scoreFreshness(token.ageHours, isLargeCap, isMemecoin)
 
   const base = (
     volMcScore     * 0.40 +
-    rugScore       * 0.25 +
+    rugWeight      * 0.25 +
     holderScore    * 0.20 +
     freshnessScore * 0.15
   )
@@ -84,12 +83,12 @@ export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strat
 
   console.log(
     `[scorer] ${token.symbol} — ` +
-    `volMc=${volMcScore.toFixed(0)} rug=${rugScore.toFixed(0)} ` +
+    `volMc=${volMcScore.toFixed(0)} rug=${rugWeight.toFixed(0)} ` +
     `holders=${holderScore.toFixed(0)} fresh=${freshnessScore.toFixed(0)} ` +
     `bonus=${curveBonus} → ${total}`
   )
 
-  return { total, volMcScore, rugScore, holderScore, freshnessScore, curveBonus }
+  return { total, volMcScore, holderScore, freshnessScore, curveBonus }
 }
 
 function scoreVolumeMcRatio(ratio: number, isPumpFun: boolean): number {
