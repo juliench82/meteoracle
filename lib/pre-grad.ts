@@ -165,3 +165,24 @@ export async function closePreGradPosition(position: Record<string, unknown>): P
     return false;
   }
 }
+
+/** Call this when a pre-grad position's token is confirmed graduated (bonding curve = 100%). */
+export async function handlePreGradGraduated(
+  position: Record<string, unknown>,
+  finalFeesSol: number
+): Promise<void> {
+  const supabase = createServerClient();
+
+  await supabase
+    .from('lp_positions')
+    .update({ status: 'closed', closed_at: new Date().toISOString(), close_reason: 'graduated' })
+    .eq('id', position.id);
+
+  await sendAlert({
+    type: 'pre_grad_graduated',
+    symbol: position.symbol as string,
+    finalFees: finalFeesSol,
+  });
+
+  console.log(`[pre-grad] 🎉 ${position.symbol} graduated — final fees: ${finalFeesSol} SOL`);
+}

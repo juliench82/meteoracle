@@ -4,20 +4,50 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID
 
 type AlertPayload =
-  | { type: 'position_opened'; symbol: string; strategy: string; solDeposited: number; entryPrice: number; positionId: string }
-  | { type: 'position_closed'; symbol: string; strategy: string; reason: string; feesEarnedSol: number; ilPct: number; ageHours: number }
-  | { type: 'position_oor'; symbol: string; strategy: string; currentPrice: number; binRangeLower: number; binRangeUpper: number; oorExitMinutes: number }
+  | {
+      type: 'position_opened'
+      symbol: string
+      strategy: string
+      solDeposited: number
+      entryPrice: number
+      positionId: string
+      takeProfitPct?: number
+      stopLossPct?: number
+      volume24h?: number
+      entryPriceUsd?: number
+      entryPriceSol?: number
+      rugcheckScore?: number | string
+      poolAddress?: string
+      mint?: string
+    }
+  | {
+      type: 'position_closed'
+      symbol: string
+      strategy: string
+      reason: string
+      feesEarnedSol: number
+      ilPct: number
+      ageHours: number
+      netPnlSol?: number
+    }
+  | {
+      type: 'position_oor'
+      symbol: string
+      strategy: string
+      currentPrice: number
+      binRangeLower: number
+      binRangeUpper: number
+      oorExitMinutes: number
+    }
   | {
       type: 'position_fee_yield_extended'
       symbol: string
       strategy: string
-      /** Total SOL fees earned, pre-formatted e.g. "0.0412" */
       totalFees: string
-      /** Fee yield as % of deployed capital, pre-formatted e.g. "8.3" */
       feeYieldPct: string
-      /** Avg daily yield %, or null if position < 24h old */
       avgDailyYield: string | null
       extensions: number
+      extraHours?: number
       effectiveMaxDurationHours: number
       positionId: string
     }
@@ -28,7 +58,9 @@ type AlertPayload =
   | { type: 'pre_grad_create_failed'; mint: string; error: string }
   | { type: 'pre_grad_opened'; symbol: string; positionId: string; poolAddress: string; bondingCurvePct: number }
   | { type: 'pre_grad_closed'; symbol: string; positionId: string; ageMin: number; reason: string }
-  | { type: 'pre_grad_graduated'; symbol: string; positionId: string; bondingCurvePct: number }
+  | { type: 'pre_grad_graduated'; symbol: string; finalFees?: number; positionId?: string; bondingCurvePct?: number }
+  | { type: 'low_balance_warning'; currentSol: number; minSol: number }
+  | { type: 'high_il_warning'; symbol: string; ilPct: number; feesEarnedSol: number; netPnlSol: number }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -46,33 +78,33 @@ function strategyBadge(strategy: string): string {
 
 function formatMessage(payload: AlertPayload): string {
   switch (payload.type) {
-    case 'position_opened':
+    case 'position_opened': {
+      const dexUrl = `https://dexscreener.com/solana/${payload.poolAddress || payload.mint || ''}`
+      const tp = payload.takeProfitPct ?? '?'
+      const sl = payload.stopLossPct ?? '?'
+      const vol = payload.volume24h?.toLocaleString() ?? 'N/A'
+      const entryUsd = payload.entryPriceUsd ?? payload.entryPrice
+      const entrySol = payload.entryPriceSol ?? ''
+      const entrySolPart = entrySol ? ` (${entrySol} SOL)` : ''
       return [
-        `⚡ *Position Opened*`,
-        `Token: \`${payload.symbol}\``,
-        `Strategy: ${payload.strategy}`,
-        `Entry: $${payload.entryPrice.toFixed(8)}`,
-        `Deployed: ${payload.solDeposited.toFixed(3)} SOL`,
-        `ID: \`${payload.positionId}\``,
-        `→ To close manually: /close ${payload.positionId}`,
+        `🟢 *BUY* ${payload.symbol}`,
+        `💰 ${payload.solDeposited} SOL | TP +${tp}% | SL ${sl}%`,
+        `📊 Vol: $${vol} | Entry: $${entryUsd}${entrySolPart}`,
+        `🦍 Strategy: ${payload.strategy} | Rug: ${payload.rugcheckScore ?? 'N/A'}`,
+        `📈 ${dexUrl}`,
       ].join('\n')
+    }
 
     case 'position_closed': {
-      const ilSign = payload.ilPct <= 0 ? '' : '+'
-      const feeLine = payload.feesEarnedSol > 0
-        ? `Fees earned: *${payload.feesEarnedSol.toFixed(6)} SOL*`
-        : `Fees earned: 0 SOL`
-      const ilLine = `IL: ${ilSign}${payload.ilPct.toFixed(2)}%`
-      const isSmartRebalance = payload.reason.startsWith('smart_rebalance')
-      const header = isSmartRebalance ? `🔄 *Smart Rebalance*` : `✅ *Position Closed*`
+      const netPnl = payload.netPnlSol ?? 0
+      const netSign = netPnl >= 0 ? '+' : ''
       return [
-        header,
-        `Token: \`${payload.symbol}\``,
-        `Strategy: ${payload.strategy}`,
+        `🔴 *SELL* ${payload.symbol}`,
         `Reason: ${payload.reason}`,
-        feeLine,
-        ilLine,
-        `Duration: ${payload.ageHours}h`,
+        `Fees Earned: *${payload.feesEarnedSol} SOL*`,
+        `IL: ${payload.ilPct.toFixed(2)}% | Net PNL: ${netSign}${netPnl} SOL`,
+        `Held for: ${payload.ageHours}h`,
+        `Strategy: ${payload.strategy}`,
       ].join('\n')
     }
 
@@ -88,36 +120,20 @@ function formatMessage(payload: AlertPayload): string {
 
     case 'position_fee_yield_extended': {
       const dailyLine = payload.avgDailyYield !== null
-        ? `Avg Daily Yield: *${payload.avgDailyYield}%/day*`
-        : `Avg Daily Yield: N/A (position < 24h old)`
+        ? `Daily Yield: ${payload.avgDailyYield}%`
+        : `Daily Yield: N/A (< 24h old)`
       return [
-        `🚀 *Fee-Yield Extended*`,
-        `Token: \`${payload.symbol}\``,
-        `Strategy: ${payload.strategy}`,
+        `🚀 *FEE-YIELD EXTENDED* ${payload.symbol}`,
         `Total Fees: *${payload.totalFees} SOL* (${payload.feeYieldPct}% of deployed)`,
         dailyLine,
-        `Extensions: ${payload.extensions}`,
+        `Extensions: ${payload.extensions} | +${payload.extraHours ?? '?'}h added`,
         `New Max Duration: ${payload.effectiveMaxDurationHours}h`,
-        `Position ID: \`${payload.positionId}\``,
-        ``,
-        `→ This winner keeps running thanks to strong fees!`,
       ].join('\n')
     }
 
-    case 'candidate_found': {
-      const badge = strategyBadge(payload.strategy)
-      const curveLine = payload.bondingCurvePct !== undefined
-        ? `\nCurve: ${payload.bondingCurvePct.toFixed(1)}% ${bondingCurveEmoji(payload.bondingCurvePct)}`
-        : ''
-      return [
-        `🔍 *New Candidate* — ${badge}`,
-        `Token: \`${payload.symbol}\``,
-        `Strategy: ${payload.strategy}`,
-        `Score: ${payload.score}/100`,
-        `MC: $${formatNum(payload.mcUsd)}`,
-        `Vol 24h: $${formatNum(payload.volume24h)}${curveLine}`,
-      ].join('\n')
-    }
+    // candidate_found intentionally produces no Telegram message (noise reduction)
+    case 'candidate_found':
+      return ''
 
     case 'orphan_detected':
       return [
@@ -172,11 +188,26 @@ function formatMessage(payload: AlertPayload): string {
 
     case 'pre_grad_graduated':
       return [
-        `🎓 *Token Graduated!*`,
-        `Token: \`${payload.symbol}\``,
-        `ID: \`${payload.positionId}\``,
-        `Curve: ${payload.bondingCurvePct.toFixed(1)}% ✅`,
-        `_Position should be closed and re-evaluated on DLMM_`,
+        `🎉 *PRE-GRAD GRADUATED* ${payload.symbol}`,
+        `Moved to Raydium successfully.`,
+        `Final Fees: ${payload.finalFees ?? 0} SOL`,
+      ].join('\n')
+
+    case 'low_balance_warning':
+      return [
+        `⚠️ *LOW BALANCE WARNING*`,
+        `Current SOL: ${payload.currentSol}`,
+        `Recommended minimum: ${payload.minSol}`,
+        `Please top up your wallet.`,
+      ].join('\n')
+
+    case 'high_il_warning':
+      return [
+        `📉 *HIGH IL WARNING* ${payload.symbol}`,
+        `Current IL: ${payload.ilPct.toFixed(2)}%`,
+        `Fees Earned: ${payload.feesEarnedSol} SOL`,
+        `Net PNL: ${payload.netPnlSol} SOL`,
+        `Consider closing manually if IL keeps growing.`,
       ].join('\n')
 
     case 'error':
@@ -196,6 +227,9 @@ function bondingCurveEmoji(pct: number): string {
 }
 
 async function sendTelegram(text: string): Promise<void> {
+  // candidate_found returns empty string — skip silently
+  if (!text) return
+
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.log('[alerter] Telegram not configured — message:', text)
     return
