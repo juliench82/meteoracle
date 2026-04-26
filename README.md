@@ -1,8 +1,21 @@
-# ⚡ Meteoracle
+# Meteoracle
 
-> Automated Solana LP fee-farming bot with a live Next.js dashboard. One active pipeline: Meteora DLMM LP positions driven by a multi-strategy token classifier.
+Automated on-chain liquidity provision bot for Solana. Scans Meteora DLMM pools in real time, classifies tokens by risk profile, deploys capital into concentrated liquidity positions, and manages exits — all without human intervention.
 
-**Status:** Live — 3 processes on Hetzner VPS via PM2 (scanner + monitor + dashboard).
+Built and operated as a solo project. Production-grade, self-hosted, zero external dependencies beyond public APIs.
+
+**Stack:** TypeScript · Next.js 14 · Supabase (Postgres) · Solana web3.js · Meteora DLMM SDK · PM2 · Hetzner VPS
+
+---
+
+## What it does
+
+1. **Scans** — A background process continuously polls Meteora DLMM pools, filtering candidates by liquidity, volume, age, holder distribution, and safety score.
+2. **Classifies** — Each token is assigned a risk class by a multi-signal classifier that combines on-chain data, holder analysis, and market structure.
+3. **Deploys** — Based on the risk class, the bot selects the appropriate strategy and opens a concentrated liquidity position on Meteora DLMM.
+4. **Monitors** — A separate monitor process tracks each open position every minute: range status, fee accrual, price movement, and elapsed time.
+5. **Exits** — Positions are closed automatically based on a set of configurable exit conditions. Fees are claimed before close.
+6. **Alerts** — All events (opens, closes, rebalances, errors) are dispatched via Telegram in real time.
 
 ---
 
@@ -11,78 +24,65 @@
 ```
 Hetzner VPS (PM2)
   │
-  ├── bot/scanner.ts          ← scans Meteora pools every 15min   [PM2: lp-scanner]
-  ├── bot/monitor.ts          ← monitors LP range health + exits every 5min  [PM2: lp-monitor-dlmm]
-  │
-  └── INTERFACE
-      ├── bot/telegram-bot.ts ← bidirectional Telegram command bot  [PM2: telegram-bot]
-      └── start-dashboard.sh  ← cleans .next + builds + starts Next.js on port 3000  [PM2: dashboard]
+  ├── bot/scanner.ts          ← pool scanner + token classifier + position opener
+  ├── bot/monitor.ts          ← position health monitor + exit engine
+  ├── bot/telegram-bot.ts     ← bidirectional Telegram command interface
+  └── start-dashboard.sh      ← Next.js dashboard (port 3000)
 
-Next.js dashboard (same VPS, port 3000)
+Next.js Dashboard
   └── app/(dashboard)/
-      ├── page.tsx                ← KPIs, P&L chart, positions table, watchlist
-      └── strategies/page.tsx     ← Strategy config + live performance
+      ├── page.tsx            ← live KPIs, P&L chart, open positions table
+      └── strategies/page.tsx ← strategy reference + per-strategy performance
 
 Supabase (Postgres)
-  ├── lp_positions                ← all LP positions (open + closed)
-  ├── candidates                  ← scanner candidates log (includes token_class + strategy_id)
-  ├── bot_logs                    ← structured event log
-  └── bot_state                   ← single-row enabled flag
-
-Telegram — bidirectional (alerts out + commands in)
+  ├── lp_positions            ← all positions, open and closed
+  ├── candidates              ← every scanned token with full classifier output
+  ├── bot_logs                ← structured event log
+  └── bot_state               ← killswitch + runtime flags
 ```
-
----
-
-## Token Classifier
-
-`strategies/index.ts` exports `classifyToken()` which assigns each scanned token one of five classes before strategy routing:
-
-| Class | Criteria | Strategy |
-|---|---|---|
-| `MEME_SHITCOIN` | age < 48h OR mc < $3M OR vol1h/liq > 5% OR top10holders > 35% | Evil Panda |
-| `SCALP_SPIKE` | 48h–30d, $3M–$20M mc, vol1h/liq ≤ 5% | Scalp-Spike |
-| `BLUECHIP` | age > 30d, mc > $20M, top10holders < 25% | Stable Farm |
-| `STABLE` | known stablecoin mint (USDC/USDT/USDH/PAI/stSOL) | Stable Farm |
-| `UNKNOWN` | no clean fit → no position opened | — |
-
-`token_class` and `strategy_id` are persisted on every `candidates` and `lp_positions` row (migration `20260417_add_token_class.sql`), enabling per-class P&L breakdown in the dashboard.
 
 ---
 
 ## Strategies
 
-| File | ID | Status | Class target |
-|---|---|---|---|
-| `strategies/evil-panda.ts` | `evil-panda` | ✅ Active | MEME_SHITCOIN |
-| `strategies/scalp-spike.ts` | `scalp-spike` | ✅ Active | SCALP_SPIKE |
-| `strategies/stable-farm.ts` | `stable-farm` | ✅ Active | BLUECHIP / STABLE |
+The bot runs multiple strategies in parallel, each targeting a different token risk profile. Strategy selection is fully automatic — the classifier routes each token to the correct strategy based on real-time on-chain data.
+
+Strategy parameters (entry filters, position sizing, range configuration, exit rules) live in `strategies/` and are not published here.
+
+| Strategy | Type | Target |
+|---|---|---|
+| Evil Panda | DLMM LP | Early-stage, high-volatility memecoins |
+| Scalp Spike | DLMM LP | Mid-cap tokens with sudden volume spikes |
+| Stable Farm | DLMM LP | Established pairs, lower volatility |
 
 ---
 
-## Telegram bot commands
+## Dashboard
+
+A private Next.js dashboard runs on the same VPS. It shows:
+
+- Real-time open positions with fee accrual, P&L breakdown (fees vs. price impact), and time in position
+- Closed position history with exit reasons
+- Per-strategy performance metrics
+- Bot status, wallet balance, and scan activity
+
+The dashboard polls the bot's Supabase database directly — no separate API layer needed.
+
+---
+
+## Telegram interface
+
+All bot events emit Telegram alerts. The bot also accepts inbound commands:
 
 | Command | Action |
 |---|---|
-| `/stop` | Emergency stop — closes all open positions + sets botState disabled |
-| `/restart` | Restarts all workers + sets botState enabled |
-| `/close` | Manually close all open positions |
-| `/tick` | Runs one scanner + monitor tick immediately |
-| `/positions` | Shows all open LP positions |
-| `/status` | Shows bot state, open position count, wallet balance |
-| `/help` | Lists all commands |
-
-### Outbound alerts
-
-| Alert | Trigger |
-|---|---|
-| 🟢 LP OPENED | Position opened |
-| 🔴 CLOSED SL | Stop loss hit |
-| ✅ CLOSED TP | Take profit hit |
-| ⏱️ CLOSED TIMEOUT | Max duration exceeded |
-| 🔁 REBALANCED | Smart rebalance triggered |
-| ⚠️ LOW BALANCE | Wallet below minimum |
-| 🚀 STARTUP | Process restarted after crash |
+| `/status` | Bot state, wallet balance, open position count |
+| `/positions` | Live summary of all open positions |
+| `/tick` | Trigger one immediate scan + monitor cycle |
+| `/close` | Close all open positions |
+| `/stop` | Emergency stop — close all positions + disable bot |
+| `/restart` | Re-enable bot + restart all workers |
+| `/help` | Command reference |
 
 ---
 
@@ -90,24 +90,21 @@ Telegram — bidirectional (alerts out + commands in)
 
 ```
 meteoracle/
-├── app/
-│   └── (dashboard)/
-│       ├── page.tsx                ← KPIs, P&L, positions table
-│       └── strategies/page.tsx     ← Strategy config + performance
+├── app/(dashboard)/           ← Next.js dashboard
 ├── bot/
-│   ├── scanner.ts                  ← Meteora pool scanner
-│   ├── monitor.ts                  ← LP range monitor + exit logic
-│   ├── executor.ts                 ← LP open/close execution
-│   ├── alerter.ts                  ← Telegram alert dispatcher
-│   ├── scorer.ts                   ← Candidate scorer
-│   ├── startup-alert.ts            ← PM2 crash-restart ping
-│   ├── telegram-bot.ts             ← Bidirectional Telegram bot
-│   └── orphan-detector.ts          ← Detects DB positions no longer on-chain
+│   ├── scanner.ts             ← pool scanner + classifier + opener
+│   ├── monitor.ts             ← position monitor + exit engine
+│   ├── executor.ts            ← on-chain transaction execution
+│   ├── alerter.ts             ← Telegram alert dispatcher
+│   ├── scorer.ts              ← candidate scoring
+│   ├── telegram-bot.ts        ← inbound command handler
+│   ├── startup-alert.ts       ← crash-restart notification
+│   └── orphan-detector.ts     ← reconciles DB vs on-chain state
 ├── strategies/
-│   ├── index.ts                    ← STRATEGIES registry + classifyToken() + getStrategyForToken()
-│   ├── evil-panda.ts               ← MEME_SHITCOIN strategy
-│   ├── scalp-spike.ts              ← SCALP_SPIKE strategy
-│   └── stable-farm.ts              ← BLUECHIP/STABLE strategy
+│   ├── index.ts               ← classifier + strategy registry
+│   ├── evil-panda.ts
+│   ├── scalp-spike.ts
+│   └── stable-farm.ts
 ├── lib/
 │   ├── supabase.ts
 │   ├── solana.ts
@@ -115,17 +112,8 @@ meteoracle/
 │   ├── rugcheck.ts
 │   ├── pumpfun.ts
 │   └── types.ts
-├── supabase/migrations/
-│   ├── 001_initial_schema.sql
-│   ├── 002_add_updated_at.sql
-│   ├── 002_entry_price_usd.sql
-│   ├── 003_bot_state.sql
-│   ├── 003_lp_positions.sql
-│   ├── 004_pre_grad_watchlist.sql
-│   ├── 004_pre_grad_watchlist_velocity.sql
-│   └── 20260417_add_token_class.sql
-├── ecosystem.config.cjs
-├── start-dashboard.sh
+├── supabase/migrations/       ← versioned schema migrations
+├── ecosystem.config.cjs       ← PM2 process definitions
 └── .env.local.example
 ```
 
@@ -141,46 +129,32 @@ cd meteoracle
 npm install
 ```
 
-### 2. Supabase migrations
+### 2. Supabase
 
-Run all 8 migrations in order in the Supabase SQL editor:
-
-```
-001_initial_schema.sql
-002_add_updated_at.sql
-002_entry_price_usd.sql
-003_bot_state.sql
-003_lp_positions.sql
-004_pre_grad_watchlist.sql
-004_pre_grad_watchlist_velocity.sql
-20260417_add_token_class.sql
-```
-
-Then seed the `bot_state` row:
+Create a project at [supabase.com](https://supabase.com), then run the migrations in `supabase/migrations/` in order via the SQL editor. Seed the killswitch row:
 
 ```sql
 insert into bot_state (id, enabled) values (1, true)
 on conflict (id) do nothing;
 ```
 
-### 3. Environment variables
+### 3. Environment
 
 ```bash
 cp .env.local.example .env.local
-# fill in your values
+# fill in all required values
 ```
 
-### 4. Run on VPS (PM2)
+### 4. Deploy (PM2 on VPS)
 
 ```bash
 npm install -g pm2
 set -a && source .env.local && set +a
 pm2 start ecosystem.config.cjs
-pm2 save
-pm2 startup   # follow the printed command
+pm2 save && pm2 startup
 ```
 
-Check logs:
+### 5. Check logs
 
 ```bash
 pm2 logs lp-scanner --lines 50
@@ -189,7 +163,7 @@ pm2 logs telegram-bot --lines 50
 pm2 logs dashboard --lines 50
 ```
 
-Deploy update:
+### 6. Deploy update
 
 ```bash
 git pull && pm2 restart all --update-env && pm2 save
@@ -199,27 +173,28 @@ git pull && pm2 restart all --update-env && pm2 save
 
 ## Go-live checklist
 
-- [ ] All 8 Supabase migrations applied
-- [ ] `bot_state` row inserted (`id=1, enabled=true`)
-- [ ] Wallet funded (≥ 0.5 SOL)
-- [ ] `BOT_DRY_RUN=false` in `.env.local`
+- [ ] All Supabase migrations applied
+- [ ] `bot_state` row inserted
+- [ ] Wallet funded (≥ 0.5 SOL recommended)
+- [ ] `BOT_DRY_RUN=false` confirmed
 - [ ] `chmod +x start-dashboard.sh`
-- [ ] `set -a && source .env.local && set +a` run before `pm2 start`
-- [ ] `pm2 start ecosystem.config.cjs && pm2 save && pm2 startup`
-- [ ] Dashboard accessible at `http://<vps-ip>:3000`
+- [ ] PM2 started and saved
+- [ ] Telegram bot responding to `/status`
 
 ---
 
-## Required accounts
+## External services required
 
-- [Helius](https://helius.dev) — Solana RPC + holder data (free tier fine)
-- [Supabase](https://supabase.com) — Postgres DB (free tier fine)
-- [Rugcheck](https://rugcheck.xyz) — token safety scores (no key needed)
-- Telegram bot via @BotFather
-- Hetzner VPS (CX22 ~€4/mo)
+| Service | Purpose | Free tier sufficient |
+|---|---|---|
+| [Helius](https://helius.dev) | Solana RPC + holder data | Yes |
+| [Supabase](https://supabase.com) | Postgres database | Yes |
+| [Rugcheck](https://rugcheck.xyz) | Token safety scores | Yes (no key needed) |
+| Telegram | Alerts + commands | Yes |
+| Hetzner VPS | Process hosting | CX22 ~€4/mo |
 
 ---
 
 ## Disclaimer
 
-Experimental software. LP and meme token trading is extremely high risk. Never deploy funds you cannot afford to lose entirely. Validate in dry-run mode first.
+Experimental software. Liquidity provision on volatile assets carries significant risk including total loss of deployed capital. This project is published for portfolio and educational purposes. Run in dry-run mode (`BOT_DRY_RUN=true`) before deploying real funds.
