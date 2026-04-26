@@ -15,6 +15,7 @@ export async function fetchSolPriceUsd(): Promise<number> {
   const timeout = setTimeout(() => controller.abort(), 4000);
 
   try {
+    // Jupiter v6 price API — most reliable SOL/USD source
     const res = await fetch(
       'https://price.jup.ag/v6/price?ids=So11111111111111111111111111111111111111112',
       {
@@ -24,7 +25,7 @@ export async function fetchSolPriceUsd(): Promise<number> {
     );
     clearTimeout(timeout);
 
-    if (!res.ok) throw new Error('Jupiter v6 failed');
+    if (!res.ok) throw new Error(`Jupiter v6 failed: ${res.status}`);
 
     const data = await res.json();
     const price = data.data?.So11111111111111111111111111111111111111112?.price;
@@ -32,11 +33,12 @@ export async function fetchSolPriceUsd(): Promise<number> {
     if (price && price > 50 && price < 200) {
       return price;
     }
-    throw new Error('Invalid price from Jupiter');
+    throw new Error(`Invalid price from Jupiter: ${price}`);
   } catch (err) {
     clearTimeout(timeout);
     console.warn('[pre-grad] Jupiter v6 failed, using fallback SOL price', err);
-    return 86; // ~current SOL price — update PRE_GRAD_SOL_USD env if this drifts
+    // Helius fallback: update PRE_GRAD_SOL_USD env var if SOL price drifts significantly
+    return 86;
   }
 }
 
