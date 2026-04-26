@@ -92,6 +92,12 @@ export interface ExitRules {
   claimFeesBeforeClose: boolean
   minFeesToClaim: number
   /**
+   * Exit if fees earned reach this % of deployed SOL — even if price is down.
+   * This is the primary safety net: lock in fee gains before IL worsens.
+   * Optional — omit to disable.
+   */
+  minFeeYieldToExit?: number
+  /**
    * If fees earned exceed this % of deployed SOL within the first 12h → early exit.
    * Captures moonshot fee windfalls before volume dies. Optional — omit to disable.
    */
