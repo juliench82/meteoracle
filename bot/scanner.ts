@@ -7,7 +7,7 @@ import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import { STRATEGIES, getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
-import { scoreCandidate } from './scorer'
+import { scoreCandidateWithBreakdown } from './scorer'
 import { openPosition } from './executor'
 import { sendAlert } from './alerter'
 import { checkHolders } from '@/lib/helius'
@@ -382,23 +382,29 @@ export async function runScanner(): Promise<{
       continue
     }
 
-    const score       = scoreCandidate(metrics, strategy)
+    const breakdown   = scoreCandidateWithBreakdown(metrics, strategy)
+    const score       = breakdown.total
     const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
     await withTimeout(
       supabase.from('candidates').insert({
-        token_address:  metrics.address,
-        symbol:         metrics.symbol,
+        token_address:     metrics.address,
+        symbol:            metrics.symbol,
         score,
-        strategy_matched: strategy.id,
-        strategy_id:    strategy.id,
-        token_class:    tokenClass,
-        mc_at_scan:     metrics.mcUsd,
-        volume_24h:     metrics.volume24h,
-        holder_count:   metrics.holderCount,
-        rugcheck_score: metrics.rugcheckScore,
-        top_holder_pct: metrics.topHolderPct,
-        scanned_at:     new Date().toISOString(),
+        strategy_matched:  strategy.id,
+        strategy_id:       strategy.id,
+        token_class:       tokenClass,
+        mc_at_scan:        metrics.mcUsd,
+        volume_24h:        metrics.volume24h,
+        holder_count:      metrics.holderCount,
+        rugcheck_score:    metrics.rugcheckScore,
+        top_holder_pct:    metrics.topHolderPct,
+        scanned_at:        new Date().toISOString(),
+        score_volmc:       breakdown.volMcScore,
+        score_rug:         breakdown.rugScore,
+        score_holders:     breakdown.holderScore,
+        score_freshness:   breakdown.freshnessScore,
+        score_curve_bonus: breakdown.curveBonus,
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
