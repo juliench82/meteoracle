@@ -235,12 +235,25 @@ async function checkPosition(
 
   // === FEE-YIELD METRICS ===
   const deployedSol = position.sol_deposited || 0
-  const feeYieldPct = deployedSol > 0 ? (feesEarnedSol / deployedSol) * 100 : 0
+  const totalFeesSol = feesEarnedSol || 0
+  const feeYieldPct = deployedSol > 0 ? (totalFeesSol / deployedSol) * 100 : 0
+
+  // Only calculate meaningful daily rate for positions >= 24h old to avoid absurd projections
+  const avgDailyYield = ageHours >= 24
+    ? (feeYieldPct / ageHours) * 24
+    : null
+
+  // dailyYield used purely for extension threshold math — still computed regardless of age
   const dailyYield = ageHours > 0 ? (feeYieldPct / ageHours) * 24 : 0
 
-  console.log(`${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)} pnl=${pnlSol.toFixed(6)} fees=${feeYieldPct.toFixed(1)}%deployed dailyYield=${dailyYield.toFixed(1)}%/day age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`)
+  console.log(
+    `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
+    ` pnl=${pnlSol.toFixed(6)} fees=${feeYieldPct.toFixed(1)}%deployed` +
+    ` dailyYield=${avgDailyYield !== null ? avgDailyYield.toFixed(1) + '%/day' : 'N/A(<24h)'}` +
+    ` age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`
+  )
 
-  // === FEE-YIELD DYNAMIC EXIT LOGIC ===
+  // === FEE-YIELD DYNAMIC EXIT LOGIC (non-spammy) ===
   let closeReason: string | null = null
 
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
@@ -250,50 +263,69 @@ async function checkPosition(
   } else if (entryPriceSol > 0 && pricePct >= strategy.exits.takeProfitPct) {
     closeReason = `takeprofit_${pricePct.toFixed(1)}pct`
   } else if (strategy.exits.feeYieldExitPct && ageHours <= 12 && feeYieldPct >= strategy.exits.feeYieldExitPct) {
-    // Moonshot profit-take: fees > 25% of deployed within first 12h — bank it
+    // Moonshot profit-take: fees > threshold of deployed within first 12h — bank it
     closeReason = `fee_yield_early_${feeYieldPct.toFixed(1)}pct`
   } else {
-    // Fee-yield duration extension: keep winners running
+    // Fee-yield duration extension — only fire when crossing a NEW threshold level
+    const currentExtensions: number = position.metadata?.feeYieldExtensions || 0
     let effectiveMaxDuration = strategy.exits.maxDurationHours
-    let extended = false
+    let shouldExtend = false
+    let newExtensions = currentExtensions
 
     if (strategy.exits.feeYieldExtendPct && dailyYield >= strategy.exits.feeYieldExtendPct) {
-      const extensions = Math.floor(dailyYield / strategy.exits.feeYieldExtendPct)
-      const extraHours = extensions * (strategy.exits.feeYieldExtensionHours ?? 48)
-      effectiveMaxDuration += extraHours
-      extended = true
+      const potentialExtensions = Math.floor(dailyYield / strategy.exits.feeYieldExtendPct)
 
-      console.log(`${label} FEE-YIELD EXTENSION: dailyYield=${dailyYield.toFixed(1)}%/day ×${extensions} → +${extraHours}h (effective max=${effectiveMaxDuration}h)`)
+      // Only extend (and alert) when we cross into a higher extension count
+      if (potentialExtensions > currentExtensions) {
+        newExtensions = potentialExtensions
+        const addedHours = (newExtensions - currentExtensions) * (strategy.exits.feeYieldExtensionHours ?? 48)
+        effectiveMaxDuration += addedHours
+        shouldExtend = true
 
-      // Persist extension metadata to DB (no migration needed — lives in jsonb metadata column)
-      try {
-        const currentMeta = position.metadata || {}
-        const newMeta = {
-          ...currentMeta,
-          feeYieldExtensions: (currentMeta.feeYieldExtensions || 0) + 1,
-          lastFeeYieldExtensionAt: new Date().toISOString(),
-          effectiveMaxDurationHours: effectiveMaxDuration,
+        console.log(
+          `${label} FEE-YIELD EXTENSION: dailyYield=${dailyYield.toFixed(1)}% ` +
+          `extensions ${currentExtensions} → ${newExtensions} (+${addedHours}h, effective max=${effectiveMaxDuration}h)`
+        )
+
+        try {
+          const currentMeta = position.metadata || {}
+          await sbUpdate('lp_positions', `id=eq.${position.id}`, {
+            metadata: {
+              ...currentMeta,
+              feeYieldExtensions: newExtensions,
+              lastFeeYieldExtensionAt: new Date().toISOString(),
+              effectiveMaxDurationHours: effectiveMaxDuration,
+            },
+          })
+        } catch (metaErr) {
+          console.error(`${label} failed to update fee-yield metadata:`, metaErr)
         }
-        await sbUpdate('lp_positions', `id=eq.${position.id}`, { metadata: newMeta })
-      } catch (metaErr) {
-        console.error(`${label} failed to update fee-yield metadata:`, metaErr)
-      }
 
-      // Telegram alert — fire once per extension event (extension count increments each tick it qualifies)
-      await sendAlert({
-        type: 'position_fee_yield_extended',
-        symbol: position.symbol,
-        strategy: strategy.id,
-        feeYieldPct: Math.round(feeYieldPct * 10) / 10,
-        dailyYield: Math.round(dailyYield * 10) / 10,
-        extensions: (position.metadata?.feeYieldExtensions || 0) + 1,
-        effectiveMaxDurationHours: effectiveMaxDuration,
-        positionId: position.id,
-      })
+        // Alert fires ONCE per extension level crossing, not every tick
+        await sendAlert({
+          type: 'position_fee_yield_extended',
+          symbol: position.symbol,
+          strategy: strategy.id,
+          totalFees: totalFeesSol.toFixed(4),
+          feeYieldPct: feeYieldPct.toFixed(1),
+          avgDailyYield: avgDailyYield !== null ? avgDailyYield.toFixed(1) : null,
+          extensions: newExtensions,
+          effectiveMaxDurationHours: effectiveMaxDuration,
+          positionId: position.id,
+        })
+      } else {
+        // Already at this extension level — recalculate effectiveMax silently
+        const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 48)
+        effectiveMaxDuration += totalAddedHours
+      }
+    } else if (currentExtensions > 0) {
+      // Has prior extensions — honour them even if dailyYield dipped below threshold
+      const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 48)
+      effectiveMaxDuration += totalAddedHours
     }
 
     if (ageHours >= effectiveMaxDuration) {
-      closeReason = `max_duration_${Math.round(ageHours)}h${extended ? '_fee_extended' : ''}`
+      closeReason = `max_duration_${Math.round(ageHours)}h${shouldExtend ? '_fee_extended' : ''}`
     }
   }
 
@@ -386,40 +418,29 @@ async function fetchPositionState(
 
     if (!pos) return { inRange: false, currentPriceSol, feesEarnedSol: 0, volume1hUsd: 0, externallyClosed: true }
 
-    const { lowerBinId, upperBinId, feeX, feeY } = pos.positionData
-    const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId
-    const feesEarnedSol = (Number(feeX) + Number(feeY)) / 1e9
+    const posData = pos.positionData
+    const activeBinId = activeBin.binId
+    const inRange = activeBinId >= posData.lowerBinId && activeBinId <= posData.upperBinId
+
+    const feeX = Number(posData.feeX ?? 0) / 1e9
+    const feeY = Number(posData.feeY ?? 0) / 1e9
+    const feesEarnedSol = feeX + feeY
 
     let volume1hUsd = 0
     try {
-      const resp = await fetch(`https://dlmm-api.meteora.ag/pair/${poolAddress}`, { signal: AbortSignal.timeout(5_000) })
-      if (resp.ok) {
-        const data = await resp.json()
-        volume1hUsd = data?.trade_volume_1h_usd ?? data?.volume?.h1 ?? 0
+      const apiRes = await fetch(
+        `https://dlmm-api.meteora.ag/pair/${poolAddress}`,
+        { signal: AbortSignal.timeout(5_000) }
+      )
+      if (apiRes.ok) {
+        const apiData = await apiRes.json()
+        volume1hUsd = apiData?.trade_volume_usd_1h ?? 0
       }
     } catch {}
 
     return { inRange, currentPriceSol, feesEarnedSol, volume1hUsd, externallyClosed: false }
   } catch (err) {
-    console.warn(`[monitor] fetchPositionState failed for ${poolAddress}:`, err)
+    console.error(`[fetchPositionState] error for pool ${poolAddress}:`, err)
     return { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0, externallyClosed: false }
   }
 }
-
-async function main(): Promise<void> {
-  console.log(`[lp-monitor-dlmm] starting — interval=${MONITOR_INTERVAL_MS / 1000}s orphan-check-every=${ORPHAN_CHECK_EVERY_N}-ticks`)
-  while (true) {
-    try {
-      const stats = await monitorPositions()
-      console.log(`[lp-monitor-dlmm] tick done — checked=${stats.checked} closed=${stats.closed} claimed=${stats.claimed} rebalanced=${stats.rebalanced}`)
-    } catch (err) {
-      console.error('[lp-monitor-dlmm] tick error:', err)
-    }
-    await new Promise(r => setTimeout(r, MONITOR_INTERVAL_MS))
-  }
-}
-
-main().catch(err => {
-  console.error('[lp-monitor-dlmm] fatal:', err)
-  process.exit(1)
-})
