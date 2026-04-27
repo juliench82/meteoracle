@@ -17,6 +17,7 @@ import {
   NATIVE_MINT,
 } from '@solana/spl-token'
 import BN from 'bn.js'
+import type { StrategyType } from '@meteora-ag/dlmm'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
@@ -48,21 +49,25 @@ const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 
 /**
  * Maximum bin range per strategy — prevents OOM in simulation for wide positions.
- * evil-panda is the most aggressive (volatile Pump.fun tokens, wide spreads).
- * scalp-spike stays tight. bluechip/stable-farm have the narrowest cap.
  */
 const MAX_BINS_BY_STRATEGY: Record<string, number> = {
-  'evil-panda':   200,
-  'scalp-spike':  120,
+  'evil-panda':    200,
+  'scalp-spike':   120,
   'bluechip-farm': 100,
   'stable-farm':   100,
 }
 const MAX_BINS_DEFAULT = 150
 
+/** Shared strategy params shape used by addLiquidityWithRetry. */
+interface LiquidityStrategyParams {
+  minBinId: number
+  maxBinId: number
+  strategyType: StrategyType
+}
+
 /**
  * Transient error messages emitted by the DLMM program / on-chain runtime.
- * These indicate the position account was not yet fully initialized when we
- * attempted addLiquidityByStrategy — they are retriable with backoff.
+ * Retriable with backoff.
  */
 function isTransientLiquidityError(msg: string): boolean {
   return (
@@ -76,8 +81,7 @@ function isTransientLiquidityError(msg: string): boolean {
 
 /**
  * Strip any ComputeBudget instructions already present in an ix array.
- * Prevents 'duplicate instruction' simulation failure when we prepend
- * our own setComputeUnitPrice + setComputeUnitLimit.
+ * Prevents 'duplicate instruction' simulation failure when we prepend our own.
  */
 function stripComputeBudgetIxs(ixs: TransactionInstruction[]): TransactionInstruction[] {
   return ixs.filter(ix => ix.programId.toBase58() !== COMPUTE_BUDGET_PROGRAM_ID)
@@ -88,9 +92,8 @@ function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): Trans
 }
 
 /**
- * Simulate a transaction before sending. Logs warnings on failure.
- * Returns true if simulation passed (or if simulation itself errored — we log but don't block).
- * Returns false if simulation definitively reported a program error OR an OOM condition.
+ * Simulate a transaction before sending.
+ * Returns false if simulation definitively reported a program error OR OOM.
  */
 async function simulateAndCheck(
   tx: Transaction,
@@ -110,12 +113,10 @@ async function simulateAndCheck(
     return true
   } catch (simErr: unknown) {
     const msg = simErr instanceof Error ? simErr.message : String(simErr)
-    // OOM during simulation means the position is too large — reject instead of proceeding
     if (msg.includes('memory allocation failed') || msg.includes('out of memory')) {
       console.error(`${label} ⚠ simulation OOM — position too large, aborting send`, { error: msg })
       return false
     }
-    // Other simulation call failures (network, timeout) — log but don't block the tx
     console.warn(`${label} simulation call threw — proceeding anyway:`, simErr)
     return true
   }
@@ -131,7 +132,6 @@ async function sendLegacyTx(
   tx.recentBlockhash = blockhash
   tx.feePayer = signers[0].publicKey
 
-  // Always simulate before sending — catches instruction errors before they hit chain
   const simOk = await simulateAndCheck(tx, label)
   if (!simOk) {
     throw new Error(`${label} transaction aborted — simulation reported program error`)
@@ -146,9 +146,7 @@ async function sendLegacyTx(
 async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
   const connection = getConnection()
   const info = await connection.getAccountInfo(mint)
-  if (info && info.owner.equals(TOKEN_2022_PROGRAM_ID)) {
-    return TOKEN_2022_PROGRAM_ID
-  }
+  if (info && info.owner.equals(TOKEN_2022_PROGRAM_ID)) return TOKEN_2022_PROGRAM_ID
   return TOKEN_PROGRAM_ID
 }
 
@@ -163,29 +161,21 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
 }
 
 /**
- * Wait for a position account to be owned by the DLMM program AND have its
- * bin array populated (i.e. fully ready for addLiquidityByStrategy).
- *
- * Ownership alone is not sufficient — the DLMM program can own the account before its
- * internal bin arrays are initialized, causing `index out of bounds: len=0` panics in
- * dynamic_position.rs when addLiquidityByStrategy runs its compute-unit simulation.
- *
- * After the account is confirmed ready, an additional mandatory delay allows the
- * runtime state to fully propagate before we call addLiquidityByStrategy.
+ * Wait for a position account to be owned by DLMM AND have its bin arrays populated.
+ * After confirmation, adds a mandatory 2.5s propagation delay.
  */
 async function waitForPositionAccountReady(
   dlmmPool: Awaited<ReturnType<Awaited<ReturnType<typeof getDLMM>>['create']>>,
   positionPubkey: PublicKey,
   walletPubkey: PublicKey,
   label: string,
-  maxAttempts = 15,    // 30 seconds total at 2s cadence
+  maxAttempts = 15,
   intervalMs = 2000
 ): Promise<void> {
   const connection = getConnection()
   const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo')
 
   for (let i = 1; i <= maxAttempts; i++) {
-    // Step 1: account must exist and be owned by DLMM
     const info = await connection.getAccountInfo(positionPubkey, 'confirmed')
     if (!info || !info.owner.equals(DLMM_PROGRAM_ID)) {
       console.log(`${label} [wait] account not yet owned by DLMM… attempt ${i}/${maxAttempts}`)
@@ -193,37 +183,29 @@ async function waitForPositionAccountReady(
       continue
     }
 
-    // Step 2: DLMM internal state must be ready (bin arrays populated)
     try {
       const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(walletPubkey)
       const found = userPositions.find(p => p.publicKey.toBase58() === positionPubkey.toBase58())
       if (found?.positionData?.lowerBinId !== undefined) {
         console.log(`${label} [wait] position account confirmed ready on-chain (attempt ${i}/${maxAttempts})`)
-        // Mandatory extra delay — DLMM runtime state needs to fully propagate
         console.log(`${label} [wait] extra 2.5s propagation delay…`)
         await new Promise(r => setTimeout(r, 2500))
         return
       }
     } catch {
-      // getPositionsByUserAndLbPair can throw transiently — just retry
+      // getPositionsByUserAndLbPair can throw transiently — retry
     }
 
     console.log(`${label} [wait] account owned but DLMM state not yet ready… attempt ${i}/${maxAttempts}`)
     await new Promise(r => setTimeout(r, intervalMs))
   }
 
-  // After all attempts: proceed with a longer safety delay to give the chain more time.
-  console.warn(`${label} [wait] readiness not confirmed after ${maxAttempts} attempts — adding 5s safety delay before proceeding`)
+  console.warn(`${label} [wait] readiness not confirmed after ${maxAttempts} attempts — adding 5s safety delay`)
   await new Promise(r => setTimeout(r, 5000))
 }
 
 /**
  * Call addLiquidityByStrategy with exponential backoff on transient DLMM errors.
- *
- * Transient errors (Assertion failed, index out of bounds, ProgramFailedToComplete)
- * indicate the on-chain position account was not yet fully initialized when the SDK's
- * internal compute-unit simulation ran. Retrying after a delay resolves this in practice.
- *
  * Delays: attempt 1 = 3s, attempt 2 = 6s, attempt 3 = 12s.
  */
 async function addLiquidityWithRetry(
@@ -233,7 +215,7 @@ async function addLiquidityWithRetry(
     user: PublicKey
     totalXAmount: BN
     totalYAmount: BN
-    strategy: { minBinId: number; maxBinId: number; strategyType: unknown }
+    strategy: LiquidityStrategyParams
   },
   label: string,
   maxRetries = 3
@@ -245,10 +227,7 @@ async function addLiquidityWithRetry(
       return await dlmmPool.addLiquidityByStrategy(params)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
-
-      if (!isTransientLiquidityError(msg) || attempt === maxRetries) {
-        throw err
-      }
+      if (!isTransientLiquidityError(msg) || attempt === maxRetries) throw err
 
       const delayMs = 3000 * Math.pow(2, attempt - 1) // 3s → 6s → 12s
       console.warn(
@@ -267,7 +246,6 @@ export async function openPosition(
   const label = `[executor][${strategy.id}][${metrics.symbol}]`
   console.log(`${label} opening position`)
 
-  // Resolve dry-run mode at call time — respects /dry and /live Telegram commands
   const botState = await getBotState()
   const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
 
@@ -275,20 +253,13 @@ export async function openPosition(
 
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx (env_forced=${ENV_DRY_RUN_FORCED}, botState=${botState.dry_run})`)
-    const dryRunEntryPriceUsd = metrics.priceUsd ?? 0
-    const dryRunEntryPriceSol = 0
     const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
     const dryRunSolAmount = strategy.position.maxSolPerPosition
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
     return await persistPosition(
-      metrics, strategy,
-      'dry-run-sig',
-      dryRunEntryPriceUsd,
-      dryRunEntryPriceSol,
-      dryRunSolAmount,
-      undefined,
-      0
+      metrics, strategy, 'dry-run-sig',
+      metrics.priceUsd ?? 0, 0, dryRunSolAmount, undefined, 0
     )
   }
 
@@ -304,9 +275,11 @@ export async function openPosition(
     const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1')
     const { data: openPositions } = await supabase
       .from('lp_positions').select('sol_deposited').eq('status', 'active')
-    const totalDeployed = (openPositions ?? []).reduce((s: number, p: { sol_deposited: number }) => s + (p.sol_deposited ?? 0), 0)
+    const totalDeployed = (openPositions ?? []).reduce(
+      (s: number, p: { sol_deposited: number }) => s + (p.sol_deposited ?? 0), 0
+    )
     if (totalDeployed + solAmount > maxTotalDeployed) {
-      console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL already deployed (limit ${maxTotalDeployed} SOL)`)
+      console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed (limit ${maxTotalDeployed})`)
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_exposure_cap',
         payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed },
@@ -326,10 +299,9 @@ export async function openPosition(
       .limit(1)
 
     if (lastClose?.length) {
-      const isEmergency    = lastClose[0].close_reason?.startsWith('emergency_stop')
-      const cooldownHours  = isEmergency ? emergencyCooldownHours : defaultCooldownHours
-      const cutoff         = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
-
+      const isEmergency   = lastClose[0].close_reason?.startsWith('emergency_stop')
+      const cooldownHours = isEmergency ? emergencyCooldownHours : defaultCooldownHours
+      const cutoff        = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
       if (lastClose[0].closed_at >= cutoff) {
         console.warn(`${label} token in cooldown — closed within last ${cooldownHours}h (reason: ${lastClose[0].close_reason})`)
         await supabase.from('bot_logs').insert({
@@ -345,7 +317,6 @@ export async function openPosition(
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
 
-    // Reserve only for the slots still available after this position.
     const currentOpenCount = (openPositions ?? []).length
     const remainingSlots   = Math.max(0, MAX_CONCURRENT_POSITIONS - currentOpenCount - 1)
     const dynamicReserve   = remainingSlots * MAX_SOL_PER_POSITION * WALLET_RESERVE_MULTIPLIER
@@ -355,7 +326,7 @@ export async function openPosition(
       console.warn(
         `${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL ` +
         `(position=${solAmount} + rent=${METEORA_RENT_RESERVE_SOL} + reserve=${dynamicReserve.toFixed(3)} ` +
-        `[${remainingSlots} remaining slots × ${MAX_SOL_PER_POSITION} SOL × ${WALLET_RESERVE_MULTIPLIER}]), ` +
+        `[${remainingSlots} slots × ${MAX_SOL_PER_POSITION} × ${WALLET_RESERVE_MULTIPLIER}]), ` +
         `have ${balanceSol.toFixed(4)} SOL`
       )
       await supabase.from('bot_logs').insert({
@@ -374,22 +345,20 @@ export async function openPosition(
     console.log(`${label} entry price: ${entryPriceSol.toFixed(9)} SOL/token (bin ${activeBinId})`)
 
     const binStep = dlmmPool.lbPair.binStep
-
-    const mintX = dlmmPool.tokenX.publicKey
-    const mintY = dlmmPool.tokenY.publicKey
+    const mintX   = dlmmPool.tokenX.publicKey
+    const mintY   = dlmmPool.tokenY.publicKey
     const isSolPool = mintY.toBase58() === NATIVE_MINT_STR
 
     const ataIxs: TransactionInstruction[] = []
     for (const [label_token, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
-        console.log(`${label} token ${label_token} is native SOL — skipping ATA creation`)
+        console.log(`${label} token ${label_token} is native SOL — skipping ATA`)
         continue
       }
       const tokenProgramId = await getTokenProgramId(mint)
       const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID)
-      const ataInfo = await connection.getAccountInfo(ata)
-      if (!ataInfo) {
-        console.log(`${label} creating ATA for token ${label_token} (${mint.toBase58().slice(0, 8)}…) program=${tokenProgramId.toBase58().slice(0, 8)}`)
+      if (!(await connection.getAccountInfo(ata))) {
+        console.log(`${label} creating ATA for token ${label_token} (${mint.toBase58().slice(0, 8)}…)`)
         ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
           wallet.publicKey, ata, wallet.publicKey, mint, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
         ))
@@ -405,22 +374,14 @@ export async function openPosition(
     }
 
     const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
-    const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
-    const minBinId = activeBinId - binsDown
-    const maxBinId = activeBinId + binsUp
-    const binRange = binsDown + binsUp
+    const binsUp   = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
+    const minBinId  = activeBinId - binsDown
+    const maxBinId  = activeBinId + binsUp
+    const binRange  = binsDown + binsUp
 
-    // Hard cap on bin range — prevents OOM in simulation for wide positions
     const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
     if (binRange > maxBins) {
-      console.warn(`${label} bin range too wide — rejecting candidate`, {
-        mint: metrics.address,
-        binRange,
-        maxBins,
-        binStep,
-        rangeDown: strategy.position.rangeDownPct,
-        rangeUp: strategy.position.rangeUpPct,
-      })
+      console.warn(`${label} bin range too wide — rejecting candidate`, { mint: metrics.address, binRange, maxBins, binStep })
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_bin_range_cap',
         payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
@@ -436,24 +397,23 @@ export async function openPosition(
     if (isSolPool) {
       totalX = new BN(0)
       totalY = new BN(lamports)
-      console.log(`${label} one-sided SOL deposit: totalX=0, totalY=${lamports} lamports (${solAmount} SOL)`)
+      console.log(`${label} one-sided SOL deposit: totalX=0, totalY=${lamports} lamports`)
     } else {
       totalX = new BN(Math.floor(lamports * (1 - strategy.position.solBias)))
       totalY = new BN(Math.floor(lamports * strategy.position.solBias))
     }
 
-    const StrategyType = await getStrategyType()
-    const strategyTypeMap: Record<string, typeof StrategyType[keyof typeof StrategyType]> = {
-      spot: StrategyType.Spot,
-      curve: StrategyType.Curve,
-      'bid-ask': StrategyType.BidAsk,
+    const StrategyTypeEnum = await getStrategyType()
+    const strategyTypeMap: Record<string, StrategyType> = {
+      spot:     StrategyTypeEnum.Spot,
+      curve:    StrategyTypeEnum.Curve,
+      'bid-ask': StrategyTypeEnum.BidAsk,
     }
-    const strategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyType.Spot
+    const strategyType: StrategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyTypeEnum.Spot
 
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // SDK expects a factory fn (count: number) => Promise<Keypair[]>, not a pre-generated array
     const keypairFactory = async (count: number): Promise<Keypair[]> =>
       Array.from({ length: count }, () => new Keypair())
 
@@ -474,6 +434,9 @@ export async function openPosition(
 
     let positionKeypairForQuery: Keypair | null = null
 
+    // Typed strategy params shared between atomic and two-step paths
+    const liqStrategyParams: LiquidityStrategyParams = { minBinId, maxBinId, strategyType }
+
     for (const { positionKeypair, initializePositionIx } of response.instructionsByPositions) {
       if (!positionKeypairForQuery) positionKeypairForQuery = positionKeypair
       posIndex++
@@ -485,41 +448,39 @@ export async function openPosition(
         binStep,
       })
 
-      // ── Step 1: Check for atomic init+liquidity method (eliminates race condition) ──
+      // ── ATOMIC PATH (preferred — eliminates race condition entirely) ──
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const dlmmPoolAny = dlmmPool as any
       const hasAtomic = typeof dlmmPoolAny.initializePositionAndAddLiquidityByStrategy === 'function'
 
       if (hasAtomic) {
-        // ─── ATOMIC PATH (preferred) ─────────────────────────────────────────────────
-        // Single call initializes the position AND deposits liquidity atomically.
-        // This removes the race condition entirely — no two-step flow, no waiting.
         console.log(`${label} [atomic] using initializePositionAndAddLiquidityByStrategy`)
         try {
-          const atomicResult = await addLiquidityWithRetry(
-            // We call the atomic method via the retry wrapper — transient errors still get retried
-            {
-              addLiquidityByStrategy: (params: unknown) =>
-                dlmmPoolAny.initializePositionAndAddLiquidityByStrategy({
-                  positionPubKey: positionKeypair.publicKey,
-                  user: wallet.publicKey,
-                  totalXAmount: totalX,
-                  totalYAmount: totalY,
-                  strategy: { minBinId, maxBinId, strategyType },
-                  ...(params as object),
-                }),
-            } as unknown as typeof dlmmPool,
-            {
-              positionPubKey: positionKeypair.publicKey,
-              user: wallet.publicKey,
-              totalXAmount: totalX,
-              totalYAmount: totalY,
-              strategy: { minBinId, maxBinId, strategyType },
-            },
-            label
-          )
+          // Wrap atomic call in the retry helper — transient errors still get retried.
+          // We can't pass the atomic call directly to addLiquidityWithRetry (different signature),
+          // so we inline the retry logic here with the same backoff curve.
+          let atomicResult: unknown
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              console.log(`${label} [atomic] attempt ${attempt}/3`)
+              atomicResult = await dlmmPoolAny.initializePositionAndAddLiquidityByStrategy({
+                positionPubKey: positionKeypair.publicKey,
+                user:           wallet.publicKey,
+                totalXAmount:   totalX,
+                totalYAmount:   totalY,
+                strategy:       liqStrategyParams,
+              })
+              break
+            } catch (aErr: unknown) {
+              const aMsg = aErr instanceof Error ? aErr.message : String(aErr)
+              if (!isTransientLiquidityError(aMsg) || attempt === 3) throw aErr
+              const delay = 3000 * Math.pow(2, attempt - 1)
+              console.warn(`${label} [atomic] transient error attempt ${attempt}/3 — retrying in ${delay}ms`, { error: aMsg })
+              await new Promise(r => setTimeout(r, delay))
+            }
+          }
 
-          const rawIxs = toIxArray(atomicResult as unknown as TransactionInstruction | TransactionInstruction[])
+          const rawIxs  = toIxArray(atomicResult as TransactionInstruction | TransactionInstruction[])
           const cleanIxs = stripComputeBudgetIxs(rawIxs)
           const atomicTx = new Transaction().add(
             ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
@@ -528,19 +489,17 @@ export async function openPosition(
           )
           lastSig = await sendLegacyTx(atomicTx, [wallet, positionKeypair], label)
           console.log(`${label} [atomic] seg ${posIndex}/${total} confirmed ✔ sig: ${lastSig}`)
-          continue // next segment
+          continue
         } catch (atomicErr: unknown) {
           const atomicMsg = atomicErr instanceof Error ? atomicErr.message : String(atomicErr)
-          console.warn(`${label} [atomic] failed — falling back to two-step flow`, { error: atomicMsg })
-          // Fall through to two-step path below
+          console.warn(`${label} [atomic] failed — falling back to two-step`, { error: atomicMsg })
         }
       }
 
-      // ── TWO-STEP PATH (fallback) ─────────────────────────────────────────────────
-      // Step 2a: init tx — strip any SDK-injected ComputeBudget ixs, prepend ours
+      // ── TWO-STEP PATH (fallback) ──
       const rawInitIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
-      const initIxs = stripComputeBudgetIxs(rawInitIxs)
-      const initTx = new Transaction().add(
+      const initIxs    = stripComputeBudgetIxs(rawInitIxs)
+      const initTx     = new Transaction().add(
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
         ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
         ...initIxs
@@ -549,28 +508,24 @@ export async function openPosition(
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair], label)
       console.log(`${label} [two-step] seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      // Step 2b: wait for position account to be fully ready (ownership + bin arrays)
       await waitForPositionAccountReady(dlmmPool, positionKeypair.publicKey, wallet.publicKey, label)
 
-      // Step 2c: add liquidity with retry backoff
-      // Transient errors (Assertion failed / index out of bounds) are retried automatically.
-      // Non-transient errors fall through to the outer catch.
       try {
         const liqResponse = await addLiquidityWithRetry(
           dlmmPool,
           {
             positionPubKey: positionKeypair.publicKey,
-            user: wallet.publicKey,
-            totalXAmount: totalX,
-            totalYAmount: totalY,
-            strategy: { minBinId, maxBinId, strategyType },
+            user:           wallet.publicKey,
+            totalXAmount:   totalX,
+            totalYAmount:   totalY,
+            strategy:       liqStrategyParams,
           },
           label
         )
 
         const rawLiqIxs = toIxArray(liqResponse as unknown as TransactionInstruction | TransactionInstruction[])
-        const liqIxs = stripComputeBudgetIxs(rawLiqIxs)
-        const liqTx = new Transaction().add(
+        const liqIxs    = stripComputeBudgetIxs(rawLiqIxs)
+        const liqTx     = new Transaction().add(
           ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
           ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
           ...liqIxs
@@ -579,32 +534,24 @@ export async function openPosition(
         console.log(`${label} [two-step] seg ${posIndex}/${total} liq confirmed ✔ sig: ${lastSig}`)
       } catch (liqErr: unknown) {
         const liqMsg = liqErr instanceof Error ? liqErr.message : String(liqErr)
-        // All retries exhausted — still a transient-looking error, or a non-transient one.
-        // Either way: position is initialized on-chain but liquidity was never added.
-        // Persist with needs_liquidity_retry flag — do NOT return null (leaves orphan).
         console.error(
-          `${label} [two-step] seg ${posIndex}/${total} addLiquidity permanently failed after retries — persisting as needs_liquidity_retry`,
+          `${label} [two-step] seg ${posIndex}/${total} addLiquidity permanently failed — persisting as needs_liquidity_retry`,
           { error: liqMsg }
         )
         await supabase.from('bot_logs').insert({
           level: 'error', event: 'add_liquidity_failed_all_retries',
           payload: {
-            symbol: metrics.symbol,
-            strategy: strategy.id,
-            positionPubkey: positionKeypair.publicKey.toBase58(),
-            initSig: lastSig,
-            error: liqMsg,
+            symbol:          metrics.symbol,
+            strategy:        strategy.id,
+            positionPubkey:  positionKeypair.publicKey.toBase58(),
+            initSig:         lastSig,
+            error:           liqMsg,
           },
         })
         return await persistPosition(
-          metrics, strategy,
-          lastSig,
-          metrics.priceUsd ?? 0,
-          entryPriceSol,
-          solAmount,
-          positionKeypair.publicKey.toBase58(),
-          0,
-          true // needsLiquidityRetry
+          metrics, strategy, lastSig,
+          metrics.priceUsd ?? 0, entryPriceSol, solAmount,
+          positionKeypair.publicKey.toBase58(), 0, true
         )
       }
     }
@@ -631,13 +578,9 @@ export async function openPosition(
     console.log(`${label} position opened ✔`)
     const firstPubKey = response.instructionsByPositions[0]?.positionKeypair?.publicKey?.toBase58()
     return await persistPosition(
-      metrics, strategy,
-      lastSig,
-      metrics.priceUsd ?? 0,
-      entryPriceSol,
-      solAmount,
-      firstPubKey,
-      tokenAmountDeposited
+      metrics, strategy, lastSig,
+      metrics.priceUsd ?? 0, entryPriceSol, solAmount,
+      firstPubKey, tokenAmountDeposited
     )
 
   } catch (err) {
@@ -671,19 +614,18 @@ export async function closePosition(
   const label = `[executor][close][${position.symbol}]`
   console.log(`${label} closing — reason: ${reason}`)
 
-  // closePosition always executes on-chain — dry-run does not block closes
   const connection = getConnection()
-  const wallet = getWallet()
+  const wallet     = getWallet()
 
   try {
     const DLMM = await getDLMM()
-    const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
+    const dlmmPool      = await DLMM.create(connection, new PublicKey(position.pool_address))
     const positionPubKey = new PublicKey(position.position_pubkey ?? '')
 
     let feesClaimedSol = 0
     try {
       const claimTxs = await dlmmPool.claimAllRewards({
-        owner: wallet.publicKey,
+        owner:     wallet.publicKey,
         positions: [{ publicKey: positionPubKey } as never],
       })
       for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
@@ -701,11 +643,11 @@ export async function closePosition(
     if (userPosition) {
       const { lowerBinId, upperBinId } = userPosition.positionData
       const removeTx = await dlmmPool.removeLiquidity({
-        position: positionPubKey,
-        user: wallet.publicKey,
-        fromBinId: lowerBinId,
-        toBinId: upperBinId,
-        bps: new BN(10_000),
+        position:           positionPubKey,
+        user:               wallet.publicKey,
+        fromBinId:          lowerBinId,
+        toBinId:            upperBinId,
+        bps:                new BN(10_000),
         shouldClaimAndClose: true,
       })
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
@@ -771,10 +713,10 @@ async function persistPosition(
       opened_at:       new Date().toISOString(),
       tx_open:         sig,
       metadata: {
-        strategy_id:            strategy.id,
-        bin_range_down:         strategy.position.rangeDownPct,
-        bin_range_up:           strategy.position.rangeUpPct,
-        needs_liquidity_retry:  needsLiquidityRetry,
+        strategy_id:           strategy.id,
+        bin_range_down:        strategy.position.rangeDownPct,
+        bin_range_up:          strategy.position.rangeUpPct,
+        needs_liquidity_retry: needsLiquidityRetry,
       },
     })
     .select('id')
