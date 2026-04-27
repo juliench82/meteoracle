@@ -45,9 +45,6 @@ const WALLET_RESERVE_MULTIPLIER = parseFloat(process.env.WALLET_RESERVE_MULTIPLI
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 
-/**
- * Maximum bin range per strategy — prevents OOM in simulation for wide positions.
- */
 const MAX_BINS_BY_STRATEGY: Record<string, number> = {
   'evil-panda':    200,
   'scalp-spike':   120,
@@ -56,16 +53,12 @@ const MAX_BINS_BY_STRATEGY: Record<string, number> = {
 }
 const MAX_BINS_DEFAULT = 150
 
-/** Shared strategy params shape used internally. */
 interface LiquidityStrategyParams {
   minBinId: number
   maxBinId: number
   strategyType: StrategyType
 }
 
-/**
- * Strip any ComputeBudget instructions already present in an ix array.
- */
 function stripComputeBudgetIxs(ixs: TransactionInstruction[]): TransactionInstruction[] {
   return ixs.filter(ix => ix.programId.toBase58() !== COMPUTE_BUDGET_PROGRAM_ID)
 }
@@ -74,10 +67,6 @@ function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): Trans
   return Array.isArray(ix) ? ix : [ix]
 }
 
-/**
- * Simulate a transaction before sending.
- * Returns false if simulation definitively reported a program error OR OOM.
- */
 async function simulateAndCheck(tx: Transaction, label: string): Promise<boolean> {
   const connection = getConnection()
   try {
@@ -97,7 +86,6 @@ async function simulateAndCheck(tx: Transaction, label: string): Promise<boolean
       console.error(`${label} ⚠ simulation OOM — position too large, aborting`, { error: msg })
       return false
     }
-    // Network / RPC failure — proceed optimistically
     console.warn(`${label} simulation threw (proceeding):`, msg)
     return true
   }
@@ -139,9 +127,6 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
   return parseFloat(activeBin.pricePerToken)
 }
 
-/**
- * Wait for a position account to be owned by DLMM AND have its bin arrays populated.
- */
 async function waitForPositionAccountReady(
   dlmmPool: Awaited<ReturnType<Awaited<ReturnType<typeof getDLMM>>['create']>>,
   positionPubkey: PublicKey,
@@ -160,7 +145,6 @@ async function waitForPositionAccountReady(
       await new Promise(r => setTimeout(r, intervalMs))
       continue
     }
-
     try {
       const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(walletPubkey)
       const found = userPositions.find(p => p.publicKey.toBase58() === positionPubkey.toBase58())
@@ -169,13 +153,11 @@ async function waitForPositionAccountReady(
         await new Promise(r => setTimeout(r, 2500))
         return
       }
-    } catch { /* transient — retry */ }
-
+    } catch { /* transient */ }
     console.log(`${label} [wait] owned but DLMM state not ready… attempt ${i}/${maxAttempts}`)
     await new Promise(r => setTimeout(r, intervalMs))
   }
-
-  console.warn(`${label} [wait] readiness not confirmed after ${maxAttempts} attempts — adding 5s safety delay`)
+  console.warn(`${label} [wait] not confirmed after ${maxAttempts} attempts — adding 5s safety delay`)
   await new Promise(r => setTimeout(r, 5000))
 }
 
@@ -279,7 +261,6 @@ export async function openPosition(
     const mintX   = dlmmPool.tokenX.publicKey
     const mintY   = dlmmPool.tokenY.publicKey
 
-    // ── ATA creation ──
     const ataIxs: TransactionInstruction[] = []
     for (const [lbl, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
@@ -303,7 +284,6 @@ export async function openPosition(
       console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
     }
 
-    // ── Bin range calculation & cap ──
     const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
     const binsUp   = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
     const minBinId = activeBinId - binsDown
@@ -321,21 +301,17 @@ export async function openPosition(
     }
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
 
-    // ── Deposit amounts ──
-    // For TOKEN/SOL pools (Pump.fun style): both X and Y sides can receive liquidity.
-    // Never force totalX=0 — that causes "index out of bounds: len 0" in AddLiquidityByStrategy2.
-    // Instead use solBias from strategy config for the split (default: 50/50 if not set).
     const lamports = Math.floor(solAmount * 1e9)
-    const solBias  = strategy.position.solBias ?? 0.5   // fraction going to Y (SOL side)
+    const solBias  = strategy.position.solBias ?? 0.5
     const totalX   = new BN(Math.floor(lamports * (1 - solBias)))
     const totalY   = new BN(Math.floor(lamports * solBias))
     console.log(`${label} deposit split: X=${totalX.toString()} Y=${totalY.toString()} lamports (solBias=${solBias})`)
 
     const StrategyTypeEnum = await getStrategyType()
     const strategyTypeMap: Record<string, StrategyType> = {
-      spot:       StrategyTypeEnum.Spot,
-      curve:      StrategyTypeEnum.Curve,
-      'bid-ask':  StrategyTypeEnum.BidAsk,
+      spot:      StrategyTypeEnum.Spot,
+      curve:     StrategyTypeEnum.Curve,
+      'bid-ask': StrategyTypeEnum.BidAsk,
     }
     const strategyType: StrategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyTypeEnum.Spot
     const liqStrategyParams: LiquidityStrategyParams = { minBinId, maxBinId, strategyType }
@@ -343,14 +319,12 @@ export async function openPosition(
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    // ── Get instructions from SDK (ONE call only — no second SDK simulation) ──
-    // initializeMultiplePositionAndAddLiquidityByStrategy builds all ixs internally.
-    // We send those ixs directly. Do NOT call initializePositionAndAddLiquidityByStrategy
-    // again in the loop — that re-runs the SDK's internal simulation against an account
-    // that doesn't exist yet, causing InvalidRealloc / index-out-of-bounds panics.
     const keypairFactory = async (count: number): Promise<Keypair[]> =>
       Array.from({ length: count }, () => new Keypair())
 
+    // ONE SDK call — returns initializePositionIx + addLiquidityIxs already built.
+    // Never call initializePositionAndAddLiquidityByStrategy inside the loop —
+    // that re-runs the SDK's internal simulation against a non-existent account.
     const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
       keypairFactory,
       totalX,
@@ -368,7 +342,7 @@ export async function openPosition(
 
     let positionKeypairForQuery: Keypair | null = null
 
-    for (const { positionKeypair, initializePositionIx, addLiquidityIx } of response.instructionsByPositions) {
+    for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
       if (!positionKeypairForQuery) positionKeypairForQuery = positionKeypair
       posIndex++
 
@@ -377,7 +351,7 @@ export async function openPosition(
         binRange: `${minBinId} → ${maxBinId} (${binRange} bins)`, binStep,
       })
 
-      // ── STEP 1: send InitializePosition ix ──
+      // ── STEP 1: InitializePosition ──
       const rawInitIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
       const initIxs    = stripComputeBudgetIxs(rawInitIxs)
       const initTx     = new Transaction().add(
@@ -385,25 +359,28 @@ export async function openPosition(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
         ...initIxs
       )
-      console.log(`${label} sending init tx for segment ${posIndex}/${total}`)
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair], label)
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      // ── STEP 2: wait for account, then send AddLiquidity ix ──
+      // ── STEP 2: AddLiquidity (one tx per chunk in addLiquidityIxs) ──
+      // addLiquidityIxs is TransactionInstruction[][] — each inner array is one tx chunk.
       await waitForPositionAccountReady(dlmmPool, positionKeypair.publicKey, wallet.publicKey, label)
 
-      // addLiquidityIx comes from the SDK's initial build — it's already simulated and valid.
-      // We do NOT call addLiquidityByStrategy again (avoids double-simulation crash).
       try {
-        const rawLiqIxs = toIxArray(addLiquidityIx as TransactionInstruction | TransactionInstruction[])
-        const liqIxs    = stripComputeBudgetIxs(rawLiqIxs)
-        const liqTx     = new Transaction().add(
-          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-          ...liqIxs
-        )
-        lastSig = await sendLegacyTx(liqTx, [wallet], label)
-        console.log(`${label} seg ${posIndex}/${total} liq confirmed ✔ sig: ${lastSig}`)
+        const chunks = (addLiquidityIxs as TransactionInstruction[][]).length > 0
+          ? addLiquidityIxs as TransactionInstruction[][]
+          : [[...(addLiquidityIxs as unknown as TransactionInstruction[])]]  // handle flat array fallback
+
+        for (let ci = 0; ci < chunks.length; ci++) {
+          const liqIxs = stripComputeBudgetIxs(chunks[ci])
+          const liqTx  = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+            ...liqIxs
+          )
+          lastSig = await sendLegacyTx(liqTx, [wallet], label)
+          console.log(`${label} seg ${posIndex}/${total} liq chunk ${ci + 1}/${chunks.length} confirmed ✔ sig: ${lastSig}`)
+        }
       } catch (liqErr: unknown) {
         const liqMsg = liqErr instanceof Error ? liqErr.message : String(liqErr)
         console.error(`${label} seg ${posIndex}/${total} addLiquidity failed — persisting as pending_retry`, { error: liqMsg })
@@ -423,7 +400,6 @@ export async function openPosition(
       }
     }
 
-    // ── Query final token amount deposited ──
     let tokenAmountDeposited = 0
     if (positionKeypairForQuery) {
       try {
@@ -439,7 +415,7 @@ export async function openPosition(
           console.log(`${label} token amount deposited: ${tokenAmountDeposited.toFixed(4)}`)
         }
       } catch (err) {
-        console.warn(`${label} could not fetch token amount from on-chain position:`, err)
+        console.warn(`${label} could not fetch token amount:`, err)
       }
     }
 
@@ -508,8 +484,8 @@ export async function closePosition(
     if (userPosition) {
       const { lowerBinId, upperBinId } = userPosition.positionData
       const removeTx = await dlmmPool.removeLiquidity({
-        position: positionPubKey,
-        user:     wallet.publicKey,
+        position:  positionPubKey,
+        user:      wallet.publicKey,
         fromBinId: lowerBinId,
         toBinId:   upperBinId,
         bps:       new BN(10_000),
