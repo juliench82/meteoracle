@@ -60,6 +60,21 @@ const MAX_BINS_BY_STRATEGY: Record<string, number> = {
 const MAX_BINS_DEFAULT = 150
 
 /**
+ * Transient error messages emitted by the DLMM program / on-chain runtime.
+ * These indicate the position account was not yet fully initialized when we
+ * attempted addLiquidityByStrategy — they are retriable with backoff.
+ */
+function isTransientLiquidityError(msg: string): boolean {
+  return (
+    msg.includes('Assertion failed') ||
+    msg.includes('index out of bounds') ||
+    msg.includes('ProgramFailedToComplete') ||
+    msg.includes('memory allocation failed') ||
+    msg.includes('out of memory')
+  )
+}
+
+/**
  * Strip any ComputeBudget instructions already present in an ix array.
  * Prevents 'duplicate instruction' simulation failure when we prepend
  * our own setComputeUnitPrice + setComputeUnitLimit.
@@ -95,7 +110,7 @@ async function simulateAndCheck(
     return true
   } catch (simErr: unknown) {
     const msg = simErr instanceof Error ? simErr.message : String(simErr)
-    // OOM during simulation means the position is too large — reject it instead of proceeding
+    // OOM during simulation means the position is too large — reject instead of proceeding
     if (msg.includes('memory allocation failed') || msg.includes('out of memory')) {
       console.error(`${label} ⚠ simulation OOM — position too large, aborting send`, { error: msg })
       return false
@@ -149,21 +164,21 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
 
 /**
  * Wait for a position account to be owned by the DLMM program AND have its
- * bin array populated (i.e. the on-chain state is fully ready for addLiquidityByStrategy).
+ * bin array populated (i.e. fully ready for addLiquidityByStrategy).
  *
  * Ownership alone is not sufficient — the DLMM program can own the account before its
  * internal bin arrays are initialized, causing `index out of bounds: len=0` panics in
  * dynamic_position.rs when addLiquidityByStrategy runs its compute-unit simulation.
  *
- * We verify readiness by calling getPositionsByUserAndLbPair and confirming the position
- * appears with a valid positionData object.
+ * After the account is confirmed ready, an additional mandatory delay allows the
+ * runtime state to fully propagate before we call addLiquidityByStrategy.
  */
-async function waitForPositionAccount(
+async function waitForPositionAccountReady(
   dlmmPool: Awaited<ReturnType<Awaited<ReturnType<typeof getDLMM>>['create']>>,
   positionPubkey: PublicKey,
   walletPubkey: PublicKey,
   label: string,
-  maxAttempts = 12,
+  maxAttempts = 15,    // 30 seconds total at 2s cadence
   intervalMs = 2000
 ): Promise<void> {
   const connection = getConnection()
@@ -173,7 +188,7 @@ async function waitForPositionAccount(
     // Step 1: account must exist and be owned by DLMM
     const info = await connection.getAccountInfo(positionPubkey, 'confirmed')
     if (!info || !info.owner.equals(DLMM_PROGRAM_ID)) {
-      console.log(`${label} waiting for position account ownership… attempt ${i}/${maxAttempts}`)
+      console.log(`${label} [wait] account not yet owned by DLMM… attempt ${i}/${maxAttempts}`)
       await new Promise(r => setTimeout(r, intervalMs))
       continue
     }
@@ -182,22 +197,67 @@ async function waitForPositionAccount(
     try {
       const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(walletPubkey)
       const found = userPositions.find(p => p.publicKey.toBase58() === positionPubkey.toBase58())
-      if (found && found.positionData) {
-        console.log(`${label} position account confirmed ready on-chain (attempt ${i})`)
+      if (found?.positionData?.lowerBinId !== undefined) {
+        console.log(`${label} [wait] position account confirmed ready on-chain (attempt ${i}/${maxAttempts})`)
+        // Mandatory extra delay — DLMM runtime state needs to fully propagate
+        console.log(`${label} [wait] extra 2.5s propagation delay…`)
+        await new Promise(r => setTimeout(r, 2500))
         return
       }
     } catch {
       // getPositionsByUserAndLbPair can throw transiently — just retry
     }
 
-    console.log(`${label} position account owned but not yet ready in DLMM state… attempt ${i}/${maxAttempts}`)
+    console.log(`${label} [wait] account owned but DLMM state not yet ready… attempt ${i}/${maxAttempts}`)
     await new Promise(r => setTimeout(r, intervalMs))
   }
 
-  // After all attempts: account is owned but may not be fully ready.
-  // Log a warning and proceed — addLiquidityByStrategy will fail if state is truly broken,
-  // and that failure is caught and handled in the caller.
-  console.warn(`${label} position account readiness not confirmed after ${maxAttempts} attempts — proceeding anyway`)
+  // After all attempts: proceed with a longer safety delay to give the chain more time.
+  console.warn(`${label} [wait] readiness not confirmed after ${maxAttempts} attempts — adding 5s safety delay before proceeding`)
+  await new Promise(r => setTimeout(r, 5000))
+}
+
+/**
+ * Call addLiquidityByStrategy with exponential backoff on transient DLMM errors.
+ *
+ * Transient errors (Assertion failed, index out of bounds, ProgramFailedToComplete)
+ * indicate the on-chain position account was not yet fully initialized when the SDK's
+ * internal compute-unit simulation ran. Retrying after a delay resolves this in practice.
+ *
+ * Delays: attempt 1 = 3s, attempt 2 = 6s, attempt 3 = 12s.
+ */
+async function addLiquidityWithRetry(
+  dlmmPool: Awaited<ReturnType<Awaited<ReturnType<typeof getDLMM>>['create']>>,
+  params: {
+    positionPubKey: PublicKey
+    user: PublicKey
+    totalXAmount: BN
+    totalYAmount: BN
+    strategy: { minBinId: number; maxBinId: number; strategyType: unknown }
+  },
+  label: string,
+  maxRetries = 3
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<any> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`${label} [addLiquidity] attempt ${attempt}/${maxRetries}`)
+      return await dlmmPool.addLiquidityByStrategy(params)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+
+      if (!isTransientLiquidityError(msg) || attempt === maxRetries) {
+        throw err
+      }
+
+      const delayMs = 3000 * Math.pow(2, attempt - 1) // 3s → 6s → 12s
+      console.warn(
+        `${label} [addLiquidity] transient error on attempt ${attempt}/${maxRetries} — retrying in ${delayMs}ms`,
+        { positionPubKey: params.positionPubKey.toBase58(), error: msg }
+      )
+      await new Promise(r => setTimeout(r, delayMs))
+    }
+  }
 }
 
 export async function openPosition(
@@ -418,7 +478,6 @@ export async function openPosition(
       if (!positionKeypairForQuery) positionKeypairForQuery = positionKeypair
       posIndex++
 
-      // Log position details before attempting on-chain operations
       console.log(`${label} preparing position segment ${posIndex}/${total}`, {
         mint: metrics.address,
         strategy: strategy.id,
@@ -426,7 +485,59 @@ export async function openPosition(
         binStep,
       })
 
-      // Step 1: init tx — strip any SDK-injected ComputeBudget ixs, prepend ours
+      // ── Step 1: Check for atomic init+liquidity method (eliminates race condition) ──
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dlmmPoolAny = dlmmPool as any
+      const hasAtomic = typeof dlmmPoolAny.initializePositionAndAddLiquidityByStrategy === 'function'
+
+      if (hasAtomic) {
+        // ─── ATOMIC PATH (preferred) ─────────────────────────────────────────────────
+        // Single call initializes the position AND deposits liquidity atomically.
+        // This removes the race condition entirely — no two-step flow, no waiting.
+        console.log(`${label} [atomic] using initializePositionAndAddLiquidityByStrategy`)
+        try {
+          const atomicResult = await addLiquidityWithRetry(
+            // We call the atomic method via the retry wrapper — transient errors still get retried
+            {
+              addLiquidityByStrategy: (params: unknown) =>
+                dlmmPoolAny.initializePositionAndAddLiquidityByStrategy({
+                  positionPubKey: positionKeypair.publicKey,
+                  user: wallet.publicKey,
+                  totalXAmount: totalX,
+                  totalYAmount: totalY,
+                  strategy: { minBinId, maxBinId, strategyType },
+                  ...(params as object),
+                }),
+            } as unknown as typeof dlmmPool,
+            {
+              positionPubKey: positionKeypair.publicKey,
+              user: wallet.publicKey,
+              totalXAmount: totalX,
+              totalYAmount: totalY,
+              strategy: { minBinId, maxBinId, strategyType },
+            },
+            label
+          )
+
+          const rawIxs = toIxArray(atomicResult as unknown as TransactionInstruction | TransactionInstruction[])
+          const cleanIxs = stripComputeBudgetIxs(rawIxs)
+          const atomicTx = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 500_000 }),
+            ...cleanIxs
+          )
+          lastSig = await sendLegacyTx(atomicTx, [wallet, positionKeypair], label)
+          console.log(`${label} [atomic] seg ${posIndex}/${total} confirmed ✔ sig: ${lastSig}`)
+          continue // next segment
+        } catch (atomicErr: unknown) {
+          const atomicMsg = atomicErr instanceof Error ? atomicErr.message : String(atomicErr)
+          console.warn(`${label} [atomic] failed — falling back to two-step flow`, { error: atomicMsg })
+          // Fall through to two-step path below
+        }
+      }
+
+      // ── TWO-STEP PATH (fallback) ─────────────────────────────────────────────────
+      // Step 2a: init tx — strip any SDK-injected ComputeBudget ixs, prepend ours
       const rawInitIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
       const initIxs = stripComputeBudgetIxs(rawInitIxs)
       const initTx = new Transaction().add(
@@ -434,28 +545,29 @@ export async function openPosition(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
         ...initIxs
       )
+      console.log(`${label} [two-step] sending init tx for segment ${posIndex}/${total}`)
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair], label)
-      console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
+      console.log(`${label} [two-step] seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      // Step 2: wait for position account to be owned by DLMM AND fully ready
-      // (bin arrays populated) — ownership alone is not enough; addLiquidityByStrategy
-      // will panic inside dynamic_position.rs if called before the state is ready.
-      await waitForPositionAccount(dlmmPool, positionKeypair.publicKey, wallet.publicKey, label)
+      // Step 2b: wait for position account to be fully ready (ownership + bin arrays)
+      await waitForPositionAccountReady(dlmmPool, positionKeypair.publicKey, wallet.publicKey, label)
 
-      // Step 3: rebuild liquidity ixs fresh against the now-live position account.
-      // Wrap in its own try/catch: if the SDK's internal compute-unit simulation panics
-      // (e.g. InstructionError/ProgramFailedToComplete after a race condition), we persist
-      // the position as 'needs_liquidity_retry' instead of leaving an orphan on-chain.
+      // Step 2c: add liquidity with retry backoff
+      // Transient errors (Assertion failed / index out of bounds) are retried automatically.
+      // Non-transient errors fall through to the outer catch.
       try {
-        const liqResponse = await dlmmPool.addLiquidityByStrategy({
-          positionPubKey: positionKeypair.publicKey,
-          user: wallet.publicKey,
-          totalXAmount: totalX,
-          totalYAmount: totalY,
-          strategy: { minBinId, maxBinId, strategyType },
-        })
+        const liqResponse = await addLiquidityWithRetry(
+          dlmmPool,
+          {
+            positionPubKey: positionKeypair.publicKey,
+            user: wallet.publicKey,
+            totalXAmount: totalX,
+            totalYAmount: totalY,
+            strategy: { minBinId, maxBinId, strategyType },
+          },
+          label
+        )
 
-        // Strip SDK ComputeBudget ixs before prepending ours — prevents 'duplicate instruction' error
         const rawLiqIxs = toIxArray(liqResponse as unknown as TransactionInstruction | TransactionInstruction[])
         const liqIxs = stripComputeBudgetIxs(rawLiqIxs)
         const liqTx = new Transaction().add(
@@ -464,44 +576,36 @@ export async function openPosition(
           ...liqIxs
         )
         lastSig = await sendLegacyTx(liqTx, [wallet], label)
-        console.log(`${label} seg ${posIndex}/${total} liq confirmed ✔ sig: ${lastSig}`)
+        console.log(`${label} [two-step] seg ${posIndex}/${total} liq confirmed ✔ sig: ${lastSig}`)
       } catch (liqErr: unknown) {
         const liqMsg = liqErr instanceof Error ? liqErr.message : String(liqErr)
-        const isSDKSimPanic = (
-          liqMsg.includes('ProgramFailedToComplete') ||
-          liqMsg.includes('InstructionError') ||
-          liqMsg.includes('index out of bounds') ||
-          liqMsg.includes('Assertion failed')
+        // All retries exhausted — still a transient-looking error, or a non-transient one.
+        // Either way: position is initialized on-chain but liquidity was never added.
+        // Persist with needs_liquidity_retry flag — do NOT return null (leaves orphan).
+        console.error(
+          `${label} [two-step] seg ${posIndex}/${total} addLiquidity permanently failed after retries — persisting as needs_liquidity_retry`,
+          { error: liqMsg }
         )
-        if (isSDKSimPanic) {
-          // Position is initialized on-chain but liquidity was never added.
-          // Persist with a flag so manual recovery is possible — do NOT return null
-          // (that would leave an orphan position with no DB record).
-          console.error(`${label} seg ${posIndex}/${total} addLiquidityByStrategy SDK panic — persisting as needs_liquidity_retry`, { error: liqMsg })
-          await supabase.from('bot_logs').insert({
-            level: 'error', event: 'add_liquidity_sdk_panic',
-            payload: {
-              symbol: metrics.symbol,
-              strategy: strategy.id,
-              positionPubkey: positionKeypair.publicKey.toBase58(),
-              initSig: lastSig,
-              error: liqMsg,
-            },
-          })
-          // Persist position with init sig and a metadata flag for retry
-          return await persistPosition(
-            metrics, strategy,
-            lastSig,
-            metrics.priceUsd ?? 0,
-            entryPriceSol,
-            solAmount,
-            positionKeypair.publicKey.toBase58(),
-            0,
-            true // needsLiquidityRetry
-          )
-        }
-        // Non-panic liq error — rethrow to outer catch
-        throw liqErr
+        await supabase.from('bot_logs').insert({
+          level: 'error', event: 'add_liquidity_failed_all_retries',
+          payload: {
+            symbol: metrics.symbol,
+            strategy: strategy.id,
+            positionPubkey: positionKeypair.publicKey.toBase58(),
+            initSig: lastSig,
+            error: liqMsg,
+          },
+        })
+        return await persistPosition(
+          metrics, strategy,
+          lastSig,
+          metrics.priceUsd ?? 0,
+          entryPriceSol,
+          solAmount,
+          positionKeypair.publicKey.toBase58(),
+          0,
+          true // needsLiquidityRetry
+        )
       }
     }
 
