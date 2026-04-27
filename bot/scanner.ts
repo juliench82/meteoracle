@@ -11,7 +11,7 @@ import { scoreCandidateWithBreakdown } from './scorer'
 import { openPosition } from './executor'
 import { sendAlert } from './alerter'
 import { checkHolders } from '@/lib/helius'
-import { checkRugscore } from '@/lib/rugcheck'
+import { getRugscore, getRugcheckCacheSize } from './rugcheck-cache'
 import {
   fetchBondingCurve,
   fetchPumpFunBondingCurve,
@@ -74,6 +74,12 @@ const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
 // Thresholds for DAMM pre-grad paths
 const PUMPFUN_PREGRAD_THRESHOLD   = 95  // pump.fun: 95% before graduation
 const MOONSHOT_PREGRAD_THRESHOLD  = 90  // Moonshot: slightly lower, curve data less precise
+
+function detectLaunchpadSource(tokenAddress: string): 'pumpfun' | 'moonshot' | 'meteora' {
+  if (isPumpFunToken(tokenAddress)) return 'pumpfun'
+  if (isMoonshotToken(tokenAddress)) return 'moonshot'
+  return 'meteora'
+}
 
 interface MeteoraPool {
   address: string; name: string; created_at: number; tvl: number; current_price: number
@@ -221,6 +227,7 @@ export async function runScanner(): Promise<{
     const token = QUOTE_ASSETS.has(representativePool.token_x.address) ? representativePool.token_y : representativePool.token_x
     const tokenAddress = token.address
     const symbol = representativePool.name ?? token.symbol
+    const launchpadSource = detectLaunchpadSource(tokenAddress)
 
     const recentResult = await withTimeout(
       supabase.from('candidates').select('id').eq('token_address', tokenAddress)
@@ -325,7 +332,7 @@ export async function runScanner(): Promise<{
     }
 
     console.log(`[scanner] ${symbol} — calling Rugcheck`)
-    const rugScore = await checkRugscore(tokenAddress)
+    const rugScore = await getRugscore(tokenAddress, symbol)
 
     const holderCountForFilter = holderCount > 0 ? holderCount : (token.holders ?? 0)
 
@@ -378,13 +385,48 @@ export async function runScanner(): Promise<{
 
     const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
     if (!strategy) {
-      console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}, quote=${quoteTokenMint}): ${explainNoStrategy(metrics)}`)
+      const rejectionReason = explainNoStrategy(metrics)
+      console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}, quote=${quoteTokenMint}): ${rejectionReason}`)
+      // Structured eval log — REJECTED (no strategy)
+      console.log(JSON.stringify({
+        event:     'candidate_evaluated',
+        mint:      tokenAddress,
+        symbol,
+        score:     0,
+        launchpad: launchpadSource,
+        decision:  'REJECTED',
+        reason:    rejectionReason,
+      }))
       continue
     }
 
     const breakdown   = scoreCandidateWithBreakdown(metrics, strategy)
     const score       = breakdown.total
     const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
+
+    const scoreBreakdown = {
+      score_volmc:     breakdown.volMcScore,
+      score_rug:       breakdown.rugScore,
+      score_holders:   breakdown.holderScore,
+      score_freshness: breakdown.freshnessScore,
+      launchpad_bonus: breakdown.curveBonus,
+      final_score:     score,
+    }
+
+    const accepted = score >= MIN_SCORE_TO_OPEN
+    const rejectionReason = !accepted ? `score ${score} < threshold ${MIN_SCORE_TO_OPEN}` : null
+
+    // Structured eval log — every candidate
+    console.log(JSON.stringify({
+      event:     'candidate_evaluated',
+      mint:      tokenAddress,
+      symbol,
+      score,
+      breakdown: scoreBreakdown,
+      launchpad: launchpadSource,
+      decision:  accepted ? 'ACCEPTED' : 'REJECTED',
+      reason:    rejectionReason,
+    }))
 
     await withTimeout(
       supabase.from('candidates').insert({
@@ -405,6 +447,8 @@ export async function runScanner(): Promise<{
         score_holders:     breakdown.holderScore,
         score_freshness:   breakdown.freshnessScore,
         score_curve_bonus: breakdown.curveBonus,
+        score_breakdown:   scoreBreakdown,
+        launchpad_source:  launchpadSource,
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
@@ -426,6 +470,7 @@ export async function runScanner(): Promise<{
     const { getHolderCacheSize } = await import('@/lib/helius')
     console.log(`[scanner] Helius cache: ${getHolderCacheSize()} entries`)
   }
+  console.log(`[scanner] Rugcheck cache: ${getRugcheckCacheSize()} entries`)
 
   console.log(`[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
   return { scanned: pools.length, candidates: candidateCount, opened: openedCount }

@@ -59,14 +59,50 @@ function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): Trans
   return Array.isArray(ix) ? ix : [ix]
 }
 
+/**
+ * Simulate a transaction before sending. Logs warnings on failure.
+ * Returns true if simulation passed (or if simulation itself errored — we log but don't block).
+ * Returns false if simulation definitively reported a program error.
+ */
+async function simulateAndCheck(
+  tx: Transaction,
+  label: string
+): Promise<boolean> {
+  const connection = getConnection()
+  try {
+    const sim = await connection.simulateTransaction(tx)
+    if (sim.value.err) {
+      console.error(`${label} ⚠ simulation FAILED — aborting send`, {
+        err:  sim.value.err,
+        logs: sim.value.logs,
+      })
+      return false
+    }
+    console.log(`${label} simulation OK (units consumed: ${sim.value.unitsConsumed ?? 'n/a'})`)
+    return true
+  } catch (simErr) {
+    // Simulation call itself failed (network, timeout) — log but don't block the tx
+    console.warn(`${label} simulation call threw — proceeding anyway:`, simErr)
+    return true
+  }
+}
+
 async function sendLegacyTx(
   tx: Transaction,
-  signers: import('@solana/web3.js').Signer[]
+  signers: import('@solana/web3.js').Signer[],
+  label: string = '[executor]'
 ): Promise<string> {
   const connection = getConnection()
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
   tx.recentBlockhash = blockhash
   tx.feePayer = signers[0].publicKey
+
+  // Always simulate before sending — catches instruction errors before they hit chain
+  const simOk = await simulateAndCheck(tx, label)
+  if (!simOk) {
+    throw new Error(`${label} transaction aborted — simulation reported program error`)
+  }
+
   tx.sign(...signers)
   const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
   await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
@@ -198,7 +234,6 @@ export async function openPosition(
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
 
     // Reserve only for the slots still available after this position.
-    // e.g. 0 open, MAX=5: reserve for 4 future positions (not 5).
     const currentOpenCount = (openPositions ?? []).length
     const remainingSlots   = Math.max(0, MAX_CONCURRENT_POSITIONS - currentOpenCount - 1)
     const dynamicReserve   = remainingSlots * MAX_SOL_PER_POSITION * WALLET_RESERVE_MULTIPLIER
@@ -253,7 +288,7 @@ export async function openPosition(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }),
         ...ataIxs
       )
-      const ataSig = await sendLegacyTx(ataTx, [wallet])
+      const ataSig = await sendLegacyTx(ataTx, [wallet], label)
       console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
     }
 
@@ -315,7 +350,7 @@ export async function openPosition(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
         ...initIxs
       )
-      lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair])
+      lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair], label)
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
       // Step 2: wait for position account to be owned by DLMM program
@@ -338,7 +373,7 @@ export async function openPosition(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
         ...liqIxs
       )
-      lastSig = await sendLegacyTx(liqTx, [wallet])
+      lastSig = await sendLegacyTx(liqTx, [wallet], label)
       console.log(`${label} seg ${posIndex}/${total} liq confirmed ✔ sig: ${lastSig}`)
     }
 
@@ -420,7 +455,7 @@ export async function closePosition(
         positions: [{ publicKey: positionPubKey } as never],
       })
       for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
-        const sig = await sendLegacyTx(tx, [wallet])
+        const sig = await sendLegacyTx(tx, [wallet], label)
         console.log(`${label} fees claimed ✔ sig: ${sig}`)
       }
       feesClaimedSol = position.fees_earned_sol ?? 0
@@ -442,7 +477,7 @@ export async function closePosition(
         shouldClaimAndClose: true,
       })
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
-        const sig = await sendLegacyTx(tx, [wallet])
+        const sig = await sendLegacyTx(tx, [wallet], label)
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
       }
     } else {
