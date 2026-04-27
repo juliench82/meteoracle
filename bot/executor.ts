@@ -147,24 +147,57 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
   return parseFloat(activeBin.pricePerToken)
 }
 
+/**
+ * Wait for a position account to be owned by the DLMM program AND have its
+ * bin array populated (i.e. the on-chain state is fully ready for addLiquidityByStrategy).
+ *
+ * Ownership alone is not sufficient — the DLMM program can own the account before its
+ * internal bin arrays are initialized, causing `index out of bounds: len=0` panics in
+ * dynamic_position.rs when addLiquidityByStrategy runs its compute-unit simulation.
+ *
+ * We verify readiness by calling getPositionsByUserAndLbPair and confirming the position
+ * appears with a valid positionData object.
+ */
 async function waitForPositionAccount(
+  dlmmPool: Awaited<ReturnType<Awaited<ReturnType<typeof getDLMM>>['create']>>,
   positionPubkey: PublicKey,
+  walletPubkey: PublicKey,
   label: string,
-  maxAttempts = 10,
-  intervalMs = 1500
+  maxAttempts = 12,
+  intervalMs = 2000
 ): Promise<void> {
   const connection = getConnection()
   const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo')
+
   for (let i = 1; i <= maxAttempts; i++) {
+    // Step 1: account must exist and be owned by DLMM
     const info = await connection.getAccountInfo(positionPubkey, 'confirmed')
-    if (info && info.owner.equals(DLMM_PROGRAM_ID)) {
-      console.log(`${label} position account confirmed on-chain (attempt ${i})`)
-      return
+    if (!info || !info.owner.equals(DLMM_PROGRAM_ID)) {
+      console.log(`${label} waiting for position account ownership… attempt ${i}/${maxAttempts}`)
+      await new Promise(r => setTimeout(r, intervalMs))
+      continue
     }
-    console.log(`${label} waiting for position account… attempt ${i}/${maxAttempts}`)
+
+    // Step 2: DLMM internal state must be ready (bin arrays populated)
+    try {
+      const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(walletPubkey)
+      const found = userPositions.find(p => p.publicKey.toBase58() === positionPubkey.toBase58())
+      if (found && found.positionData) {
+        console.log(`${label} position account confirmed ready on-chain (attempt ${i})`)
+        return
+      }
+    } catch {
+      // getPositionsByUserAndLbPair can throw transiently — just retry
+    }
+
+    console.log(`${label} position account owned but not yet ready in DLMM state… attempt ${i}/${maxAttempts}`)
     await new Promise(r => setTimeout(r, intervalMs))
   }
-  throw new Error(`Position account ${positionPubkey.toBase58()} not visible after ${maxAttempts} attempts`)
+
+  // After all attempts: account is owned but may not be fully ready.
+  // Log a warning and proceed — addLiquidityByStrategy will fail if state is truly broken,
+  // and that failure is caught and handled in the caller.
+  console.warn(`${label} position account readiness not confirmed after ${maxAttempts} attempts — proceeding anyway`)
 }
 
 export async function openPosition(
@@ -404,28 +437,72 @@ export async function openPosition(
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair], label)
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      // Step 2: wait for position account to be owned by DLMM program
-      await waitForPositionAccount(positionKeypair.publicKey, label)
+      // Step 2: wait for position account to be owned by DLMM AND fully ready
+      // (bin arrays populated) — ownership alone is not enough; addLiquidityByStrategy
+      // will panic inside dynamic_position.rs if called before the state is ready.
+      await waitForPositionAccount(dlmmPool, positionKeypair.publicKey, wallet.publicKey, label)
 
-      // Step 3: rebuild liquidity ixs fresh against the now-live position account
-      const liqResponse = await dlmmPool.addLiquidityByStrategy({
-        positionPubKey: positionKeypair.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalX,
-        totalYAmount: totalY,
-        strategy: { minBinId, maxBinId, strategyType },
-      })
+      // Step 3: rebuild liquidity ixs fresh against the now-live position account.
+      // Wrap in its own try/catch: if the SDK's internal compute-unit simulation panics
+      // (e.g. InstructionError/ProgramFailedToComplete after a race condition), we persist
+      // the position as 'needs_liquidity_retry' instead of leaving an orphan on-chain.
+      try {
+        const liqResponse = await dlmmPool.addLiquidityByStrategy({
+          positionPubKey: positionKeypair.publicKey,
+          user: wallet.publicKey,
+          totalXAmount: totalX,
+          totalYAmount: totalY,
+          strategy: { minBinId, maxBinId, strategyType },
+        })
 
-      // Strip SDK ComputeBudget ixs before prepending ours — prevents 'duplicate instruction' error
-      const rawLiqIxs = toIxArray(liqResponse as unknown as TransactionInstruction | TransactionInstruction[])
-      const liqIxs = stripComputeBudgetIxs(rawLiqIxs)
-      const liqTx = new Transaction().add(
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-        ...liqIxs
-      )
-      lastSig = await sendLegacyTx(liqTx, [wallet], label)
-      console.log(`${label} seg ${posIndex}/${total} liq confirmed ✔ sig: ${lastSig}`)
+        // Strip SDK ComputeBudget ixs before prepending ours — prevents 'duplicate instruction' error
+        const rawLiqIxs = toIxArray(liqResponse as unknown as TransactionInstruction | TransactionInstruction[])
+        const liqIxs = stripComputeBudgetIxs(rawLiqIxs)
+        const liqTx = new Transaction().add(
+          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+          ...liqIxs
+        )
+        lastSig = await sendLegacyTx(liqTx, [wallet], label)
+        console.log(`${label} seg ${posIndex}/${total} liq confirmed ✔ sig: ${lastSig}`)
+      } catch (liqErr: unknown) {
+        const liqMsg = liqErr instanceof Error ? liqErr.message : String(liqErr)
+        const isSDKSimPanic = (
+          liqMsg.includes('ProgramFailedToComplete') ||
+          liqMsg.includes('InstructionError') ||
+          liqMsg.includes('index out of bounds') ||
+          liqMsg.includes('Assertion failed')
+        )
+        if (isSDKSimPanic) {
+          // Position is initialized on-chain but liquidity was never added.
+          // Persist with a flag so manual recovery is possible — do NOT return null
+          // (that would leave an orphan position with no DB record).
+          console.error(`${label} seg ${posIndex}/${total} addLiquidityByStrategy SDK panic — persisting as needs_liquidity_retry`, { error: liqMsg })
+          await supabase.from('bot_logs').insert({
+            level: 'error', event: 'add_liquidity_sdk_panic',
+            payload: {
+              symbol: metrics.symbol,
+              strategy: strategy.id,
+              positionPubkey: positionKeypair.publicKey.toBase58(),
+              initSig: lastSig,
+              error: liqMsg,
+            },
+          })
+          // Persist position with init sig and a metadata flag for retry
+          return await persistPosition(
+            metrics, strategy,
+            lastSig,
+            metrics.priceUsd ?? 0,
+            entryPriceSol,
+            solAmount,
+            positionKeypair.publicKey.toBase58(),
+            0,
+            true // needsLiquidityRetry
+          )
+        }
+        // Non-panic liq error — rethrow to outer catch
+        throw liqErr
+      }
     }
 
     let tokenAmountDeposited = 0
@@ -568,7 +645,8 @@ async function persistPosition(
   entryPriceSol: number,
   solDeposited: number,
   positionPubKey?: string,
-  tokenAmount: number = 0
+  tokenAmount: number = 0,
+  needsLiquidityRetry: boolean = false
 ): Promise<string> {
   const supabase = createServerClient()
   const { data, error } = await supabase
@@ -583,15 +661,16 @@ async function persistPosition(
       entry_price_usd: entryPriceUsd,
       entry_price_sol: entryPriceSol,
       fees_earned_sol: 0,
-      status:          'active',
+      status:          needsLiquidityRetry ? 'pending_retry' : 'active',
       in_range:        true,
       dry_run:         ENV_DRY_RUN_FORCED,
       opened_at:       new Date().toISOString(),
       tx_open:         sig,
       metadata: {
-        strategy_id:    strategy.id,
-        bin_range_down: strategy.position.rangeDownPct,
-        bin_range_up:   strategy.position.rangeUpPct,
+        strategy_id:            strategy.id,
+        bin_range_down:         strategy.position.rangeDownPct,
+        bin_range_up:           strategy.position.rangeUpPct,
+        needs_liquidity_retry:  needsLiquidityRetry,
       },
     })
     .select('id')
