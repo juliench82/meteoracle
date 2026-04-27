@@ -47,6 +47,19 @@ const WALLET_RESERVE_MULTIPLIER = parseFloat(process.env.WALLET_RESERVE_MULTIPLI
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 
 /**
+ * Maximum bin range per strategy — prevents OOM in simulation for wide positions.
+ * evil-panda is the most aggressive (volatile Pump.fun tokens, wide spreads).
+ * scalp-spike stays tight. bluechip/stable-farm have the narrowest cap.
+ */
+const MAX_BINS_BY_STRATEGY: Record<string, number> = {
+  'evil-panda':   200,
+  'scalp-spike':  120,
+  'bluechip-farm': 100,
+  'stable-farm':   100,
+}
+const MAX_BINS_DEFAULT = 150
+
+/**
  * Strip any ComputeBudget instructions already present in an ix array.
  * Prevents 'duplicate instruction' simulation failure when we prepend
  * our own setComputeUnitPrice + setComputeUnitLimit.
@@ -62,7 +75,7 @@ function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): Trans
 /**
  * Simulate a transaction before sending. Logs warnings on failure.
  * Returns true if simulation passed (or if simulation itself errored — we log but don't block).
- * Returns false if simulation definitively reported a program error.
+ * Returns false if simulation definitively reported a program error OR an OOM condition.
  */
 async function simulateAndCheck(
   tx: Transaction,
@@ -74,14 +87,20 @@ async function simulateAndCheck(
     if (sim.value.err) {
       console.error(`${label} ⚠ simulation FAILED — aborting send`, {
         err:  sim.value.err,
-        logs: sim.value.logs,
+        logs: sim.value.logs?.slice(-5),
       })
       return false
     }
     console.log(`${label} simulation OK (units consumed: ${sim.value.unitsConsumed ?? 'n/a'})`)
     return true
-  } catch (simErr) {
-    // Simulation call itself failed (network, timeout) — log but don't block the tx
+  } catch (simErr: unknown) {
+    const msg = simErr instanceof Error ? simErr.message : String(simErr)
+    // OOM during simulation means the position is too large — reject it instead of proceeding
+    if (msg.includes('memory allocation failed') || msg.includes('out of memory')) {
+      console.error(`${label} ⚠ simulation OOM — position too large, aborting send`, { error: msg })
+      return false
+    }
+    // Other simulation call failures (network, timeout) — log but don't block the tx
     console.warn(`${label} simulation call threw — proceeding anyway:`, simErr)
     return true
   }
@@ -296,7 +315,27 @@ export async function openPosition(
     const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
     const minBinId = activeBinId - binsDown
     const maxBinId = activeBinId + binsUp
-    console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binsDown + binsUp} bins, step=${binStep})`)
+    const binRange = binsDown + binsUp
+
+    // Hard cap on bin range — prevents OOM in simulation for wide positions
+    const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
+    if (binRange > maxBins) {
+      console.warn(`${label} bin range too wide — rejecting candidate`, {
+        mint: metrics.address,
+        binRange,
+        maxBins,
+        binStep,
+        rangeDown: strategy.position.rangeDownPct,
+        rangeUp: strategy.position.rangeUpPct,
+      })
+      await supabase.from('bot_logs').insert({
+        level: 'warn', event: 'open_position_skipped_bin_range_cap',
+        payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
+      })
+      return null
+    }
+
+    console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
 
     const lamports = Math.floor(solAmount * 1e9)
     let totalX: BN
@@ -345,6 +384,14 @@ export async function openPosition(
     for (const { positionKeypair, initializePositionIx } of response.instructionsByPositions) {
       if (!positionKeypairForQuery) positionKeypairForQuery = positionKeypair
       posIndex++
+
+      // Log position details before attempting on-chain operations
+      console.log(`${label} preparing position segment ${posIndex}/${total}`, {
+        mint: metrics.address,
+        strategy: strategy.id,
+        binRange: `${minBinId} → ${maxBinId} (${binRange} bins)`,
+        binStep,
+      })
 
       // Step 1: init tx — strip any SDK-injected ComputeBudget ixs, prepend ours
       const rawInitIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
