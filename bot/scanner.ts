@@ -413,7 +413,6 @@ export async function runScanner(): Promise<{
       score,
       breakdown: {
         score_volmc:       breakdown.volMcScore,
-        score_rug:         breakdown.rugScore,
         score_holders:     breakdown.holderScore,
         score_freshness:   breakdown.freshnessScore,
         score_curve_bonus: breakdown.curveBonus,
@@ -439,7 +438,6 @@ export async function runScanner(): Promise<{
         top_holder_pct:    metrics.topHolderPct,
         scanned_at:        new Date().toISOString(),
         score_volmc:       breakdown.volMcScore,
-        score_rug:         breakdown.rugScore,
         score_holders:     breakdown.holderScore,
         score_freshness:   breakdown.freshnessScore,
         score_curve_bonus: breakdown.curveBonus,

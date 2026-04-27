@@ -14,6 +14,7 @@
  *   /status         — snapshot: state, open positions, wallet SOL
  *   /tick           — manually trigger scanner + monitor in parallel
  *   /orphans        — manually run orphan detector on demand
+ *   /candidates     — list top candidates from last 24h sorted by score
  *   /help           — command list
  */
 
@@ -270,6 +271,45 @@ async function handlePositions() {
   await reply(lines.join('\n'))
 }
 
+async function handleCandidates() {
+  const supabase = createServerClient()
+
+  const { data, error } = await supabase
+    .from('candidates')
+    .select('symbol, score, strategy_id, token_class, mc_at_scan, volume_24h, rugcheck_score, scanned_at, launchpad_source')
+    .gte('scanned_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+    .order('score', { ascending: false })
+    .limit(15)
+
+  if (error) {
+    await reply(`❌ Failed to fetch candidates: ${error.message}`)
+    return
+  }
+
+  if (!data || data.length === 0) {
+    await reply('🔍 No candidates found in the last 24h.')
+    return
+  }
+
+  const lines = [`🔍 *Top Candidates — last 24h (${data.length})*`, ``]
+  for (const c of data) {
+    const age = Math.round((Date.now() - new Date(c.scanned_at).getTime()) / 60_000)
+    const mc  = c.mc_at_scan >= 1_000_000
+      ? `$${(c.mc_at_scan / 1_000_000).toFixed(1)}M`
+      : `$${(c.mc_at_scan / 1_000).toFixed(0)}k`
+    const vol = c.volume_24h >= 1_000_000
+      ? `$${(c.volume_24h / 1_000_000).toFixed(1)}M`
+      : `$${(c.volume_24h / 1_000).toFixed(0)}k`
+    const source = c.launchpad_source ? ` [${c.launchpad_source}]` : ''
+    lines.push(
+      `• *${c.symbol}*${source} — score *${c.score}* | ${c.strategy_id}`,
+      `  MC: ${mc} | vol: ${vol} | rug: ${c.rugcheck_score ?? '?'} | ${age}min ago`
+    )
+  }
+
+  await reply(lines.join('\n'))
+}
+
 async function handleTick() {
   await reply('⏳ *Running scanner + monitor...*')
 
@@ -316,6 +356,7 @@ async function handleHelp() {
     `/close <id> — force-close an LP position`,
     `/tick — manually trigger scanner + monitor`,
     `/orphans — manually run orphan detector`,
+    `/candidates — top candidates from last 24h sorted by score`,
     `/help — this message`,
   ].join('\n'))
 }
@@ -339,6 +380,7 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
     case 'close': await handleClose(args[0] ?? ''); break
     case 'status': await handleStatus(); break
     case 'positions': await handlePositions(); break
+    case 'candidates': await handleCandidates(); break
     case 'tick': await handleTick(); break
     case 'orphans': await handleOrphans(); break
     case 'help': await handleHelp(); break
