@@ -5,12 +5,28 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
     "worker": "tsx --tsconfig tsconfig.worker.json worker.ts",
     "worker:build": "tsc --project tsconfig.worker.json",
     "worker:start": "node -r tsconfig-paths/register dist/worker.js"
+  },
+  "imports": {
+    "#dlmm": {
+      "require": "./node_modules/@meteora-ag/dlmm/dist/index.cjs",
+      "default": "./node_modules/@meteora-ag/dlmm/dist/index.cjs"
+    }
+  },
+  "overrides": {
+    "@meteora-ag/dlmm": {
+      "exports": {
+        ".": {
+          "require": "./dist/index.cjs",
+          "import": "./dist/index.cjs",
+          "default": "./dist/index.cjs"
+        }
+      }
+    }
   },
   "dependencies": {
     "@meteora-ag/cp-amm-sdk": "^1.0.0",
