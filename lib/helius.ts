@@ -33,8 +33,6 @@ async function acquireGlobalSlot(): Promise<void> {
 }
 
 // ── Inflight dedup ────────────────────────────────────────────────────────────
-// Prevents the same mint from stacking duplicate in-flight calls while
-// waiting in the retry queue.
 const _inflight = new Map<string, Promise<HolderData>>()
 
 export async function checkHolders(mintAddress: string): Promise<HolderData> {
@@ -50,7 +48,6 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
 }
 
 async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
-  // Must explicitly opt-in: HELIUS_ENABLED=true
   if (process.env.HELIUS_ENABLED !== 'true') {
     return { holderCount: 0, topHolderPct: 0, reliable: false }
   }
@@ -81,12 +78,22 @@ async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
     console.log(`[helius] ${mintAddress} — ${holderCount} holders (DAS), topHolder=${topHolderPct.toFixed(1)}%`)
     result = { holderCount, topHolderPct, reliable: true }
   } else {
-    const estimated = rpcAccounts.length > 0 ? rpcAccounts.length * 50 : 0
-    console.debug(`[helius] ${mintAddress} — DAS failed, using heuristic (~${estimated} holders, topHolder=${topHolderPct.toFixed(1)}%)`)
-    result = { holderCount: estimated, topHolderPct, reliable: false }
+    // RPC getTokenLargestAccounts returns at most 20 accounts.
+    // Use the top-holder concentration as a proxy: if top holder is X% of supply,
+    // a rough lower-bound estimate is 100/X * 3 (assumes top holder ~3× avg concentration).
+    // Floor at 500, cap at 50_000 to avoid absurd values.
+    const topPct = rpcResult?.topHolderPct ?? 0
+    let estimated: number
+    if (topPct > 0) {
+      estimated = Math.min(Math.max(Math.round((100 / topPct) * 3), 500), 50_000)
+    } else {
+      // No RPC data at all — use 0 so score_holders reflects unknown, not fake 1000
+      estimated = 0
+    }
+    console.warn(`[helius] ${mintAddress} — DAS failed, using heuristic (est ~${estimated} holders, topHolder=${topPct.toFixed(1)}%)`)
+    result = { holderCount: estimated, topHolderPct: topPct, reliable: false }
   }
 
-  // Always cache — both reliable and heuristic — with differentiated TTLs
   _holderCache.set(mintAddress, { data: result, ts: Date.now(), reliable: result.reliable })
   return result
 }
@@ -96,7 +103,6 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
   accounts:     Array<{ uiAmount: number | null }>
   topHolderPct: number
 } | null> {
-  // Sequential — each awaits the global gate individually
   const largestRes = await rpcCall('getTokenLargestAccounts', [mint])
   const supplyRes  = await rpcCall('getTokenSupply',          [mint])
 
@@ -117,8 +123,6 @@ async function fetchDasHolderCount(
   let total = 0
   for (let page = 1; page <= maxPages; page++) {
     let res
-    // 3 retries max — at 8s max backoff (~14s total ceiling).
-    // Data is stale after 64s anyway; fail fast and use heuristic.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await acquireGlobalSlot()
