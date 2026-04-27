@@ -387,7 +387,6 @@ export async function runScanner(): Promise<{
     if (!strategy) {
       const rejectionReason = explainNoStrategy(metrics)
       console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}, quote=${quoteTokenMint}): ${rejectionReason}`)
-      // Structured eval log — REJECTED (no strategy)
       console.log(JSON.stringify({
         event:     'candidate_evaluated',
         mint:      tokenAddress,
@@ -406,7 +405,6 @@ export async function runScanner(): Promise<{
 
     const scoreBreakdown = {
       score_volmc:     breakdown.volMcScore,
-      score_rug:       breakdown.rugScore,
       score_holders:   breakdown.holderScore,
       score_freshness: breakdown.freshnessScore,
       launchpad_bonus: breakdown.curveBonus,
@@ -416,7 +414,6 @@ export async function runScanner(): Promise<{
     const accepted = score >= MIN_SCORE_TO_OPEN
     const rejectionReason = !accepted ? `score ${score} < threshold ${MIN_SCORE_TO_OPEN}` : null
 
-    // Structured eval log — every candidate
     console.log(JSON.stringify({
       event:     'candidate_evaluated',
       mint:      tokenAddress,
@@ -428,7 +425,7 @@ export async function runScanner(): Promise<{
       reason:    rejectionReason,
     }))
 
-    await withTimeout(
+    const insertResult = await withTimeout(
       supabase.from('candidates').insert({
         token_address:     metrics.address,
         symbol:            metrics.symbol,
@@ -443,7 +440,6 @@ export async function runScanner(): Promise<{
         top_holder_pct:    metrics.topHolderPct,
         scanned_at:        new Date().toISOString(),
         score_volmc:       breakdown.volMcScore,
-        score_rug:         breakdown.rugScore,
         score_holders:     breakdown.holderScore,
         score_freshness:   breakdown.freshnessScore,
         score_curve_bonus: breakdown.curveBonus,
@@ -452,6 +448,9 @@ export async function runScanner(): Promise<{
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
+    if (insertResult && 'error' in insertResult && insertResult.error) {
+      console.error(`[scanner] candidates insert failed for ${symbol}:`, insertResult.error.message)
+    }
 
     candidateCount++
     console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, quote=${quoteTokenMint}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(2)}%, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStep}${bondingInfo})`)

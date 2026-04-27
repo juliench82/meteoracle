@@ -321,8 +321,11 @@ export async function openPosition(
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
+    // Pre-generate keypairs — SDK expects Keypair[] directly, not a callback
+    const positionKeypairs = [new Keypair()]
+
     const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
-      async (count) => Array.from({ length: count }, () => new Keypair()),
+      positionKeypairs,
       totalX,
       totalY,
       { minBinId, maxBinId, strategyType },
