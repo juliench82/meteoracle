@@ -403,14 +403,6 @@ export async function runScanner(): Promise<{
     const score       = breakdown.total
     const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
-    const scoreBreakdown = {
-      score_volmc:     breakdown.volMcScore,
-      score_holders:   breakdown.holderScore,
-      score_freshness: breakdown.freshnessScore,
-      launchpad_bonus: breakdown.curveBonus,
-      final_score:     score,
-    }
-
     const accepted = score >= MIN_SCORE_TO_OPEN
     const rejectionReason = !accepted ? `score ${score} < threshold ${MIN_SCORE_TO_OPEN}` : null
 
@@ -419,7 +411,14 @@ export async function runScanner(): Promise<{
       mint:      tokenAddress,
       symbol,
       score,
-      breakdown: scoreBreakdown,
+      breakdown: {
+        score_volmc:     breakdown.volMcScore,
+        score_rug:       breakdown.rugScore,
+        score_holders:   breakdown.holderScore,
+        score_freshness: breakdown.freshnessScore,
+        score_curve_bonus: breakdown.curveBonus,
+        final_score:     score,
+      },
       launchpad: launchpadSource,
       decision:  accepted ? 'ACCEPTED' : 'REJECTED',
       reason:    rejectionReason,
@@ -443,13 +442,16 @@ export async function runScanner(): Promise<{
         score_holders:     breakdown.holderScore,
         score_freshness:   breakdown.freshnessScore,
         score_curve_bonus: breakdown.curveBonus,
-        score_breakdown:   scoreBreakdown,
         launchpad_source:  launchpadSource,
       }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
-    if (insertResult && 'error' in insertResult && insertResult.error) {
-      console.error(`[scanner] candidates insert failed for ${symbol}:`, insertResult.error.message)
+
+    const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
+    if (!insertOk) {
+      const errMsg = insertResult && 'error' in insertResult ? insertResult.error?.message : 'timeout'
+      console.error(`[scanner] candidates insert failed for ${symbol} — skipping openPosition:`, errMsg)
+      continue
     }
 
     candidateCount++
