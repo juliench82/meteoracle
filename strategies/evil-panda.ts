@@ -16,6 +16,9 @@ import type { Strategy } from '@/lib/types'
  *   rangeUp   = 100 bins (+100%)
  *   total     = 150 bins  ← well within MAX_BINS_BY_STRATEGY[evil-panda]=200
  *
+ * minBinStep=80: rejects stable/USDC pools (binStep 1–20) that would produce
+ * 750+ bins for this range width and always hit the OOM/bin-cap guard.
+ *
  * Exit logic (fee-yield-aware):
  * - stopLoss              : −50% price
  * - takeProfit            : +40% price
@@ -49,6 +52,7 @@ export const evilPandaStrategy: Strategy = {
     minRugcheckScore:          0,
     requireSocialSignal:   false,
     minFeeTvl24hPct:          15,
+    minBinStep:               80,   // reject stable/USDC pools (binStep 1-20) — bin range always blows cap
   },
 
   position: {
