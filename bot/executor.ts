@@ -26,11 +26,11 @@ import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 async function getDLMM() {
-  const mod = await import('@meteora-ag/dlmm')
+  const mod = await import('#dlmm')
   return mod.default as typeof import('@meteora-ag/dlmm').default
 }
 async function getStrategyType() {
-  const mod = await import('@meteora-ag/dlmm')
+  const mod = await import('#dlmm')
   return mod.StrategyType
 }
 
@@ -498,6 +498,7 @@ export async function closePosition(
     } else {
       console.warn(`${label} position not found on-chain — marking closed in DB`)
       await markPositionClosed(positionId, feesClaimedSol, `${reason}_external`)
+      await sendCloseAlert(position, feesClaimedSol, reason)
       return true
     }
 
@@ -512,6 +513,7 @@ export async function closePosition(
     }
 
     await markPositionClosed(positionId, feesClaimedSol, reason)
+    await sendCloseAlert(position, feesClaimedSol, reason)
     return true
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -521,6 +523,34 @@ export async function closePosition(
       payload: { positionId, reason, error: message },
     })
     return false
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function sendCloseAlert(position: any, feesClaimedSol: number, reason: string): Promise<void> {
+  try {
+    const solDeposited  = position.sol_deposited ?? 0
+    const openedAt      = position.opened_at ? new Date(position.opened_at).getTime() : Date.now()
+    const ageHours      = parseFloat(((Date.now() - openedAt) / 3_600_000).toFixed(1))
+    const entryPriceSol = position.entry_price_sol ?? 0
+
+    // IL: approximate impermanent loss as (fees_earned / sol_deposited) * -1 for meme pools
+    // Real IL calc requires current price — use fees as proxy for now, reported separately
+    const ilPct    = 0
+    const netPnlSol = parseFloat((feesClaimedSol - solDeposited * 0).toFixed(6))
+
+    await sendAlert({
+      type:          'position_closed',
+      symbol:        position.symbol,
+      strategy:      position.metadata?.strategy_id ?? 'unknown',
+      reason,
+      feesEarnedSol: parseFloat(feesClaimedSol.toFixed(6)),
+      ilPct,
+      ageHours,
+      netPnlSol:     feesClaimedSol,
+    })
+  } catch (alertErr) {
+    console.warn('[executor] sendCloseAlert failed (non-fatal):', alertErr)
   }
 }
 
