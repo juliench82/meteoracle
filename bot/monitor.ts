@@ -274,23 +274,30 @@ async function checkPosition(
   }
 
   if (!closeReason) {
-    const currentExtensions: number = position.metadata?.feeYieldExtensions || 0
+    // Extension count is stored in DB metadata — it is the source of truth.
+    // We only increment (and alert) when potentialExtensions strictly exceeds
+    // the persisted value. This prevents the same extension level from firing
+    // an alert on every subsequent tick as dailyYield continues to grow.
+    const currentExtensions: number = position.metadata?.feeYieldExtensions ?? 0
     let effectiveMaxDuration = strategy.exits.maxDurationHours
     let shouldExtend = false
     let newExtensions = currentExtensions
+    let addedHoursThisTick = 0
 
     if (strategy.exits.feeYieldExtendPct && dailyYield >= strategy.exits.feeYieldExtendPct) {
       const potentialExtensions = Math.floor(dailyYield / strategy.exits.feeYieldExtendPct)
 
       if (potentialExtensions > currentExtensions) {
+        // New extension level reached — update DB and fire alert ONCE.
+        const prevExtensions = currentExtensions
         newExtensions = potentialExtensions
-        const addedHours = (newExtensions - currentExtensions) * (strategy.exits.feeYieldExtensionHours ?? 36)
-        effectiveMaxDuration += addedHours
+        addedHoursThisTick = (newExtensions - prevExtensions) * (strategy.exits.feeYieldExtensionHours ?? 36)
+        effectiveMaxDuration += newExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
         shouldExtend = true
 
         console.log(
           `${label} FEE-YIELD EXTENSION: dailyYield=${dailyYield.toFixed(1)}% ` +
-          `extensions ${currentExtensions} → ${newExtensions} (+${addedHours}h, effective max=${effectiveMaxDuration}h)`
+          `extensions ${prevExtensions} → ${newExtensions} (+${addedHoursThisTick}h, effective max=${effectiveMaxDuration}h)`
         )
 
         try {
@@ -315,16 +322,16 @@ async function checkPosition(
           feeYieldPct: feeYieldPct.toFixed(1),
           avgDailyYield: avgDailyYield !== null ? avgDailyYield.toFixed(1) : null,
           extensions: newExtensions,
+          extraHours: addedHoursThisTick,
           effectiveMaxDurationHours: effectiveMaxDuration,
           positionId: position.id,
         })
       } else {
-        const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
-        effectiveMaxDuration += totalAddedHours
+        // Already at or above this extension level — just apply existing extensions silently.
+        effectiveMaxDuration += currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
       }
     } else if (currentExtensions > 0) {
-      const totalAddedHours = currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
-      effectiveMaxDuration += totalAddedHours
+      effectiveMaxDuration += currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
     }
 
     if (ageHours >= effectiveMaxDuration) {
