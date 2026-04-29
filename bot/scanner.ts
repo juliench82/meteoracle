@@ -300,12 +300,14 @@ export async function runScanner(): Promise<{
 
     const quoteTokenMint = getQuoteTokenMint(bestPool)
 
-    const vol24h  = bestPool.volume['24h']
-    const vol1h   = bestPool.volume['1h']
-    const binStep = bestPool.pool_config?.bin_step ?? '?'
+    const vol24h   = bestPool.volume['24h']
+    const vol1h    = bestPool.volume['1h']
+    // Typed numeric for filter + metrics; display string for logs
+    const binStep: number | undefined = bestPool.pool_config?.bin_step
+    const binStepDisplay = binStep ?? '?'
 
     if (bestPool.address !== representativePool.address) {
-      console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStep}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)} (was bin_step=${representativePool.pool_config?.bin_step}, feeTvl=${(representativePool.fee_tvl_ratio['24h'] * 100).toFixed(2)}%)`)
+      console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStepDisplay}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)} (was bin_step=${representativePool.pool_config?.bin_step}, feeTvl=${(representativePool.fee_tvl_ratio['24h'] * 100).toFixed(2)}%)`)
     }
 
     let resolvedMc = mcUsd
@@ -368,6 +370,7 @@ export async function runScanner(): Promise<{
       feeTvl24hPct,
       bondingCurvePct,
       quoteTokenMint,
+      binStep,
     }
 
     const tokenClass = classifyToken({
@@ -454,7 +457,7 @@ export async function runScanner(): Promise<{
     }
 
     candidateCount++
-    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, quote=${quoteTokenMint}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(2)}%, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStep}${bondingInfo})`)
+    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, quote=${quoteTokenMint}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(2)}%, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (score >= MIN_SCORE_TO_OPEN) {
