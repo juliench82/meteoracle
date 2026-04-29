@@ -1,4 +1,10 @@
-export type PositionStatus = 'active' | 'out_of_range' | 'closed' | 'error'
+export type PositionStatus =
+  | 'active'
+  | 'out_of_range'
+  | 'closed'
+  | 'error'
+  | 'pending_retry'
+  | 'orphaned'
 
 export interface Position {
   id: string

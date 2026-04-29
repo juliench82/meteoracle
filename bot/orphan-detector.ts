@@ -46,7 +46,7 @@ async function insertOrphan(
     headers: { ...sbHeaders(), 'Prefer': 'return=minimal' },
     body: JSON.stringify({
       symbol:          `ORPHAN-${positionPubKey.slice(0, 6)}`,
-      token_address:   '',
+      mint:            '',
       pool_address:    poolAddress,
       strategy_id:     'unknown',
       entry_price:     0,
@@ -145,8 +145,6 @@ export async function detectAllOrphanedPositions(): Promise<void> {
     for (const pos of positions) {
       const positionPubKey = pos.publicKey.toBase58()
 
-      // Use REST helper — supabase-js can return { data: null } on pool issues,
-      // causing false negatives and duplicate inserts + spam alerts every tick.
       let exists: boolean
       try {
         exists = await positionExistsInDb(positionPubKey)
@@ -174,7 +172,6 @@ export async function detectAllOrphanedPositions(): Promise<void> {
         continue
       }
 
-      // Only alert once per process lifetime per position
       if (!_alertedOrphans.has(positionPubKey)) {
         _alertedOrphans.add(positionPubKey)
         await sendAlert({
