@@ -3,6 +3,8 @@ import { getConnection, getWallet } from '@/lib/solana'
 
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v6'
+const SWAP_TIMEOUT_MS = 15_000
+const SWAP_MAX_RETRIES = 2
 
 // Default: 1% slippage. Override via SWAP_SLIPPAGE_BPS env.
 function slippageBps(): number {
@@ -14,6 +16,24 @@ async function getTokenBalance(connection: Connection, mint: string, owner: Publ
   if (!accounts.value.length) return 0n
   const amount = accounts.value[0].account.data.parsed.info.tokenAmount.amount as string
   return BigInt(amount)
+}
+
+async function fetchWithRetry(url: string, options: RequestInit, attempt = 1): Promise<Response> {
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(SWAP_TIMEOUT_MS),
+    })
+    return res
+  } catch (err) {
+    if (attempt < SWAP_MAX_RETRIES) {
+      const delay = attempt * 2_000
+      console.warn(`[swap] fetch failed (attempt ${attempt}/${SWAP_MAX_RETRIES}), retrying in ${delay}ms...`)
+      await new Promise(r => setTimeout(r, delay))
+      return fetchWithRetry(url, options, attempt + 1)
+    }
+    throw err
+  }
 }
 
 /**
@@ -48,12 +68,12 @@ export async function swapTokenToSol(
 
   // 1. Quote
   const quoteUrl = `${JUPITER_QUOTE_API}/quote?inputMint=${tokenMint}&outputMint=${NATIVE_MINT}&amount=${balance.toString()}&slippageBps=${slippageBps()}&onlyDirectRoutes=false`
-  const quoteRes = await fetch(quoteUrl)
+  const quoteRes = await fetchWithRetry(quoteUrl, {})
   if (!quoteRes.ok) throw new Error(`Jupiter quote failed: ${quoteRes.status} ${await quoteRes.text()}`)
   const quote = await quoteRes.json()
 
   // 2. Swap transaction
-  const swapRes = await fetch(`${JUPITER_QUOTE_API}/swap`, {
+  const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
