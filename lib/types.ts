@@ -59,6 +59,8 @@ export interface TokenMetrics {
   bondingCurvePct?: number
   /** Quote token mint address of the selected pool (e.g. WSOL, USDC, USDT). */
   quoteTokenMint?: string
+  /** Pool bin step (e.g. 20, 50, 100, 200). Used to enforce minBinStep strategy filter. */
+  binStep?: number
 }
 
 export interface TokenFilters {
@@ -74,7 +76,13 @@ export interface TokenFilters {
   /** Minimum 24h Fee/TVL % required to enter this pool. Strategy-dependent. */
   minFeeTvl24hPct: number
   /**
-   * If set, the pool's quote token mint must be one of these addresses.
+   * If set, reject pools whose bin step is below this value.
+   * Evil Panda uses 80 to block stable/USDC pools (binStep 1–20) that produce
+   * 750+ bins for a −50%/+100% range, always hitting the OOM/bin-cap guard.
+   */
+  minBinStep?: number
+  /**
+   * If set, the pool’s quote token mint must be one of these addresses.
    * Used by bluechip-farm to enforce USDC/USDT-only pairs.
    * Leave undefined to allow any quote token (SOL, USDC, USDT).
    */
