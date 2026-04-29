@@ -10,10 +10,10 @@ interface Position {
   entry_price_sol:   number
   current_price_usd: number
   amount_sol:        number
-  pnl_sol?:          number
-  pnl_pct?:          number
-  fees_earned_sol?:  number
-  il_pct?:           number
+  pnl_sol?:          number | null
+  pnl_pct?:          number | null
+  fees_earned_sol?:  number | null
+  il_pct?:           number | null
   status:            string
   dry_run:           boolean
   opened_at:         string
@@ -61,21 +61,20 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
     return <span className="text-zinc-500">—</span>
   }
 
-  // === IMPROVED PNL: Fees Earned | Price PnL | Total Return ===
   function pnlCells(pos: Position) {
     const isLp = pos._type === 'lp'
 
     if (!isLp) {
-      // Spot: single P&L column
+      // Spot: single P&L column spanning fees + IL + total
       if (pos.pnl_pct !== undefined && pos.pnl_pct !== null) {
         const color = pos.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'
         return (
           <>
             <td className="text-right px-4 py-3 text-zinc-500">—</td>
+            <td className="text-right px-4 py-3 text-zinc-500">—</td>
             <td className="text-right px-4 py-3">
               <span className={color}>{pos.pnl_pct >= 0 ? '+' : ''}{pos.pnl_pct.toFixed(1)}%</span>
             </td>
-            <td className="text-right px-4 py-3 text-zinc-500">—</td>
           </>
         )
       }
@@ -84,10 +83,11 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
         return (
           <>
             <td className="text-right px-4 py-3 text-zinc-500">—</td>
+            <td className="text-right px-4 py-3 text-zinc-500">—</td>
             <td className="text-right px-4 py-3">
               <span className={color}>{pos.pnl_sol >= 0 ? '+' : ''}{pos.pnl_sol.toFixed(4)}</span>
+              <div className="text-xs text-zinc-500">SOL</div>
             </td>
-            <td className="text-right px-4 py-3 text-zinc-500">—</td>
           </>
         )
       }
@@ -100,7 +100,7 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
       )
     }
 
-    // LP: Fees | Price PnL | Total
+    // LP: Fees | IL | PnL (SOL)
     const fees     = pos.fees_earned_sol ?? 0
     const deployed = pos.amount_sol ?? 0
     const ilPct    = pos.il_pct ?? null
@@ -111,6 +111,7 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
     const totalColor = total !== null ? (total >= 0 ? 'text-green-400' : 'text-red-400') : 'text-zinc-500'
 
     const feeYield = deployed > 0 ? (fees / deployed) * 100 : 0
+    const totalPct = total !== null && deployed > 0 ? (total / deployed) * 100 : null
 
     return (
       <>
@@ -123,19 +124,25 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
             <div className="text-xs text-zinc-500">{feeYield.toFixed(1)}%</div>
           )}
         </td>
-        {/* Price PnL / IL */}
+        {/* IL */}
         <td className="text-right px-4 py-3">
           {ilPct !== null
             ? <span className={ilColor}>IL {ilPct >= 0 ? '+' : ''}{ilPct.toFixed(1)}%</span>
             : <span className="text-zinc-500">—</span>
           }
         </td>
-        {/* Total Return */}
+        {/* PnL (SOL) */}
         <td className="text-right px-4 py-3">
-          {total !== null
-            ? <span className={totalColor}>{total >= 0 ? '+' : ''}{total.toFixed(4)}</span>
-            : <span className="text-zinc-500">—</span>
-          }
+          {total !== null ? (
+            <>
+              <span className={totalColor}>{total >= 0 ? '+' : ''}{total.toFixed(4)}</span>
+              {totalPct !== null && (
+                <div className="text-xs text-zinc-500">{totalPct >= 0 ? '+' : ''}{totalPct.toFixed(1)}%</div>
+              )}
+            </>
+          ) : (
+            <span className="text-zinc-500">—</span>
+          )}
         </td>
       </>
     )
@@ -181,8 +188,8 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
                 <th className="text-right px-4 py-3">Size</th>
                 <th className="text-right px-4 py-3">Entry</th>
                 <th className="text-right px-4 py-3">Fees</th>
-                <th className="text-right px-4 py-3">Price PnL</th>
-                <th className="text-right px-4 py-3">Total</th>
+                <th className="text-right px-4 py-3">IL</th>
+                <th className="text-right px-4 py-3">PnL (SOL)</th>
                 <th className="text-right px-4 py-3">Age</th>
                 <th className="text-center px-4 py-3">Status</th>
                 <th className="text-center px-4 py-3">Tx</th>

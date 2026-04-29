@@ -23,6 +23,8 @@ function normaliseLp(p: any, closed = false) {
     opened_at:       p.opened_at,
     closed_at:       p.closed_at       ?? null,
     pnl_sol:         p.pnl_sol         ?? null,
+    fees_earned_sol: p.fees_earned_sol ?? null,
+    il_pct:          p.il_pct          ?? null,
     tx_buy:          p.tx_open         ?? undefined,
     tx_sell:         p.tx_close        ?? undefined,
     _type:           'lp',
