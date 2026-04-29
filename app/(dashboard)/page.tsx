@@ -23,8 +23,11 @@ export default function DashboardPage() {
     }
   }
 
-  // Initial load
-  useEffect(() => { fetchData() }, [])
+  useEffect(() => {
+    fetchData()
+    const interval = setInterval(fetchData, 60_000)
+    return () => clearInterval(interval)
+  }, [])
 
   if (!data) {
     return (
