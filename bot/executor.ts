@@ -26,11 +26,11 @@ import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 async function getDLMM() {
-  const mod = await import('#dlmm')
+  const mod = await import('@meteora-ag/dlmm')
   return mod.default as typeof import('@meteora-ag/dlmm').default
 }
 async function getStrategyType() {
-  const mod = await import('#dlmm')
+  const mod = await import('@meteora-ag/dlmm')
   return mod.StrategyType
 }
 
@@ -322,9 +322,6 @@ export async function openPosition(
     const keypairFactory = async (count: number): Promise<Keypair[]> =>
       Array.from({ length: count }, () => new Keypair())
 
-    // ONE SDK call — returns initializePositionIx + addLiquidityIxs already built.
-    // Never call initializePositionAndAddLiquidityByStrategy inside the loop —
-    // that re-runs the SDK's internal simulation against a non-existent account.
     const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
       keypairFactory,
       totalX,
@@ -351,7 +348,6 @@ export async function openPosition(
         binRange: `${minBinId} → ${maxBinId} (${binRange} bins)`, binStep,
       })
 
-      // ── STEP 1: InitializePosition ──
       const rawInitIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
       const initIxs    = stripComputeBudgetIxs(rawInitIxs)
       const initTx     = new Transaction().add(
@@ -362,14 +358,12 @@ export async function openPosition(
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair], label)
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
-      // ── STEP 2: AddLiquidity (one tx per chunk in addLiquidityIxs) ──
-      // addLiquidityIxs is TransactionInstruction[][] — each inner array is one tx chunk.
       await waitForPositionAccountReady(dlmmPool, positionKeypair.publicKey, wallet.publicKey, label)
 
       try {
         const chunks = (addLiquidityIxs as TransactionInstruction[][]).length > 0
           ? addLiquidityIxs as TransactionInstruction[][]
-          : [[...(addLiquidityIxs as unknown as TransactionInstruction[])]]  // handle flat array fallback
+          : [[...(addLiquidityIxs as unknown as TransactionInstruction[])]]
 
         for (let ci = 0; ci < chunks.length; ci++) {
           const liqIxs = stripComputeBudgetIxs(chunks[ci])
@@ -529,15 +523,8 @@ export async function closePosition(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function sendCloseAlert(position: any, feesClaimedSol: number, reason: string): Promise<void> {
   try {
-    const solDeposited  = position.sol_deposited ?? 0
-    const openedAt      = position.opened_at ? new Date(position.opened_at).getTime() : Date.now()
-    const ageHours      = parseFloat(((Date.now() - openedAt) / 3_600_000).toFixed(1))
-    const entryPriceSol = position.entry_price_sol ?? 0
-
-    // IL: approximate impermanent loss as (fees_earned / sol_deposited) * -1 for meme pools
-    // Real IL calc requires current price — use fees as proxy for now, reported separately
-    const ilPct    = 0
-    const netPnlSol = parseFloat((feesClaimedSol - solDeposited * 0).toFixed(6))
+    const openedAt  = position.opened_at ? new Date(position.opened_at).getTime() : Date.now()
+    const ageHours  = parseFloat(((Date.now() - openedAt) / 3_600_000).toFixed(1))
 
     await sendAlert({
       type:          'position_closed',
@@ -545,7 +532,7 @@ async function sendCloseAlert(position: any, feesClaimedSol: number, reason: str
       strategy:      position.metadata?.strategy_id ?? 'unknown',
       reason,
       feesEarnedSol: parseFloat(feesClaimedSol.toFixed(6)),
-      ilPct,
+      ilPct:         0,
       ageHours,
       netPnlSol:     feesClaimedSol,
     })
