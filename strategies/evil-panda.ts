@@ -16,17 +16,18 @@ import type { Strategy } from '@/lib/types'
  *   rangeUp   = 100 bins (+100%)
  *   total     = 150 bins  ← well within MAX_BINS_BY_STRATEGY[evil-panda]=200
  *
- * Previous range −70% / +180% = 250 bins → always OOM-rejected at simulation.
- *
  * Exit logic (fee-yield-aware):
- * - stopLoss             : −50% price
- * - takeProfit           : +40% price — realistic exit, not waiting for a moon
- * - OOR                  : 45 min out of range (earning nothing)
- * - maxDuration          : 72h (3 days)
- * - minFeeYieldToExit    : exit if fees reach 10% of deployed (safety net even with IL)
- * - feeYieldExitPct      : close early if fees > 25% of deployed within first 12h
- * - feeYieldExtendPct    : if daily yield >= 12% → add feeYieldExtensionHours per threshold hit
+ * - stopLoss              : −50% price
+ * - takeProfit            : +40% price
+ * - OOR                   : 45 min out of range (earning nothing)
+ * - maxDuration           : 72h (3 days) hard stop
+ * - feeYieldExitPct       : close early if fees > 25% of deployed within first 12h
+ * - feeYieldExtendPct     : if daily yield >= 12% after 24h → add feeYieldExtensionHours
  * - feeYieldExtensionHours: 36h added per 12% daily yield threshold
+ *
+ * Note: minFeeYieldToExit removed — it fired at 10% and killed positions before the
+ * extend logic could run, contradicting the fee-farming intent. feeYieldExitPct (25%)
+ * and maxDurationHours (72h) are sufficient exits.
  */
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
@@ -52,24 +53,23 @@ export const evilPandaStrategy: Strategy = {
 
   position: {
     binStep:              100,
-    rangeDownPct:         -50,   // was -70 → 70 bins; now 50 bins
-    rangeUpPct:           100,   // was +180 → 180 bins; now 100 bins — total 150 bins
+    rangeDownPct:         -50,
+    rangeUpPct:           100,
     distributionType: 'bid-ask',
     solBias:              1.0,
   },
 
   exits: {
-    stopLossPct:              -50,   // aligned with rangeDownPct
+    stopLossPct:              -50,
     takeProfitPct:             40,
     outOfRangeMinutes:         45,
     maxDurationHours:          72,
     claimFeesBeforeClose:    true,
     minFeesToClaim:          0.001,
 
-    // === Fee-based exits (key safety net) ===
-    minFeeYieldToExit:         10,
-    feeYieldExitPct:           25,
-    feeYieldExtendPct:         12,
-    feeYieldExtensionHours:    36,
+    // === Fee-based exits ===
+    feeYieldExitPct:           25,   // close early if fees > 25% of deployed within first 12h
+    feeYieldExtendPct:         12,   // after 24h: extend if daily yield >= 12%
+    feeYieldExtensionHours:    36,   // +36h per threshold hit
   },
 }
