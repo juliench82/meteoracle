@@ -20,7 +20,6 @@ import {
   isMoonshotToken,
   isSupportedLaunchpadToken,
 } from '@/lib/pumpfun'
-import { createPreGradPool } from '@/lib/pre-grad'
 import type { TokenMetrics } from '@/lib/types'
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
@@ -71,9 +70,9 @@ const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 const _bondingCurveCache = new Map<string, { pct: number; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
 
-// Thresholds for DAMM pre-grad paths
-const PUMPFUN_PREGRAD_THRESHOLD   = 95  // pump.fun: 95% before graduation
-const MOONSHOT_PREGRAD_THRESHOLD  = 90  // Moonshot: slightly lower, curve data less precise
+// Thresholds for high-curve detection (logged, falls through to normal scoring)
+const PUMPFUN_HIGHCURVE_THRESHOLD  = 95
+const MOONSHOT_HIGHCURVE_THRESHOLD = 90
 
 function detectLaunchpadSource(tokenAddress: string): 'pumpfun' | 'moonshot' | 'meteora' {
   if (isPumpFunToken(tokenAddress)) return 'pumpfun'
@@ -113,7 +112,6 @@ async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string
   return result
 }
 
-/** Returns the quote token mint address for a pool (the side that is WSOL/USDC/USDT). */
 function getQuoteTokenMint(pool: MeteoraPool): string {
   return QUOTE_ASSETS.has(pool.token_x.address)
     ? pool.token_x.address
@@ -243,71 +241,57 @@ export async function runScanner(): Promise<{
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
 
-    // === EXPANDED DAMM PRE-GRAD PATH ===
-    const isLaunchpad = isSupportedLaunchpadToken(tokenAddress)
-
-    if (isLaunchpad && heliusRpcUrl && ageHours < 48) {
-      let shouldCreateDamm = false
-      let source = ''
-      let progress = 0
-
+    // High-curve detection: log progress, then fall through to normal scoring.
+    // The scorer awards +8 curveBonus at 70-95% and +4 at 95-99%.
+    if (isSupportedLaunchpadToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
       if (isPumpFunToken(tokenAddress)) {
         const curve = await fetchPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
-        progress = curve?.progressPct ?? 0
-        if (progress >= PUMPFUN_PREGRAD_THRESHOLD && curve?.complete === false) {
-          shouldCreateDamm = true
-          source = 'pumpfun-pregrad'
+        const progress = curve?.progressPct ?? 0
+        if (progress >= PUMPFUN_HIGHCURVE_THRESHOLD && curve?.complete === false) {
+          console.log(`[scanner] ${symbol} — pump.fun high-curve ${progress.toFixed(1)}% — scoring normally (+curveBonus)`)
         } else {
-          console.log(`[scanner] ${symbol} — pump.fun curve ${progress.toFixed(1)}% (threshold=${PUMPFUN_PREGRAD_THRESHOLD}%, complete=${curve?.complete ?? 'unknown'}) — no DAMM`)
+          console.log(`[scanner] ${symbol} — pump.fun curve ${progress.toFixed(1)}% (complete=${curve?.complete ?? 'unknown'})`)
         }
       } else if (isMoonshotToken(tokenAddress)) {
         const curve = await fetchMoonshotBondingCurve(tokenAddress, heliusRpcUrl)
-        progress = curve?.progressPct ?? 0
-        if (progress >= MOONSHOT_PREGRAD_THRESHOLD) {
-          shouldCreateDamm = true
-          source = 'moonshot'
+        const progress = curve?.progressPct ?? 0
+        if (progress >= MOONSHOT_HIGHCURVE_THRESHOLD) {
+          console.log(`[scanner] ${symbol} — moonshot high-curve ${progress.toFixed(1)}% — scoring normally (+curveBonus)`)
         } else {
-          console.log(`[scanner] ${symbol} — moonshot curve ${progress.toFixed(1)}% (threshold=${MOONSHOT_PREGRAD_THRESHOLD}%) — no DAMM`)
+          console.log(`[scanner] ${symbol} — moonshot curve ${progress.toFixed(1)}%`)
         }
       }
-
-      if (shouldCreateDamm) {
-        console.log(`[scanner] ${symbol} — ${source} (${progress.toFixed(1)}%) → creating DAMM v2 pool`)
-        await createPreGradPool({ mintAddress: tokenAddress, symbol, strategy: null })
-        continue
-      }
+      // Always fall through to normal pool selection and scoring
     }
 
-    // === NEW: Meteora New Listings (strict < 15 minutes) ===
     const bestPool = selectBestPool(pools, tokenAddress)
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
       continue
     }
 
-    const poolAgeHours = (Date.now() / 1000 - toUnixSeconds(bestPool.created_at)) / 3600
-    const liqUsd       = bestPool.tvl
-    const feeTvl24hPct = bestPool.fee_tvl_ratio['24h'] * 100
+    const poolAgeHours  = (Date.now() / 1000 - toUnixSeconds(bestPool.created_at)) / 3600
+    const liqUsd        = bestPool.tvl
+    const feeTvl24hPct  = bestPool.fee_tvl_ratio['24h'] * 100
 
+    // New Meteora listing fast-path: log and fall through to normal scoring.
     if (poolAgeHours < METEORA_NEW_LISTING_AGE_H && liqUsd >= METEORA_NEW_LISTING_LIQ_USD && feeTvl24hPct >= METEORA_NEW_LISTING_FEETVL) {
       console.log(
         `[scanner] ${symbol} — new Meteora listing ` +
-        `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(1)}%) → DAMM candidate`
+        `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(1)}%) — scoring normally`
       )
-      await createPreGradPool({ mintAddress: tokenAddress, symbol, strategy: null })
-      continue
+      // fall through to normal scoring + openPosition
     }
 
     const quoteTokenMint = getQuoteTokenMint(bestPool)
 
-    const vol24h   = bestPool.volume['24h']
-    const vol1h    = bestPool.volume['1h']
-    // Typed numeric for filter + metrics; display string for logs
+    const vol24h  = bestPool.volume['24h']
+    const vol1h   = bestPool.volume['1h']
     const binStep: number | undefined = bestPool.pool_config?.bin_step
     const binStepDisplay = binStep ?? '?'
 
     if (bestPool.address !== representativePool.address) {
-      console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStepDisplay}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)} (was bin_step=${representativePool.pool_config?.bin_step}, feeTvl=${(representativePool.fee_tvl_ratio['24h'] * 100).toFixed(2)}%)`)
+      console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStepDisplay}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)}`)
     }
 
     let resolvedMc = mcUsd
