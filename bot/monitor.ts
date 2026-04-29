@@ -238,11 +238,10 @@ async function checkPosition(
   const totalFeesSol = feesEarnedSol || 0
   const feeYieldPct = deployedSol > 0 ? (totalFeesSol / deployedSol) * 100 : 0
 
+  // avgDailyYield is null before 24h — never extrapolate from a partial window
   const avgDailyYield = ageHours >= 24
     ? (feeYieldPct / ageHours) * 24
     : null
-
-  const dailyYield = ageHours > 0 ? (feeYieldPct / ageHours) * 24 : 0
 
   console.log(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
@@ -277,15 +276,16 @@ async function checkPosition(
     // Extension count is stored in DB metadata — it is the source of truth.
     // We only increment (and alert) when potentialExtensions strictly exceeds
     // the persisted value. This prevents the same extension level from firing
-    // an alert on every subsequent tick as dailyYield continues to grow.
+    // an alert on every subsequent tick.
+    // Guard: avgDailyYield is null before 24h — never extend on extrapolated yield.
     const currentExtensions: number = position.metadata?.feeYieldExtensions ?? 0
     let effectiveMaxDuration = strategy.exits.maxDurationHours
     let shouldExtend = false
     let newExtensions = currentExtensions
     let addedHoursThisTick = 0
 
-    if (strategy.exits.feeYieldExtendPct && dailyYield >= strategy.exits.feeYieldExtendPct) {
-      const potentialExtensions = Math.floor(dailyYield / strategy.exits.feeYieldExtendPct)
+    if (strategy.exits.feeYieldExtendPct && avgDailyYield !== null && avgDailyYield >= strategy.exits.feeYieldExtendPct) {
+      const potentialExtensions = Math.floor(avgDailyYield / strategy.exits.feeYieldExtendPct)
 
       if (potentialExtensions > currentExtensions) {
         // New extension level reached — update DB and fire alert ONCE.
@@ -296,7 +296,7 @@ async function checkPosition(
         shouldExtend = true
 
         console.log(
-          `${label} FEE-YIELD EXTENSION: dailyYield=${dailyYield.toFixed(1)}% ` +
+          `${label} FEE-YIELD EXTENSION: avgDailyYield=${avgDailyYield.toFixed(1)}% ` +
           `extensions ${prevExtensions} → ${newExtensions} (+${addedHoursThisTick}h, effective max=${effectiveMaxDuration}h)`
         )
 
@@ -320,7 +320,7 @@ async function checkPosition(
           strategy: strategy.id,
           totalFees: totalFeesSol.toFixed(4),
           feeYieldPct: feeYieldPct.toFixed(1),
-          avgDailyYield: avgDailyYield !== null ? avgDailyYield.toFixed(1) : null,
+          avgDailyYield: avgDailyYield.toFixed(1),
           extensions: newExtensions,
           extraHours: addedHoursThisTick,
           effectiveMaxDurationHours: effectiveMaxDuration,
