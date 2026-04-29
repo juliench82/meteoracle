@@ -111,6 +111,13 @@ function passesQuoteMintFilter(strategy: Strategy, quoteTokenMint?: string): boo
   return required.includes(quoteTokenMint)
 }
 
+function passesBinStepFilter(strategy: Strategy, binStep?: number): boolean {
+  const min = strategy.filters.minBinStep
+  if (min === undefined) return true
+  if (binStep === undefined) return true  // unknown bin step — allow through
+  return binStep >= min
+}
+
 export function getStrategyForToken(token: {
   address?:       string
   mcUsd:          number
@@ -122,6 +129,7 @@ export function getStrategyForToken(token: {
   ageHours:       number
   rugcheckScore:  number
   quoteTokenMint?: string
+  binStep?:       number
 }): Strategy | null {
   const tokenClass = classifyToken({ address: token.address ?? '', ...token })
   if (tokenClass === 'UNKNOWN') return null
@@ -139,7 +147,8 @@ export function getStrategyForToken(token: {
     token.holderCount   >= f.minHolderCount   &&
     token.ageHours      <= f.maxAgeHours      &&
     token.rugcheckScore >= f.minRugcheckScore  &&
-    passesQuoteMintFilter(strategy, token.quoteTokenMint)
+    passesQuoteMintFilter(strategy, token.quoteTokenMint) &&
+    passesBinStepFilter(strategy, token.binStep)
 
   return passes ? strategy : null
 }
@@ -155,6 +164,7 @@ export function getAllMatchingStrategies(token: {
   ageHours:       number
   rugcheckScore:  number
   quoteTokenMint?: string
+  binStep?:       number
 }): Strategy[] {
   return STRATEGIES.filter((s) => {
     if (!s.enabled) return false
@@ -168,7 +178,8 @@ export function getAllMatchingStrategies(token: {
       token.holderCount   >= f.minHolderCount   &&
       token.ageHours      <= f.maxAgeHours      &&
       token.rugcheckScore >= f.minRugcheckScore  &&
-      passesQuoteMintFilter(s, token.quoteTokenMint)
+      passesQuoteMintFilter(s, token.quoteTokenMint) &&
+      passesBinStepFilter(s, token.binStep)
     )
   })
 }
@@ -177,6 +188,7 @@ export function explainNoStrategy(t: {
   mcUsd: number; volume24h: number; liquidityUsd: number
   topHolderPct: number; holderCount: number; ageHours: number
   rugcheckScore: number; feeTvl24hPct: number; quoteTokenMint?: string
+  binStep?: number
 }): string {
   const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
     const f = s.filters
@@ -190,6 +202,9 @@ export function explainNoStrategy(t: {
     if (t.ageHours       > f.maxAgeHours)     fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
     if (t.rugcheckScore  < f.minRugcheckScore) fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
     if (t.feeTvl24hPct   < f.minFeeTvl24hPct) fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
+    if (f.minBinStep !== undefined && t.binStep !== undefined && t.binStep < f.minBinStep) {
+      fails.push(`binStep=${t.binStep}<${f.minBinStep}`)
+    }
     if (f.requiredQuoteMints && f.requiredQuoteMints.length > 0) {
       if (!t.quoteTokenMint || !f.requiredQuoteMints.includes(t.quoteTokenMint)) {
         fails.push(`quote=${t.quoteTokenMint ?? 'unknown'} not in [USDC/USDT]`)
