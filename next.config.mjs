@@ -1,3 +1,8 @@
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
@@ -13,15 +18,21 @@ const nextConfig = {
       'bs58',
       'borsh',
     ],
-  },
-  outputFileTracingExcludes: {
-    '*': [
-      'node_modules/@meteora-ag/**',
-      'node_modules/@coral-xyz/**',
-      'node_modules/@project-serum/**',
-    ],
+    outputFileTracingExcludes: {
+      '*': [
+        'node_modules/@meteora-ag/**',
+        'node_modules/@coral-xyz/**',
+        'node_modules/@project-serum/**',
+      ],
+    },
   },
   webpack: (config, { isServer }) => {
+    // Resolve Node.js package imports alias (#dlmm) for webpack
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '#dlmm': path.resolve(__dirname, 'node_modules/@meteora-ag/dlmm/dist/index.cjs'),
+    }
+
     const esmExternals = [
       '@meteora-ag/dlmm',
       '@coral-xyz/anchor',
