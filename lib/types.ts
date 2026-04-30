@@ -82,7 +82,7 @@ export interface TokenFilters {
    */
   minBinStep?: number
   /**
-   * If set, the pool’s quote token mint must be one of these addresses.
+   * If set, the pool's quote token mint must be one of these addresses.
    * Used by bluechip-farm to enforce USDC/USDT-only pairs.
    * Leave undefined to allow any quote token (SOL, USDC, USDT).
    */
@@ -162,4 +162,38 @@ export interface DexScreenerPair {
   pairCreatedAt?: number
   labels?: string[]
   url?: string
+}
+
+// ── DAMM v2 Edge — isolated type definitions ─────────────────────────────────
+// These are ONLY used by strategies/damm-edge.ts and bot/damm-executor.ts.
+// No existing DLMM code references these types.
+
+/**
+ * Parameters needed to open a DAMM v2 position.
+ * Built by evaluateDammEdge() and consumed by openDammPosition().
+ */
+export interface DammPositionParams {
+  tokenAddress: string
+  poolAddress: string
+  /** SOL amount to deposit (conservative — we are testing the edge). */
+  solAmount: number
+  symbol: string
+  /** Pool age in minutes at time of decision. */
+  ageMinutes: number
+  /** 24h fee/TVL % at time of decision (for logging / audit). */
+  feeTvl24hPct: number
+  /** Pool liquidity in USD at time of decision (for logging / audit). */
+  liquidityUsd: number
+}
+
+/**
+ * Return value of evaluateDammEdge().
+ * Tells the scanner whether to open a DAMM v2 position and with what params.
+ */
+export interface DammEdgeDecision {
+  shouldUseDamm: boolean
+  /** Human-readable reason for accept or reject — always present for logging. */
+  reason: string
+  /** Only present when shouldUseDamm === true. */
+  params?: DammPositionParams
 }

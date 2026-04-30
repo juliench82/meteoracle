@@ -21,6 +21,10 @@ import {
   isSupportedLaunchpadToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
+// ── DAMM v2 Edge (additive imports — do not remove or reorder) ────────────────
+import { evaluateDammEdge } from '@/strategies/damm-edge'
+import { openDammPosition } from './damm-executor'
+// ─────────────────────────────────────────────────────────────────────────────
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM    = 'https://dlmm-api.meteora.ag'
@@ -356,6 +360,37 @@ export async function runScanner(): Promise<{
       quoteTokenMint,
       binStep,
     }
+
+    // ========== DAMM v2 EDGE (additive hook — Meteora-origin pools only) =======
+    // Fires ONLY for native Meteora pools (launchpadSource === 'meteora').
+    // If the token qualifies, opens a DAMM v2 position and skips the DLMM path
+    // for this token via `continue`. All existing DLMM strategy logic below is
+    // untouched — this block is pure additive code.
+    if (launchpadSource === 'meteora') {
+      const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
+      console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
+      if (dammDecision.shouldUseDamm && dammDecision.params) {
+        console.log(`[scanner][damm-edge] TRIGGERED — opening DAMM v2 position for ${symbol}`)
+        const result = await openDammPosition(dammDecision.params)
+        if (result.success) {
+          openedCount++
+          await sendAlert({
+            type:          'position_opened',
+            symbol,
+            strategy:      'damm-edge',
+            solDeposited:  dammDecision.params.solAmount,
+            entryPrice:    metrics.priceUsd,
+            positionId:    result.positionPubkey,
+          })
+        } else {
+          console.error(`[scanner][damm-edge] openDammPosition failed for ${symbol}: ${result.error}`)
+        }
+        // Skip DLMM path for this token regardless of open success.
+        // We do not want the same token evaluated by both tracks.
+        continue
+      }
+    }
+    // ========== END DAMM v2 EDGE ================================================
 
     const tokenClass = classifyToken({
       address:        metrics.address,
