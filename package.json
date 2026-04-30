@@ -10,7 +10,8 @@
     "type-check": "tsc --noEmit",
     "worker": "tsx --tsconfig tsconfig.worker.json worker.ts",
     "worker:build": "tsc --project tsconfig.worker.json",
-    "worker:start": "node -r tsconfig-paths/register dist/worker.js"
+    "worker:start": "node -r tsconfig-paths/register dist/worker.js",
+    "postinstall": "node scripts/patch-dlmm-esm.js"
   },
   "overrides": {
     "@meteora-ag/dlmm": {
