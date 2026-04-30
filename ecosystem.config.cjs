@@ -25,6 +25,13 @@
  * DRY-RUN vs LIVE:
  *   BOT_DRY_RUN=true  — simulate only, no real txs, no wallet needed
  *   BOT_DRY_RUN=false — live mode, REAL money, fund wallet first
+ *
+ * NODE_OPTIONS note:
+ *   --conditions=require forces Node.js to resolve the `require` export condition
+ *   on all packages. This makes tsx load @meteora-ag/dlmm's compiled CJS dist
+ *   (./dist/index.cjs) instead of its TypeScript source (./src/), which would
+ *   otherwise trigger an ESM import of { BN } from @coral-xyz/anchor that fails
+ *   because the anchor ESM bundle does not re-export BN.
  */
 
 module.exports = {
@@ -42,6 +49,7 @@ module.exports = {
       env: {
         NODE_ENV:              'production',
         LP_SCANNER_STANDALONE: 'true',
+        NODE_OPTIONS:          '--conditions=require',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/lp-scanner-error.log',
@@ -60,6 +68,7 @@ module.exports = {
       env: {
         NODE_ENV:              'production',
         LP_MONITOR_STANDALONE: 'true',
+        NODE_OPTIONS:          '--conditions=require',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/lp-monitor-dlmm-error.log',
@@ -77,7 +86,10 @@ module.exports = {
       restart_delay:  5_000,
       max_restarts:   10,
       env_file:      '.env.local',
-      env: { NODE_ENV: 'production' },
+      env: {
+        NODE_ENV:     'production',
+        NODE_OPTIONS: '--conditions=require',
+      },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/telegram-bot-error.log',
       out_file:   './logs/telegram-bot-out.log',
