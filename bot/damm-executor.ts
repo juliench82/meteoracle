@@ -1,27 +1,38 @@
 /**
  * bot/damm-executor.ts — FULL PRODUCTION DAMM v2 Executor
  *
- * - Real open:  createPosition + addLiquidity via @meteora-ag/cp-amm-sdk
- * - Real close: zapOutThroughDammV2 via @meteora-ag/zap-sdk → everything to SOL
- * - Wallet:     loaded from WALLET_PRIVATE_KEY env (base58), never from PublicKey alone
- * - Lazy imports: all SDK imports are dynamic to prevent Next.js build-time IDL crash
+ * - Real open:  createPositionAndAddLiquidity via @meteora-ag/cp-amm-sdk
+ *   Uses single-sided SOL deposit: maxAmountToken[A|B] = lamports, other side = 0.
+ *   liquidityDelta computed via sdk.getDepositQuote().
+ *   Saves to lp_positions with strategy_id = 'damm-edge' on success.
+ *
+ * - Real close: zapOutThroughDammV2 via @meteora-ag/zap-sdk → everything to SOL.
+ *   Loads position row from Supabase by positionId before calling zap.
+ *
+ * - Wallet: loaded from WALLET_PRIVATE_KEY env (base58), never from PublicKey alone.
+ * - Lazy imports: all SDK imports are dynamic to prevent Next.js build-time IDL crash.
  *
  * ISOLATION RULE: Must NOT import from bot/executor.ts or bot/monitor.ts.
  */
 
-import { Connection, PublicKey, Keypair, sendAndConfirmTransaction, Transaction } from '@solana/web3.js'
+import {
+  Connection,
+  PublicKey,
+  Keypair,
+  Transaction,
+  ComputeBudgetProgram,
+} from '@solana/web3.js'
+import { TOKEN_PROGRAM_ID, NATIVE_MINT } from '@solana/spl-token'
 import BN from 'bn.js'
 import bs58 from 'bs58'
 import type { DammPositionParams } from '@/lib/types'
+import { createServerClient } from '@/lib/supabase'
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
-// All SDK instantiation is deferred to first call-time.
-// This prevents module-level evaluation during Next.js build (which would
-// trigger Anchor IDL parsing and crash page-data collection).
 
 let _connection: Connection | null = null
 let _cpAmm: any = null
-let _zap:  any = null
+let _zap: any = null
 
 function getConnection(): Connection {
   if (!_connection) {
@@ -30,7 +41,6 @@ function getConnection(): Connection {
   return _connection
 }
 
-/** Load the bot wallet from WALLET_PRIVATE_KEY (base58-encoded secret key). */
 function getWallet(): Keypair {
   const key = process.env.WALLET_PRIVATE_KEY
   if (!key) throw new Error('[DAMM] WALLET_PRIVATE_KEY not set')
@@ -53,15 +63,45 @@ async function getZap(): Promise<any> {
   return _zap
 }
 
-/**
- * Some Meteora SDK methods return a TxBuilder (with a .build() method) rather
- * than a raw Transaction. This helper handles both cases transparently.
- */
 async function resolveTransaction(txOrBuilder: any): Promise<Transaction> {
   if (txOrBuilder && typeof txOrBuilder.build === 'function') {
     return txOrBuilder.build()
   }
   return txOrBuilder as Transaction
+}
+
+async function sendWithPriority(
+  tx: Transaction,
+  signers: Keypair[],
+  label: string,
+): Promise<string> {
+  const connection = getConnection()
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
+  tx.recentBlockhash = blockhash
+  tx.feePayer = signers[0].publicKey
+
+  // Prepend budget instructions only if not already present
+  const hasBudget = tx.instructions.some(
+    ix => ix.programId.equals(ComputeBudgetProgram.programId),
+  )
+  if (!hasBudget) {
+    tx.instructions.unshift(
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+    )
+  }
+
+  tx.sign(...signers)
+  const sig = await connection.sendRawTransaction(tx.serialize(), {
+    skipPreflight: false,
+    maxRetries: 3,
+  })
+  await connection.confirmTransaction(
+    { signature: sig, blockhash, lastValidBlockHeight },
+    'confirmed',
+  )
+  console.log(`${label} tx confirmed: ${sig}`)
+  return sig
 }
 
 // ── Open ───────────────────────────────────────────────────────────────────────
@@ -70,62 +110,151 @@ async function resolveTransaction(txOrBuilder: any): Promise<Transaction> {
  * Open a DAMM v2 position for the given token/pool.
  *
  * Flow:
- *   1. Fetch pool state to confirm live + detect which side is SOL.
- *   2. Create a fresh position Keypair.
- *   3. Call createPosition, then addLiquidity (single-sided SOL input).
- *   4. Return position pubkey + tx signature for Supabase recording.
+ *   1. Fetch pool state to get sqrtPrice, vaults, mints, programs, collectFeeMode.
+ *   2. Determine which side is SOL; build maxAmountToken[A|B].
+ *   3. Compute liquidityDelta via sdk.getDepositQuote() for single-sided deposit.
+ *   4. Generate fresh position NFT Keypair.
+ *   5. Call sdk.createPositionAndAddLiquidity() → build → sign → confirm.
+ *   6. Persist to lp_positions with strategy_id = 'damm-edge'.
  */
 export async function openDammPosition(
-  params: DammPositionParams
+  params: DammPositionParams,
 ): Promise<{ positionPubkey: string; txSignature: string; success: boolean; error?: string }> {
   console.log(`[DAMM] Opening position — pool=${params.poolAddress} sol=${params.solAmount}`)
 
   try {
-    const sdk    = await getCpAmm()
+    const sdk = await getCpAmm()
     const wallet = getWallet()
-    const pool   = new PublicKey(params.poolAddress)
-    const positionKp = Keypair.generate()
+    const pool = new PublicKey(params.poolAddress)
+    // positionNft is the NFT mint keypair — createPositionAndAddLiquidity derives
+    // the position PDA and NFT account from it internally.
+    const positionNftKp = Keypair.generate()
 
-    // 1. Confirm pool is live
+    // 1. Fetch pool state
     const poolState = await sdk.fetchPoolState(pool)
-    if (!poolState) throw new Error('Pool not found or paused')
+    if (!poolState) throw new Error('[DAMM] Pool not found or paused')
 
-    // 2. Single-sided SOL deposit — determine which token mint is SOL
-    const WSOL = 'So11111111111111111111111111111111111111112'
-    const solLamports = Math.floor(params.solAmount * 1e9)
-    const isTokenASol = poolState.tokenAMint.toBase58() === WSOL
-    const tokenAAmountIn = new BN(isTokenASol ? solLamports : 0)
-    const tokenBAmountIn = new BN(isTokenASol ? 0 : solLamports)
+    const {
+      tokenAMint,
+      tokenBMint,
+      tokenAVault,
+      tokenBVault,
+      sqrtPrice,
+      sqrtMinPrice,
+      sqrtMaxPrice,
+      liquidity,
+      collectFeeMode,
+      tokenAFlag,
+      tokenBFlag,
+    } = poolState
 
-    // 3. Create position account
-    const createRaw = await sdk.createPosition({
-      owner:    wallet.publicKey,
+    // 2. Token programs — tokenFlag: 0 = SPL, 1 = Token2022
+    const { TOKEN_2022_PROGRAM_ID } = await import('@solana/spl-token')
+    const tokenAProgram = tokenAFlag === 1 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID
+    const tokenBProgram = tokenBFlag === 1 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID
+
+    const WSOL = NATIVE_MINT.toBase58()
+    const isTokenASol = tokenAMint.toBase58() === WSOL
+    const isTokenBSol = tokenBMint.toBase58() === WSOL
+
+    if (!isTokenASol && !isTokenBSol) {
+      throw new Error('[DAMM] Neither token is SOL — single-sided SOL deposit not possible')
+    }
+
+    const lamports = Math.floor(params.solAmount * 1e9)
+    const solBN = new BN(lamports)
+    const zeroBN = new BN(0)
+
+    // 3. Compute liquidityDelta for single-sided deposit
+    //    getDepositQuote returns { liquidityDelta, actualInputAmount, outputAmount }
+    let liquidityDelta: BN
+    let maxAmountTokenA: BN
+    let maxAmountTokenB: BN
+
+    if (isTokenASol) {
+      // Depositing token A (SOL) only → sqrtPrice must be < sqrtMaxPrice
+      if (sqrtPrice.gte(sqrtMaxPrice)) {
+        throw new Error('[DAMM] sqrtPrice >= sqrtMaxPrice — cannot deposit token A only')
+      }
+      const quote = sdk.getDepositQuote({
+        inAmount: solBN,
+        isTokenA: true,
+        minSqrtPrice: sqrtMinPrice,
+        maxSqrtPrice: sqrtMaxPrice,
+        sqrtPrice,
+        collectFeeMode,
+        tokenAAmount: poolState.tokenAAmount,
+        tokenBAmount: poolState.tokenBAmount,
+        liquidity,
+      })
+      liquidityDelta = quote.liquidityDelta
+      // Set generous thresholds: 1% slippage
+      maxAmountTokenA = solBN
+      maxAmountTokenB = zeroBN
+    } else {
+      // Depositing token B (SOL) only → sqrtPrice must be > sqrtMinPrice
+      if (sqrtPrice.lte(sqrtMinPrice)) {
+        throw new Error('[DAMM] sqrtPrice <= sqrtMinPrice — cannot deposit token B only')
+      }
+      const quote = sdk.getDepositQuote({
+        inAmount: solBN,
+        isTokenA: false,
+        minSqrtPrice: sqrtMinPrice,
+        maxSqrtPrice: sqrtMaxPrice,
+        sqrtPrice,
+        collectFeeMode,
+        tokenAAmount: poolState.tokenAAmount,
+        tokenBAmount: poolState.tokenBAmount,
+        liquidity,
+      })
+      liquidityDelta = quote.liquidityDelta
+      maxAmountTokenA = zeroBN
+      maxAmountTokenB = solBN
+    }
+
+    if (liquidityDelta.isZero()) {
+      throw new Error('[DAMM] liquidityDelta is zero — pool may be full range or price is at boundary')
+    }
+
+    console.log(`[DAMM] liquidityDelta=${liquidityDelta.toString()} isTokenASol=${isTokenASol}`)
+
+    // 4. createPositionAndAddLiquidity (creates NFT mint + position PDA + adds liq in one tx)
+    const rawTx = await sdk.createPositionAndAddLiquidity({
+      owner: wallet.publicKey,
       pool,
-      position: positionKp.publicKey,
-    })
-    const createTx = await resolveTransaction(createRaw)
-    await sendAndConfirmTransaction(getConnection(), createTx, [wallet, positionKp], {
-      commitment: 'confirmed',
-    })
-    console.log(`[DAMM] Position account created: ${positionKp.publicKey.toBase58()}`)
-
-    // 4. Add single-sided liquidity
-    const addRaw = await sdk.addLiquidity({
-      owner:           wallet.publicKey,
-      pool,
-      position:        positionKp.publicKey,
-      tokenAAmountIn,
-      tokenBAmountIn,
-      liquidityMin:    new BN(0),   // no slippage protection for now — tighten once live
-    })
-    const addTx = await resolveTransaction(addRaw)
-    const signature = await sendAndConfirmTransaction(getConnection(), addTx, [wallet], {
-      commitment: 'confirmed',
+      positionNft: positionNftKp.publicKey,
+      liquidityDelta,
+      maxAmountTokenA,
+      maxAmountTokenB,
+      // 1% slippage: accept up to 1% less than theoretical amounts
+      tokenAAmountThreshold: maxAmountTokenA.muln(99).divn(100),
+      tokenBAmountThreshold: maxAmountTokenB.muln(99).divn(100),
+      tokenAMint,
+      tokenBMint,
+      tokenAProgram,
+      tokenBProgram,
     })
 
-    console.log(`[DAMM] ✅ Opened: ${signature}`)
-    return { positionPubkey: positionKp.publicKey.toBase58(), txSignature: signature, success: true }
+    const tx = await resolveTransaction(rawTx)
+    // positionNftKp must sign because it is the NFT mint being created
+    const signature = await sendWithPriority(tx, [wallet, positionNftKp], '[DAMM][open]')
 
+    // Derive position PDA for storage (same derivation as SDK internals)
+    const { derivePositionAddress } = await import('@meteora-ag/cp-amm-sdk')
+    const positionPda = derivePositionAddress(positionNftKp.publicKey)
+    const positionPubkey = positionPda.toBase58()
+
+    console.log(`[DAMM] ✅ Opened: pos=${positionPubkey} sig=${signature}`)
+
+    // 5. Persist to lp_positions
+    await saveDammPosition({
+      params,
+      positionPubkey,
+      signature,
+      solDeposited: params.solAmount,
+    })
+
+    return { positionPubkey, txSignature: signature, success: true }
   } catch (e: any) {
     const msg = e?.message ?? String(e)
     console.error('[DAMM] openDammPosition failed:', msg)
@@ -133,48 +262,114 @@ export async function openDammPosition(
   }
 }
 
+// ── Supabase persist ───────────────────────────────────────────────────────────
+
+async function saveDammPosition({
+  params,
+  positionPubkey,
+  signature,
+  solDeposited,
+}: {
+  params: DammPositionParams
+  positionPubkey: string
+  signature: string
+  solDeposited: number
+}): Promise<string> {
+  const supabase = createServerClient()
+  const { data, error } = await supabase
+    .from('lp_positions')
+    .insert({
+      mint: params.tokenAddress,
+      symbol: params.symbol,
+      pool_address: params.poolAddress,
+      position_pubkey: positionPubkey,
+      token_amount: 0,
+      sol_deposited: solDeposited,
+      entry_price_usd: 0,
+      entry_price_sol: 0,
+      fees_earned_sol: 0,
+      status: 'active',
+      in_range: true,
+      dry_run: process.env.BOT_DRY_RUN === 'true',
+      opened_at: new Date().toISOString(),
+      tx_open: signature,
+      metadata: {
+        strategy_id: 'damm-edge',
+        age_minutes: params.ageMinutes,
+        fee_tvl_24h_pct: params.feeTvl24hPct,
+        liquidity_usd: params.liquidityUsd,
+      },
+    })
+    .select('id')
+    .single()
+
+  if (error) {
+    console.error('[DAMM] Failed to persist lp_position:', error.message)
+    throw new Error(`[DAMM] Supabase insert failed: ${error.message}`)
+  }
+
+  console.log(`[DAMM] lp_position saved: id=${data.id}`)
+  return data.id
+}
+
 // ── Close ──────────────────────────────────────────────────────────────────────
 
 /**
  * Close a DAMM v2 position via Zap Out → 100% back to SOL.
  *
- * poolAddress must be supplied (stored in lp_positions.pool_address when opened).
- * Without it we cannot build the zap-out instruction.
+ * positionId: Supabase row id from lp_positions.
+ * Loads pool_address and position_pubkey from DB; no guessing.
  */
 export async function closeDammPosition(
-  positionPubkey: string,
+  positionId: string,
   reason: string,
-  poolAddress: string,
 ): Promise<{ txSignature: string; success: boolean; error?: string }> {
-  console.log(`[DAMM] Closing via Zap Out: ${positionPubkey} — ${reason}`)
+  console.log(`[DAMM] Closing position id=${positionId} reason=${reason}`)
 
   try {
-    const zap    = await getZap()
+    const supabase = createServerClient()
+    const { data: row, error: dbErr } = await supabase
+      .from('lp_positions')
+      .select('pool_address, position_pubkey')
+      .eq('id', positionId)
+      .single()
+
+    if (dbErr || !row) {
+      throw new Error(`[DAMM] lp_position ${positionId} not found: ${dbErr?.message ?? 'null row'}`)
+    }
+
+    const zap = await getZap()
     const wallet = getWallet()
-    const WSOL   = new PublicKey('So11111111111111111111111111111111111111112')
-    const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
 
     const tx: any = await zap.zapOutThroughDammV2({
-      user:                wallet.publicKey,
-      poolAddress:         new PublicKey(poolAddress),
-      inputMint:           WSOL,
-      outputMint:          WSOL,
-      inputTokenProgram:   TOKEN_PROGRAM,
-      outputTokenProgram:  TOKEN_PROGRAM,
-      amountIn:            new BN(0),
+      user: wallet.publicKey,
+      poolAddress: new PublicKey(row.pool_address),
+      inputMint: NATIVE_MINT,
+      outputMint: NATIVE_MINT,
+      inputTokenProgram: TOKEN_PROGRAM_ID,
+      outputTokenProgram: TOKEN_PROGRAM_ID,
+      amountIn: new BN(0),
       minimumSwapAmountOut: new BN(0),
-      maxSwapAmount:       new BN(0),
-      percentageToZapOut:  100,
+      maxSwapAmount: new BN(0),
+      percentageToZapOut: 100,
     })
 
     const resolved = await resolveTransaction(tx)
-    const signature = await sendAndConfirmTransaction(getConnection(), resolved, [wallet], {
-      commitment: 'confirmed',
-    })
+    const signature = await sendWithPriority(resolved, [wallet], '[DAMM][close]')
+
+    // Mark closed in DB
+    await supabase
+      .from('lp_positions')
+      .update({
+        status: 'closed',
+        closed_at: new Date().toISOString(),
+        close_reason: reason,
+        oor_since_at: null,
+      })
+      .eq('id', positionId)
 
     console.log(`[DAMM] ✅ Closed via Zap Out: ${signature}`)
     return { txSignature: signature, success: true }
-
   } catch (e: any) {
     const msg = e?.message ?? String(e)
     console.error('[DAMM] closeDammPosition failed:', msg)
@@ -185,18 +380,18 @@ export async function closeDammPosition(
 // ── Pool config helper ──────────────────────────────────────────────────────────
 
 export async function getDammPoolConfig(poolAddress: string): Promise<{
-  isValid:       boolean
+  isValid: boolean
   currentPrice?: number
-  feePct?:       number
+  feePct?: number
 }> {
   try {
-    const sdk  = await getCpAmm()
+    const sdk = await getCpAmm()
     const pool = await sdk.fetchPoolState(new PublicKey(poolAddress))
     if (!pool) return { isValid: false }
     return {
-      isValid:      true,
+      isValid: true,
       currentPrice: Number(pool.sqrtPrice ?? 0),
-      feePct:       pool.poolFees?.baseFactor ? Number(pool.poolFees.baseFactor) / 100 : undefined,
+      feePct: pool.poolFees?.baseFactor ? Number(pool.poolFees.baseFactor) / 100 : undefined,
     }
   } catch {
     return { isValid: false }
