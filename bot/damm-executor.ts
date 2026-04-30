@@ -5,6 +5,10 @@
  * COMPLETELY ISOLATED from bot/executor.ts (DLMM) — zero shared imports.
  *
  * ISOLATION RULE: Must NOT import from bot/executor.ts or bot/monitor.ts.
+ *
+ * CRITICAL: CpAmm and Connection are lazy-initialised inside functions only.
+ * Module-level SDK instantiation triggers Anchor IDL parsing at Next.js build
+ * time, which crashes page-data collection with an IdlError.
  */
 
 import 'dotenv/config'
@@ -12,14 +16,23 @@ import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
 
-import { Connection, PublicKey, Keypair } from '@solana/web3.js'
-import { CpAmm } from '@meteora-ag/cp-amm-sdk'
+import { Connection } from '@solana/web3.js'
 import type { DammPositionParams } from '@/lib/types'
 
-// Module-level connection + CpAmm instance (matches cp-amm-sdk constructor signature).
-// Falls back to HELIUS_RPC_URL if RPC_URL is not explicitly set.
-const connection = new Connection(process.env.RPC_URL ?? process.env.HELIUS_RPC_URL ?? '')
-const cpAmm = new CpAmm(connection)
+// ── Lazy singleton ─────────────────────────────────────────────────────────────
+// Never instantiate at module level — that runs during Next.js build and causes
+// Anchor IDL parsing to fire, crashing /api/bot/tick page-data collection.
+
+let _cpAmm: import('@meteora-ag/cp-amm-sdk').CpAmm | null = null
+
+async function getCpAmm(): Promise<import('@meteora-ag/cp-amm-sdk').CpAmm> {
+  if (!_cpAmm) {
+    const { CpAmm } = await import('@meteora-ag/cp-amm-sdk')
+    const conn = new Connection(process.env.RPC_URL ?? process.env.HELIUS_RPC_URL ?? '')
+    _cpAmm = new CpAmm(conn)
+  }
+  return _cpAmm
+}
 
 // ── Open ───────────────────────────────────────────────────────────────────────
 
@@ -43,6 +56,10 @@ export async function openDammPosition(
   )
 
   try {
+    // Lazy-load SDK — safe to call here (runtime only, never at build time)
+    const cpAmm = await getCpAmm()
+    void cpAmm // suppress unused-variable lint until TODOs are implemented
+
     // TODO (step 1): Confirm pool exists and is not paused.
     //   const poolState = await cpAmm.fetchPoolState(new PublicKey(params.poolAddress))
 
@@ -91,6 +108,9 @@ export async function closeDammPosition(
   console.log('[DAMM] Would close', positionPubkey, 'reason:', reason)
 
   try {
+    const cpAmm = await getCpAmm()
+    void cpAmm
+
     // TODO (step 1): const positionState = await cpAmm.fetchPositionState(new PublicKey(positionPubkey))
     // TODO (step 2): Claim fees IX — cpAmm.claimFee() or cpAmm.claimAllFee()
     // TODO (step 3): Remove liquidity IX — cpAmm.removeLiquidity() or decreaseLiquidityByStrategy()
@@ -120,6 +140,7 @@ export async function getDammPoolConfig(poolAddress: string): Promise<{
   currentPrice?: number
   feePct?: number
 }> {
+  // TODO: const cpAmm = await getCpAmm()
   // TODO: const poolState = await cpAmm.fetchPoolState(new PublicKey(poolAddress))
   // TODO: return { isValid: true, currentPrice: poolState.sqrtPrice, feePct: poolState.poolFees.baseFactor }
   void poolAddress
