@@ -13,7 +13,6 @@
     "worker:start": "node -r tsconfig-paths/register dist/worker.js"
   },
   "overrides": {
-    "@coral-xyz/anchor": "0.29.0",
     "@meteora-ag/dlmm": {
       "exports": {
         ".": {
@@ -25,7 +24,6 @@
     }
   },
   "dependencies": {
-    "@coral-xyz/anchor": "0.29.0",
     "@meteora-ag/cp-amm-sdk": "^1.0.0",
     "@meteora-ag/dlmm": "^1.1.12",
     "@solana/spl-token": "^0.4.9",
