@@ -247,17 +247,3 @@ export async function handleDammExit(
 
   console.log(`[PRE-GRAD] Exit closed ${positionId} reason: ${reason}`)
 }
-
-// ── monitor.ts compatibility shim ────────────────────────────────────────────
-
-export async function closePreGradPosition(
-  position: Record<string, unknown>
-): Promise<boolean> {
-  const positionId = String(position.id || position.position_id || '')
-  if (!positionId) {
-    console.error('[PRE-GRAD] closePreGradPosition called without id')
-    return false
-  }
-  console.log(`[PRE-GRAD] closePreGradPosition called for ${positionId} (deferred to pre-grad loop)`)
-  return false
-}
