@@ -4,7 +4,7 @@
  * Manages the monitoring loop and exit routing for positions opened via the
  * DAMM edge track (strategy_id = 'damm-edge').
  *
- * ISOLATION RULE: Must NOT import from bot/monitor.ts or bot/executor.ts.
+ * ISOLATION RULE: Must NOT import anything from bot/monitor.ts or bot/executor.ts.
  */
 
 import { closeDammPosition } from '../bot/damm-executor'
@@ -18,45 +18,58 @@ const supabase = createClient(
 // ── Monitor loop ──────────────────────────────────────────────────────────────────
 
 /**
- * Start the DAMM position monitor.
- * Called once at bot startup (alongside startMonitor in bot/monitor.ts).
- *
- * Next iteration TODOs:
- *   1. Query lp_positions WHERE strategy_id = 'damm-edge' AND status = 'active'.
- *   2. For each position, evaluate exit rules:
- *      - Stop-loss (SOL value < entry * stopLossPct)
- *      - Take-profit (SOL value > entry * takeProfitPct)
- *      - Fee yield exit (feesEarnedSol / solDeposited > feeYieldExitPct)
- *      - Max duration (age > maxDurationHours)
- *   3. Call handleDammExit() for any position that triggers a rule.
+ * Start the DAMM position monitor (60s interval).
+ * Called once at bot startup.
  */
 export async function startPreGradMonitor(): Promise<void> {
-  console.log('[PRE-GRAD] Starting DAMM position monitor...')
+  console.log('[PRE-GRAD] Starting DAMM position monitor (60s interval)...')
 
   setInterval(async () => {
-    console.log('[PRE-GRAD] Checking DAMM positions...')
+    console.log('[PRE-GRAD] Checking active DAMM positions...')
 
-    // TODO: Query active damm-edge positions
-    // const { data, error } = await supabase
-    //   .from('lp_positions')
-    //   .select('*')
-    //   .eq('strategy_id', 'damm-edge')
-    //   .eq('status', 'active')
-    //
-    // TODO: Iterate + evaluate exit rules per position
-    // if (error) console.error('[PRE-GRAD] DB error:', error.message)
+    const { data: positions, error } = await supabase
+      .from('lp_positions')
+      .select('*')
+      .eq('strategy_id', 'damm-edge')
+      .eq('status', 'active')
+
+    if (error) {
+      console.error('[PRE-GRAD] DB query error:', error.message)
+      return
+    }
+
+    if (!positions || positions.length === 0) {
+      console.log('[PRE-GRAD] No active DAMM positions')
+      return
+    }
+
+    console.log(`[PRE-GRAD] Evaluating ${positions.length} DAMM position(s)`)
+
+    for (const pos of positions) {
+      const ageHours = (Date.now() - new Date(pos.created_at).getTime()) / (1000 * 60 * 60)
+      const pnlPct = pos.pnl_pct || 0
+      const feeYield = pos.fee_yield_sol || 0
+
+      let reason = ''
+
+      if (ageHours > 72) reason = 'max-duration'
+      else if (pnlPct <= -30) reason = 'stop-loss'
+      else if (pnlPct >= 40) reason = 'take-profit'
+      else if (feeYield > 0.10) reason = 'fee-yield'
+
+      if (reason) {
+        console.log(`[PRE-GRAD] EXIT triggered: ${pos.token_symbol || pos.token_address} → ${reason}`)
+        await handleDammExit(pos.id, reason)
+      }
+    }
   }, 60_000)
 }
 
-// ── Exit handler ─────────────────────────────────────────────────────────────────
+// ── Exit handler ───────────────────────────────────────────────────────────────
 
 /**
- * Explicit exit trigger. Called by startPreGradMonitor (above) or externally
+ * Explicit exit trigger. Called by startPreGradMonitor or externally
  * when an exit condition fires.
- *
- * Calls closeDammPosition() in bot/damm-executor which handles:
- *   - Zap Out via @meteora-ag/zap-sdk (100% back to SOL)
- *   - DB update (status: 'closed', close_reason, closed_at)
  */
 export async function handleDammExit(
   positionId: string,
@@ -66,23 +79,22 @@ export async function handleDammExit(
   console.log(`[PRE-GRAD] Exit closed ${positionId} reason: ${reason}`)
 }
 
-// ── monitor.ts compatibility shim ─────────────────────────────────────────────────
+// ── monitor.ts compatibility shim ─────────────────────────────────────────────
 
 /**
- * Called by bot/monitor.ts for any position with position_type === 'pre_grad'.
+ * Called by bot/monitor.ts for any position with strategy_id === 'damm-edge'.
  * Returns true if the position was closed, false if skipped.
- *
- * TODO: Replace stub with real DAMM v2 exit logic:
- *   1. Evaluate exit rules against the position
- *   2. Call handleDammExit() if triggered
- *   3. Return true only when the position was actually closed
+ * Exit ownership belongs to startPreGradMonitor; this shim defers accordingly.
  */
 export async function closePreGradPosition(
   position: Record<string, unknown>
 ): Promise<boolean> {
-  console.warn(
-    `[PRE-GRAD] closePreGradPosition stub — position ${position['id']} skipped. ` +
-    `DAMM v2 executor not yet fully implemented.`
-  )
+  const positionId = String(position.id || position.position_id || '')
+  if (!positionId) {
+    console.error('[PRE-GRAD] closePreGradPosition called without id')
+    return false
+  }
+
+  console.log(`[PRE-GRAD] closePreGradPosition called for ${positionId} (monitor compatibility — deferred to pre-grad loop)`)
   return false
 }
