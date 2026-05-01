@@ -8,6 +8,7 @@
  */
 
 import { closeDammPosition } from '../bot/damm-executor'
+import { sendAlert } from './alerter'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
@@ -59,7 +60,7 @@ export async function startPreGradMonitor(): Promise<void> {
 
       if (reason) {
         console.log(`[PRE-GRAD] EXIT triggered: ${pos.token_symbol || pos.token_address} → ${reason}`)
-        await handleDammExit(pos.id, reason)
+        await handleDammExit(pos.id, reason, pos.symbol ?? pos.token_symbol ?? pos.mint ?? 'UNKNOWN', pos.created_at)
       }
     }
   }, 60_000)
@@ -69,13 +70,28 @@ export async function startPreGradMonitor(): Promise<void> {
 
 /**
  * Explicit exit trigger. Called by startPreGradMonitor or externally
- * when an exit condition fires.
+ * when an exit condition fires. Fires pre_grad_closed Telegram alert.
  */
 export async function handleDammExit(
   positionId: string,
-  reason: string
+  reason: string,
+  symbol: string = 'UNKNOWN',
+  openedAt?: string,
 ): Promise<void> {
+  const ageMin = openedAt
+    ? Math.round((Date.now() - new Date(openedAt).getTime()) / 60_000)
+    : 0
+
   await closeDammPosition(positionId, reason)
+
+  await sendAlert({
+    type: 'pre_grad_closed',
+    symbol,
+    positionId,
+    reason,
+    ageMin,
+  })
+
   console.log(`[PRE-GRAD] Exit closed ${positionId} reason: ${reason}`)
 }
 

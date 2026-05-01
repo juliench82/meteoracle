@@ -4,7 +4,7 @@
  * - Real open:  createPositionAndAddLiquidity via @meteora-ag/cp-amm-sdk
  *   Uses single-sided SOL deposit: maxAmountToken[A|B] = lamports, other side = 0.
  *   liquidityDelta computed via sdk.getDepositQuote().
- *   Saves to lp_positions with strategy_id = 'damm-edge' on success.
+ *   Saves to lp_positions with strategy_id = 'damm-edge'.
  *
  * - Real close: zapOutThroughDammV2 via @meteora-ag/zap-sdk → everything to SOL.
  *   Loads position row from Supabase by positionId before calling zap.
@@ -27,6 +27,7 @@ import BN from 'bn.js'
 import bs58 from 'bs58'
 import type { DammPositionParams } from '@/lib/types'
 import { createServerClient } from '@/lib/supabase'
+import { sendAlert } from '@/lib/alerter'
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
 
@@ -116,6 +117,7 @@ async function sendWithPriority(
  *   4. Generate fresh position NFT Keypair.
  *   5. Call sdk.createPositionAndAddLiquidity() → build → sign → confirm.
  *   6. Persist to lp_positions with strategy_id = 'damm-edge'.
+ *   7. Fire pre_grad_opened Telegram alert.
  */
 export async function openDammPosition(
   params: DammPositionParams,
@@ -247,11 +249,20 @@ export async function openDammPosition(
     console.log(`[DAMM] ✅ Opened: pos=${positionPubkey} sig=${signature}`)
 
     // 5. Persist to lp_positions
-    await saveDammPosition({
+    const positionId = await saveDammPosition({
       params,
       positionPubkey,
       signature,
       solDeposited: params.solAmount,
+    })
+
+    // 6. Fire Telegram alert
+    await sendAlert({
+      type: 'pre_grad_opened',
+      symbol: params.symbol,
+      positionId,
+      poolAddress: params.poolAddress,
+      bondingCurvePct: params.bondingCurvePct ?? 0,
     })
 
     return { positionPubkey, txSignature: signature, success: true }
