@@ -16,6 +16,57 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
+// ── On-chain state fetch ─────────────────────────────────────────────────────────
+
+/**
+ * Reads current sqrtPrice from DAMM pool state and derives a SOL-denominated
+ * price. Also reads unclaimed fees from the position account.
+ *
+ * sqrtPrice in DAMM v2 is a Q64.64 fixed-point number:
+ *   price = (sqrtPrice / 2^64)^2
+ * We only need a ratio vs entry_price_sol for PnL %, so units cancel out.
+ *
+ * Returns null if the RPC call fails so the caller can skip the tick safely.
+ */
+async function fetchDammPositionState(
+  poolAddress: string,
+  positionPubkey: string,
+): Promise<{ currentPriceSol: number; feesEarnedSol: number } | null> {
+  try {
+    const { Connection, PublicKey } = await import('@solana/web3.js')
+    const { CpAmm } = await import('@meteora-ag/cp-amm-sdk')
+
+    const connection = new Connection(process.env.RPC_URL!, 'confirmed')
+    const sdk = new CpAmm(connection)
+
+    const poolState = await sdk.fetchPoolState(new PublicKey(poolAddress))
+    if (!poolState) return null
+
+    // sqrtPrice is Q64.64: price = (sqrtPrice / 2^64)^2
+    const TWO_POW_64 = 2n ** 64n
+    const sqrtPriceBig = BigInt(poolState.sqrtPrice.toString())
+    const currentPriceSol = Number((sqrtPriceBig * sqrtPriceBig) / (TWO_POW_64 * TWO_POW_64))
+
+    // Fetch unclaimed fees from the position account
+    let feesEarnedSol = 0
+    try {
+      const positionState = await sdk.fetchPositionState(new PublicKey(positionPubkey))
+      if (positionState) {
+        const feeA = Number(positionState.feeOwed?.feeAOwed ?? 0) / 1e9
+        const feeB = Number(positionState.feeOwed?.feeBOwed ?? 0) / 1e9
+        feesEarnedSol = feeA + feeB
+      }
+    } catch {
+      // fees are non-critical — carry on with 0
+    }
+
+    return { currentPriceSol, feesEarnedSol }
+  } catch (err) {
+    console.error('[PRE-GRAD] fetchDammPositionState failed:', err)
+    return null
+  }
+}
+
 // ── Monitor loop ──────────────────────────────────────────────────────────────────
 
 /**
@@ -47,25 +98,56 @@ export async function startPreGradMonitor(): Promise<void> {
     console.log(`[PRE-GRAD] Evaluating ${positions.length} DAMM position(s)`)
 
     for (const pos of positions) {
-      // opened_at is the correct timestamp column in lp_positions
       const ageHours = (Date.now() - new Date(pos.opened_at).getTime()) / (1000 * 60 * 60)
-      // pnl_sol is the actual column; derive pct from sol_deposited
-      const pnlSol = Number(pos.pnl_sol ?? 0)
       const solDeposited = Number(pos.sol_deposited ?? 1)
-      const pnlPct = solDeposited > 0 ? (pnlSol / solDeposited) * 100 : 0
-      // fees_earned_sol is the actual column
-      const feeYield = Number(pos.fees_earned_sol ?? 0)
+
+      // Fetch live on-chain state
+      const onChain = await fetchDammPositionState(pos.pool_address, pos.position_pubkey)
+
+      let pnlSol: number
+      let feesEarnedSol: number
+      let pnlPct: number
+
+      if (onChain && onChain.currentPriceSol > 0 && Number(pos.entry_price_sol ?? 0) > 0) {
+        const entryPrice = Number(pos.entry_price_sol)
+        const pricePct = ((onChain.currentPriceSol - entryPrice) / entryPrice) * 100
+        // Standard CPAMM IL approximation: 2√k/(1+k) − 1
+        const k = onChain.currentPriceSol / entryPrice
+        const ilPct = (2 * Math.sqrt(k) / (1 + k) - 1) * 100
+        feesEarnedSol = onChain.feesEarnedSol
+        pnlSol = solDeposited * (pricePct / 100) + feesEarnedSol
+        pnlPct = solDeposited > 0 ? (pnlSol / solDeposited) * 100 : 0
+
+        // Write live metrics back to DB so dashboard + exit logic are accurate
+        await supabase
+          .from('lp_positions')
+          .update({
+            current_price: onChain.currentPriceSol,
+            fees_earned_sol: feesEarnedSol,
+            pnl_sol: Math.round(pnlSol * 1e6) / 1e6,
+            il_pct: Math.round(ilPct * 100) / 100,
+          })
+          .eq('id', pos.id)
+      } else {
+        // RPC miss or no entry price — fall back to DB values, skip TP/SL
+        pnlSol = Number(pos.pnl_sol ?? 0)
+        feesEarnedSol = Number(pos.fees_earned_sol ?? 0)
+        pnlPct = solDeposited > 0 ? (pnlSol / solDeposited) * 100 : 0
+        if (!onChain) {
+          console.warn(`[PRE-GRAD] RPC miss for ${pos.id} — skipping TP/SL this tick`)
+        }
+      }
 
       let reason = ''
 
       if (ageHours > 72) reason = 'max-duration'
-      else if (pnlPct <= -30) reason = 'stop-loss'
-      else if (pnlPct >= 40) reason = 'take-profit'
-      else if (feeYield > 0.10) reason = 'fee-yield'
+      else if (onChain && pnlPct <= -30) reason = 'stop-loss'
+      else if (onChain && pnlPct >= 40) reason = 'take-profit'
+      else if (feesEarnedSol > 0.10) reason = 'fee-yield'
 
       if (reason) {
         const label = pos.symbol ?? pos.mint ?? pos.id
-        console.log(`[PRE-GRAD] EXIT triggered: ${label} → ${reason}`)
+        console.log(`[PRE-GRAD] EXIT triggered: ${label} → ${reason} (pnl=${pnlPct.toFixed(1)}% fees=${feesEarnedSol.toFixed(4)} SOL)`)
         await handleDammExit(pos.id, reason, pos.symbol ?? pos.mint ?? 'UNKNOWN', pos.opened_at)
       }
     }
