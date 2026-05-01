@@ -25,6 +25,7 @@ import { swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 import { OPEN_LP_STATUSES, assertCanOpenLpPosition } from '@/lib/position-limits'
+import { STRATEGIES } from '@/strategies'
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -295,6 +296,209 @@ async function getPositionWithRetry(
   return null
 }
 
+function strategyTypeForDistribution(
+  strategyTypeEnum: typeof import('@meteora-ag/dlmm').StrategyType,
+  distributionType: Strategy['position']['distributionType'],
+): StrategyType {
+  const strategyTypeMap: Record<string, StrategyType> = {
+    spot:      strategyTypeEnum.Spot,
+    curve:     strategyTypeEnum.Curve,
+    'bid-ask': strategyTypeEnum.BidAsk,
+  }
+  return strategyTypeMap[distributionType] ?? strategyTypeEnum.Spot
+}
+
+function findStrategyForPosition(position: Record<string, any>): Strategy | null {
+  const strategyId = position.strategy_id ?? position.metadata?.strategy_id
+  return STRATEGIES.find(strategy => strategy.id === strategyId) ?? null
+}
+
+export async function addLiquidityToPosition(
+  positionId: string,
+  solAmount: number,
+): Promise<{
+  success: boolean
+  dryRun: boolean
+  txSignature: string
+  symbol: string
+  solAdded: number
+  error?: string
+}> {
+  const supabase = createServerClient()
+  const label = `[executor][add][${positionId}]`
+
+  if (!Number.isFinite(solAmount) || solAmount <= 0) {
+    return { success: false, dryRun: false, txSignature: '', symbol: positionId, solAdded: solAmount, error: 'SOL amount must be greater than 0' }
+  }
+
+  const { data: position, error } = await supabase
+    .from('lp_positions')
+    .select('*')
+    .eq('id', positionId)
+    .single()
+
+  if (error || !position) {
+    return { success: false, dryRun: false, txSignature: '', symbol: positionId, solAdded: solAmount, error: `position not found: ${error?.message ?? 'null row'}` }
+  }
+
+  const symbol = position.symbol ?? position.mint ?? positionId
+  if (position.position_type === 'damm-edge' || position.strategy_id === 'damm-edge' || position.strategy_id === 'damm-live') {
+    return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'adding liquidity is currently supported for DLMM positions only' }
+  }
+  if (position.status === 'closed') {
+    return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'position is already closed' }
+  }
+  if (!position.position_pubkey || !position.pool_address) {
+    return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'position is missing pool_address or position_pubkey' }
+  }
+
+  const strategy = findStrategyForPosition(position)
+  if (!strategy) {
+    return {
+      success: false,
+      dryRun: false,
+      txSignature: '',
+      symbol,
+      solAdded: solAmount,
+      error: `strategy not found for ${position.strategy_id ?? position.metadata?.strategy_id ?? 'unknown'}`,
+    }
+  }
+
+  const botState = await getBotState()
+  const dryRun = ENV_DRY_RUN_FORCED || botState.dry_run
+  if (dryRun) {
+    await supabase.from('bot_logs').insert({
+      level: 'info',
+      event: 'add_liquidity_dry_run',
+      payload: { positionId, symbol, solAmount, strategy: strategy.id },
+    })
+    console.log(`${label} dry_run=true — skipping add liquidity tx`)
+    return { success: true, dryRun: true, txSignature: 'DRY_RUN', symbol, solAdded: solAmount }
+  }
+
+  const connection = getConnection()
+  const wallet = getWallet()
+  const balanceSol = await connection.getBalance(wallet.publicKey) / 1e9
+  const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL
+  if (balanceSol < requiredSol) {
+    return {
+      success: false,
+      dryRun: false,
+      txSignature: '',
+      symbol,
+      solAdded: solAmount,
+      error: `insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`,
+    }
+  }
+
+  const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1')
+  const { data: openPositions } = await supabase
+    .from('lp_positions')
+    .select('sol_deposited')
+    .in('status', OPEN_LP_STATUSES)
+  const totalDeployed = (openPositions ?? []).reduce(
+    (sum: number, row: { sol_deposited: number | null }) => sum + Number(row.sol_deposited ?? 0),
+    0,
+  )
+  if (totalDeployed + solAmount > maxTotalDeployed) {
+    return {
+      success: false,
+      dryRun: false,
+      txSignature: '',
+      symbol,
+      solAdded: solAmount,
+      error: `global exposure cap hit — ${(totalDeployed + solAmount).toFixed(3)}/${maxTotalDeployed} SOL`,
+    }
+  }
+
+  try {
+    const DLMM = await getDLMM()
+    const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
+    const positionPubkey = new PublicKey(position.position_pubkey)
+    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
+    const livePosition = userPositions.find(p => p.publicKey.toBase58() === position.position_pubkey)
+
+    if (!livePosition) {
+      return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'position is not live in wallet on Meteora' }
+    }
+
+    const tokenX = dlmmPool.tokenX.publicKey as PublicKey
+    const tokenY = dlmmPool.tokenY.publicKey as PublicKey
+    const lamports = new BN(Math.floor(solAmount * 1e9))
+    const totalXAmount = tokenX.toBase58() === NATIVE_MINT_STR ? lamports : new BN(0)
+    const totalYAmount = tokenY.toBase58() === NATIVE_MINT_STR ? lamports : new BN(0)
+
+    if (totalXAmount.isZero() && totalYAmount.isZero()) {
+      return {
+        success: false,
+        dryRun: false,
+        txSignature: '',
+        symbol,
+        solAdded: solAmount,
+        error: 'pool has no SOL side; /add currently supports SOL-paired DLMM positions only',
+      }
+    }
+
+    const StrategyTypeEnum = await getStrategyType()
+    const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
+    const minBinId = Number(livePosition.positionData.lowerBinId)
+    const maxBinId = Number(livePosition.positionData.upperBinId)
+    const priorityFee = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()])
+
+    const rawTx = await dlmmPool.addLiquidityByStrategy({
+      positionPubKey: positionPubkey,
+      totalXAmount,
+      totalYAmount,
+      strategy: { minBinId, maxBinId, strategyType },
+      user: wallet.publicKey,
+      slippage: 1,
+    })
+
+    const tx = new Transaction().add(
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+      ...stripComputeBudgetIxs(rawTx.instructions),
+    )
+    const sig = await sendLegacyTx(tx, [wallet], label)
+    const previousSol = Number(position.sol_deposited ?? 0)
+    const metadata = (position.metadata ?? {}) as Record<string, unknown>
+    const previousManualAdds = Number(metadata.manual_add_sol_total ?? 0)
+
+    await supabase
+      .from('lp_positions')
+      .update({
+        sol_deposited: Math.round((previousSol + solAmount) * 1e9) / 1e9,
+        metadata: {
+          ...metadata,
+          manual_add_sol_total: Math.round((previousManualAdds + solAmount) * 1e9) / 1e9,
+          last_add_liquidity_sol: solAmount,
+          last_add_liquidity_tx: sig,
+          last_add_liquidity_at: new Date().toISOString(),
+          last_add_liquidity_distribution: strategy.position.distributionType,
+        },
+      })
+      .eq('id', positionId)
+
+    await supabase.from('bot_logs').insert({
+      level: 'info',
+      event: 'add_liquidity_success',
+      payload: { positionId, symbol, solAmount, strategy: strategy.id, txSignature: sig },
+    })
+
+    console.log(`${label} added ${solAmount} SOL to ${symbol} ✔ sig: ${sig}`)
+    return { success: true, dryRun: false, txSignature: sig, symbol, solAdded: solAmount }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`${label} add liquidity failed:`, message)
+    await supabase.from('bot_logs').insert({
+      level: 'error',
+      event: 'add_liquidity_failed',
+      payload: { positionId, symbol, solAmount, error: message },
+    })
+    return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: message }
+  }
+}
+
 export async function openPosition(
   metrics: TokenMetrics,
   strategy: Strategy
@@ -447,12 +651,7 @@ export async function openPosition(
     console.log(`${label} deposit split: X=${totalX.toString()} Y=${totalY.toString()} lamports (solBias=${solBias})`)
 
     const StrategyTypeEnum = await getStrategyType()
-    const strategyTypeMap: Record<string, StrategyType> = {
-      spot:      StrategyTypeEnum.Spot,
-      curve:     StrategyTypeEnum.Curve,
-      'bid-ask': StrategyTypeEnum.BidAsk,
-    }
-    const strategyType: StrategyType = strategyTypeMap[strategy.position.distributionType] ?? StrategyTypeEnum.Spot
+    const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
     const liqStrategyParams: LiquidityStrategyParams = { minBinId, maxBinId, strategyType }
 
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])

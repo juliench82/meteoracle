@@ -1,12 +1,13 @@
 import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { closePosition, openPosition } from '@/bot/executor'
+import { addLiquidityToPosition, closePosition, openPosition } from '@/bot/executor'
 import { closeDammPosition } from '@/bot/damm-executor'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { fetchLiveMeteoraPositions } from '@/lib/meteora-live'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
+import { syncAllMeteoraPositions } from '@/lib/position-sync'
 import { STRATEGIES } from '@/strategies'
 import type { TokenMetrics } from '@/lib/types'
 import axios from 'axios'
@@ -122,6 +123,64 @@ async function closeLpPositionByKind(
   return closePosition(pos.id, reason)
 }
 
+function parseSolAmount(value: string | undefined): number | null {
+  if (!value) return null
+  const amount = Number(value.replace(',', '.'))
+  return Number.isFinite(amount) && amount > 0 ? amount : null
+}
+
+async function resolveAddTarget(parts: string[]): Promise<{
+  positionId: string | null
+  solAmount: number | null
+  error?: string
+}> {
+  await syncAllMeteoraPositions().catch(err =>
+    console.warn('[telegram webhook] /add pre-sync failed:', err)
+  )
+
+  const supabase = createServerClient()
+  const { data: positions, error } = await supabase
+    .from('lp_positions')
+    .select('id, symbol, status, strategy_id, position_type')
+    .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
+
+  if (error) {
+    return { positionId: null, solAmount: null, error: `Could not load positions: ${error.message}` }
+  }
+
+  const dlmmPositions = (positions ?? []).filter(position => !isDammLp(position))
+  if (parts.length === 2) {
+    const solAmount = parseSolAmount(parts[1])
+    if (solAmount === null) {
+      return { positionId: null, solAmount: null, error: 'Usage: `/add <position_id> <SOL>` or `/add <SOL>` when exactly one DLMM position is open.' }
+    }
+    if (dlmmPositions.length !== 1) {
+      return {
+        positionId: null,
+        solAmount,
+        error: `Found ${dlmmPositions.length} open DLMM positions. Use \`/add <position_id> ${solAmount}\`.`,
+      }
+    }
+    return { positionId: dlmmPositions[0].id, solAmount }
+  }
+
+  const positionArg = parts[1]
+  const solAmount = parseSolAmount(parts[2])
+  if (!positionArg || solAmount === null) {
+    return { positionId: null, solAmount: null, error: 'Usage: `/add <position_id> <SOL>`' }
+  }
+
+  const matches = dlmmPositions.filter(position => position.id === positionArg || position.id.startsWith(positionArg))
+  if (matches.length === 0) {
+    return { positionId: null, solAmount, error: `No open DLMM position matches \`${positionArg}\`.` }
+  }
+  if (matches.length > 1) {
+    return { positionId: null, solAmount, error: `\`${positionArg}\` matches multiple positions. Use the full position id.` }
+  }
+
+  return { positionId: matches[0].id, solAmount }
+}
+
 export async function POST(req: Request) {
   try {
     if (!TELEGRAM_WEBHOOK_SECRET) {
@@ -181,6 +240,30 @@ export async function POST(req: Request) {
       } else {
         const detail = closeErr ? `: ${closeErr}` : ' — check logs'
         await reply(chatId, `❌ Failed to close \`${positionId}\` (${pos.symbol})${detail}`)
+      }
+      return NextResponse.json({ ok: true })
+    }
+
+    // -------------------------------------------------------------------- /add
+    if (command === '/add') {
+      const { positionId, solAmount, error } = await resolveAddTarget(parts)
+      if (error || !positionId || solAmount === null) {
+        await reply(chatId, `❌ ${error ?? 'Usage: `/add <position_id> <SOL>`'}`)
+        return NextResponse.json({ ok: true })
+      }
+
+      await reply(chatId, `⏳ Adding ${solAmount} SOL to position \`${positionId}\`...`)
+      const result = await addLiquidityToPosition(positionId, solAmount)
+      if (result.success && result.dryRun) {
+        await reply(chatId, `🟡 Dry-run: would add ${result.solAdded} SOL to ${result.symbol}. No transaction sent.`)
+      } else if (result.success) {
+        await reply(chatId, [
+          `✅ Added ${result.solAdded} SOL to ${result.symbol}.`,
+          `Position: \`${positionId}\``,
+          `Tx: \`${result.txSignature}\``,
+        ].join('\n'))
+      } else {
+        await reply(chatId, `❌ Add liquidity failed for ${result.symbol}: ${result.error ?? 'unknown error'}`)
       }
       return NextResponse.json({ ok: true })
     }
@@ -399,6 +482,7 @@ export async function POST(req: Request) {
         ``,
         `*Positions*`,
         `/close <id>     — manually force-close a position`,
+        `/add <id> <SOL> — add SOL liquidity to a DLMM position`,
         `/rebalance <id> — close + reopen centered at current price`,
         ``,
         `*Control*`,

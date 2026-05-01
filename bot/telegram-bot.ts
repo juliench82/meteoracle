@@ -10,6 +10,7 @@
  *   /dry            — switch to dry-run mode
  *   /live           — switch to live trading
  *   /close <id>     — force-close an LP position by ID
+ *   /add <id> <sol> — add SOL liquidity to an existing DLMM position
  *   /positions      — list all open LP positions
  *   /status         — snapshot: state, open positions, wallet SOL
  *   /tick           — manually trigger scanner + monitor in parallel
@@ -28,7 +29,7 @@ import { exec } from 'child_process'
 import { promisify } from 'util'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
-import { closePosition } from '@/bot/executor'
+import { addLiquidityToPosition, closePosition } from '@/bot/executor'
 import { closeDammPosition } from '@/bot/damm-executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
@@ -83,6 +84,66 @@ function fmtPrice(value: unknown): string {
   const n = Number(value)
   if (!Number.isFinite(n) || n <= 0) return 'n/a'
   return n >= 1 ? n.toFixed(4) : n.toPrecision(6)
+}
+
+function parseSolAmount(value: string | undefined): number | null {
+  if (!value) return null
+  const normalized = value.replace(',', '.')
+  const amount = Number(normalized)
+  return Number.isFinite(amount) && amount > 0 ? amount : null
+}
+
+async function resolveAddTarget(args: string[]): Promise<{
+  positionId: string | null
+  solAmount: number | null
+  error?: string
+}> {
+  await syncAllMeteoraPositions().catch(err =>
+    console.warn('[telegram-bot] /add pre-sync failed:', err)
+  )
+
+  const supabase = createServerClient()
+  const { data: positions, error } = await supabase
+    .from('lp_positions')
+    .select('id, symbol, status, strategy_id, position_type')
+    .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
+
+  if (error) {
+    return { positionId: null, solAmount: null, error: `Could not load positions: ${error.message}` }
+  }
+
+  const dlmmPositions = (positions ?? []).filter(position => !isDammLp(position))
+
+  if (args.length === 1) {
+    const solAmount = parseSolAmount(args[0])
+    if (solAmount === null) {
+      return { positionId: null, solAmount: null, error: 'Usage: `/add <position_id> <SOL>` or `/add <SOL>` when exactly one DLMM position is open.' }
+    }
+    if (dlmmPositions.length !== 1) {
+      return {
+        positionId: null,
+        solAmount,
+        error: `Found ${dlmmPositions.length} open DLMM positions. Use \`/add <position_id> ${solAmount}\`.`,
+      }
+    }
+    return { positionId: dlmmPositions[0].id, solAmount }
+  }
+
+  const positionArg = args[0]
+  const solAmount = parseSolAmount(args[1])
+  if (!positionArg || solAmount === null) {
+    return { positionId: null, solAmount: null, error: 'Usage: `/add <position_id> <SOL>`' }
+  }
+
+  const matches = dlmmPositions.filter(position => position.id === positionArg || position.id.startsWith(positionArg))
+  if (matches.length === 0) {
+    return { positionId: null, solAmount, error: `No open DLMM position matches \`${positionArg}\`.` }
+  }
+  if (matches.length > 1) {
+    return { positionId: null, solAmount, error: `\`${positionArg}\` matches multiple positions. Use the full position id.` }
+  }
+
+  return { positionId: matches[0].id, solAmount }
 }
 
 async function reply(text: string): Promise<void> {
@@ -248,6 +309,33 @@ async function handleClose(positionId: string) {
   }
 }
 
+async function handleAdd(args: string[]) {
+  const { positionId, solAmount, error } = await resolveAddTarget(args)
+  if (error || !positionId || solAmount === null) {
+    await reply(`❌ ${error ?? 'Usage: `/add <position_id> <SOL>`'}`)
+    return
+  }
+
+  await reply(`⏳ Adding ${solAmount} SOL to LP position \`${positionId}\`...`)
+  const result = await addLiquidityToPosition(positionId, solAmount)
+
+  if (result.success && result.dryRun) {
+    await reply(`🟡 Dry-run: would add ${result.solAdded} SOL to ${result.symbol}. No transaction sent.`)
+    return
+  }
+
+  if (result.success) {
+    await reply([
+      `✅ Added ${result.solAdded} SOL to ${result.symbol}.`,
+      `Position: \`${positionId}\``,
+      `Tx: \`${result.txSignature}\``,
+    ].join('\n'))
+    return
+  }
+
+  await reply(`❌ Add liquidity failed for ${result.symbol}: ${result.error ?? 'unknown error'}`)
+}
+
 async function handleStatus() {
   const supabase = createServerClient()
   const state = await getBotState()
@@ -344,10 +432,13 @@ async function handlePositions() {
     const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
     const value = p.position_value_usd ?? p.metadata?.position_value_usd
     const poolStats = p.metadata?.volume_24h_usd ? ` | vol24h ${fmtUsd(p.metadata.volume_24h_usd)}` : ''
+    const actionLine = liveOnly
+      ? `  Run /orphans to create a manageable cache row`
+      : `  /close ${p.id}${!isDammLp(p) ? ` | /add ${p.id} 0.05` : ''}`
     lines.push(
       `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h${source}`,
       `  value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | price ${fmtPrice(p.current_price)}${poolStats}`,
-      liveOnly ? `  Run /orphans to create a closeable cache row` : `  /close ${p.id}`
+      actionLine
     )
   }
   await reply(lines.join('\n'))
@@ -430,6 +521,7 @@ async function handleHelp() {
     `/status — snapshot: bot state + DLMM + DAMM v2 positions`,
     `/positions — list all open Meteora LP positions`,
     `/close <id> — force-close an LP position`,
+    `/add <id> <SOL> — add SOL liquidity to a DLMM position`,
     `/tick — manually trigger scanner + monitor`,
     `/orphans — manually run orphan detector`,
     `/candidates — top candidates from last 24h sorted by score`,
@@ -454,6 +546,7 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
     case 'dry': await handleDry(); break
     case 'live': await handleLive(); break
     case 'close': await handleClose(args[0] ?? ''); break
+    case 'add': await handleAdd(args); break
     case 'status': await handleStatus(); break
     case 'positions': await handlePositions(); break
     case 'candidates': await handleCandidates(); break
