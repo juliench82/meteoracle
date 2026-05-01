@@ -3,7 +3,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { SpotKPIBar } from '@/components/dashboard/SpotKPIBar'
 import { SpotPositionsTable } from '@/components/dashboard/SpotPositionsTable'
-import { SpotPnlChart } from '@/components/dashboard/SpotPnlChart'
 
 const POLL_INTERVAL_MS = 30_000
 
@@ -22,11 +21,9 @@ function normaliseLp(p: any, closed = false) {
     dry_run:         p.dry_run         ?? true,
     opened_at:       p.opened_at,
     closed_at:       p.closed_at       ?? null,
-    pnl_sol:         p.pnl_sol         ?? null,
-    fees_earned_sol: p.fees_earned_sol ?? null,
-    il_pct:          p.il_pct          ?? null,
     tx_buy:          p.tx_open         ?? undefined,
     tx_sell:         p.tx_close        ?? undefined,
+    metadata:        p.metadata        ?? {},
     _type:           'lp',
   }
 }
@@ -77,13 +74,7 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
     .slice(0, 50)
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tradesWithPnl = allClosed.filter((p: any) => p.pnl_sol !== null)
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const solDeployed = allOpen.reduce((s: number, p: any) => s + (p.amount_sol ?? 0), 0)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const wins    = tradesWithPnl.filter((p: any) => p.pnl_sol > 0).length
-  const winRate = tradesWithPnl.length > 0 ? Math.round((wins / tradesWithPnl.length) * 100) : null
 
   return (
     <div className="p-6 space-y-6">
@@ -102,10 +93,8 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
       <SpotKPIBar
         solDeployed={solDeployed}
         openPositions={allOpen.length}
-        winRate={winRate}
-        totalTrades={tradesWithPnl.length}
+        totalTrades={allClosed.length}
       />
-      <SpotPnlChart />
       <SpotPositionsTable
         openPositions={allOpen}
         closedPositions={allClosed.slice(0, 20)}

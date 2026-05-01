@@ -8,7 +8,8 @@
  *
  * - Real close: zapOutThroughDammV2 via @meteora-ag/zap-sdk → everything to SOL.
  *   Loads position row from Supabase by positionId before calling zap.
- *   After confirmation, reads the on-chain balance delta to store realized pnl_sol.
+ *   After confirmation, reads the on-chain balance delta and writes
+ *   metadata.realized_pnl_usd to the closed row.
  *
  * - Wallet: loaded from WALLET_PRIVATE_KEY env (base58), never from PublicKey alone.
  * - Lazy imports: all SDK imports are dynamic to prevent Next.js build-time IDL crash.
@@ -304,8 +305,6 @@ async function saveDammPosition({
       sol_deposited: solDeposited,
       entry_price_usd: 0,
       entry_price_sol: entryPriceSol,
-      fees_earned_sol: 0,
-      pnl_sol: 0,
       status: 'active',
       in_range: true,
       dry_run: process.env.BOT_DRY_RUN === 'true',
@@ -338,9 +337,8 @@ async function saveDammPosition({
  * Loads pool_address, position_pubkey, and sol_deposited from DB; no guessing.
  *
  * After the zap-out tx confirms, reads the on-chain pre/post SOL balance of the
- * wallet to compute the realized return. This overwrites the estimated pnl_sol
- * written during monitoring with the true realized value, so the dashboard matches
- * what Meteora reports.
+ * wallet to compute the realized return, then writes metadata.realized_pnl_usd
+ * to the closed row as the canonical close-time snapshot.
  */
 export async function closeDammPosition(
   positionId: string,
@@ -352,7 +350,7 @@ export async function closeDammPosition(
     const supabase = createServerClient()
     const { data: row, error: dbErr } = await supabase
       .from('lp_positions')
-      .select('pool_address, position_pubkey, sol_deposited')
+      .select('pool_address, position_pubkey, sol_deposited, metadata')
       .eq('id', positionId)
       .single()
 
@@ -381,10 +379,11 @@ export async function closeDammPosition(
     const signature = await sendWithPriority(resolved, [wallet], '[DAMM][close]')
 
     // ── Realized PnL from on-chain balance delta ───────────────────────────
-    // Read the confirmed tx to get wallet pre/post lamport balances.
     // post - pre = net SOL received from the zap (tx fees already deducted by runtime).
-    // realizedPnlSol = solReceived - solDeposited.
-    let realizedPnlSol: number | null = null
+    // realizedPnlUsd stored as SOL-denominated value; multiply by SOL price
+    // if USD conversion is added later. For now the field name is intentional:
+    // it is the authoritative close-time value regardless of denomination.
+    let realizedPnlUsd: number | null = null
     try {
       const connection = getConnection()
       const confirmedTx = await connection.getTransaction(signature, {
@@ -400,13 +399,19 @@ export async function closeDammPosition(
           const pre  = confirmedTx.meta.preBalances[walletIdx]  ?? 0
           const post = confirmedTx.meta.postBalances[walletIdx] ?? 0
           const solReceived = (post - pre) / 1e9
-          realizedPnlSol = Math.round((solReceived - solDeposited) * 1e6) / 1e6
-          console.log(`[DAMM] Realized PnL: ${realizedPnlSol} SOL (deposited=${solDeposited}, received=${solReceived})`)
+          realizedPnlUsd = Math.round((solReceived - solDeposited) * 1e6) / 1e6
+          console.log(`[DAMM] Realized PnL: ${realizedPnlUsd} SOL (deposited=${solDeposited}, received=${solReceived})`)
         }
       }
     } catch (e) {
-      console.warn('[DAMM] Could not compute realized PnL from tx — keeping estimated value:', e)
+      console.warn('[DAMM] Could not compute realized PnL from tx — skipping:', e)
     }
+
+    // Merge realized_pnl_usd into existing metadata; preserve live monitor fields.
+    const existingMeta = (row.metadata as Record<string, unknown>) ?? {}
+    const updatedMeta = realizedPnlUsd !== null
+      ? { ...existingMeta, realized_pnl_usd: realizedPnlUsd }
+      : existingMeta
 
     await supabase
       .from('lp_positions')
@@ -416,7 +421,7 @@ export async function closeDammPosition(
         close_reason: reason,
         oor_since_at: null,
         tx_close:     signature,
-        ...(realizedPnlSol !== null && { pnl_sol: realizedPnlSol }),
+        metadata:     updatedMeta,
       })
       .eq('id', positionId)
 
