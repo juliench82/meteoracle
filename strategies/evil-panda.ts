@@ -22,7 +22,7 @@ import type { Strategy } from '@/lib/types'
  * Exit logic:
  * - stopLoss    : −50% price
  * - takeProfit  : +40% price
- * - OOR         : 45 min out of range (earning nothing)
+ * - OOR         : 120 min out of range (earning nothing)
  * - maxDuration : 72h (3 days) hard stop
  */
 export const evilPandaStrategy: Strategy = {
@@ -58,7 +58,7 @@ export const evilPandaStrategy: Strategy = {
   exits: {
     stopLossPct:              -50,
     takeProfitPct:             40,
-    outOfRangeMinutes:         45,
+    outOfRangeMinutes:        120,
     maxDurationHours:          72,
     claimFeesBeforeClose:    true,
     minFeesToClaim:          0.001,
