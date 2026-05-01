@@ -2,6 +2,9 @@ import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112'
+const DEXSCREENER_SOLANA_PAIR_API = 'https://api.dexscreener.com/latest/dex/pairs/solana'
+const DEXSCREENER_TOKEN_API = 'https://api.dexscreener.com/latest/dex/tokens'
+const _pairInfoCache = new Map<string, DexPairInfo | null>()
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -30,6 +33,103 @@ function toBase58(value: unknown): string {
     return (value as { toBase58: () => string }).toBase58()
   }
   return String(value ?? '')
+}
+
+interface DexPairInfo {
+  pairAddress?: string
+  url?: string
+  baseToken?: { address?: string; symbol?: string }
+  quoteToken?: { address?: string; symbol?: string }
+}
+
+function normalizeSymbolPart(symbol: unknown): string {
+  const s = String(symbol ?? '').trim()
+  if (!s) return ''
+  return s.toUpperCase() === 'WSOL' ? 'SOL' : s
+}
+
+function pairSymbol(base: unknown, quote: unknown): string {
+  const baseSymbol = normalizeSymbolPart(base)
+  const quoteSymbol = normalizeSymbolPart(quote)
+  if (baseSymbol && quoteSymbol) return `${baseSymbol}-${quoteSymbol}`
+  return baseSymbol || quoteSymbol
+}
+
+function symbolFromPositionInfo(positionInfo: any): string {
+  const tokenXSymbol = positionInfo?.tokenX?.symbol ?? positionInfo?.tokenX?.name
+  const tokenYSymbol = positionInfo?.tokenY?.symbol ?? positionInfo?.tokenY?.name
+  const tokenXMint = toBase58(positionInfo?.tokenX?.publicKey)
+  const tokenYMint = toBase58(positionInfo?.tokenY?.publicKey)
+
+  if (tokenYMint === SOL_MINT) return pairSymbol(tokenXSymbol, 'SOL')
+  if (tokenXMint === SOL_MINT) return pairSymbol(tokenYSymbol, 'SOL')
+  return pairSymbol(tokenXSymbol, tokenYSymbol)
+}
+
+function symbolFromDexPair(pair: DexPairInfo | null): string {
+  if (!pair) return ''
+  return pairSymbol(pair.baseToken?.symbol, pair.quoteToken?.symbol)
+}
+
+async function fetchDexJson(url: string): Promise<any | null> {
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!res.ok) return null
+    return res.json()
+  } catch {
+    return null
+  }
+}
+
+async function fetchDexPairByPool(poolAddress: string): Promise<DexPairInfo | null> {
+  if (!poolAddress) return null
+  const cacheKey = `pool:${poolAddress}`
+  if (_pairInfoCache.has(cacheKey)) return _pairInfoCache.get(cacheKey) ?? null
+
+  const data = await fetchDexJson(`${DEXSCREENER_SOLANA_PAIR_API}/${poolAddress}`)
+  const pair = (data?.pair ?? data?.pairs?.[0] ?? null) as DexPairInfo | null
+  _pairInfoCache.set(cacheKey, pair)
+  return pair
+}
+
+async function fetchDexPairByToken(mint: string, poolAddress?: string): Promise<DexPairInfo | null> {
+  if (!mint) return null
+  const cacheKey = `token:${mint}:${poolAddress ?? ''}`
+  if (_pairInfoCache.has(cacheKey)) return _pairInfoCache.get(cacheKey) ?? null
+
+  const data = await fetchDexJson(`${DEXSCREENER_TOKEN_API}/${mint}`)
+  const pairs = Array.isArray(data?.pairs) ? data.pairs as DexPairInfo[] : []
+  const exactPool = poolAddress
+    ? pairs.find(p => p.pairAddress?.toLowerCase() === poolAddress.toLowerCase())
+    : null
+  const solPair = pairs.find(p =>
+    p.quoteToken?.address === SOL_MINT ||
+    p.baseToken?.address === SOL_MINT ||
+    normalizeSymbolPart(p.quoteToken?.symbol) === 'SOL' ||
+    normalizeSymbolPart(p.baseToken?.symbol) === 'SOL'
+  )
+  const pair = exactPool ?? solPair ?? pairs[0] ?? null
+  _pairInfoCache.set(cacheKey, pair)
+  return pair
+}
+
+async function resolveLiveSymbol(
+  mint: string,
+  poolAddress: string,
+  fallbackPrefix: 'LIVE' | 'DAMM',
+  positionInfo?: any,
+): Promise<{ symbol: string; dexUrl?: string }> {
+  const localSymbol = positionInfo ? symbolFromPositionInfo(positionInfo) : ''
+  if (localSymbol) return { symbol: localSymbol }
+
+  const pair = await fetchDexPairByPool(poolAddress) ?? await fetchDexPairByToken(mint, poolAddress)
+  const dexSymbol = symbolFromDexPair(pair)
+  if (dexSymbol) return { symbol: dexSymbol, dexUrl: pair?.url }
+
+  return { symbol: `${fallbackPrefix}-${mint.slice(0, 6)}` }
 }
 
 function extractPositions(positionInfo: any): any[] {
@@ -154,6 +254,7 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
     if (positions.length === 0) continue
 
     const mint = resolveMint(positionInfo) || poolAddress
+    const resolved = await resolveLiveSymbol(mint, poolAddress, 'LIVE', positionInfo)
     let activeBinId: number | null = null
     let currentPrice = 0
 
@@ -180,7 +281,7 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
       live.push({
         id: `meteora-${positionPubkey}`,
         mint,
-        symbol: `LIVE-${mint.slice(0, 6)}`,
+        symbol: resolved.symbol,
         pool_address: poolAddress,
         position_pubkey: positionPubkey,
         strategy_id: 'meteora-live',
@@ -205,6 +306,7 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
           total_y_amount: String(positionData.totalYAmount ?? '0'),
           fee_x_amount: String(positionData.feeX ?? '0'),
           fee_y_amount: String(positionData.feeY ?? '0'),
+          ...(resolved.dexUrl && { dexscreener_url: resolved.dexUrl }),
           version: pos.version ?? null,
           synced_at: new Date().toISOString(),
         },
@@ -245,6 +347,7 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
 
     const meteoraFields = await fetchMeteoraDammPositionFields(positionPubkey)
     const mint = resolveDammMint(poolState) || poolAddress
+    const resolved = await resolveLiveSymbol(mint, poolAddress, 'DAMM')
     const currentPrice = poolState ? sqrtPriceToNumber(poolState.sqrtPrice) : 0
     const claimableFeesUsd = meteoraFields?.claimableFeesUsd ?? null
     const positionValueUsd = meteoraFields?.positionValueUsd ?? null
@@ -252,7 +355,7 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
     live.push({
       id: `meteora-damm-${positionPubkey}`,
       mint,
-      symbol: `DAMM-${mint.slice(0, 6)}`,
+      symbol: resolved.symbol,
       pool_address: poolAddress,
       position_pubkey: positionPubkey,
       strategy_id: 'damm-live',
@@ -284,6 +387,7 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
         permanent_locked_liquidity: String(positionState.permanentLockedLiquidity ?? '0'),
         ...(claimableFeesUsd !== null && { claimable_fees_usd: claimableFeesUsd }),
         ...(positionValueUsd !== null && { position_value_usd: positionValueUsd }),
+        ...(resolved.dexUrl && { dexscreener_url: resolved.dexUrl }),
         synced_at: new Date().toISOString(),
       },
       _source: 'meteora-live',
@@ -327,9 +431,12 @@ export function mergeDbAndLiveLpPositions(dbRows: any[], liveRows: LiveMeteoraPo
 
     if (live) {
       seen.add(live.position_pubkey)
+      const dbSymbol = String(row.symbol ?? '')
+      const symbol = /^(LIVE|DAMM|ORPHAN)-/.test(dbSymbol) ? live.symbol : (row.symbol ?? live.symbol)
       merged.push({
         ...live,
         ...row,
+        symbol,
         status: live.status,
         in_range: live.in_range,
         current_price: live.current_price || row.current_price,

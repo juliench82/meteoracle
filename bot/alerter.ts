@@ -16,6 +16,7 @@ type AlertPayload =
       volume24h?: number
       entryPriceUsd?: number
       entryPriceSol?: number
+      meteoracleScore?: number
       rugcheckScore?: number | string
       poolAddress?: string
       mint?: string
@@ -52,7 +53,7 @@ type AlertPayload =
       positionId: string
     }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
-  | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string }
+  | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string; mint?: string; positionType?: string }
   | { type: 'cooldown_skip'; symbol: string; strategy: string; cooldownHours: number }
   | { type: 'pre_grad_pool_created'; symbol: string; mint: string; pool: string; sol: number }
   | { type: 'pre_grad_create_failed'; mint: string; error: string }
@@ -86,21 +87,30 @@ function strategyBadge(strategy: string): string {
   return '📊 DLMM'
 }
 
+function formatUsdPrice(value: number | undefined): string {
+  if (value == null || !Number.isFinite(value) || value <= 0) return 'N/A'
+  if (value >= 1) return `$${value.toLocaleString(undefined, { maximumFractionDigits: 4 })}`
+  return `$${value.toPrecision(6)}`
+}
+
+function formatScore(score: number | undefined): string {
+  if (score == null || !Number.isFinite(score)) return 'N/A'
+  return `${Math.round(score)}/100`
+}
+
 function formatMessage(payload: AlertPayload): string {
   switch (payload.type) {
     case 'position_opened': {
       const dexUrl = `https://dexscreener.com/solana/${payload.poolAddress || payload.mint || ''}`
-      const tp = payload.takeProfitPct ?? '?'
-      const sl = payload.stopLossPct ?? '?'
-      const vol = payload.volume24h?.toLocaleString() ?? 'N/A'
       const entryUsd = payload.entryPriceUsd ?? payload.entryPrice
       const entrySol = payload.entryPriceSol ?? ''
-      const entrySolPart = entrySol ? ` (${entrySol} SOL)` : ''
+      const entrySolPart = entrySol ? ` | ${entrySol} SOL` : ''
       return [
         `🟢 *BUY* ${payload.symbol}`,
-        `💰 ${payload.solDeposited} SOL | TP +${tp}% | SL ${sl}%`,
-        `📊 Vol: $${vol} | Entry: $${entryUsd}${entrySolPart}`,
-        `🦍 Strategy: ${payload.strategy} | Rug: ${payload.rugcheckScore ?? 'N/A'}`,
+        `💰 Deployed: ${payload.solDeposited} SOL`,
+        `🎯 Meteoracle Score: *${formatScore(payload.meteoracleScore)}*`,
+        `💵 Entry Price: ${formatUsdPrice(entryUsd)}${entrySolPart}`,
+        `🧠 Strategy: ${payload.strategy}`,
         `📈 ${dexUrl}`,
       ].join('\n')
     }
@@ -149,10 +159,12 @@ function formatMessage(payload: AlertPayload): string {
       return [
         `👻 *Orphaned Position Detected*`,
         `Symbol: \`${payload.symbol}\``,
+        payload.positionType ? `Type: \`${payload.positionType}\`` : null,
+        payload.mint ? `Mint: \`${payload.mint}\`` : null,
         `Position: \`${payload.positionPubKey}\``,
         `Pool: \`${payload.poolAddress}\``,
-        `_On-chain but missing from DB — marked orphaned_`,
-      ].join('\n')
+        `_On-chain in Meteora but missing from Supabase cache — inserted automatically_`,
+      ].filter(Boolean).join('\n')
 
     case 'cooldown_skip':
       return [

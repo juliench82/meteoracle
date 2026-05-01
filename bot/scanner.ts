@@ -470,7 +470,18 @@ export async function runScanner(): Promise<{
       const positionId = await openPosition(metrics, strategy)
       if (positionId) {
         openedCount++
-        await sendAlert({ type: 'position_opened', symbol, strategy: strategy.id, solDeposited: MAX_SOL_PER_POSITION, entryPrice: metrics.priceUsd, positionId })
+        await sendAlert({
+          type: 'position_opened',
+          symbol,
+          strategy: strategy.id,
+          solDeposited: MAX_SOL_PER_POSITION,
+          entryPrice: metrics.priceUsd,
+          entryPriceUsd: metrics.priceUsd,
+          meteoracleScore: score,
+          poolAddress: metrics.poolAddress,
+          mint: metrics.address,
+          positionId,
+        })
       }
     }
   }

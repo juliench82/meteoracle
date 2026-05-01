@@ -2,6 +2,7 @@ import { fetchLiveMeteoraPositions, type LiveMeteoraPosition } from '@/lib/meteo
 
 interface CachedPosition {
   id: string
+  symbol: string | null
   position_pubkey: string | null
   strategy_id: string | null
   position_type: string | null
@@ -45,7 +46,7 @@ async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<stri
   if (positionPubkeys.length === 0) return new Map()
 
   const filter = `position_pubkey=in.(${positionPubkeys.join(',')})`
-  const select = 'select=id,position_pubkey,strategy_id,position_type,status,metadata'
+  const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,metadata'
   const res = await fetch(`${sbUrl()}/rest/v1/lp_positions?${filter}&${select}`, {
     headers: sbHeaders('representation'),
     signal: AbortSignal.timeout(10_000),
@@ -93,8 +94,16 @@ function insertBody(live: LiveMeteoraPosition): Record<string, unknown> {
   }
 }
 
+function shouldRefreshSymbol(existing: CachedPosition): boolean {
+  const symbol = String(existing.symbol ?? '')
+  return !symbol || /^(LIVE|DAMM|ORPHAN)-/.test(symbol) || existing.strategy_id === 'meteora-live' || existing.strategy_id === 'damm-live'
+}
+
 function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record<string, unknown> {
   return {
+    ...(shouldRefreshSymbol(existing) && { symbol: live.symbol }),
+    mint: live.mint,
+    pool_address: live.pool_address,
     status: live.status,
     in_range: live.in_range,
     current_price: live.current_price,

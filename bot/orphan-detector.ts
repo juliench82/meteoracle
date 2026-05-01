@@ -139,6 +139,8 @@ export async function detectOrphanedPositions(knownPoolAddresses: string[]): Pro
             symbol: `ORPHAN-${positionPubKey.slice(0, 6)}`,
             positionPubKey,
             poolAddress,
+            mint,
+            positionType: 'dlmm',
           })
         }
       }
@@ -175,6 +177,8 @@ export async function detectAllOrphanedPositions(): Promise<MeteoraPositionSyncR
       symbol: live.symbol,
       positionPubKey,
       poolAddress: live.pool_address,
+      mint: live.mint,
+      positionType: live.position_type === 'damm-edge' ? 'damm-v2' : 'dlmm',
     })
   }
 
