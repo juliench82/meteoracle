@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { PublicKey } from '@solana/web3.js'
-import { getConnection, getWallet } from '@/lib/solana'
+import { getConnection } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { redis } from '@/lib/redis'
 
@@ -36,11 +36,10 @@ export async function GET() {
     .in('status', ['active', 'out_of_range'])
 
   if (error || !positions?.length) {
-    return NextResponse.json({ positions: [], totalPnlSol: 0, totalFeesSol: 0 })
+    return NextResponse.json({ positions: [], totalClaimableFeesUsd: 0, totalPositionValueUsd: 0 })
   }
 
   const connection = getConnection()
-  const wallet = getWallet()
   const DLMM = await getDLMM()
 
   const enriched = await Promise.all(
@@ -50,14 +49,8 @@ export async function GET() {
         const activeBin = await dlmmPool.getActiveBin()
         const currentPriceSol = parseFloat(activeBin.pricePerToken)
 
-        const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
-        const match = userPositions.find(
-          (p) => p.publicKey.toBase58() === pos.position_pubkey
-        )
-
-        const feesSol = match
-          ? match.positionData.feeY.toNumber() / 1e9
-          : (pos.fees_earned_sol ?? 0)
+        const claimableFeesUsd = Number(pos.claimable_fees_usd ?? pos.metadata?.claimable_fees_usd ?? 0)
+        const positionValueUsd = Number(pos.position_value_usd ?? pos.metadata?.position_value_usd ?? 0)
 
         const entryPriceSol: number = pos.metadata?.entryPriceSol ?? 0
         const pricePct = entryPriceSol > 0
@@ -71,44 +64,44 @@ export async function GET() {
           ? (2 * Math.sqrt(k) / (1 + k) - 1) * 100
           : 0
 
-        const pnlSol = entryPriceSol > 0
-          ? pos.sol_deposited * (pricePct / 100) + feesSol
-          : (pos.pnl_sol ?? feesSol)
-
         return {
           id: pos.id,
           symbol: pos.symbol,
           strategy: pos.strategy_id,
           currentPrice: currentPriceSol,
           pricePct: Math.round(pricePct * 100) / 100,
-          feesSol: Math.round(feesSol * 1e6) / 1e6,
+          claimableFeesUsd: Math.round(claimableFeesUsd * 100) / 100,
+          positionValueUsd: Math.round(positionValueUsd * 100) / 100,
           ilPct: Math.round(ilPct * 100) / 100,
-          pnlSol: Math.round(pnlSol * 1e6) / 1e6,
+          realizedPnlUsd: pos.realized_pnl_usd ?? pos.metadata?.realized_pnl_usd ?? null,
           status: pos.status,
         }
       } catch {
+        const claimableFeesUsd = Number(pos.claimable_fees_usd ?? pos.metadata?.claimable_fees_usd ?? 0)
+        const positionValueUsd = Number(pos.position_value_usd ?? pos.metadata?.position_value_usd ?? 0)
         return {
           id: pos.id,
           symbol: pos.symbol,
           strategy: pos.strategy_id,
           currentPrice: pos.current_price ?? 0,
           pricePct: 0,
-          feesSol: pos.fees_earned_sol ?? 0,
+          claimableFeesUsd: Math.round(claimableFeesUsd * 100) / 100,
+          positionValueUsd: Math.round(positionValueUsd * 100) / 100,
           ilPct: pos.il_pct ?? 0,
-          pnlSol: pos.pnl_sol ?? 0,
+          realizedPnlUsd: pos.realized_pnl_usd ?? pos.metadata?.realized_pnl_usd ?? null,
           status: pos.status,
         }
       }
     })
   )
 
-  const totalPnlSol = enriched.reduce((a, p) => a + p.pnlSol, 0)
-  const totalFeesSol = enriched.reduce((a, p) => a + p.feesSol, 0)
+  const totalClaimableFeesUsd = enriched.reduce((a, p) => a + p.claimableFeesUsd, 0)
+  const totalPositionValueUsd = enriched.reduce((a, p) => a + p.positionValueUsd, 0)
 
   const snapshot = {
     positions: enriched,
-    totalPnlSol: Math.round(totalPnlSol * 1e6) / 1e6,
-    totalFeesSol: Math.round(totalFeesSol * 1e6) / 1e6,
+    totalClaimableFeesUsd: Math.round(totalClaimableFeesUsd * 100) / 100,
+    totalPositionValueUsd: Math.round(totalPositionValueUsd * 100) / 100,
     cachedAt: new Date().toISOString(),
   }
 

@@ -26,9 +26,6 @@ create table if not exists lp_positions (
   -- Pricing
   entry_price_usd     numeric not null default 0,
 
-  -- Fees
-  fees_earned_sol     numeric not null default 0,
-
   -- Status
   status              text not null default 'active'
                         check (status in ('active', 'out_of_range', 'closed', 'pending_retry', 'error')),

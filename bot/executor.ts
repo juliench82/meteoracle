@@ -49,6 +49,12 @@ const WALLET_RESERVE_MULTIPLIER = parseFloat(process.env.WALLET_RESERVE_MULTIPLI
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 
+function getClaimableFeesUsd(position: Record<string, any>): number | null {
+  const value = position.claimable_fees_usd ?? position.metadata?.claimable_fees_usd
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 const MAX_BINS_BY_STRATEGY: Record<string, number> = {
   'evil-panda':    200,
   'scalp-spike':   120,
@@ -578,8 +584,9 @@ export async function closePosition(
 
   if (position.dry_run === true) {
     console.log(`${label} DRY RUN row — marking closed in DB only`)
-    await markPositionClosed(positionId, position.fees_earned_sol ?? 0, reason, position)
-    await sendCloseAlert(position, position.fees_earned_sol ?? 0, reason)
+    const claimableFeesUsd = getClaimableFeesUsd(position) ?? 0
+    await markPositionClosed(positionId, claimableFeesUsd, reason)
+    await sendCloseAlert(position, claimableFeesUsd, reason)
     return true
   }
 
@@ -595,7 +602,7 @@ export async function closePosition(
 
   if (!position.position_pubkey) {
     console.error(`${label} position_pubkey is null — cannot close on-chain, marking closed in DB`)
-    await markPositionClosed(positionId, position.fees_earned_sol ?? 0, `${reason}_no_pubkey`, position)
+    await markPositionClosed(positionId, getClaimableFeesUsd(position) ?? 0, `${reason}_no_pubkey`)
     return false
   }
 
@@ -607,7 +614,7 @@ export async function closePosition(
     const dlmmPool       = await DLMM.create(connection, new PublicKey(position.pool_address))
     const positionPubKey = new PublicKey(position.position_pubkey)
 
-    let feesClaimedSol = 0
+    let claimableFeesUsd = getClaimableFeesUsd(position) ?? 0
     try {
       const claimTxs = await dlmmPool.claimAllRewards({
         owner:     wallet.publicKey,
@@ -617,7 +624,6 @@ export async function closePosition(
         const sig = await sendLegacyTx(tx, [wallet], label)
         console.log(`${label} fees claimed ✔ sig: ${sig}`)
       }
-      feesClaimedSol = position.fees_earned_sol ?? 0
     } catch (err) {
       console.warn(`${label} fee claim failed (continuing):`, err)
     }
@@ -646,8 +652,8 @@ export async function closePosition(
       }
     } else {
       console.warn(`${label} position not found on-chain after retries — marking closed in DB`)
-      await markPositionClosed(positionId, feesClaimedSol, `${reason}_external`, position)
-      await sendCloseAlert(position, feesClaimedSol, reason)
+      await markPositionClosed(positionId, claimableFeesUsd, `${reason}_external`)
+      await sendCloseAlert(position, claimableFeesUsd, reason)
       return true
     }
 
@@ -681,8 +687,8 @@ export async function closePosition(
       }
     }
 
-    await markPositionClosed(positionId, feesClaimedSol, reason, position)
-    await sendCloseAlert(position, feesClaimedSol, reason)
+    await markPositionClosed(positionId, claimableFeesUsd, reason)
+    await sendCloseAlert(position, claimableFeesUsd, reason)
     return true
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -695,7 +701,7 @@ export async function closePosition(
   }
 }
 
-async function sendCloseAlert(position: any, feesClaimedSol: number, reason: string): Promise<void> {
+async function sendCloseAlert(position: any, claimableFeesUsd: number, reason: string): Promise<void> {
   try {
     const openedAt  = position.opened_at ? new Date(position.opened_at).getTime() : Date.now()
     const ageHours  = parseFloat(((Date.now() - openedAt) / 3_600_000).toFixed(1))
@@ -705,10 +711,9 @@ async function sendCloseAlert(position: any, feesClaimedSol: number, reason: str
       symbol:        position.symbol,
       strategy:      position.metadata?.strategy_id ?? 'unknown',
       reason,
-      feesEarnedSol: parseFloat(feesClaimedSol.toFixed(6)),
+      claimableFeesUsd: Math.round(claimableFeesUsd * 100) / 100,
       ilPct:         0,
       ageHours,
-      netPnlSol:     feesClaimedSol,
     })
   } catch (alertErr) {
     console.warn('[executor] sendCloseAlert failed (non-fatal):', alertErr)
@@ -739,7 +744,8 @@ async function persistPosition(
       sol_deposited:   solDeposited,
       entry_price_usd: entryPriceUsd,
       entry_price_sol: entryPriceSol,
-      fees_earned_sol: 0,
+      claimable_fees_usd: 0,
+      position_value_usd: 0,
       status:          needsLiquidityRetry ? 'pending_retry' : 'active',
       in_range:        true,
       dry_run:         dryRun,
@@ -759,38 +765,24 @@ async function persistPosition(
 }
 
 /**
- * Marks a DLMM position closed and writes realized_pnl_usd.
- * realized_pnl_usd = fees_earned_sol converted to USD at close-time SOL price.
- * We use entry_price_usd / entry_price_sol as the SOL/USD rate since we have
- * no live price oracle here; this approximates within normal hold durations.
+ * Marks a DLMM position closed and preserves the latest Meteora-sourced
+ * claimable_fees_usd snapshot. DLMM realized PnL is not computed locally.
  */
 async function markPositionClosed(
   positionId: string,
-  feesEarnedSol: number,
-  reason: string,
-  position?: Record<string, any>
+  claimableFeesUsd: number | null,
+  reason: string
 ): Promise<void> {
   const supabase = createServerClient()
-
-  let realizedPnlUsd: number | null = null
-  if (position) {
-    const entryPriceSol: number = position.entry_price_sol ?? 0
-    const entryPriceUsd: number = position.entry_price_usd ?? 0
-    const solPriceUsd = entryPriceSol > 0 ? entryPriceUsd / entryPriceSol : 0
-    if (solPriceUsd > 0) {
-      realizedPnlUsd = Math.round(feesEarnedSol * solPriceUsd * 100) / 100
-    }
-  }
 
   await supabase
     .from('lp_positions')
     .update({
       status:            'closed',
       closed_at:         new Date().toISOString(),
-      fees_earned_sol:   feesEarnedSol,
       oor_since_at:      null,
       close_reason:      reason,
-      ...(realizedPnlUsd !== null ? { realized_pnl_usd: realizedPnlUsd } : {}),
+      ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
     })
     .eq('id', positionId)
 }

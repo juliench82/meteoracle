@@ -168,6 +168,8 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
         .from('lp_positions')
         .update({
           current_price: onChain.currentPriceSol,
+          ...(claimableFeesUsd !== null && { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 }),
+          ...(positionValueUsd !== null && { position_value_usd: Math.round(positionValueUsd * 100) / 100 }),
           metadata: {
             ...(pos.metadata ?? {}),
             // Live USD fields from Meteora — what the UI should display

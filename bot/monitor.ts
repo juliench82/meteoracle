@@ -162,7 +162,7 @@ async function checkPosition(
   const label = `[monitor][${position.symbol}][${strategy.id}]`
   const now = Date.now()
 
-  const { inRange, currentPriceSol, feesEarnedSol, volume1hUsd, externallyClosed } = await fetchPositionState(
+  const { inRange, currentPriceSol, claimableFeesSolEquivalent, volume1hUsd, externallyClosed } = await fetchPositionState(
     position.pool_address,
     position.position_pubkey
   )
@@ -176,7 +176,6 @@ async function checkPosition(
         in_range: false,
         oor_since_at: null,
         close_reason: 'external_close_detected',
-        fees_earned_sol: feesEarnedSol,
       })
       stats.closed++
     } catch (err) {
@@ -203,15 +202,15 @@ async function checkPosition(
     : 0
 
   const pnlSol = entryPriceSol > 0
-    ? Math.round((position.sol_deposited * (pricePct / 100) + feesEarnedSol) * 1e6) / 1e6
-    : Math.round(feesEarnedSol * 1e6) / 1e6
+    ? Math.round((position.sol_deposited * (pricePct / 100) + claimableFeesSolEquivalent) * 1e6) / 1e6
+    : Math.round(claimableFeesSolEquivalent * 1e6) / 1e6
 
   // USD values derived from entry price ratio (best available without live oracle)
   const solPriceUsd = entryPriceSol > 0 && entryPriceUsd > 0
     ? entryPriceUsd / entryPriceSol
     : 0
   const claimableFeesUsd = solPriceUsd > 0
-    ? Math.round(feesEarnedSol * solPriceUsd * 100) / 100
+    ? Math.round(claimableFeesSolEquivalent * solPriceUsd * 100) / 100
     : null
   const positionValueUsd = solPriceUsd > 0
     ? Math.round((position.sol_deposited + pnlSol) * solPriceUsd * 100) / 100
@@ -234,7 +233,6 @@ async function checkPosition(
     await sbUpdate('lp_positions', `id=eq.${position.id}`, {
       current_price:     currentPriceSol,
       in_range:          inRange,
-      fees_earned_sol:   feesEarnedSol,
       il_pct:            ilPct,
       pnl_sol:           pnlSol,
       status:            inRange ? 'active' : 'out_of_range',
@@ -253,7 +251,7 @@ async function checkPosition(
     : 0
 
   const deployedSol = position.sol_deposited || 0
-  const feeYieldPct = deployedSol > 0 ? (feesEarnedSol / deployedSol) * 100 : 0
+  const feeYieldPct = deployedSol > 0 ? (claimableFeesSolEquivalent / deployedSol) * 100 : 0
 
   console.log(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
@@ -285,7 +283,7 @@ async function checkPosition(
         symbol: position.symbol,
         strategy: strategy.id,
         reason: closeReason,
-        feesEarnedSol,
+        ...(claimableFeesUsd !== null ? { claimableFeesUsd } : {}),
         ilPct,
         ageHours: Math.round(ageHours * 10) / 10,
       })
@@ -313,7 +311,7 @@ async function checkPosition(
           symbol: position.symbol,
           strategy: strategy.id,
           reason: `smart_rebalance (price at ${positionInRange.toFixed(0)}% of range)`,
-          feesEarnedSol,
+          ...(claimableFeesUsd !== null ? { claimableFeesUsd } : {}),
           ilPct,
           ageHours: Math.round(ageHours * 10) / 10,
         })
@@ -349,7 +347,7 @@ async function checkPosition(
 async function fetchPositionState(
   poolAddress: string,
   positionPubKey: string
-): Promise<{ inRange: boolean; currentPriceSol: number; feesEarnedSol: number; volume1hUsd: number; externallyClosed: boolean }> {
+): Promise<{ inRange: boolean; currentPriceSol: number; claimableFeesSolEquivalent: number; volume1hUsd: number; externallyClosed: boolean }> {
   const connection = getConnection()
   const DLMM = await getDLMM()
 
@@ -362,7 +360,7 @@ async function fetchPositionState(
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const pos = userPositions.find(p => p.publicKey.toBase58() === positionPubKey)
 
-    if (!pos) return { inRange: false, currentPriceSol, feesEarnedSol: 0, volume1hUsd: 0, externallyClosed: true }
+    if (!pos) return { inRange: false, currentPriceSol, claimableFeesSolEquivalent: 0, volume1hUsd: 0, externallyClosed: true }
 
     const posData = pos.positionData
     const activeBinId = activeBin.binId
@@ -370,7 +368,7 @@ async function fetchPositionState(
 
     const feeX = Number(posData.feeX ?? 0) / 1e9
     const feeY = Number(posData.feeY ?? 0) / 1e9
-    const feesEarnedSol = feeX + feeY
+    const claimableFeesSolEquivalent = feeX + feeY
 
     // NOTE: volume1hUsd intentionally set to 0 — the undocumented
     // dlmm-api.meteora.ag endpoint is rate-limited and not part of any
@@ -378,10 +376,10 @@ async function fetchPositionState(
     // DAMM v2 / DLMM API once endpoints are confirmed.
     const volume1hUsd = 0
 
-    return { inRange, currentPriceSol, feesEarnedSol, volume1hUsd, externallyClosed: false }
+    return { inRange, currentPriceSol, claimableFeesSolEquivalent, volume1hUsd, externallyClosed: false }
   } catch (err) {
     console.error(`[fetchPositionState] error for pool ${poolAddress}:`, err)
-    return { inRange: false, currentPriceSol: 0, feesEarnedSol: 0, volume1hUsd: 0, externallyClosed: false }
+    return { inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, volume1hUsd: 0, externallyClosed: false }
   }
 }
 

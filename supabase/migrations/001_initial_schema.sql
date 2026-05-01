@@ -15,7 +15,6 @@ create table if not exists positions (
   entry_price numeric not null,
   current_price numeric,
   sol_deposited numeric not null default 0,
-  fees_earned_sol numeric not null default 0,
   status text not null default 'active' check (status in ('active', 'out_of_range', 'closed', 'error')),
   in_range boolean not null default true,
   opened_at timestamptz not null default now(),

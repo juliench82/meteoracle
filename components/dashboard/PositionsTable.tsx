@@ -48,8 +48,8 @@ export function PositionsTable({ positions }: { positions: any[] }) {
             <tbody>
               {positions.map((p) => {
                 const deployedSol: number = p.sol_deposited ?? 0
-                const claimableFeesUsd = p.metadata?.claimable_fees_usd
-                const positionValueUsd = p.metadata?.position_value_usd
+                const claimableFeesUsd = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
+                const positionValueUsd = p.position_value_usd ?? p.metadata?.position_value_usd
 
                 return (
                   <tr

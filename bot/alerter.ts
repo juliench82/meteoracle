@@ -25,7 +25,7 @@ type AlertPayload =
       symbol: string
       strategy: string
       reason: string
-      feesEarnedSol: number
+      claimableFeesUsd?: number
       ilPct: number
       ageHours: number
       netPnlSol?: number
@@ -70,7 +70,7 @@ type AlertPayload =
     }
   | { type: 'pre_grad_graduated'; symbol: string; finalFees?: number; positionId?: string; bondingCurvePct?: number }
   | { type: 'low_balance_warning'; currentSol: number; minSol: number }
-  | { type: 'high_il_warning'; symbol: string; ilPct: number; feesEarnedSol: number; netPnlSol: number }
+  | { type: 'high_il_warning'; symbol: string; ilPct: number; claimableFeesUsd?: number; netPnlSol: number }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -111,7 +111,7 @@ function formatMessage(payload: AlertPayload): string {
       return [
         `🔴 *SELL* ${payload.symbol}`,
         `Reason: ${payload.reason}`,
-        `Fees Earned: *${payload.feesEarnedSol} SOL*`,
+        `Claimable Fees: *${payload.claimableFeesUsd != null ? `$${payload.claimableFeesUsd.toFixed(2)}` : 'N/A'}*`,
         `IL: ${payload.ilPct.toFixed(2)}% | Net PNL: ${netSign}${netPnl} SOL`,
         `Held for: ${payload.ageHours}h`,
         `Strategy: ${payload.strategy}`,
@@ -229,7 +229,7 @@ function formatMessage(payload: AlertPayload): string {
       return [
         `📉 *HIGH IL WARNING* ${payload.symbol}`,
         `Current IL: ${payload.ilPct.toFixed(2)}%`,
-        `Fees Earned: ${payload.feesEarnedSol} SOL`,
+        `Claimable Fees: ${payload.claimableFeesUsd != null ? `$${payload.claimableFeesUsd.toFixed(2)}` : 'N/A'}`,
         `Net PNL: ${payload.netPnlSol} SOL`,
         `Consider closing manually if IL keeps growing.`,
       ].join('\n')

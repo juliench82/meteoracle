@@ -11,6 +11,9 @@ interface Position {
   amount_sol:      number
   pnl_sol?:        number | null   // spot only
   pnl_pct?:        number | null   // spot only
+  claimable_fees_usd?: number | null
+  position_value_usd?: number | null
+  realized_pnl_usd?: number | null
   status:          string
   dry_run:         boolean
   opened_at:       string
@@ -111,7 +114,7 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
 
     if (isClosed) {
       // Closed LP: show realized PnL from close-time Meteora snapshot
-      const realizedPnl = meta.realized_pnl_usd as number | undefined
+      const realizedPnl = (pos.realized_pnl_usd ?? meta.realized_pnl_usd) as number | undefined
       const pnlColor = realizedPnl == null
         ? 'text-zinc-500'
         : realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'
@@ -132,8 +135,8 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
     }
 
     // Open LP: claimable fees | position value | —
-    const claimable = meta.claimable_fees_usd as number | undefined
-    const value     = meta.position_value_usd  as number | undefined
+    const claimable = (pos.claimable_fees_usd ?? meta.claimable_fees_usd) as number | undefined
+    const value     = (pos.position_value_usd  ?? meta.position_value_usd)  as number | undefined
     return (
       <>
         {/* Claimable fees */}
