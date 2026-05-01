@@ -3,24 +3,22 @@
 import { useState } from 'react'
 
 interface Position {
-  id:                string
-  mint:              string
-  symbol:            string
-  entry_price_usd:   number
-  entry_price_sol:   number
-  current_price_usd: number
-  amount_sol:        number
-  pnl_sol?:          number | null
-  pnl_pct?:          number | null
-  fees_earned_sol?:  number | null
-  il_pct?:           number | null
-  status:            string
-  dry_run:           boolean
-  opened_at:         string
-  closed_at?:        string
-  tx_buy?:           string
-  tx_sell?:          string
-  _type?:            string
+  id:              string
+  mint:            string
+  symbol:          string
+  entry_price_usd: number
+  entry_price_sol: number
+  amount_sol:      number
+  pnl_sol?:        number | null   // spot only
+  pnl_pct?:        number | null   // spot only
+  status:          string
+  dry_run:         boolean
+  opened_at:       string
+  closed_at?:      string
+  tx_buy?:         string
+  tx_sell?:        string
+  metadata?:       Record<string, unknown>
+  _type?:          string
 }
 
 interface Props {
@@ -41,15 +39,15 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
 
   function statusBadge(status: string, dryRun: boolean) {
     const base = 'px-2 py-0.5 rounded-full text-xs font-medium'
-    if (dryRun)                       return <span className={`${base} bg-yellow-900 text-yellow-300`}>DRY</span>
-    if (status === 'open')            return <span className={`${base} bg-blue-900 text-blue-300`}>OPEN</span>
-    if (status === 'active')          return <span className={`${base} bg-blue-900 text-blue-300`}>ACTIVE</span>
-    if (status === 'out_of_range')    return <span className={`${base} bg-orange-900 text-orange-300`}>OOR</span>
-    if (status === 'closed_tp')       return <span className={`${base} bg-green-900 text-green-300`}>TP ✅</span>
-    if (status === 'closed_sl')       return <span className={`${base} bg-red-900 text-red-300`}>SL ❌</span>
-    if (status === 'closed_manual')   return <span className={`${base} bg-zinc-700 text-zinc-300`}>MANUAL</span>
-    if (status === 'closed_timeout')  return <span className={`${base} bg-zinc-700 text-zinc-300`}>TIMEOUT</span>
-    if (status === 'emergency_stop')  return <span className={`${base} bg-red-900 text-red-300`}>STOP</span>
+    if (dryRun)                      return <span className={`${base} bg-yellow-900 text-yellow-300`}>DRY</span>
+    if (status === 'open')           return <span className={`${base} bg-blue-900 text-blue-300`}>OPEN</span>
+    if (status === 'active')         return <span className={`${base} bg-blue-900 text-blue-300`}>ACTIVE</span>
+    if (status === 'out_of_range')   return <span className={`${base} bg-orange-900 text-orange-300`}>OOR</span>
+    if (status === 'closed_tp')      return <span className={`${base} bg-green-900 text-green-300`}>TP ✅</span>
+    if (status === 'closed_sl')      return <span className={`${base} bg-red-900 text-red-300`}>SL ❌</span>
+    if (status === 'closed_manual')  return <span className={`${base} bg-zinc-700 text-zinc-300`}>MANUAL</span>
+    if (status === 'closed_timeout') return <span className={`${base} bg-zinc-700 text-zinc-300`}>TIMEOUT</span>
+    if (status === 'emergency_stop') return <span className={`${base} bg-red-900 text-red-300`}>STOP</span>
     return <span className={`${base} bg-zinc-800 text-zinc-400`}>{status}</span>
   }
 
@@ -61,11 +59,19 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
     return <span className="text-zinc-500">—</span>
   }
 
+  function fmtUsd(val: unknown, sign = false): string {
+    const n = Number(val)
+    if (!val || isNaN(n)) return '—'
+    const prefix = sign && n >= 0 ? '+' : ''
+    return `${prefix}$${Math.abs(n).toFixed(2)}`
+  }
+
   function pnlCells(pos: Position) {
     const isLp = pos._type === 'lp'
+    const isClosed = pos.closed_at != null
 
     if (!isLp) {
-      // Spot: single P&L column spanning fees + IL + total
+      // ── Spot: Fees=— | IL=— | PnL ────────────────────────────────────────
       if (pos.pnl_pct !== undefined && pos.pnl_pct !== null) {
         const color = pos.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'
         return (
@@ -100,50 +106,50 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
       )
     }
 
-    // LP: Fees | IL | PnL (SOL)
-    const fees     = pos.fees_earned_sol ?? 0
-    const deployed = pos.amount_sol ?? 0
-    const ilPct    = pos.il_pct ?? null
-    const total    = pos.pnl_sol ?? null
+    // ── LP: source of truth is Meteora API ────────────────────────────────
+    const meta = pos.metadata ?? {}
 
-    const feesColor  = fees > 0 ? 'text-emerald-400' : 'text-zinc-500'
-    const ilColor    = ilPct !== null ? (ilPct >= 0 ? 'text-zinc-400' : 'text-red-400') : 'text-zinc-500'
-    const totalColor = total !== null ? (total >= 0 ? 'text-green-400' : 'text-red-400') : 'text-zinc-500'
+    if (isClosed) {
+      // Closed LP: show realized PnL from close-time Meteora snapshot
+      const realizedPnl = meta.realized_pnl_usd as number | undefined
+      const pnlColor = realizedPnl == null
+        ? 'text-zinc-500'
+        : realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'
+      return (
+        <>
+          <td className="text-right px-4 py-3 text-zinc-500">—</td>
+          <td className="text-right px-4 py-3 text-zinc-500">—</td>
+          <td className="text-right px-4 py-3">
+            <span className={pnlColor}>
+              {realizedPnl != null ? fmtUsd(realizedPnl, true) : '—'}
+            </span>
+            {realizedPnl != null && (
+              <div className="text-xs text-zinc-500">realized</div>
+            )}
+          </td>
+        </>
+      )
+    }
 
-    const feeYield = deployed > 0 ? (fees / deployed) * 100 : 0
-    const totalPct = total !== null && deployed > 0 ? (total / deployed) * 100 : null
-
+    // Open LP: claimable fees | position value | —
+    const claimable = meta.claimable_fees_usd as number | undefined
+    const value     = meta.position_value_usd  as number | undefined
     return (
       <>
-        {/* Fees Earned */}
+        {/* Claimable fees */}
         <td className="text-right px-4 py-3">
-          <span className={feesColor}>
-            {fees > 0 ? `+${fees.toFixed(4)}` : '—'}
+          <span className={claimable != null && claimable > 0 ? 'text-emerald-400' : 'text-zinc-500'}>
+            {claimable != null ? fmtUsd(claimable) : '—'}
           </span>
-          {feeYield > 0 && (
-            <div className="text-xs text-zinc-500">{feeYield.toFixed(1)}%</div>
-          )}
         </td>
-        {/* IL */}
+        {/* Position value */}
         <td className="text-right px-4 py-3">
-          {ilPct !== null
-            ? <span className={ilColor}>IL {ilPct >= 0 ? '+' : ''}{ilPct.toFixed(1)}%</span>
-            : <span className="text-zinc-500">—</span>
-          }
+          <span className="text-zinc-300">
+            {value != null ? fmtUsd(value) : '—'}
+          </span>
         </td>
-        {/* PnL (SOL) */}
-        <td className="text-right px-4 py-3">
-          {total !== null ? (
-            <>
-              <span className={totalColor}>{total >= 0 ? '+' : ''}{total.toFixed(4)}</span>
-              {totalPct !== null && (
-                <div className="text-xs text-zinc-500">{totalPct >= 0 ? '+' : ''}{totalPct.toFixed(1)}%</div>
-              )}
-            </>
-          ) : (
-            <span className="text-zinc-500">—</span>
-          )}
-        </td>
+        {/* PnL not available for open LP — Meteora is source of truth at close */}
+        <td className="text-right px-4 py-3 text-zinc-500">—</td>
       </>
     )
   }
@@ -187,9 +193,9 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
                 <th className="text-left px-4 py-3">Token</th>
                 <th className="text-right px-4 py-3">Size</th>
                 <th className="text-right px-4 py-3">Entry</th>
-                <th className="text-right px-4 py-3">Fees</th>
-                <th className="text-right px-4 py-3">IL</th>
-                <th className="text-right px-4 py-3">PnL (SOL)</th>
+                <th className="text-right px-4 py-3">Fees / Claimable</th>
+                <th className="text-right px-4 py-3">IL / Value</th>
+                <th className="text-right px-4 py-3">PnL</th>
                 <th className="text-right px-4 py-3">Age</th>
                 <th className="text-center px-4 py-3">Status</th>
                 <th className="text-center px-4 py-3">Tx</th>
