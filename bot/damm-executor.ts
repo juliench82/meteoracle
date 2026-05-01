@@ -43,8 +43,8 @@ let _cpAmm: any = null
 let _zap: any = null
 
 function getRpcUrl(): string {
-  const url = process.env.RPC_URL ?? process.env.HELIUS_RPC_URL
-  if (!url) throw new Error('[DAMM] RPC_URL or HELIUS_RPC_URL is not set')
+  const url = process.env.HELIUS_RPC_URL || process.env.RPC_URL
+  if (!url) throw new Error('[DAMM] HELIUS_RPC_URL or RPC_URL is not set')
   return url
 }
 

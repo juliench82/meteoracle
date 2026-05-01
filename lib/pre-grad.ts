@@ -15,8 +15,8 @@ import { sendAlert } from '../bot/alerter'
 import { createServerClient } from './supabase'
 
 function getRpcUrl(): string {
-  const url = process.env.RPC_URL ?? process.env.HELIUS_RPC_URL
-  if (!url) throw new Error('RPC_URL or HELIUS_RPC_URL is not set')
+  const url = process.env.HELIUS_RPC_URL || process.env.RPC_URL
+  if (!url) throw new Error('HELIUS_RPC_URL or RPC_URL is not set')
   return url
 }
 
