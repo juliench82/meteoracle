@@ -123,6 +123,7 @@ async function sendLegacyTx(
     const errMsg = confirmErr instanceof Error ? confirmErr.message : String(confirmErr)
     console.warn(`${label} confirmTransaction threw — checking chain directly for ${sig.slice(0, 8)}…`, errMsg)
 
+    // Give the RPC a moment to catch up before we query status
     await new Promise(r => setTimeout(r, 3_000))
 
     const statusResp = await connection.getSignatureStatus(sig, { searchTransactionHistory: true })
@@ -133,6 +134,7 @@ async function sendLegacyTx(
       return sig
     }
 
+    // Chain also has no record — tx genuinely did not land
     console.error(`${label} tx not confirmed on-chain after fallback check — sig: ${sig}`, { status })
     throw confirmErr
   }
@@ -526,21 +528,23 @@ export async function closePosition(
       return true
     }
 
-    // Attempt token → SOL swap with retry. On final failure, alert so the
-    // stranded tokens are never silently lost.
     try {
       await swapTokenToSol(position.mint, label)
     } catch (swapErr) {
       const swapMsg = swapErr instanceof Error ? swapErr.message : String(swapErr)
-      console.error(`${label} token→SOL swap failed after retries — manual action required`, { mint: position.mint, error: swapMsg })
+      console.error(`${label} token→SOL swap failed after all retries — tokens are stranded in wallet`, { mint: position.mint, error: swapMsg })
+
+      // Log to DB for audit trail
       await supabase.from('bot_logs').insert({
-        level: 'error', event: 'swap_token_to_sol_failed',
+        level: 'error',
+        event: 'swap_token_to_sol_failed',
         payload: { positionId, mint: position.mint, reason, error: swapMsg },
       })
-      // Fire Telegram alert so stranded tokens are surfaced immediately
+
+      // FIX: alert via Telegram so stranded tokens are immediately visible
       await sendAlert({
         type: 'error',
-        message: `⚠️ Token→SOL swap FAILED for ${position.symbol}\nMint: \`${position.mint}\`\nManual swap required.\nError: ${swapMsg}`,
+        message: `⚠️ Swap failed for ${position.symbol} after close (${reason})\nMint: \`${position.mint}\`\nTokens are stranded in wallet — manual swap required.\nError: ${swapMsg}`,
       })
     }
 

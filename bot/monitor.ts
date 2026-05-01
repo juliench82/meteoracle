@@ -263,7 +263,7 @@ async function checkPosition(
     strategy.exits.feeYieldExitPct &&
     ageHours <= 12 &&
     feeYieldPct >= strategy.exits.feeYieldExitPct &&
-    pnlSol > 0  // ← PATCH: fees cannot overcome a losing price position
+    pnlSol > 0  // FIX: only exit early when net PnL is positive — fees alone don't justify exit if price drift is negative
   ) {
     closeReason = `fee_yield_early_${feeYieldPct.toFixed(1)}pct`
   }
@@ -272,12 +272,17 @@ async function checkPosition(
   if (!closeReason && strategy.exits.minFeeYieldToExit) {
     const deployed = position.sol_deposited || 0
     const feeYield = deployed > 0 ? (feesEarnedSol / deployed) * 100 : 0
-    if (feeYield >= strategy.exits.minFeeYieldToExit && pnlSol > 0) {
+    if (feeYield >= strategy.exits.minFeeYieldToExit) {
       closeReason = `fee_target_reached_${feeYield.toFixed(1)}%`
     }
   }
 
   if (!closeReason) {
+    // Extension count is stored in DB metadata — it is the source of truth.
+    // We only increment (and alert) when potentialExtensions strictly exceeds
+    // the persisted value. This prevents the same extension level from firing
+    // an alert on every subsequent tick.
+    // Guard: avgDailyYield is null before 24h — never extend on extrapolated yield.
     const currentExtensions: number = position.metadata?.feeYieldExtensions ?? 0
     let effectiveMaxDuration = strategy.exits.maxDurationHours
     let shouldExtend = false
@@ -288,6 +293,7 @@ async function checkPosition(
       const potentialExtensions = Math.floor(avgDailyYield / strategy.exits.feeYieldExtendPct)
 
       if (potentialExtensions > currentExtensions) {
+        // New extension level reached — update DB and fire alert ONCE.
         const prevExtensions = currentExtensions
         newExtensions = potentialExtensions
         addedHoursThisTick = (newExtensions - prevExtensions) * (strategy.exits.feeYieldExtensionHours ?? 36)
@@ -326,6 +332,7 @@ async function checkPosition(
           positionId: position.id,
         })
       } else {
+        // Already at or above this extension level — just apply existing extensions silently.
         effectiveMaxDuration += currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
       }
     } else if (currentExtensions > 0) {
