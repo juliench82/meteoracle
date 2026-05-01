@@ -1,33 +1,39 @@
 # Meteoracle
 
-Automated on-chain liquidity provision bot for Solana. Scans Meteora DLMM pools in real time, classifies tokens by risk profile, deploys capital into concentrated liquidity positions, and manages exits — all without human intervention.
+Automated on-chain liquidity provision bot for Solana. Scans Meteora DLMM and DAMM v2 pools in real time, classifies tokens by risk profile, deploys capital into concentrated liquidity positions, and manages exits — all without human intervention.
 
-Built and operated as a solo project. Production-grade, self-hosted, zero external dependencies beyond public APIs.
+Built and operated as a solo project. Production-grade, self-hosted.
 
-**Stack:** TypeScript · Next.js 14 · Supabase (Postgres) · Solana web3.js · Meteora DLMM SDK · PM2 · Hetzner VPS
+**Stack:** TypeScript · Next.js 14 · Supabase (Postgres) · Solana web3.js · Meteora DLMM SDK · Meteora DAMM v2 SDK · Zap SDK · PM2
 
 ---
 
 ## What it does
 
-1. **Scans** — A background process continuously polls Meteora DLMM pools, filtering candidates by liquidity, volume, age, holder distribution, and safety score.
-2. **Classifies** — Each token is assigned a risk class by a multi-signal classifier that combines on-chain data, holder analysis, and market structure.
-3. **Deploys** — Based on the risk class, the bot selects the appropriate strategy and opens a concentrated liquidity position on Meteora DLMM.
-4. **Monitors** — A separate monitor process tracks each open position every minute: range status, fee accrual, price movement, and elapsed time.
-5. **Exits** — Positions are closed automatically based on a set of configurable exit conditions. Fees are claimed before close.
-6. **Alerts** — All events (opens, closes, rebalances, errors) are dispatched via Telegram in real time.
+1. **Scans** — Continuously polls Meteora DLMM and DAMM v2 pools, filtering candidates by liquidity, volume, age, holder distribution, and safety score.
+2. **Classifies** — Each token is assigned a risk class by a multi-signal classifier combining on-chain data, holder analysis, and market structure.
+3. **Deploys** — Based on the risk class, the bot selects the appropriate strategy and opens a concentrated liquidity position.
+4. **Monitors** — A per-tick monitor tracks each open position: price movement, fee accrual, range status, and elapsed time. USD values are fetched from the Meteora REST API each tick — no local price computation.
+5. **Exits** — Positions are closed automatically on configurable conditions. DLMM positions exit via standard remove-liquidity. DAMM v2 positions exit via Zap Out → 100% SOL.
+6. **Alerts** — All events (opens, closes, errors, balance warnings) are dispatched via Telegram in real time with rich USD-denominated P&L data.
 
 ---
 
 ## Architecture
 
 ```
-Hetzner VPS (PM2)
+VPS (PM2)
   │
-  ├── bot/scanner.ts          ← pool scanner + token classifier + position opener
-  ├── bot/monitor.ts          ← position health monitor + exit engine
+  ├── bot/scanner.ts          ← pool scanner + classifier + position opener (DLMM)
+  ├── bot/monitor.ts          ← DLMM position monitor + exit engine
+  ├── bot/damm-executor.ts    ← DAMM v2 open + close (Zap Out) + PnL fetch
+  ├── bot/alerter.ts          ← Telegram alert dispatcher
   ├── bot/telegram-bot.ts     ← bidirectional Telegram command interface
   └── start-dashboard.sh      ← Next.js dashboard (port 3000)
+
+lib/
+  ├── pre-grad.ts             ← DAMM v2 monitor loop + exit handler
+  └── types.ts                ← shared types
 
 Next.js Dashboard
   └── app/(dashboard)/
@@ -38,41 +44,56 @@ Supabase (Postgres)
   ├── lp_positions            ← all positions, open and closed
   ├── candidates              ← every scanned token with full classifier output
   ├── bot_logs                ← structured event log
-  └── bot_state               ← killswitch + runtime flags
+  └── bot_state               ← killswitch + runtime flags (dry_run)
 ```
+
+---
+
+## Two execution tracks
+
+The bot runs two parallel execution tracks, each targeting a different pool type:
+
+| Track | Pool type | SDK | Exit method |
+|---|---|---|---|
+| DLMM | Meteora DLMM (bin-based) | `@meteora-ag/dlmm` | Remove liquidity |
+| DAMM v2 / pre-grad | Meteora DAMM v2 (CPMM) | `@meteora-ag/cp-amm-sdk` + `@meteora-ag/zap-sdk` | Zap Out → SOL |
+
+### DAMM v2 track
+
+Positions are opened single-sided in SOL using `createPositionAndAddLiquidity`. `liquidityDelta` is computed from `sdk.getDepositQuote()` for the correct side (token A or B depending on which is WSOL).
+
+At close, `zapOutThroughDammV2` converts 100% of the position back to SOL in a single transaction. After confirmation, the Meteora DAMM v2 REST API is queried (up to 4 retries, 1.5s gap) for authoritative post-close `realized_pnl_usd` and `total_fee_earned_usd`. These are written to the DB row and surfaced in the Telegram close alert.
+
+All USD money fields (claimable fees, position value, realized PnL) come from the Meteora REST API — no local price computation.
 
 ---
 
 ## Strategies
 
-The bot runs multiple strategies in parallel, each targeting a different token risk profile. Strategy selection is fully automatic — the classifier routes each token to the correct strategy based on real-time on-chain data.
+Strategy selection is fully automatic — the classifier routes each token to the correct strategy based on real-time on-chain data. Strategy parameters (entry filters, position sizing, range config, exit rules) are not published.
 
-Strategy parameters (entry filters, position sizing, range configuration, exit rules) live in `strategies/` and are not published here.
-
-| Strategy | Type | Target |
-|---|---|---|
-| Evil Panda | DLMM LP | Early-stage, high-volatility memecoins |
-| Scalp Spike | DLMM LP | Mid-cap tokens with sudden volume spikes |
-| Stable Farm | DLMM LP | Established pairs, lower volatility |
+| Track | Target |
+|---|---|
+| DLMM strategies | Various risk profiles — early-stage to established pairs |
+| DAMM v2 / pre-grad | Pre-graduation tokens on the DAMM v2 bonding curve |
 
 ---
 
-## Dashboard
+## Telegram alerts
 
-A private Next.js dashboard runs on the same VPS. It shows:
+All bot events emit structured Telegram alerts. Close alerts include rich USD data:
 
-- Real-time open positions with fee accrual, P&L breakdown (fees vs. price impact), and time in position
-- Closed position history with exit reasons
-- Per-strategy performance metrics
-- Bot status, wallet balance, and scan activity
+```
+🌿 Pre-Grad Position Closed
+Token: `SYMBOL`
+Reason: take-profit
+Age: 43min
+Value: $12.34
+Realized PnL: +$1.82
+Claimable Fees: $0.47
+```
 
-The dashboard polls the bot's Supabase database directly — no separate API layer needed.
-
----
-
-## Telegram interface
-
-All bot events emit Telegram alerts. The bot also accepts inbound commands:
+The bot also accepts inbound commands:
 
 | Command | Action |
 |---|---|
@@ -92,20 +113,19 @@ All bot events emit Telegram alerts. The bot also accepts inbound commands:
 meteoracle/
 ├── app/(dashboard)/           ← Next.js dashboard
 ├── bot/
-│   ├── scanner.ts             ← pool scanner + classifier + opener
-│   ├── monitor.ts             ← position monitor + exit engine
-│   ├── executor.ts            ← on-chain transaction execution
+│   ├── scanner.ts             ← pool scanner + classifier + opener (DLMM)
+│   ├── monitor.ts             ← DLMM position monitor + exit engine
+│   ├── executor.ts            ← DLMM on-chain transaction execution
+│   ├── damm-executor.ts       ← DAMM v2 open + close (Zap Out) + PnL API
 │   ├── alerter.ts             ← Telegram alert dispatcher
 │   ├── scorer.ts              ← candidate scoring
 │   ├── telegram-bot.ts        ← inbound command handler
 │   ├── startup-alert.ts       ← crash-restart notification
 │   └── orphan-detector.ts     ← reconciles DB vs on-chain state
 ├── strategies/
-│   ├── index.ts               ← classifier + strategy registry
-│   ├── evil-panda.ts
-│   ├── scalp-spike.ts
-│   └── stable-farm.ts
+│   └── index.ts               ← classifier + strategy registry
 ├── lib/
+│   ├── pre-grad.ts            ← DAMM v2 monitor loop + exit handler
 │   ├── supabase.ts
 │   ├── solana.ts
 │   ├── helius.ts
@@ -114,7 +134,7 @@ meteoracle/
 │   └── types.ts
 ├── supabase/migrations/       ← versioned schema migrations
 ├── ecosystem.config.cjs       ← PM2 process definitions
-└── .env.local.example
+└── .env.local.example         ← all required env vars (no secrets)
 ```
 
 ---
@@ -140,12 +160,15 @@ on conflict (id) do nothing;
 
 ### 3. Environment
 
+Copy the example file and fill in all values:
+
 ```bash
 cp .env.local.example .env.local
-# fill in all required values
 ```
 
-### 4. Deploy (PM2 on VPS)
+Required variables are documented in `.env.local.example`. No secrets are committed to this repo.
+
+### 4. Deploy (PM2)
 
 ```bash
 npm install -g pm2
@@ -166,7 +189,7 @@ pm2 logs dashboard --lines 50
 ### 6. Deploy update
 
 ```bash
-git pull && pm2 restart all --update-env && pm2 save
+git pull && npm install && pm2 restart all --update-env && pm2 save
 ```
 
 ---
@@ -175,8 +198,8 @@ git pull && pm2 restart all --update-env && pm2 save
 
 - [ ] All Supabase migrations applied
 - [ ] `bot_state` row inserted
-- [ ] Wallet funded (≥ 0.5 SOL recommended)
-- [ ] `BOT_DRY_RUN=false` confirmed
+- [ ] Wallet funded (≥ 0.5 SOL recommended for initial positions)
+- [ ] `BOT_DRY_RUN=false` confirmed in env
 - [ ] `chmod +x start-dashboard.sh`
 - [ ] PM2 started and saved
 - [ ] Telegram bot responding to `/status`
@@ -191,10 +214,10 @@ git pull && pm2 restart all --update-env && pm2 save
 | [Supabase](https://supabase.com) | Postgres database | Yes |
 | [Rugcheck](https://rugcheck.xyz) | Token safety scores | Yes (no key needed) |
 | Telegram | Alerts + commands | Yes |
-| Hetzner VPS | Process hosting | CX22 ~€4/mo |
+| VPS (any provider) | Process hosting | Small instance sufficient |
 
 ---
 
 ## Disclaimer
 
-Experimental software. Liquidity provision on volatile assets carries significant risk including total loss of deployed capital. This project is published for portfolio and educational purposes. Run in dry-run mode (`BOT_DRY_RUN=true`) before deploying real funds.
+Experimental software. Liquidity provision on volatile assets carries significant risk including total loss of deployed capital. This project is published for educational and portfolio purposes. Always run with `BOT_DRY_RUN=true` before deploying real funds.
