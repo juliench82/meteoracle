@@ -6,6 +6,7 @@ ALTER TABLE lp_positions
   ADD COLUMN IF NOT EXISTS entry_price        numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS current_price      numeric,
   ADD COLUMN IF NOT EXISTS il_pct             numeric,
+  ADD COLUMN IF NOT EXISTS fees_earned_sol    numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS claimable_fees_usd numeric,
   ADD COLUMN IF NOT EXISTS position_value_usd numeric,
   ADD COLUMN IF NOT EXISTS realized_pnl_usd   numeric,
