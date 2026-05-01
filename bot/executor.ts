@@ -267,6 +267,34 @@ async function waitForPositionAccountReady(
   await new Promise(r => setTimeout(r, 5000))
 }
 
+/**
+ * Fetches userPositions with up to `maxAttempts` retries spaced `delayMs` apart.
+ * Meteora's position API can lag 1–3s behind the chain after a removeLiquidity tx.
+ * Returns the matching position or null if still absent after all retries.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getPositionWithRetry(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  dlmmPool: any,
+  walletPubkey: PublicKey,
+  positionPubkey: string,
+  label: string,
+  maxAttempts = 4,
+  delayMs = 1_500
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<any | null> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(walletPubkey)
+    const found = userPositions.find((p: { publicKey: PublicKey }) => p.publicKey.toBase58() === positionPubkey)
+    if (found) return found
+    if (attempt < maxAttempts) {
+      console.log(`${label} position not yet visible in API — retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`)
+      await new Promise(r => setTimeout(r, delayMs))
+    }
+  }
+  return null
+}
+
 export async function openPosition(
   metrics: TokenMetrics,
   strategy: Strategy
@@ -557,7 +585,7 @@ export async function closePosition(
 
   if (!position.position_pubkey) {
     console.error(`${label} position_pubkey is null — cannot close on-chain, marking closed in DB`)
-    await markPositionClosed(positionId, position.fees_earned_sol ?? 0, `${reason}_no_pubkey`)
+    await markPositionClosed(positionId, position.fees_earned_sol ?? 0, `${reason}_no_pubkey`, position)
     return false
   }
 
@@ -584,8 +612,13 @@ export async function closePosition(
       console.warn(`${label} fee claim failed (continuing):`, err)
     }
 
-    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
-    const userPosition = userPositions.find(p => p.publicKey.toBase58() === positionPubKey.toBase58())
+    // Retry getPositionsByUserAndLbPair to tolerate 1–3s Meteora API lag after chain TX
+    const userPosition = await getPositionWithRetry(
+      dlmmPool,
+      wallet.publicKey,
+      positionPubKey.toBase58(),
+      label
+    )
 
     if (userPosition) {
       const { lowerBinId, upperBinId } = userPosition.positionData
@@ -602,8 +635,8 @@ export async function closePosition(
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
       }
     } else {
-      console.warn(`${label} position not found on-chain — marking closed in DB`)
-      await markPositionClosed(positionId, feesClaimedSol, `${reason}_external`)
+      console.warn(`${label} position not found on-chain after retries — marking closed in DB`)
+      await markPositionClosed(positionId, feesClaimedSol, `${reason}_external`, position)
       await sendCloseAlert(position, feesClaimedSol, reason)
       return true
     }
@@ -638,7 +671,7 @@ export async function closePosition(
       }
     }
 
-    await markPositionClosed(positionId, feesClaimedSol, reason)
+    await markPositionClosed(positionId, feesClaimedSol, reason, position)
     await sendCloseAlert(position, feesClaimedSol, reason)
     return true
   } catch (err) {
@@ -715,20 +748,40 @@ async function persistPosition(
   return data.id
 }
 
+/**
+ * Marks a DLMM position closed and writes realized_pnl_usd.
+ * realized_pnl_usd = fees_earned_sol converted to USD at close-time SOL price.
+ * We use entry_price_usd / entry_price_sol as the SOL/USD rate since we have
+ * no live price oracle here; this approximates within normal hold durations.
+ */
 async function markPositionClosed(
   positionId: string,
   feesEarnedSol: number,
-  reason: string
+  reason: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  position?: Record<string, any>
 ): Promise<void> {
   const supabase = createServerClient()
+
+  let realizedPnlUsd: number | null = null
+  if (position) {
+    const entryPriceSol: number = position.entry_price_sol ?? 0
+    const entryPriceUsd: number = position.entry_price_usd ?? 0
+    const solPriceUsd = entryPriceSol > 0 ? entryPriceUsd / entryPriceSol : 0
+    if (solPriceUsd > 0) {
+      realizedPnlUsd = Math.round(feesEarnedSol * solPriceUsd * 100) / 100
+    }
+  }
+
   await supabase
     .from('lp_positions')
     .update({
-      status:          'closed',
-      closed_at:       new Date().toISOString(),
-      fees_earned_sol: feesEarnedSol,
-      oor_since_at:    null,
-      close_reason:    reason,
+      status:            'closed',
+      closed_at:         new Date().toISOString(),
+      fees_earned_sol:   feesEarnedSol,
+      oor_since_at:      null,
+      close_reason:      reason,
+      ...(realizedPnlUsd !== null ? { realized_pnl_usd: realizedPnlUsd } : {}),
     })
     .eq('id', positionId)
 }
