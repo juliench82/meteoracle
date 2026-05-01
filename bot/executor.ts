@@ -47,7 +47,7 @@ const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
 const MAX_SOL_PER_POSITION      = parseFloat(process.env.MAX_SOL_PER_POSITION      ?? '0.05')
 const MAX_CONCURRENT_POSITIONS  = parseInt(process.env.MAX_CONCURRENT_POSITIONS    ?? '5')
-const WALLET_RESERVE_MULTIPLIER = parseFloat(process.env.WALLET_RESERVE_MULTIPLIER ?? '1.5')
+const WALLET_MIN_SOL_RESERVE    = parseFloat(process.env.WALLET_MIN_SOL_RESERVE    ?? '0.1')
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 
@@ -579,15 +579,20 @@ export async function openPosition(
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
 
-    const remainingSlots   = Math.max(0, MAX_CONCURRENT_POSITIONS - limitState.effectiveOpenCount - 1)
-    const dynamicReserve   = remainingSlots * MAX_SOL_PER_POSITION * WALLET_RESERVE_MULTIPLIER
-    const requiredSol      = solAmount + METEORA_RENT_RESERVE_SOL + dynamicReserve
+    const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL + WALLET_MIN_SOL_RESERVE
 
     if (balanceSol < requiredSol) {
       console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)}`)
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_insufficient_balance',
-        payload: { symbol: metrics.symbol, balanceSol, requiredSol },
+        payload: {
+          symbol: metrics.symbol,
+          balanceSol,
+          requiredSol,
+          solAmount,
+          meteoraRentReserveSol: METEORA_RENT_RESERVE_SOL,
+          walletMinSolReserve: WALLET_MIN_SOL_RESERVE,
+        },
       })
       return null
     }
