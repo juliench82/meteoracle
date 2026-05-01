@@ -8,8 +8,8 @@
  *
  * - Real close: zapOutThroughDammV2 via @meteora-ag/zap-sdk → everything to SOL.
  *   Loads position row from Supabase by positionId before calling zap.
- *   After confirmation, reads the on-chain balance delta and writes
- *   metadata.realized_pnl_usd to the closed row.
+ *   After confirmation, fetches Meteora DAMM v2 position API for authoritative
+ *   USD PnL and writes metadata.realized_pnl_usd to the closed row.
  *
  * - Wallet: loaded from WALLET_PRIVATE_KEY env (base58), never from PublicKey alone.
  * - Lazy imports: all SDK imports are dynamic to prevent Next.js build-time IDL crash.
@@ -30,6 +30,8 @@ import bs58 from 'bs58'
 import type { DammPositionParams } from '@/lib/types'
 import { createServerClient } from '@/lib/supabase'
 import { sendAlert } from './alerter'
+
+const METEORA_DAMM_API = 'https://amm-v2.meteora.ag'
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
 
@@ -113,6 +115,40 @@ function sqrtPriceToSol(sqrtPrice: BN): number {
   const TWO_POW_64 = 2n ** 64n
   const sp = BigInt(sqrtPrice.toString())
   return Number((sp * sp) / (TWO_POW_64 * TWO_POW_64))
+}
+
+/**
+ * Fetch realized PnL (USD) from the Meteora DAMM v2 position API.
+ * Returns null if the request fails — caller falls back to null gracefully.
+ *
+ * Response shape (relevant fields):
+ *   { position_pnl_usd: number, total_fee_earned_usd: number, ... }
+ */
+async function fetchDammPositionPnl(positionPubkey: string): Promise<{
+  realized_pnl_usd: number
+  total_fee_earned_usd: number
+} | null> {
+  try {
+    const res = await fetch(`${METEORA_DAMM_API}/position/${positionPubkey}`, {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    })
+    if (!res.ok) {
+      console.warn(`[DAMM] Meteora position API ${res.status} for ${positionPubkey}`)
+      return null
+    }
+    const json = await res.json()
+    const realized_pnl_usd    = Number(json?.position_pnl_usd    ?? json?.pnl_usd    ?? NaN)
+    const total_fee_earned_usd = Number(json?.total_fee_earned_usd ?? json?.fee_earned_usd ?? NaN)
+    if (isNaN(realized_pnl_usd)) {
+      console.warn('[DAMM] Meteora API response missing position_pnl_usd:', JSON.stringify(json).slice(0, 200))
+      return null
+    }
+    return { realized_pnl_usd, total_fee_earned_usd: isNaN(total_fee_earned_usd) ? 0 : total_fee_earned_usd }
+  } catch (e) {
+    console.warn('[DAMM] fetchDammPositionPnl failed:', e)
+    return null
+  }
 }
 
 // ── Open ───────────────────────────────────────────────────────────────────────
@@ -336,9 +372,9 @@ async function saveDammPosition({
  * positionId: Supabase row id from lp_positions.
  * Loads pool_address, position_pubkey, and sol_deposited from DB; no guessing.
  *
- * After the zap-out tx confirms, reads the on-chain pre/post SOL balance of the
- * wallet to compute the realized return, then writes metadata.realized_pnl_usd
- * to the closed row as the canonical close-time snapshot.
+ * After the zap-out tx confirms, calls the Meteora DAMM v2 position API to get
+ * the authoritative USD PnL and writes metadata.realized_pnl_usd to the closed row.
+ * Falls back to null if the API is unreachable — the row is still closed cleanly.
  */
 export async function closeDammPosition(
   positionId: string,
@@ -358,7 +394,6 @@ export async function closeDammPosition(
       throw new Error(`[DAMM] lp_position ${positionId} not found: ${dbErr?.message ?? 'null row'}`)
     }
 
-    const solDeposited = Number(row.sol_deposited ?? 0)
     const zap = await getZap()
     const wallet = getWallet()
 
@@ -378,40 +413,25 @@ export async function closeDammPosition(
     const resolved = await resolveTransaction(tx)
     const signature = await sendWithPriority(resolved, [wallet], '[DAMM][close]')
 
-    // ── Realized PnL from on-chain balance delta ───────────────────────────
-    // post - pre = net SOL received from the zap (tx fees already deducted by runtime).
-    // realizedPnlUsd stored as SOL-denominated value; multiply by SOL price
-    // if USD conversion is added later. For now the field name is intentional:
-    // it is the authoritative close-time value regardless of denomination.
-    let realizedPnlUsd: number | null = null
-    try {
-      const connection = getConnection()
-      const confirmedTx = await connection.getTransaction(signature, {
-        commitment: 'confirmed',
-        maxSupportedTransactionVersion: 0,
-      })
-      if (confirmedTx?.meta) {
-        const keys = confirmedTx.transaction.message.staticAccountKeys
-        const walletIdx = keys.findIndex(
-          (k: any) => k.toBase58() === wallet.publicKey.toBase58(),
-        )
-        if (walletIdx >= 0) {
-          const pre  = confirmedTx.meta.preBalances[walletIdx]  ?? 0
-          const post = confirmedTx.meta.postBalances[walletIdx] ?? 0
-          const solReceived = (post - pre) / 1e9
-          realizedPnlUsd = Math.round((solReceived - solDeposited) * 1e6) / 1e6
-          console.log(`[DAMM] Realized PnL: ${realizedPnlUsd} SOL (deposited=${solDeposited}, received=${solReceived})`)
-        }
-      }
-    } catch (e) {
-      console.warn('[DAMM] Could not compute realized PnL from tx — skipping:', e)
+    // ── Realized PnL from Meteora DAMM v2 API ─────────────────────────────
+    // The position may take a few seconds to settle on the API after the tx;
+    // a single attempt is sufficient — if it fails we still close cleanly.
+    const pnlData = await fetchDammPositionPnl(row.position_pubkey)
+    if (pnlData) {
+      console.log(`[DAMM] Realized PnL (Meteora API): $${pnlData.realized_pnl_usd} | fees: $${pnlData.total_fee_earned_usd}`)
+    } else {
+      console.warn('[DAMM] Could not fetch realized PnL from Meteora API — metadata.realized_pnl_usd will be null')
     }
 
-    // Merge realized_pnl_usd into existing metadata; preserve live monitor fields.
+    // Merge into existing metadata; preserve open-time fields (age_minutes etc).
     const existingMeta = (row.metadata as Record<string, unknown>) ?? {}
-    const updatedMeta = realizedPnlUsd !== null
-      ? { ...existingMeta, realized_pnl_usd: realizedPnlUsd }
-      : existingMeta
+    const updatedMeta: Record<string, unknown> = {
+      ...existingMeta,
+      ...(pnlData !== null && {
+        realized_pnl_usd:    pnlData.realized_pnl_usd,
+        total_fee_earned_usd: pnlData.total_fee_earned_usd,
+      }),
+    }
 
     await supabase
       .from('lp_positions')
