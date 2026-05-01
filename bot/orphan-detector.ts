@@ -1,7 +1,7 @@
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
-import { fetchLiveDlmmPositions, type LiveDlmmPosition } from '@/lib/meteora-live'
+import { syncAllMeteoraPositions, type MeteoraPositionSyncResult } from '@/lib/position-sync'
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -100,43 +100,6 @@ async function insertOrphan(
   }
 }
 
-async function insertLivePosition(live: LiveDlmmPosition): Promise<void> {
-  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions`, {
-    method: 'POST',
-    headers: { ...sbHeaders(), 'Prefer': 'return=minimal' },
-    body: JSON.stringify({
-      symbol:              live.symbol,
-      mint:                live.mint,
-      pool_address:        live.pool_address,
-      strategy_id:         'meteora-live',
-      entry_price:         0,
-      entry_price_sol:     0,
-      entry_price_usd:     0,
-      current_price:       live.current_price,
-      sol_deposited:       live.sol_deposited,
-      token_amount:        live.token_amount,
-      claimable_fees_usd:  0,
-      position_value_usd:  0,
-      status:              live.status,
-      in_range:            live.in_range,
-      dry_run:             false,
-      position_type:       'dlmm',
-      opened_at:           live.opened_at,
-      position_pubkey:     live.position_pubkey,
-      metadata: {
-        ...live.metadata,
-        source_of_truth: 'meteora',
-        detectedBy: 'wallet-position-scan',
-        needs_strategy_review: true,
-      },
-    }),
-    signal: AbortSignal.timeout(8_000),
-  })
-  if (!res.ok && res.status !== 409) {
-    throw new Error(`insertLivePosition ${res.status}: ${await res.text()}`)
-  }
-}
-
 // In-memory dedup: prevents repeat alerts for the same orphan across ticks
 // within a single process lifetime. Cleared on restart.
 const _alertedOrphans = new Set<string>()
@@ -188,57 +151,36 @@ export async function detectOrphanedPositions(knownPoolAddresses: string[]): Pro
 }
 
 /**
- * Full-wallet scan: fetches ALL onchain DLMM positions for this wallet
- * via getAllLbPairPositionsByUser, then reconciles each against the DB.
+ * Full-wallet scan: fetches all on-chain Meteora LP positions for this wallet
+ * (DLMM + DAMM), then reconciles each against the DB cache.
  * Catches positions opened outside the bot (manual, other tools).
  */
-export async function detectAllOrphanedPositions(): Promise<{ live: number; inserted: number }> {
-  console.log('[orphan-detector] full-wallet scan for orphaned positions')
+export async function detectAllOrphanedPositions(): Promise<MeteoraPositionSyncResult> {
+  console.log('[orphan-detector] full-wallet scan for Meteora positions')
 
-  let livePositions: LiveDlmmPosition[]
-  try {
-    livePositions = await fetchLiveDlmmPositions()
-  } catch (err) {
-    console.warn('[orphan-detector] fetchLiveDlmmPositions failed:', err)
-    return { live: 0, inserted: 0 }
-  }
+  const result = await syncAllMeteoraPositions()
 
-  let inserted = 0
-  for (const live of livePositions) {
+  for (const live of result.insertedPositions) {
     const positionPubKey = live.position_pubkey
-
-    let exists: boolean
-    try {
-      exists = await positionExistsInDb(positionPubKey)
-    } catch (err) {
-      console.warn(`[orphan-detector] DB check failed for ${positionPubKey} — skipping:`, err)
-      continue
-    }
-    if (exists) continue
-
     console.warn(`[orphan-detector] live Meteora position missing from DB: ${positionPubKey} in pool ${live.pool_address}`)
 
-    try {
-      await insertLivePosition(live)
-      inserted++
-    } catch (err) {
-      console.error(`[orphan-detector] insertLivePosition failed for ${positionPubKey}:`, err)
+    if (_alertedOrphans.has(positionPubKey)) {
+      console.log(`[orphan-detector] ${positionPubKey} — alert already sent this session, skipping`)
       continue
     }
 
-    if (!_alertedOrphans.has(positionPubKey)) {
-      _alertedOrphans.add(positionPubKey)
-      await sendAlert({
-        type: 'orphan_detected',
-        symbol: live.symbol,
-        positionPubKey,
-        poolAddress: live.pool_address,
-      })
-    } else {
-      console.log(`[orphan-detector] ${positionPubKey} — alert already sent this session, skipping`)
-    }
+    _alertedOrphans.add(positionPubKey)
+    await sendAlert({
+      type: 'orphan_detected',
+      symbol: live.symbol,
+      positionPubKey,
+      poolAddress: live.pool_address,
+    })
   }
 
-  console.log(`[orphan-detector] full-wallet scan done — live=${livePositions.length} inserted=${inserted}`)
-  return { live: livePositions.length, inserted }
+  console.log(
+    `[orphan-detector] full-wallet scan done — live=${result.live} updated=${result.updated} inserted=${result.inserted} ` +
+    `(dlmm=${result.dlmmLive}, damm=${result.dammLive})`,
+  )
+  return result
 }

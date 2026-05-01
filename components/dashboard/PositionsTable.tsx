@@ -6,6 +6,8 @@ const STRATEGY_LABELS: Record<string, string> = {
   'scalp-spike': 'Scalp Spike',
   'stable-farm': 'Stable Farm',
   'damm-edge': 'DAMM Edge',
+  'damm-live': 'DAMM Live',
+  'meteora-live': 'Meteora Live',
 }
 
 function formatAge(openedAt: string): string {

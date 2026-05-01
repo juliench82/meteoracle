@@ -100,7 +100,10 @@ export async function monitorPositions(): Promise<{
     console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
     try {
       const reconcile = await detectAllOrphanedPositions()
-      console.log(`[monitor] Meteora reconcile — live=${reconcile.live} inserted=${reconcile.inserted}`)
+      console.log(
+        `[monitor] Meteora reconcile — live=${reconcile.live} updated=${reconcile.updated} inserted=${reconcile.inserted} ` +
+        `(DLMM ${reconcile.dlmmLive}, DAMM ${reconcile.dammLive})`,
+      )
     } catch (err) {
       console.warn('[monitor] Meteora position reconcile failed (non-fatal):', err)
     }
@@ -132,7 +135,7 @@ export async function monitorPositions(): Promise<{
       if (position.position_type === 'pre_grad' || strategyId === 'damm-edge') {
         continue
       }
-      if (strategyId === 'meteora-live') {
+      if (strategyId === 'meteora-live' || strategyId === 'damm-live' || position.position_type === 'damm-edge') {
         console.log(`[monitor] ${position.symbol} is a Meteora-live cache row — dashboard only, skipping strategy exits`)
         continue
       }

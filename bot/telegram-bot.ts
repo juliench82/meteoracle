@@ -29,10 +29,11 @@ import { promisify } from 'util'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
+import { closeDammPosition } from '@/bot/damm-executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
-import { fetchLiveDlmmPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
+import { fetchLiveMeteoraPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
 
 const execAsync = promisify(exec)
 const PM2 = '/usr/local/bin/pm2'
@@ -55,6 +56,21 @@ if (!BOT_TOKEN || !CHAT_ID) {
 }
 
 let lastUpdateId = 0
+
+function isDammLp(pos: { strategy_id?: string | null; position_type?: string | null }): boolean {
+  return pos.strategy_id === 'damm-edge' || pos.strategy_id === 'damm-live' || pos.position_type === 'damm-edge'
+}
+
+async function closeLpPositionByKind(
+  pos: { id: string; strategy_id?: string | null; position_type?: string | null },
+  reason: string,
+): Promise<boolean> {
+  if (isDammLp(pos)) {
+    const result = await closeDammPosition(pos.id, reason)
+    return result.success
+  }
+  return closePosition(pos.id, reason)
+}
 
 async function reply(text: string): Promise<void> {
   try {
@@ -128,13 +144,13 @@ async function handleStop() {
   const supabase = createServerClient()
   const { data: positions } = await supabase
     .from('lp_positions')
-    .select('id, symbol, status')
+    .select('id, symbol, status, strategy_id, position_type')
     .in('status', ['active', 'out_of_range'])
 
   let closed = 0
   for (const pos of positions ?? []) {
     try {
-      const ok = await closePosition(pos.id, 'emergency_stop')
+      const ok = await closeLpPositionByKind(pos, 'emergency_stop')
       if (ok) closed++
     } catch (err) {
       console.error(`[telegram-bot] emergency close ${pos.id} failed:`, err)
@@ -188,7 +204,7 @@ async function handleClose(positionId: string) {
   try {
     const supabase = createServerClient()
     const { data: pos, error } = await supabase
-      .from('lp_positions').select('id, symbol, status').eq('id', positionId).single()
+      .from('lp_positions').select('id, symbol, status, strategy_id, position_type').eq('id', positionId).single()
     if (error || !pos) {
       await reply(`❌ LP position \`${positionId}\` not found.`)
       return
@@ -197,7 +213,7 @@ async function handleClose(positionId: string) {
       await reply(`ℹ️ \`${positionId}\` (${pos.symbol}) is already closed.`)
       return
     }
-    const ok = await closePosition(positionId, 'manual_telegram')
+    const ok = await closeLpPositionByKind(pos, 'manual_telegram')
     await reply(ok
       ? `✅ \`${positionId}\` (${pos.symbol}) closed successfully.`
       : `❌ Failed to close \`${positionId}\` — check PM2 logs.`
@@ -210,18 +226,19 @@ async function handleClose(positionId: string) {
 async function handleStatus() {
   const supabase = createServerClient()
   const state = await getBotState()
-  const liveLp = await fetchLiveDlmmPositions().catch(() => [])
+  const liveLp = await fetchLiveMeteoraPositions().catch(() => [])
+  const liveDlmmCount = liveLp.filter(p => p.position_type === 'dlmm').length
+  const liveDammCount = liveLp.filter(p => p.position_type === 'damm-edge').length
 
-  // DLMM positions
   const { data: openLp } = await supabase
     .from('lp_positions')
-    .select('id, symbol, sol_deposited, opened_at, status, position_pubkey, strategy_id, position_type, metadata')
+    .select('id, symbol, sol_deposited, opened_at, status, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, metadata')
     .in('status', ['active', 'out_of_range', 'orphaned'])
 
   const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp)
 
   const dlmmLines = mergedOpenLp
-    .filter(p => p.strategy_id !== 'damm-edge' && p.position_type !== 'damm-edge')
+    .filter(p => p.strategy_id !== 'damm-edge' && p.strategy_id !== 'damm-live' && p.position_type !== 'damm-edge')
     .map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
@@ -229,37 +246,36 @@ async function handleStatus() {
     return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${oor}${source}`
   })
 
-  // DAMM v2 positions are stored in lp_positions with strategy_id='damm-edge'
-  const { data: openDamm } = await supabase
-    .from('lp_positions')
-    .select('id, symbol, sol_deposited, opened_at, status, metadata')
-    .eq('strategy_id', 'damm-edge')
-    .in('status', ['active', 'out_of_range'])
-
-  const dammLines = (openDamm ?? []).map(p => {
+  const dammPositions = mergedOpenLp.filter(
+    p => p.strategy_id === 'damm-edge' || p.strategy_id === 'damm-live' || p.position_type === 'damm-edge',
+  )
+  const dammLines = dammPositions.map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const bondingCurvePct = p.metadata?.bonding_curve_pct
     const curve = bondingCurvePct != null ? ` | curve ${Number(bondingCurvePct).toFixed(1)}%` : ''
-    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${curve}`
+    const value = p.position_value_usd ?? p.metadata?.position_value_usd
+    const valueText = value != null ? ` | value $${Number(value).toFixed(2)}` : ''
+    const source = p._source?.includes('meteora') || p.strategy_id === 'damm-live' ? ' | Meteora live' : ''
+    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${curve}${valueText}${source}`
   })
 
   await reply([
     `🤖 *Bot Status*`,
     `State: ${state.enabled ? '🟢 Running' : '🛑 Stopped'}`,
     `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
-    `Meteora live DLMM: ${liveLp.length}`,
+    `Meteora live: ${liveDlmmCount} DLMM / ${liveDammCount} DAMM`,
     ``,
     `📊 *DLMM Positions (${dlmmLines.length})*`,
     ...(dlmmLines.length ? dlmmLines : ['  none']),
     ``,
-    `🌱 *DAMM v2 Pre-Grad (${(openDamm ?? []).length})*`,
+    `🌱 *DAMM v2 Positions (${dammPositions.length})*`,
     ...(dammLines.length ? dammLines : ['  none']),
   ].join('\n'))
 }
 
 async function handlePositions() {
   const supabase = createServerClient()
-  const liveLp = await fetchLiveDlmmPositions().catch(() => [])
+  const liveLp = await fetchLiveMeteoraPositions().catch(() => [])
   const { data } = await supabase
     .from('lp_positions')
     .select('id, symbol, status, sol_deposited, pool_address, opened_at, position_pubkey, strategy_id, position_type, metadata')
@@ -340,7 +356,12 @@ async function handleOrphans() {
   await reply('⏳ *Reconciling wallet positions from Meteora...*')
   try {
     const result = await detectAllOrphanedPositions()
-    await reply(`✅ Meteora reconcile complete.\nLive DLMM positions: ${result.live}\nInserted missing cache rows: ${result.inserted}`)
+    await reply(
+      `✅ Meteora reconcile complete.\n` +
+      `Live: ${result.live} (${result.dlmmLive} DLMM / ${result.dammLive} DAMM)\n` +
+      `Updated cache rows: ${result.updated}\n` +
+      `Inserted missing cache rows: ${result.inserted}`,
+    )
   } catch (err) {
     await reply(`❌ Meteora reconcile error: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -355,7 +376,7 @@ async function handleHelp() {
     `/dry — switch to dry-run mode`,
     `/live — switch to live trading`,
     `/status — snapshot: bot state + DLMM + DAMM v2 positions`,
-    `/positions — list all open DLMM LP positions`,
+    `/positions — list all open Meteora LP positions`,
     `/close <id> — force-close an LP position`,
     `/tick — manually trigger scanner + monitor`,
     `/orphans — manually run orphan detector`,

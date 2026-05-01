@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
-import { fetchLiveDlmmPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
+import { fetchLiveMeteoraPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,9 +16,9 @@ export async function GET() {
   ])
 
   const dbOpenLp = openLpRes.status === 'fulfilled' ? (openLpRes.value.data ?? []) : []
-  let liveLp: Awaited<ReturnType<typeof fetchLiveDlmmPositions>> = []
+  let liveLp: Awaited<ReturnType<typeof fetchLiveMeteoraPositions>> = []
   try {
-    liveLp = await fetchLiveDlmmPositions()
+    liveLp = await fetchLiveMeteoraPositions()
   } catch (err) {
     console.warn('[dashboard-data] Meteora live position fetch failed; using Supabase cache:', err)
   }
@@ -32,6 +32,8 @@ export async function GET() {
     meteoraLive: {
       ok: liveLp.length > 0,
       count: liveLp.length,
+      dlmm: liveLp.filter(p => p.position_type === 'dlmm').length,
+      damm: liveLp.filter(p => p.position_type === 'damm-edge').length,
     },
   })
 }

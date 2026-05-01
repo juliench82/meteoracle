@@ -2,9 +2,10 @@ import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { closePosition, openPosition } from '@/bot/executor'
+import { closeDammPosition } from '@/bot/damm-executor'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
-import { fetchLiveDlmmPositions } from '@/lib/meteora-live'
+import { fetchLiveMeteoraPositions } from '@/lib/meteora-live'
 import { STRATEGIES } from '@/strategies'
 import type { TokenMetrics } from '@/lib/types'
 import axios from 'axios'
@@ -105,6 +106,21 @@ function guardBot(state: { enabled: boolean }) {
   return !state.enabled
 }
 
+function isDammLp(pos: { strategy_id?: string | null; position_type?: string | null }): boolean {
+  return pos.strategy_id === 'damm-edge' || pos.strategy_id === 'damm-live' || pos.position_type === 'damm-edge'
+}
+
+async function closeLpPositionByKind(
+  pos: { id: string; strategy_id?: string | null; position_type?: string | null },
+  reason: string,
+): Promise<boolean> {
+  if (isDammLp(pos)) {
+    const result = await closeDammPosition(pos.id, reason)
+    return result.success
+  }
+  return closePosition(pos.id, reason)
+}
+
 export async function POST(req: Request) {
   try {
     if (!TELEGRAM_WEBHOOK_SECRET) {
@@ -141,7 +157,7 @@ export async function POST(req: Request) {
       const supabase = createServerClient()
       const { data: pos, error } = await supabase
         .from('lp_positions')
-        .select('id, symbol, status')
+        .select('id, symbol, status, strategy_id, position_type')
         .eq('id', positionId)
         .single()
       if (error || !pos) {
@@ -155,7 +171,7 @@ export async function POST(req: Request) {
       let closeOk = false
       let closeErr = ''
       try {
-        closeOk = await closePosition(positionId, 'manual_telegram')
+        closeOk = await closeLpPositionByKind(pos, 'manual_telegram')
       } catch (err) {
         closeErr = err instanceof Error ? err.message : String(err)
       }
@@ -188,6 +204,10 @@ export async function POST(req: Request) {
       }
       if (pos.status === 'closed') {
         await reply(chatId, `ℹ️ Position \`${positionId}\` (${pos.symbol}) is already closed.`)
+        return NextResponse.json({ ok: true })
+      }
+      if (isDammLp(pos)) {
+        await reply(chatId, `❌ Rebalance is only supported for DLMM positions. Use /close for DAMM position \`${positionId}\`.`)
         return NextResponse.json({ ok: true })
       }
       const strategyId = pos.strategy_id ?? pos.metadata?.strategy_id
@@ -341,18 +361,25 @@ export async function POST(req: Request) {
         getBotState(),
         supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
         supabase.from('bot_logs').select('created_at').eq('event', 'bot_tick').order('created_at', { ascending: false }).limit(1).single(),
-        fetchLiveDlmmPositions(),
+        fetchLiveMeteoraPositions(),
       ])
       const state       = stateRes.status === 'fulfilled' ? stateRes.value : { enabled: false, dry_run: true }
       const openCount   = openRes.status === 'fulfilled' ? openRes.value.count : '?'
       const lastTick    = lastTickRes.status === 'fulfilled' ? lastTickRes.value.data?.created_at : null
       const liveLpCount = liveLpRes.status === 'fulfilled' ? liveLpRes.value.length : 0
+      const liveDlmmCount = liveLpRes.status === 'fulfilled'
+        ? liveLpRes.value.filter(p => p.position_type === 'dlmm').length
+        : 0
+      const liveDammCount = liveLpRes.status === 'fulfilled'
+        ? liveLpRes.value.filter(p => p.position_type === 'damm-edge').length
+        : 0
       const lastTickStr = lastTick ? new Date(lastTick).toUTCString() : 'Never'
       await reply(chatId, [
         `📊 *Bot Status*`,
         `Enabled:        ${state.enabled  ? '✅ Running' : '🛑 Stopped'}`,
         `Mode:           ${state.dry_run  ? '🟡 Dry run' : '🟢 Live trading'}`,
         `Open positions: ${openCount} cached / ${liveLpCount} Meteora live`,
+        `Meteora live:  ${liveDlmmCount} DLMM / ${liveDammCount} DAMM`,
         `Last tick:      ${lastTickStr}`,
       ].join('\n'))
     }
