@@ -1,27 +1,22 @@
 import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { startPreGradMonitor } from '@/lib/pre-grad'
+import { checkDammPositions } from '@/lib/pre-grad'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 
 export const dynamic = 'force-dynamic'
-
-// Start the DAMM pre-grad monitor once on first tick (setInterval is idempotent
-// across hot reloads in dev; Vercel serverless re-initialises per invocation so
-// the interval fires once within each execution context, which is acceptable).
-let preGradMonitorStarted = false
 
 /**
  * Main bot tick — called by Vercel Cron (and manually via Telegram /tick).
  * Order of checks:
  *  1. BOT_ENABLED env var — hard kill-switch, survives DB outages
  *  2. bot_state.enabled  — soft runtime toggle via /stop and /start
- *  3. startPreGradMonitor — once per process lifetime
- *  4. monitor first (time-sensitive exits), then scanner
+ *  3. monitorPositions   — DLMM exits (time-sensitive)
+ *  4. checkDammPositions — DAMM v2 exits (time-sensitive)
+ *  5. runScanner         — new candidates
  */
 export async function POST() {
-  // 1. Hard kill-switch — env var must be 'true'
   if (process.env.BOT_ENABLED !== 'true') {
     return NextResponse.json({
       status: 'disabled',
@@ -29,7 +24,6 @@ export async function POST() {
     })
   }
 
-  // 2. Runtime toggle — reads from Supabase bot_state table
   const state = await getBotState()
   if (!state.enabled) {
     return NextResponse.json({
@@ -39,24 +33,17 @@ export async function POST() {
     })
   }
 
-  // 3. Start DAMM pre-grad monitor once per process lifetime
-  if (!preGradMonitorStarted) {
-    preGradMonitorStarted = true
-    void startPreGradMonitor()
-  }
-
   const startedAt = Date.now()
   const supabase = createServerClient()
 
   try {
-    // 4. Monitor open positions first — exits are time-sensitive
     const monitorResult = await monitorPositions()
-
-    // 5. Scan for new candidates
+    const dammResult = await checkDammPositions()
     const scanResult = await runScanner()
 
     const payload = {
       monitor: monitorResult,
+      damm: dammResult,
       scanner: scanResult,
       durationMs: Date.now() - startedAt,
     }

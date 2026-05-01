@@ -81,7 +81,6 @@ async function sendWithPriority(
   tx.recentBlockhash = blockhash
   tx.feePayer = signers[0].publicKey
 
-  // Prepend budget instructions only if not already present
   const hasBudget = tx.instructions.some(
     ix => ix.programId.equals(ComputeBudgetProgram.programId),
   )
@@ -105,6 +104,15 @@ async function sendWithPriority(
   return sig
 }
 
+// ── helpers ────────────────────────────────────────────────────────────────────
+
+/** Convert Q64.64 sqrtPrice BN → SOL-denominated price ratio. */
+function sqrtPriceToSol(sqrtPrice: BN): number {
+  const TWO_POW_64 = 2n ** 64n
+  const sp = BigInt(sqrtPrice.toString())
+  return Number((sp * sp) / (TWO_POW_64 * TWO_POW_64))
+}
+
 // ── Open ───────────────────────────────────────────────────────────────────────
 
 /**
@@ -117,6 +125,7 @@ async function sendWithPriority(
  *   4. Generate fresh position NFT Keypair.
  *   5. Call sdk.createPositionAndAddLiquidity() → build → sign → confirm.
  *   6. Persist to lp_positions with strategy_id = 'damm-edge'.
+ *      entry_price_sol is captured from sqrtPrice at open so TP/SL have a baseline.
  *   7. Fire pre_grad_opened Telegram alert.
  */
 export async function openDammPosition(
@@ -128,8 +137,6 @@ export async function openDammPosition(
     const sdk = await getCpAmm()
     const wallet = getWallet()
     const pool = new PublicKey(params.poolAddress)
-    // positionNft is the NFT mint keypair — createPositionAndAddLiquidity derives
-    // the position PDA and NFT account from it internally.
     const positionNftKp = Keypair.generate()
 
     // 1. Fetch pool state
@@ -139,8 +146,6 @@ export async function openDammPosition(
     const {
       tokenAMint,
       tokenBMint,
-      tokenAVault,
-      tokenBVault,
       sqrtPrice,
       sqrtMinPrice,
       sqrtMaxPrice,
@@ -149,6 +154,9 @@ export async function openDammPosition(
       tokenAFlag,
       tokenBFlag,
     } = poolState
+
+    // Capture entry price from sqrtPrice at the moment of open
+    const entryPriceSol = sqrtPriceToSol(sqrtPrice)
 
     // 2. Token programs — tokenFlag: 0 = SPL, 1 = Token2022
     const { TOKEN_2022_PROGRAM_ID } = await import('@solana/spl-token')
@@ -168,13 +176,11 @@ export async function openDammPosition(
     const zeroBN = new BN(0)
 
     // 3. Compute liquidityDelta for single-sided deposit
-    //    getDepositQuote returns { liquidityDelta, actualInputAmount, outputAmount }
     let liquidityDelta: BN
     let maxAmountTokenA: BN
     let maxAmountTokenB: BN
 
     if (isTokenASol) {
-      // Depositing token A (SOL) only → sqrtPrice must be < sqrtMaxPrice
       if (sqrtPrice.gte(sqrtMaxPrice)) {
         throw new Error('[DAMM] sqrtPrice >= sqrtMaxPrice — cannot deposit token A only')
       }
@@ -190,11 +196,9 @@ export async function openDammPosition(
         liquidity,
       })
       liquidityDelta = quote.liquidityDelta
-      // Set generous thresholds: 1% slippage
       maxAmountTokenA = solBN
       maxAmountTokenB = zeroBN
     } else {
-      // Depositing token B (SOL) only → sqrtPrice must be > sqrtMinPrice
       if (sqrtPrice.lte(sqrtMinPrice)) {
         throw new Error('[DAMM] sqrtPrice <= sqrtMinPrice — cannot deposit token B only')
       }
@@ -218,9 +222,9 @@ export async function openDammPosition(
       throw new Error('[DAMM] liquidityDelta is zero — pool may be full range or price is at boundary')
     }
 
-    console.log(`[DAMM] liquidityDelta=${liquidityDelta.toString()} isTokenASol=${isTokenASol}`)
+    console.log(`[DAMM] liquidityDelta=${liquidityDelta.toString()} isTokenASol=${isTokenASol} entryPriceSol=${entryPriceSol}`)
 
-    // 4. createPositionAndAddLiquidity (creates NFT mint + position PDA + adds liq in one tx)
+    // 4. createPositionAndAddLiquidity
     const rawTx = await sdk.createPositionAndAddLiquidity({
       owner: wallet.publicKey,
       pool,
@@ -228,7 +232,6 @@ export async function openDammPosition(
       liquidityDelta,
       maxAmountTokenA,
       maxAmountTokenB,
-      // 1% slippage: accept up to 1% less than theoretical amounts
       tokenAAmountThreshold: maxAmountTokenA.muln(99).divn(100),
       tokenBAmountThreshold: maxAmountTokenB.muln(99).divn(100),
       tokenAMint,
@@ -238,22 +241,21 @@ export async function openDammPosition(
     })
 
     const tx = await resolveTransaction(rawTx)
-    // positionNftKp must sign because it is the NFT mint being created
     const signature = await sendWithPriority(tx, [wallet, positionNftKp], '[DAMM][open]')
 
-    // Derive position PDA for storage (same derivation as SDK internals)
     const { derivePositionAddress } = await import('@meteora-ag/cp-amm-sdk')
     const positionPda = derivePositionAddress(positionNftKp.publicKey)
     const positionPubkey = positionPda.toBase58()
 
     console.log(`[DAMM] ✅ Opened: pos=${positionPubkey} sig=${signature}`)
 
-    // 5. Persist to lp_positions
+    // 5. Persist — entry_price_sol written from live sqrtPrice
     const positionId = await saveDammPosition({
       params,
       positionPubkey,
       signature,
       solDeposited: params.solAmount,
+      entryPriceSol,
     })
 
     // 6. Fire Telegram alert
@@ -280,11 +282,13 @@ async function saveDammPosition({
   positionPubkey,
   signature,
   solDeposited,
+  entryPriceSol,
 }: {
   params: DammPositionParams
   positionPubkey: string
   signature: string
   solDeposited: number
+  entryPriceSol: number
 }): Promise<string> {
   const supabase = createServerClient()
   const { data, error } = await supabase
@@ -298,7 +302,7 @@ async function saveDammPosition({
       token_amount: 0,
       sol_deposited: solDeposited,
       entry_price_usd: 0,
-      entry_price_sol: 0,
+      entry_price_sol: entryPriceSol,
       fees_earned_sol: 0,
       pnl_sol: 0,
       status: 'active',
@@ -320,7 +324,7 @@ async function saveDammPosition({
     throw new Error(`[DAMM] Supabase insert failed: ${error.message}`)
   }
 
-  console.log(`[DAMM] lp_position saved: id=${data.id}`)
+  console.log(`[DAMM] lp_position saved: id=${data.id} entry_price_sol=${entryPriceSol}`)
   return data.id
 }
 
@@ -369,7 +373,6 @@ export async function closeDammPosition(
     const resolved = await resolveTransaction(tx)
     const signature = await sendWithPriority(resolved, [wallet], '[DAMM][close]')
 
-    // Mark closed in DB
     await supabase
       .from('lp_positions')
       .update({
@@ -402,7 +405,7 @@ export async function getDammPoolConfig(poolAddress: string): Promise<{
     if (!pool) return { isValid: false }
     return {
       isValid: true,
-      currentPrice: Number(pool.sqrtPrice ?? 0),
+      currentPrice: sqrtPriceToSol(pool.sqrtPrice),
       feePct: pool.poolFees?.baseFactor ? Number(pool.poolFees.baseFactor) / 100 : undefined,
     }
   } catch {
