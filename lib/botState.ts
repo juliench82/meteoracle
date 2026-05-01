@@ -25,8 +25,8 @@ export async function getBotState(): Promise<BotState> {
     }
 
     return { enabled: data.enabled, dry_run: data.dry_run }
-  } catch (err) {
-    console.error('[botState] unexpected error:', err)
+  } catch (error) {
+    console.error('[botState] Supabase error, failing closed:', error)
     return { enabled: false, dry_run: true }
   }
 }
