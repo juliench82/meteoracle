@@ -21,7 +21,7 @@ async function getDLMM() {
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
-const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit', 'fee_target']
+const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
 
 // Run full-wallet orphan scan every N ticks (default 15 ≈ 15 min at 60s interval)
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '15')
@@ -352,17 +352,11 @@ async function fetchPositionState(
     const feeY = Number(posData.feeY ?? 0) / 1e9
     const feesEarnedSol = feeX + feeY
 
-    let volume1hUsd = 0
-    try {
-      const apiRes = await fetch(
-        `https://dlmm-api.meteora.ag/pair/${poolAddress}`,
-        { signal: AbortSignal.timeout(5_000) }
-      )
-      if (apiRes.ok) {
-        const apiData = await apiRes.json()
-        volume1hUsd = apiData?.trade_volume_usd_1h ?? 0
-      }
-    } catch {}
+    // NOTE: volume1hUsd intentionally set to 0 — the undocumented
+    // dlmm-api.meteora.ag endpoint is rate-limited and not part of any
+    // official Meteora API. Will be replaced with the official
+    // DAMM v2 / DLMM API once endpoints are confirmed.
+    const volume1hUsd = 0
 
     return { inRange, currentPriceSol, feesEarnedSol, volume1hUsd, externallyClosed: false }
   } catch (err) {
