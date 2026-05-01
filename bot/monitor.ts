@@ -186,6 +186,7 @@ async function checkPosition(
   }
 
   const entryPriceSol: number = position.entry_price_sol ?? position.metadata?.entry_price_sol ?? 0
+  const entryPriceUsd: number = position.entry_price_usd ?? 0
 
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
@@ -199,6 +200,17 @@ async function checkPosition(
   const pnlSol = entryPriceSol > 0
     ? Math.round((position.sol_deposited * (pricePct / 100) + feesEarnedSol) * 1e6) / 1e6
     : Math.round(feesEarnedSol * 1e6) / 1e6
+
+  // USD values derived from entry price ratio (best available without live oracle)
+  const solPriceUsd = entryPriceSol > 0 && entryPriceUsd > 0
+    ? entryPriceUsd / entryPriceSol
+    : 0
+  const claimableFeesUsd = solPriceUsd > 0
+    ? Math.round(feesEarnedSol * solPriceUsd * 100) / 100
+    : null
+  const positionValueUsd = solPriceUsd > 0
+    ? Math.round((position.sol_deposited + pnlSol) * solPriceUsd * 100) / 100
+    : null
 
   const wasInRange = position.status === 'active'
   const justWentOOR = !inRange && wasInRange
@@ -215,13 +227,15 @@ async function checkPosition(
 
   try {
     await sbUpdate('lp_positions', `id=eq.${position.id}`, {
-      current_price: currentPriceSol,
-      in_range: inRange,
-      fees_earned_sol: feesEarnedSol,
-      il_pct: ilPct,
-      pnl_sol: pnlSol,
-      status: inRange ? 'active' : 'out_of_range',
-      oor_since_at: oorSinceAt,
+      current_price:     currentPriceSol,
+      in_range:          inRange,
+      fees_earned_sol:   feesEarnedSol,
+      il_pct:            ilPct,
+      pnl_sol:           pnlSol,
+      status:            inRange ? 'active' : 'out_of_range',
+      oor_since_at:      oorSinceAt,
+      ...(claimableFeesUsd !== null  ? { claimable_fees_usd:  claimableFeesUsd }  : {}),
+      ...(positionValueUsd !== null  ? { position_value_usd:  positionValueUsd }  : {}),
     })
   } catch (err) {
     console.error(`${label} DB update failed:`, err)
@@ -239,6 +253,7 @@ async function checkPosition(
   console.log(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
     ` pnl=${pnlSol.toFixed(6)} fees=${feeYieldPct.toFixed(1)}%deployed` +
+    ` claimable=$${claimableFeesUsd ?? 'n/a'} posValue=$${positionValueUsd ?? 'n/a'}` +
     ` age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`
   )
 
@@ -365,7 +380,7 @@ async function fetchPositionState(
   }
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+// ── Entry point ─────────────────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log(`[monitor] starting — interval=${MONITOR_INTERVAL_MS / 1000}s`)
