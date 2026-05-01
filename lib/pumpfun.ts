@@ -1,5 +1,7 @@
 /**
- * pump.fun + Moonshot bonding curve reader — uses Helius RPC, no pump.fun API needed.
+ * pump.fun bonding curve reader — uses Helius RPC, no pump.fun API needed.
+ * Moonshot curve support is intentionally disabled until its on-chain layout is
+ * implemented, so scanner decisions never rely on fabricated progress values.
  *
  * BondingCurve account layout (Anchor, after 8-byte discriminator):
  *   offset  8: virtualTokenReserves  u64
@@ -126,9 +128,9 @@ export function isMoonshotToken(mintAddress: string): boolean {
   return lower.endsWith('moon') || lower.includes('moonshot') || lower.endsWith('msh')
 }
 
-/** True for any supported launchpad (pump.fun OR Moonshot). */
+/** True for launchpads whose bonding-curve layout is implemented. */
 export function isSupportedLaunchpadToken(mintAddress: string): boolean {
-  return isPumpFunToken(mintAddress) || isMoonshotToken(mintAddress)
+  return isPumpFunToken(mintAddress)
 }
 
 /**

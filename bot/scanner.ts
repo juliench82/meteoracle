@@ -15,10 +15,8 @@ import { getRugscore, getRugcheckCacheSize } from './rugcheck-cache'
 import {
   fetchBondingCurve,
   fetchPumpFunBondingCurve,
-  fetchMoonshotBondingCurve,
   isPumpFunToken,
   isMoonshotToken,
-  isSupportedLaunchpadToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
 // ── DAMM v2 Edge (additive imports — do not remove or reorder) ────────────────
@@ -76,7 +74,6 @@ const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
 
 // Thresholds for high-curve detection (logged, falls through to normal scoring)
 const PUMPFUN_HIGHCURVE_THRESHOLD  = 95
-const MOONSHOT_HIGHCURVE_THRESHOLD = 90
 
 function detectLaunchpadSource(tokenAddress: string): 'pumpfun' | 'moonshot' | 'meteora' {
   if (isPumpFunToken(tokenAddress)) return 'pumpfun'
@@ -245,25 +242,15 @@ export async function runScanner(): Promise<{
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
 
-    // High-curve detection: log progress, then fall through to normal scoring.
+    // Pump.fun high-curve detection: log progress, then fall through to normal scoring.
     // The scorer awards +8 curveBonus at 70-95% and +4 at 95-99%.
-    if (isSupportedLaunchpadToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
-      if (isPumpFunToken(tokenAddress)) {
-        const curve = await fetchPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
-        const progress = curve?.progressPct ?? 0
-        if (progress >= PUMPFUN_HIGHCURVE_THRESHOLD && curve?.complete === false) {
-          console.log(`[scanner] ${symbol} — pump.fun high-curve ${progress.toFixed(1)}% — scoring normally (+curveBonus)`)
-        } else {
-          console.log(`[scanner] ${symbol} — pump.fun curve ${progress.toFixed(1)}% (complete=${curve?.complete ?? 'unknown'})`)
-        }
-      } else if (isMoonshotToken(tokenAddress)) {
-        const curve = await fetchMoonshotBondingCurve(tokenAddress, heliusRpcUrl)
-        const progress = curve?.progressPct ?? 0
-        if (progress >= MOONSHOT_HIGHCURVE_THRESHOLD) {
-          console.log(`[scanner] ${symbol} — moonshot high-curve ${progress.toFixed(1)}% — scoring normally (+curveBonus)`)
-        } else {
-          console.log(`[scanner] ${symbol} — moonshot curve ${progress.toFixed(1)}%`)
-        }
+    if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
+      const curve = await fetchPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
+      const progress = curve?.progressPct ?? 0
+      if (progress >= PUMPFUN_HIGHCURVE_THRESHOLD && curve?.complete === false) {
+        console.log(`[scanner] ${symbol} — pump.fun high-curve ${progress.toFixed(1)}% — scoring normally (+curveBonus)`)
+      } else {
+        console.log(`[scanner] ${symbol} — pump.fun curve ${progress.toFixed(1)}% (complete=${curve?.complete ?? 'unknown'})`)
       }
       // Always fall through to normal pool selection and scoring
     }
