@@ -8,9 +8,10 @@
  *
  * - Real close: zapOutThroughDammV2 via @meteora-ag/zap-sdk → everything to SOL.
  *   Loads position row from Supabase by positionId before calling zap.
- *   After confirmation, fetches Meteora DAMM v2 position API for authoritative
- *   USD PnL and writes metadata.realized_pnl_usd to the closed row.
+ *   After confirmation, fetches Meteora DAMM v2 position API (4× retry, 1.5s gap)
+ *   for authoritative USD PnL and writes realized_pnl_usd top-level + metadata.
  *
+ * - dry_run: read from bot_state table at open time (same as executor.ts/monitor.ts).
  * - Wallet: loaded from WALLET_PRIVATE_KEY env (base58), never from PublicKey alone.
  * - Lazy imports: all SDK imports are dynamic to prevent Next.js build-time IDL crash.
  *
@@ -117,38 +118,66 @@ function sqrtPriceToSol(sqrtPrice: BN): number {
   return Number((sp * sp) / (TWO_POW_64 * TWO_POW_64))
 }
 
+/** Read dry_run flag from bot_state table (row id=1). Falls back to env var. */
+async function getBotDryRun(): Promise<boolean> {
+  try {
+    const supabase = createServerClient()
+    const { data } = await supabase
+      .from('bot_state')
+      .select('dry_run')
+      .eq('id', 1)
+      .single()
+    if (data != null) return data.dry_run as boolean
+  } catch {
+    // fall through to env fallback
+  }
+  return process.env.BOT_DRY_RUN === 'true'
+}
+
 /**
  * Fetch realized PnL (USD) from the Meteora DAMM v2 position API.
- * Returns null if the request fails — caller falls back to null gracefully.
- *
- * Response shape (relevant fields):
- *   { position_pnl_usd: number, total_fee_earned_usd: number, ... }
+ * Retries up to 4 times with 1.5s gaps to tolerate post-tx API lag (1–3s typical).
+ * Returns null after all attempts fail — caller still closes row cleanly.
  */
-async function fetchDammPositionPnl(positionPubkey: string): Promise<{
+async function fetchDammPositionPnlWithRetry(positionPubkey: string): Promise<{
   realized_pnl_usd: number
   total_fee_earned_usd: number
 } | null> {
-  try {
-    const res = await fetch(`${METEORA_DAMM_API}/position/${positionPubkey}`, {
-      headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(8_000),
-    })
-    if (!res.ok) {
-      console.warn(`[DAMM] Meteora position API ${res.status} for ${positionPubkey}`)
-      return null
+  const ATTEMPTS = 4
+  const DELAY_MS = 1_500
+
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(`${METEORA_DAMM_API}/position/${positionPubkey}`, {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(8_000),
+      })
+      if (!res.ok) {
+        console.warn(`[DAMM] PnL API attempt ${attempt}/${ATTEMPTS} — HTTP ${res.status}`)
+      } else {
+        const json = await res.json()
+        const realized_pnl_usd     = Number(json?.position_pnl_usd    ?? json?.pnl_usd    ?? NaN)
+        const total_fee_earned_usd  = Number(json?.total_fee_earned_usd ?? json?.fee_earned_usd ?? NaN)
+        if (!isNaN(realized_pnl_usd)) {
+          console.log(`[DAMM] PnL API resolved on attempt ${attempt}: $${realized_pnl_usd}`)
+          return {
+            realized_pnl_usd,
+            total_fee_earned_usd: isNaN(total_fee_earned_usd) ? 0 : total_fee_earned_usd,
+          }
+        }
+        console.warn(`[DAMM] PnL API attempt ${attempt}/${ATTEMPTS} — missing position_pnl_usd:`, JSON.stringify(json).slice(0, 200))
+      }
+    } catch (e) {
+      console.warn(`[DAMM] PnL API attempt ${attempt}/${ATTEMPTS} threw:`, e)
     }
-    const json = await res.json()
-    const realized_pnl_usd    = Number(json?.position_pnl_usd    ?? json?.pnl_usd    ?? NaN)
-    const total_fee_earned_usd = Number(json?.total_fee_earned_usd ?? json?.fee_earned_usd ?? NaN)
-    if (isNaN(realized_pnl_usd)) {
-      console.warn('[DAMM] Meteora API response missing position_pnl_usd:', JSON.stringify(json).slice(0, 200))
-      return null
+
+    if (attempt < ATTEMPTS) {
+      await new Promise(r => setTimeout(r, DELAY_MS))
     }
-    return { realized_pnl_usd, total_fee_earned_usd: isNaN(total_fee_earned_usd) ? 0 : total_fee_earned_usd }
-  } catch (e) {
-    console.warn('[DAMM] fetchDammPositionPnl failed:', e)
-    return null
   }
+
+  console.warn('[DAMM] fetchDammPositionPnlWithRetry: all attempts exhausted — realized_pnl_usd will be null')
+  return null
 }
 
 // ── Open ───────────────────────────────────────────────────────────────────────
@@ -157,14 +186,15 @@ async function fetchDammPositionPnl(positionPubkey: string): Promise<{
  * Open a DAMM v2 position for the given token/pool.
  *
  * Flow:
- *   1. Fetch pool state to get sqrtPrice, vaults, mints, programs, collectFeeMode.
- *   2. Determine which side is SOL; build maxAmountToken[A|B].
- *   3. Compute liquidityDelta via sdk.getDepositQuote() for single-sided deposit.
- *   4. Generate fresh position NFT Keypair.
- *   5. Call sdk.createPositionAndAddLiquidity() → build → sign → confirm.
- *   6. Persist to lp_positions with strategy_id = 'damm-edge'.
+ *   1. Guard: read dry_run from bot_state table.
+ *   2. Fetch pool state to get sqrtPrice, vaults, mints, programs, collectFeeMode.
+ *   3. Determine which side is SOL; build maxAmountToken[A|B].
+ *   4. Compute liquidityDelta via sdk.getDepositQuote() for single-sided deposit.
+ *   5. Generate fresh position NFT Keypair.
+ *   6. Call sdk.createPositionAndAddLiquidity() → build → sign → confirm.
+ *   7. Persist to lp_positions with strategy_id = 'damm-edge'.
  *      entry_price_sol is captured from sqrtPrice at open so TP/SL have a baseline.
- *   7. Fire pre_grad_opened Telegram alert.
+ *   8. Fire pre_grad_opened Telegram alert.
  */
 export async function openDammPosition(
   params: DammPositionParams,
@@ -172,12 +202,19 @@ export async function openDammPosition(
   console.log(`[DAMM] Opening position — pool=${params.poolAddress} sol=${params.solAmount}`)
 
   try {
+    // 1. dry_run guard — read from bot_state, not env directly
+    const dryRun = await getBotDryRun()
+    if (dryRun) {
+      console.log('[DAMM] dry_run=true — skipping real open')
+      return { positionPubkey: 'DRY_RUN', txSignature: 'DRY_RUN', success: true }
+    }
+
     const sdk = await getCpAmm()
     const wallet = getWallet()
     const pool = new PublicKey(params.poolAddress)
     const positionNftKp = Keypair.generate()
 
-    // 1. Fetch pool state
+    // 2. Fetch pool state
     const poolState = await sdk.fetchPoolState(pool)
     if (!poolState) throw new Error('[DAMM] Pool not found or paused')
 
@@ -196,7 +233,7 @@ export async function openDammPosition(
     // Capture entry price from sqrtPrice at the moment of open
     const entryPriceSol = sqrtPriceToSol(sqrtPrice)
 
-    // 2. Token programs — tokenFlag: 0 = SPL, 1 = Token2022
+    // 3. Token programs — tokenFlag: 0 = SPL, 1 = Token2022
     const { TOKEN_2022_PROGRAM_ID } = await import('@solana/spl-token')
     const tokenAProgram = tokenAFlag === 1 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID
     const tokenBProgram = tokenBFlag === 1 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID
@@ -213,7 +250,7 @@ export async function openDammPosition(
     const solBN = new BN(lamports)
     const zeroBN = new BN(0)
 
-    // 3. Compute liquidityDelta for single-sided deposit
+    // 4. Compute liquidityDelta for single-sided deposit
     let liquidityDelta: BN
     let maxAmountTokenA: BN
     let maxAmountTokenB: BN
@@ -262,7 +299,7 @@ export async function openDammPosition(
 
     console.log(`[DAMM] liquidityDelta=${liquidityDelta.toString()} isTokenASol=${isTokenASol} entryPriceSol=${entryPriceSol}`)
 
-    // 4. createPositionAndAddLiquidity
+    // 5. createPositionAndAddLiquidity
     const rawTx = await sdk.createPositionAndAddLiquidity({
       owner: wallet.publicKey,
       pool,
@@ -287,16 +324,17 @@ export async function openDammPosition(
 
     console.log(`[DAMM] ✅ Opened: pos=${positionPubkey} sig=${signature}`)
 
-    // 5. Persist — entry_price_sol written from live sqrtPrice
+    // 6. Persist — entry_price_sol written from live sqrtPrice, dry_run from bot_state
     const positionId = await saveDammPosition({
       params,
       positionPubkey,
       signature,
       solDeposited: params.solAmount,
       entryPriceSol,
+      dryRun,
     })
 
-    // 6. Fire Telegram alert
+    // 7. Fire Telegram alert
     await sendAlert({
       type: 'pre_grad_opened',
       symbol: params.symbol,
@@ -321,12 +359,14 @@ async function saveDammPosition({
   signature,
   solDeposited,
   entryPriceSol,
+  dryRun,
 }: {
   params: DammPositionParams
   positionPubkey: string
   signature: string
   solDeposited: number
   entryPriceSol: number
+  dryRun: boolean
 }): Promise<string> {
   const supabase = createServerClient()
   const { data, error } = await supabase
@@ -343,7 +383,7 @@ async function saveDammPosition({
       entry_price_sol: entryPriceSol,
       status: 'active',
       in_range: true,
-      dry_run: process.env.BOT_DRY_RUN === 'true',
+      dry_run: dryRun,
       opened_at: new Date().toISOString(),
       tx_open: signature,
       metadata: {
@@ -360,7 +400,7 @@ async function saveDammPosition({
     throw new Error(`[DAMM] Supabase insert failed: ${error.message}`)
   }
 
-  console.log(`[DAMM] lp_position saved: id=${data.id} entry_price_sol=${entryPriceSol}`)
+  console.log(`[DAMM] lp_position saved: id=${data.id} entry_price_sol=${entryPriceSol} dry_run=${dryRun}`)
   return data.id
 }
 
@@ -372,9 +412,10 @@ async function saveDammPosition({
  * positionId: Supabase row id from lp_positions.
  * Loads pool_address, position_pubkey, and sol_deposited from DB; no guessing.
  *
- * After the zap-out tx confirms, calls the Meteora DAMM v2 position API to get
- * the authoritative USD PnL and writes metadata.realized_pnl_usd to the closed row.
- * Falls back to null if the API is unreachable — the row is still closed cleanly.
+ * After the zap-out tx confirms, calls the Meteora DAMM v2 position API with
+ * up to 4 retries (1.5s gap) to tolerate post-tx lag. PnL is written to both
+ * the top-level realized_pnl_usd column AND metadata for legacy compatibility.
+ * Falls back to null if all retries fail — the row is still closed cleanly.
  */
 export async function closeDammPosition(
   positionId: string,
@@ -413,14 +454,12 @@ export async function closeDammPosition(
     const resolved = await resolveTransaction(tx)
     const signature = await sendWithPriority(resolved, [wallet], '[DAMM][close]')
 
-    // ── Realized PnL from Meteora DAMM v2 API ─────────────────────────────
-    // The position may take a few seconds to settle on the API after the tx;
-    // a single attempt is sufficient — if it fails we still close cleanly.
-    const pnlData = await fetchDammPositionPnl(row.position_pubkey)
+    // ── Realized PnL — 4× retry to survive Meteora API lag ────────────────
+    const pnlData = await fetchDammPositionPnlWithRetry(row.position_pubkey)
     if (pnlData) {
-      console.log(`[DAMM] Realized PnL (Meteora API): $${pnlData.realized_pnl_usd} | fees: $${pnlData.total_fee_earned_usd}`)
+      console.log(`[DAMM] Realized PnL: $${pnlData.realized_pnl_usd} | fees: $${pnlData.total_fee_earned_usd}`)
     } else {
-      console.warn('[DAMM] Could not fetch realized PnL from Meteora API — metadata.realized_pnl_usd will be null')
+      console.warn('[DAMM] realized_pnl_usd will be null — all PnL API retries failed')
     }
 
     // Merge into existing metadata; preserve open-time fields (age_minutes etc).
@@ -428,7 +467,7 @@ export async function closeDammPosition(
     const updatedMeta: Record<string, unknown> = {
       ...existingMeta,
       ...(pnlData !== null && {
-        realized_pnl_usd:    pnlData.realized_pnl_usd,
+        realized_pnl_usd:     pnlData.realized_pnl_usd,
         total_fee_earned_usd: pnlData.total_fee_earned_usd,
       }),
     }
@@ -436,12 +475,14 @@ export async function closeDammPosition(
     await supabase
       .from('lp_positions')
       .update({
-        status:       'closed',
-        closed_at:    new Date().toISOString(),
-        close_reason: reason,
-        oor_since_at: null,
-        tx_close:     signature,
-        metadata:     updatedMeta,
+        status:           'closed',
+        closed_at:        new Date().toISOString(),
+        close_reason:     reason,
+        oor_since_at:     null,
+        tx_close:         signature,
+        metadata:         updatedMeta,
+        // Top-level column — written alongside metadata for dashboard queries
+        ...(pnlData !== null && { realized_pnl_usd: pnlData.realized_pnl_usd }),
       })
       .eq('id', positionId)
 
