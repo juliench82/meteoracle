@@ -16,6 +16,36 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
+// ── DAMM v2 REST pool stats ───────────────────────────────────────────────────
+
+/**
+ * Fetches pool stats from the Meteora DAMM v2 REST API.
+ * Returns trading_volume_24h, fees_24h, and tvl.
+ * Non-blocking — returns null on any failure so the monitor tick is never blocked.
+ *
+ * Endpoint: GET https://amm-v2.meteora.ag/pool/{pool_address}
+ */
+async function fetchDammPoolStats(poolAddress: string): Promise<{
+  volume24hUsd: number
+  fees24hUsd: number
+  tvlUsd: number
+} | null> {
+  try {
+    const res = await fetch(`https://amm-v2.meteora.ag/pool/${poolAddress}`, {
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return {
+      volume24hUsd: Number(data.trading_volume   ?? data.volume_24h   ?? 0),
+      fees24hUsd:   Number(data.fees_24h          ?? data.fee_volume   ?? 0),
+      tvlUsd:       Number(data.pool_tvl           ?? data.tvl          ?? 0),
+    }
+  } catch {
+    return null
+  }
+}
+
 // ── On-chain state fetch ─────────────────────────────────────────────────────────
 
 /**
@@ -98,7 +128,11 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
     const ageHours = (Date.now() - new Date(pos.opened_at).getTime()) / (1000 * 60 * 60)
     const solDeposited = Number(pos.sol_deposited ?? 1)
 
-    const onChain = await fetchDammPositionState(pos.pool_address, pos.position_pubkey)
+    // Fetch on-chain state and REST pool stats in parallel
+    const [onChain, poolStats] = await Promise.all([
+      fetchDammPositionState(pos.pool_address, pos.position_pubkey),
+      fetchDammPoolStats(pos.pool_address),
+    ])
 
     let pnlSol: number
     let feesEarnedSol: number
@@ -116,10 +150,20 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
       await supabase
         .from('lp_positions')
         .update({
-          current_price: onChain.currentPriceSol,
-          fees_earned_sol: feesEarnedSol,
-          pnl_sol: Math.round(pnlSol * 1e6) / 1e6,
-          il_pct: Math.round(ilPct * 100) / 100,
+          current_price:    onChain.currentPriceSol,
+          fees_earned_sol:  feesEarnedSol,
+          pnl_sol:          Math.round(pnlSol * 1e6) / 1e6,
+          il_pct:           Math.round(ilPct * 100) / 100,
+          // Merge latest pool stats into metadata so dashboard has fresh volume/TVL
+          ...(poolStats && {
+            metadata: {
+              ...(pos.metadata ?? {}),
+              volume_24h_usd: Math.round(poolStats.volume24hUsd),
+              fees_24h_usd:   Math.round(poolStats.fees24hUsd),
+              tvl_usd:        Math.round(poolStats.tvlUsd),
+              stats_updated_at: new Date().toISOString(),
+            },
+          }),
         })
         .eq('id', pos.id)
     } else {
@@ -131,11 +175,12 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
       }
     }
 
+    // ── Exit triggers: max-duration | stop-loss | take-profit ────────────────
+    // fee-yield trigger removed — fees are informational only, not an exit signal.
     let reason = ''
     if (ageHours > 72)                   reason = 'max-duration'
     else if (onChain && pnlPct <= -30)   reason = 'stop-loss'
     else if (onChain && pnlPct >= 40)    reason = 'take-profit'
-    else if (feesEarnedSol > 0.10)       reason = 'fee-yield'
 
     if (reason) {
       const label = pos.symbol ?? pos.mint ?? pos.id
