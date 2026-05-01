@@ -50,8 +50,9 @@ async function fetchDammPositionState(
     try {
       const positionState = await sdk.fetchPositionState(new PublicKey(positionPubkey))
       if (positionState) {
-        const feeA = Number(positionState.feeOwed?.feeAOwed ?? 0) / 1e9
-        const feeB = Number(positionState.feeOwed?.feeBOwed ?? 0) / 1e9
+        // SDK fields: feeAPending / feeBPending (BN, in lamports)
+        const feeA = Number(positionState.feeAPending ?? 0) / 1e9
+        const feeB = Number(positionState.feeBPending ?? 0) / 1e9
         feesEarnedSol = feeA + feeB
       }
     } catch {
