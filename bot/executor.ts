@@ -555,13 +555,19 @@ export async function closePosition(
   const label = `[executor][close][${position.symbol}]`
   console.log(`${label} closing — reason: ${reason}`)
 
+  if (!position.position_pubkey) {
+    console.error(`${label} position_pubkey is null — cannot close on-chain, marking closed in DB`)
+    await markPositionClosed(positionId, position.fees_earned_sol ?? 0, `${reason}_no_pubkey`)
+    return false
+  }
+
   const connection = getConnection()
   const wallet     = getWallet()
 
   try {
     const DLMM = await getDLMM()
     const dlmmPool       = await DLMM.create(connection, new PublicKey(position.pool_address))
-    const positionPubKey = new PublicKey(position.position_pubkey ?? '')
+    const positionPubKey = new PublicKey(position.position_pubkey)
 
     let feesClaimedSol = 0
     try {
