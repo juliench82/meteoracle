@@ -2,14 +2,22 @@ interface SpotKPIBarProps {
   solDeployed:   number
   openPositions: number
   totalTrades:   number
+  walletSol?:     number | null
 }
 
 export function SpotKPIBar({
   solDeployed,
   openPositions,
   totalTrades,
+  walletSol,
 }: SpotKPIBarProps) {
   const cards = [
+    {
+      label: 'Wallet SOL',
+      value: walletSol != null ? `${walletSol.toFixed(3)} SOL` : 'N/A',
+      sub:   'live RPC balance',
+      color: 'text-emerald-300',
+    },
     {
       label: 'SOL Deployed',
       value: `${solDeployed.toFixed(3)} SOL`,
@@ -25,7 +33,7 @@ export function SpotKPIBar({
   ]
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
       {cards.map(card => (
         <div key={card.label} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">{card.label}</p>

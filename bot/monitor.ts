@@ -50,6 +50,11 @@ function sbHeaders() {
   }
 }
 
+function nullableNumber(value: unknown): number | null {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
 async function sbSelect<T>(table: string, params: string): Promise<T[]> {
   const res = await fetch(`${sbUrl()}/rest/v1/${table}?${params}`, {
     headers: { ...sbHeaders(), 'Prefer': 'return=representation' },
@@ -217,12 +222,16 @@ async function checkPosition(
   const solPriceUsd = entryPriceSol > 0 && entryPriceUsd > 0
     ? entryPriceUsd / entryPriceSol
     : 0
-  const claimableFeesUsd = solPriceUsd > 0
+  const derivedClaimableFeesUsd = solPriceUsd > 0
     ? Math.round(claimableFeesSolEquivalent * solPriceUsd * 100) / 100
     : null
-  const positionValueUsd = solPriceUsd > 0
+  const derivedPositionValueUsd = solPriceUsd > 0
     ? Math.round((position.sol_deposited + pnlSol) * solPriceUsd * 100) / 100
     : null
+  const liveClaimableFeesUsd = nullableNumber(position.claimable_fees_usd ?? position.metadata?.claimable_fees_usd)
+  const livePositionValueUsd = nullableNumber(position.position_value_usd ?? position.metadata?.position_value_usd)
+  const claimableFeesUsd = liveClaimableFeesUsd ?? derivedClaimableFeesUsd
+  const positionValueUsd = livePositionValueUsd ?? derivedPositionValueUsd
 
   const wasInRange = position.status === 'active'
   const justWentOOR = !inRange && wasInRange

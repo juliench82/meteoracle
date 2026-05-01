@@ -183,7 +183,7 @@ export async function detectAllOrphanedPositions(): Promise<MeteoraPositionSyncR
   }
 
   console.log(
-    `[orphan-detector] full-wallet scan done — live=${result.live} updated=${result.updated} inserted=${result.inserted} ` +
+    `[orphan-detector] full-wallet scan done — live=${result.live} updated=${result.updated} inserted=${result.inserted} closed=${result.externallyClosed} ` +
     `(dlmm=${result.dlmmLive}, damm=${result.dammLive})`,
   )
   return result

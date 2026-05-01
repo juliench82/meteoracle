@@ -19,7 +19,7 @@ export async function GET(request: Request) {
 
   if (status !== 'all') {
     if (status === 'active') {
-      query = query.in('status', ['active', 'out_of_range', 'orphaned'])
+      query = query.in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
     } else {
       query = query.eq('status', status)
     }
@@ -27,20 +27,25 @@ export async function GET(request: Request) {
 
   const { data, error } = await query
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
   let liveLp: Awaited<ReturnType<typeof fetchLiveMeteoraPositions>> = []
+  let liveLpOk = false
   if (status === 'all' || status === 'active' || status === 'out_of_range') {
     try {
       liveLp = await fetchLiveMeteoraPositions()
+      liveLpOk = true
     } catch (err) {
       console.warn('[positions] Meteora live position fetch failed; using Supabase cache:', err)
     }
   }
 
-  const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp)
+  if (error && !liveLpOk) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
 
-  return NextResponse.json({ positions })
+  const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp, {
+    liveFetchOk: liveLpOk,
+    includeDbClosed: status === 'all' || status === 'closed',
+  })
+
+  return NextResponse.json({ positions, liveSource: liveLpOk ? 'meteora' : 'supabase-cache' })
 }

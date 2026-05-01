@@ -20,7 +20,7 @@ function normaliseLp(p: any, closed = false) {
     realized_pnl_usd:   p.realized_pnl_usd   ?? null,
     tp_pct:          0,
     sl_pct:          0,
-    status:          closed ? (p.close_reason ?? 'closed') : 'open',
+    status:          closed ? (p.close_reason ?? 'closed') : (p.status ?? 'open'),
     dry_run:         p.dry_run         ?? true,
     opened_at:       p.opened_at,
     closed_at:       p.closed_at       ?? null,
@@ -36,6 +36,7 @@ interface InitialData {
   closedSpot: any[]
   openLp:     any[]
   closedLp:   any[]
+  wallet?:    { sol?: number | null } | null
 }
 
 export function DashboardClient({ initialData }: { initialData: InitialData }) {
@@ -92,6 +93,7 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
         solDeployed={solDeployed}
         openPositions={allOpen.length}
         totalTrades={allClosed.length}
+        walletSol={data.wallet?.sol ?? null}
       />
       <SpotPositionsTable
         openPositions={allOpen}

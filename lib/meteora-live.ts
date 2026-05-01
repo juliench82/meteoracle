@@ -22,7 +22,14 @@ function toNumber(value: unknown): number {
   if (typeof value === 'bigint') return Number(value)
   if (typeof value === 'string') return Number(value) || 0
   if (typeof (value as { toNumber?: unknown }).toNumber === 'function') {
-    return (value as { toNumber: () => number }).toNumber()
+    try {
+      return (value as { toNumber: () => number }).toNumber()
+    } catch {
+      // Some SDK BN/u128 values are too large for toNumber(); fall through to toString.
+    }
+  }
+  if (typeof (value as { toString?: unknown }).toString === 'function') {
+    return Number((value as { toString: () => string }).toString()) || 0
   }
   return Number(value) || 0
 }
@@ -38,6 +45,10 @@ function toBase58(value: unknown): string {
 interface DexPairInfo {
   pairAddress?: string
   url?: string
+  priceUsd?: string
+  priceNative?: string
+  liquidity?: { usd?: number; base?: number; quote?: number }
+  volume?: { h24?: number; h6?: number; h1?: number; m5?: number }
   baseToken?: { address?: string; symbol?: string }
   quoteToken?: { address?: string; symbol?: string }
 }
@@ -52,7 +63,7 @@ function pairSymbol(base: unknown, quote: unknown): string {
   const baseSymbol = normalizeSymbolPart(base)
   const quoteSymbol = normalizeSymbolPart(quote)
   if (baseSymbol && quoteSymbol) return `${baseSymbol}-${quoteSymbol}`
-  return baseSymbol || quoteSymbol
+  return ''
 }
 
 function symbolFromPositionInfo(positionInfo: any): string {
@@ -61,6 +72,8 @@ function symbolFromPositionInfo(positionInfo: any): string {
   const tokenXMint = toBase58(positionInfo?.tokenX?.publicKey)
   const tokenYMint = toBase58(positionInfo?.tokenY?.publicKey)
 
+  if (tokenYMint === SOL_MINT && !tokenXSymbol) return ''
+  if (tokenXMint === SOL_MINT && !tokenYSymbol) return ''
   if (tokenYMint === SOL_MINT) return pairSymbol(tokenXSymbol, 'SOL')
   if (tokenXMint === SOL_MINT) return pairSymbol(tokenYSymbol, 'SOL')
   return pairSymbol(tokenXSymbol, tokenYSymbol)
@@ -121,15 +134,14 @@ async function resolveLiveSymbol(
   poolAddress: string,
   fallbackPrefix: 'LIVE' | 'DAMM',
   positionInfo?: any,
-): Promise<{ symbol: string; dexUrl?: string }> {
+): Promise<{ symbol: string; dexUrl?: string; pair?: DexPairInfo | null }> {
   const localSymbol = positionInfo ? symbolFromPositionInfo(positionInfo) : ''
-  if (localSymbol) return { symbol: localSymbol }
-
   const pair = await fetchDexPairByPool(poolAddress) ?? await fetchDexPairByToken(mint, poolAddress)
+  if (localSymbol) return { symbol: localSymbol, dexUrl: pair?.url, pair }
   const dexSymbol = symbolFromDexPair(pair)
-  if (dexSymbol) return { symbol: dexSymbol, dexUrl: pair?.url }
+  if (dexSymbol) return { symbol: dexSymbol, dexUrl: pair?.url, pair }
 
-  return { symbol: `${fallbackPrefix}-${mint.slice(0, 6)}` }
+  return { symbol: `${fallbackPrefix}-${mint.slice(0, 6)}`, pair }
 }
 
 function extractPositions(positionInfo: any): any[] {
@@ -153,6 +165,78 @@ function estimateSolDeposited(positionData: any, positionInfo: any): number {
   if (tokenX === SOL_MINT) return toNumber(positionData?.totalXAmount) / 1e9
   if (tokenY === SOL_MINT) return toNumber(positionData?.totalYAmount) / 1e9
   return 0
+}
+
+function tokenDecimals(value: unknown): number {
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? n : 0
+}
+
+function uiAmount(raw: unknown, decimals: number): number {
+  const amount = toNumber(raw)
+  if (!Number.isFinite(amount) || amount <= 0) return 0
+  return amount / 10 ** decimals
+}
+
+function roundUsd(value: number): number | null {
+  if (!Number.isFinite(value) || value <= 0) return null
+  return Math.round(value * 100) / 100
+}
+
+function inferUsdPrices(pair: DexPairInfo | null | undefined, tokenXMint: string, tokenYMint: string): {
+  tokenXUsd: number | null
+  tokenYUsd: number | null
+} {
+  if (!pair) return { tokenXUsd: null, tokenYUsd: null }
+
+  const baseMint = pair.baseToken?.address
+  const quoteMint = pair.quoteToken?.address
+  const priceUsd = Number(pair.priceUsd)
+  const priceNative = Number(pair.priceNative)
+  let baseUsd = Number.isFinite(priceUsd) && priceUsd > 0 ? priceUsd : null
+  let quoteUsd: number | null = null
+
+  if (quoteMint === SOL_MINT && baseUsd !== null && Number.isFinite(priceNative) && priceNative > 0) {
+    quoteUsd = baseUsd / priceNative
+  }
+  if (baseMint === SOL_MINT && baseUsd !== null) {
+    quoteUsd = Number.isFinite(priceNative) && priceNative > 0 ? baseUsd / priceNative : quoteUsd
+  }
+  if (baseMint && quoteMint && baseUsd !== null && quoteUsd === null && Number.isFinite(priceNative) && priceNative > 0) {
+    quoteUsd = baseUsd / priceNative
+  }
+
+  return {
+    tokenXUsd: tokenXMint === baseMint ? baseUsd : tokenXMint === quoteMint ? quoteUsd : tokenXMint === SOL_MINT ? quoteUsd ?? baseUsd : null,
+    tokenYUsd: tokenYMint === baseMint ? baseUsd : tokenYMint === quoteMint ? quoteUsd : tokenYMint === SOL_MINT ? quoteUsd ?? baseUsd : null,
+  }
+}
+
+function estimateDlmmUsdFields(positionData: any, positionInfo: any, pair: DexPairInfo | null | undefined): {
+  claimableFeesUsd: number | null
+  positionValueUsd: number | null
+} {
+  const tokenXMint = toBase58(positionInfo?.tokenX?.publicKey)
+  const tokenYMint = toBase58(positionInfo?.tokenY?.publicKey)
+  const tokenXDecimals = tokenDecimals(positionInfo?.tokenX?.decimals)
+  const tokenYDecimals = tokenDecimals(positionInfo?.tokenY?.decimals)
+  const { tokenXUsd, tokenYUsd } = inferUsdPrices(pair, tokenXMint, tokenYMint)
+
+  const feeX = uiAmount(positionData?.feeX, tokenXDecimals)
+  const feeY = uiAmount(positionData?.feeY, tokenYDecimals)
+  const totalX = uiAmount(positionData?.totalXAmount, tokenXDecimals)
+  const totalY = uiAmount(positionData?.totalYAmount, tokenYDecimals)
+
+  const claimableFeesUsd = roundUsd(
+    (tokenXUsd !== null ? feeX * tokenXUsd : 0) +
+    (tokenYUsd !== null ? feeY * tokenYUsd : 0),
+  )
+  const positionValueUsd = roundUsd(
+    (tokenXUsd !== null ? totalX * tokenXUsd : 0) +
+    (tokenYUsd !== null ? totalY * tokenYUsd : 0),
+  )
+
+  return { claimableFeesUsd, positionValueUsd }
 }
 
 function openedAtFromPosition(positionData: any): string {
@@ -204,6 +288,26 @@ async function fetchMeteoraDammPositionFields(positionPubkey: string): Promise<{
   }
 }
 
+async function fetchMeteoraDammPoolStats(poolAddress: string): Promise<{
+  volume24hUsd: number | null
+  tvlUsd: number | null
+} | null> {
+  try {
+    const res = await fetch(`https://amm-v2.meteora.ag/pool/${poolAddress}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return {
+      volume24hUsd: Number(data.trading_volume ?? data.volume_24h ?? 0) || null,
+      tvlUsd: Number(data.pool_tvl ?? data.tvl ?? 0) || null,
+    }
+  } catch {
+    return null
+  }
+}
+
 export interface LiveDlmmPosition {
   id: string
   mint: string
@@ -235,6 +339,12 @@ export interface LiveDammPosition extends Omit<LiveDlmmPosition, 'position_type'
 }
 
 export type LiveMeteoraPosition = LiveDlmmPosition | LiveDammPosition
+
+export interface LiveMeteoraSnapshot {
+  positions: LiveMeteoraPosition[]
+  dlmmOk: boolean
+  dammOk: boolean
+}
 
 export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
   const connection = getConnection()
@@ -272,6 +382,7 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
       if (!positionPubkey) continue
 
       const positionData = pos.positionData ?? {}
+      const usdFields = estimateDlmmUsdFields(positionData, positionInfo, resolved.pair)
       const lowerBinId = Number(positionData.lowerBinId ?? 0)
       const upperBinId = Number(positionData.upperBinId ?? 0)
       const inRange = activeBinId !== null
@@ -295,10 +406,24 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
         entry_price_sol: 0,
         entry_price_usd: 0,
         current_price: currentPrice,
+        claimable_fees_usd: usdFields.claimableFeesUsd,
+        position_value_usd: usdFields.positionValueUsd,
         dry_run: false,
         metadata: {
           source_of_truth: 'meteora',
           detected_by: 'wallet-position-scan',
+          token_x_mint: toBase58(positionInfo?.tokenX?.publicKey),
+          token_y_mint: toBase58(positionInfo?.tokenY?.publicKey),
+          token_x_symbol: normalizeSymbolPart(positionInfo?.tokenX?.symbol),
+          token_y_symbol: normalizeSymbolPart(positionInfo?.tokenY?.symbol),
+          token_x_decimals: tokenDecimals(positionInfo?.tokenX?.decimals),
+          token_y_decimals: tokenDecimals(positionInfo?.tokenY?.decimals),
+          dex_pair_address: resolved.pair?.pairAddress ?? null,
+          dex_price_usd: resolved.pair?.priceUsd != null ? Number(resolved.pair.priceUsd) : null,
+          dex_liquidity_usd: resolved.pair?.liquidity?.usd ?? null,
+          volume_24h_usd: resolved.pair?.volume?.h24 ?? null,
+          bin_step: positionInfo?.binStep ?? positionInfo?.lbPair?.binStep ?? null,
+          base_fee_pct: positionInfo?.baseFeePercentage ?? positionInfo?.lbPair?.baseFeePercentage ?? null,
           lower_bin_id: lowerBinId,
           upper_bin_id: upperBinId,
           active_bin_id: activeBinId,
@@ -306,6 +431,8 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
           total_y_amount: String(positionData.totalYAmount ?? '0'),
           fee_x_amount: String(positionData.feeX ?? '0'),
           fee_y_amount: String(positionData.feeY ?? '0'),
+          ...(usdFields.claimableFeesUsd !== null && { claimable_fees_usd: usdFields.claimableFeesUsd }),
+          ...(usdFields.positionValueUsd !== null && { position_value_usd: usdFields.positionValueUsd }),
           ...(resolved.dexUrl && { dexscreener_url: resolved.dexUrl }),
           version: pos.version ?? null,
           synced_at: new Date().toISOString(),
@@ -348,6 +475,7 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
     const meteoraFields = await fetchMeteoraDammPositionFields(positionPubkey)
     const mint = resolveDammMint(poolState) || poolAddress
     const resolved = await resolveLiveSymbol(mint, poolAddress, 'DAMM')
+    const poolStats = await fetchMeteoraDammPoolStats(poolAddress)
     const currentPrice = poolState ? sqrtPriceToNumber(poolState.sqrtPrice) : 0
     const claimableFeesUsd = meteoraFields?.claimableFeesUsd ?? null
     const positionValueUsd = meteoraFields?.positionValueUsd ?? null
@@ -380,6 +508,14 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
         nft_mint: toBase58(positionState.nftMint),
         token_a_mint: toBase58(poolState?.tokenAMint),
         token_b_mint: toBase58(poolState?.tokenBMint),
+        dex_pair_address: resolved.pair?.pairAddress ?? null,
+        dex_price_usd: resolved.pair?.priceUsd != null ? Number(resolved.pair.priceUsd) : null,
+        dex_liquidity_usd: resolved.pair?.liquidity?.usd ?? null,
+        tvl_usd: poolStats?.tvlUsd ?? resolved.pair?.liquidity?.usd ?? null,
+        volume_24h_usd: poolStats?.volume24hUsd ?? resolved.pair?.volume?.h24 ?? null,
+        pool_type: poolState?.poolType ?? null,
+        fee_version: poolState?.feeVersion ?? null,
+        collect_fee_mode: poolState?.collectFeeMode ?? null,
         fee_a_pending: String(positionState.feeAPending ?? '0'),
         fee_b_pending: String(positionState.feeBPending ?? '0'),
         unlocked_liquidity: String(positionState.unlockedLiquidity ?? '0'),
@@ -397,7 +533,7 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
   return live
 }
 
-export async function fetchLiveMeteoraPositions(): Promise<LiveMeteoraPosition[]> {
+export async function fetchLiveMeteoraSnapshot(): Promise<LiveMeteoraSnapshot> {
   const [dlmm, damm] = await Promise.allSettled([
     fetchLiveDlmmPositions(),
     fetchLiveDammPositions(),
@@ -410,14 +546,27 @@ export async function fetchLiveMeteoraPositions(): Promise<LiveMeteoraPosition[]
     console.warn('[meteora-live] DAMM live fetch failed:', damm.reason)
   }
 
-  return [
+  return {
+    positions: [
     ...(dlmm.status === 'fulfilled' ? dlmm.value : []),
     ...(damm.status === 'fulfilled' ? damm.value : []),
-  ]
+    ],
+    dlmmOk: dlmm.status === 'fulfilled',
+    dammOk: damm.status === 'fulfilled',
+  }
 }
 
-export function mergeDbAndLiveLpPositions(dbRows: any[], liveRows: LiveMeteoraPosition[]): any[] {
-  if (liveRows.length === 0) return dbRows
+export async function fetchLiveMeteoraPositions(): Promise<LiveMeteoraPosition[]> {
+  return (await fetchLiveMeteoraSnapshot()).positions
+}
+
+export function mergeDbAndLiveLpPositions(
+  dbRows: any[],
+  liveRows: LiveMeteoraPosition[],
+  options: { liveFetchOk?: boolean; includeDbClosed?: boolean } = {},
+): any[] {
+  const liveFetchOk = options.liveFetchOk ?? liveRows.length > 0
+  if (!liveFetchOk && liveRows.length === 0) return dbRows
 
   const liveByPubkey = new Map(liveRows.map(row => [row.position_pubkey, row]))
   const merged: any[] = []
@@ -425,18 +574,27 @@ export function mergeDbAndLiveLpPositions(dbRows: any[], liveRows: LiveMeteoraPo
 
   for (const row of dbRows) {
     const live = liveByPubkey.get(row.position_pubkey)
-    const isDamm = row.strategy_id === 'damm-edge' || row.position_type === 'damm-edge'
-    const keepDbOnly = isDamm || row.dry_run === true || row.status === 'pending_retry'
+    const keepDbOnly = row.dry_run === true || row.status === 'pending_retry' || (options.includeDbClosed === true && row.status === 'closed')
     if (!live && !keepDbOnly) continue
 
     if (live) {
       seen.add(live.position_pubkey)
       const dbSymbol = String(row.symbol ?? '')
-      const symbol = /^(LIVE|DAMM|ORPHAN)-/.test(dbSymbol) ? live.symbol : (row.symbol ?? live.symbol)
+      const symbol = /^(LIVE|DAMM|ORPHAN)-/.test(dbSymbol) || dbSymbol === 'SOL'
+        ? live.symbol
+        : (row.symbol ?? live.symbol)
       merged.push({
-        ...live,
         ...row,
+        ...live,
+        id: row.id ?? live.id,
         symbol,
+        strategy_id: row.strategy_id ?? live.strategy_id,
+        opened_at: row.opened_at ?? live.opened_at,
+        sol_deposited: Number(row.sol_deposited ?? 0) > 0 ? row.sol_deposited : live.sol_deposited,
+        entry_price: row.entry_price ?? live.entry_price,
+        entry_price_sol: row.entry_price_sol ?? live.entry_price_sol,
+        entry_price_usd: row.entry_price_usd ?? live.entry_price_usd,
+        tx_open: row.tx_open,
         status: live.status,
         in_range: live.in_range,
         current_price: live.current_price || row.current_price,

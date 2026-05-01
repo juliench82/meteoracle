@@ -34,6 +34,8 @@ import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
 import { fetchLiveMeteoraPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
+import { syncAllMeteoraPositions } from '@/lib/position-sync'
+import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 
 const execAsync = promisify(exec)
 const PM2 = '/usr/local/bin/pm2'
@@ -70,6 +72,17 @@ async function closeLpPositionByKind(
     return result.success
   }
   return closePosition(pos.id, reason)
+}
+
+function fmtUsd(value: unknown): string {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? `$${n.toFixed(2)}` : 'n/a'
+}
+
+function fmtPrice(value: unknown): string {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return 'n/a'
+  return n >= 1 ? n.toFixed(4) : n.toPrecision(6)
 }
 
 async function reply(text: string): Promise<void> {
@@ -140,12 +153,15 @@ function withTickTimeout(fn: () => Promise<string>, name: string): Promise<strin
 async function handleStop() {
   await reply('🛑 *EMERGENCY STOP initiated...*')
   await setBotState({ enabled: false })
+  await syncAllMeteoraPositions().catch(err =>
+    console.warn('[telegram-bot] pre-stop Meteora sync failed:', err)
+  )
 
   const supabase = createServerClient()
   const { data: positions } = await supabase
     .from('lp_positions')
     .select('id, symbol, status, strategy_id, position_type')
-    .in('status', ['active', 'out_of_range'])
+    .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
 
   let closed = 0
   for (const pos of positions ?? []) {
@@ -203,8 +219,17 @@ async function handleClose(positionId: string) {
   await reply(`⏳ Closing LP position \`${positionId}\`...`)
   try {
     const supabase = createServerClient()
-    const { data: pos, error } = await supabase
+    let { data: pos, error } = await supabase
       .from('lp_positions').select('id, symbol, status, strategy_id, position_type').eq('id', positionId).single()
+    if (error || !pos) {
+      await syncAllMeteoraPositions().catch(err =>
+        console.warn('[telegram-bot] close retry sync failed:', err)
+      )
+      const retry = await supabase
+        .from('lp_positions').select('id, symbol, status, strategy_id, position_type').eq('id', positionId).single()
+      pos = retry.data
+      error = retry.error
+    }
     if (error || !pos) {
       await reply(`❌ LP position \`${positionId}\` not found.`)
       return
@@ -226,16 +251,23 @@ async function handleClose(positionId: string) {
 async function handleStatus() {
   const supabase = createServerClient()
   const state = await getBotState()
-  const liveLp = await fetchLiveMeteoraPositions().catch(() => [])
+  let liveOk = false
+  const liveLp = await fetchLiveMeteoraPositions()
+    .then(rows => {
+      liveOk = true
+      return rows
+    })
+    .catch(() => [])
   const liveDlmmCount = liveLp.filter(p => p.position_type === 'dlmm').length
   const liveDammCount = liveLp.filter(p => p.position_type === 'damm-edge').length
+  const wallet = await fetchWalletLiveBalances(liveLp.map(p => p.mint)).catch(() => null)
 
   const { data: openLp } = await supabase
     .from('lp_positions')
     .select('id, symbol, sol_deposited, opened_at, status, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, metadata')
-    .in('status', ['active', 'out_of_range', 'orphaned'])
+    .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
 
-  const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp)
+  const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp, { liveFetchOk: liveOk })
 
   const dlmmLines = mergedOpenLp
     .filter(p => p.strategy_id !== 'damm-edge' && p.strategy_id !== 'damm-live' && p.position_type !== 'damm-edge')
@@ -243,7 +275,9 @@ async function handleStatus() {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
     const source = p._source?.includes('meteora') ? ' | Meteora live' : ''
-    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${oor}${source}`
+    const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
+    const value = p.position_value_usd ?? p.metadata?.position_value_usd
+    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | ${mins}min${oor}${source}`
   })
 
   const dammPositions = mergedOpenLp.filter(
@@ -255,15 +289,19 @@ async function handleStatus() {
     const curve = bondingCurvePct != null ? ` | curve ${Number(bondingCurvePct).toFixed(1)}%` : ''
     const value = p.position_value_usd ?? p.metadata?.position_value_usd
     const valueText = value != null ? ` | value $${Number(value).toFixed(2)}` : ''
+    const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
+    const feesText = fees != null ? ` | fees $${Number(fees).toFixed(2)}` : ''
     const source = p._source?.includes('meteora') || p.strategy_id === 'damm-live' ? ' | Meteora live' : ''
-    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${curve}${valueText}${source}`
+    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${curve}${valueText}${feesText}${source}`
   })
 
   await reply([
     `🤖 *Bot Status*`,
     `State: ${state.enabled ? '🟢 Running' : '🛑 Stopped'}`,
     `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
-    `Meteora live: ${liveDlmmCount} DLMM / ${liveDammCount} DAMM`,
+    `Wallet: ${wallet ? wallet.sol.toFixed(4) : 'n/a'} SOL`,
+    `Meteora live: ${liveLp.length} total (${liveDlmmCount} DLMM / ${liveDammCount} DAMM)`,
+    `Supabase cache: ${(openLp ?? []).length} open rows`,
     ``,
     `📊 *DLMM Positions (${dlmmLines.length})*`,
     ...(dlmmLines.length ? dlmmLines : ['  none']),
@@ -275,14 +313,23 @@ async function handleStatus() {
 
 async function handlePositions() {
   const supabase = createServerClient()
-  const liveLp = await fetchLiveMeteoraPositions().catch(() => [])
+  await syncAllMeteoraPositions().catch(err =>
+    console.warn('[telegram-bot] /positions sync failed:', err)
+  )
+  let liveOk = false
+  const liveLp = await fetchLiveMeteoraPositions()
+    .then(rows => {
+      liveOk = true
+      return rows
+    })
+    .catch(() => [])
   const { data } = await supabase
     .from('lp_positions')
-    .select('id, symbol, status, sol_deposited, pool_address, opened_at, position_pubkey, strategy_id, position_type, metadata')
-    .in('status', ['active', 'out_of_range', 'orphaned'])
+    .select('id, symbol, status, sol_deposited, pool_address, opened_at, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, current_price, metadata')
+    .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
     .order('opened_at', { ascending: false })
 
-  const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp)
+  const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp, { liveFetchOk: liveOk })
 
   if (positions.length === 0) {
     await reply('🏊 No open LP positions.')
@@ -294,8 +341,12 @@ async function handlePositions() {
     const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
     const liveOnly = p._source === 'meteora-live'
     const source = p._source?.includes('meteora') ? ' | Meteora live' : ''
+    const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
+    const value = p.position_value_usd ?? p.metadata?.position_value_usd
+    const poolStats = p.metadata?.volume_24h_usd ? ` | vol24h ${fmtUsd(p.metadata.volume_24h_usd)}` : ''
     lines.push(
       `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h${source}`,
+      `  value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | price ${fmtPrice(p.current_price)}${poolStats}`,
       liveOnly ? `  Run /orphans to create a closeable cache row` : `  /close ${p.id}`
     )
   }
@@ -360,6 +411,7 @@ async function handleOrphans() {
       `✅ Meteora reconcile complete.\n` +
       `Live: ${result.live} (${result.dlmmLive} DLMM / ${result.dammLive} DAMM)\n` +
       `Updated cache rows: ${result.updated}\n` +
+      `Marked externally closed: ${result.externallyClosed}\n` +
       `Inserted missing cache rows: ${result.inserted}`,
     )
   } catch (err) {

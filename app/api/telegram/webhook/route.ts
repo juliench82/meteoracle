@@ -6,6 +6,7 @@ import { closeDammPosition } from '@/bot/damm-executor'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { fetchLiveMeteoraPositions } from '@/lib/meteora-live'
+import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 import { STRATEGIES } from '@/strategies'
 import type { TokenMetrics } from '@/lib/types'
 import axios from 'axios'
@@ -357,11 +358,12 @@ export async function POST(req: Request) {
 
     else if (command === '/status') {
       const supabase = createServerClient()
-      const [stateRes, openRes, lastTickRes, liveLpRes] = await Promise.allSettled([
+      const [stateRes, openRes, lastTickRes, liveLpRes, walletRes] = await Promise.allSettled([
         getBotState(),
-        supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
+        supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry']),
         supabase.from('bot_logs').select('created_at').eq('event', 'bot_tick').order('created_at', { ascending: false }).limit(1).single(),
         fetchLiveMeteoraPositions(),
+        fetchWalletLiveBalances(),
       ])
       const state       = stateRes.status === 'fulfilled' ? stateRes.value : { enabled: false, dry_run: true }
       const openCount   = openRes.status === 'fulfilled' ? openRes.value.count : '?'
@@ -373,12 +375,14 @@ export async function POST(req: Request) {
       const liveDammCount = liveLpRes.status === 'fulfilled'
         ? liveLpRes.value.filter(p => p.position_type === 'damm-edge').length
         : 0
+      const walletSol = walletRes.status === 'fulfilled' ? walletRes.value.sol : null
       const lastTickStr = lastTick ? new Date(lastTick).toUTCString() : 'Never'
       await reply(chatId, [
         `📊 *Bot Status*`,
         `Enabled:        ${state.enabled  ? '✅ Running' : '🛑 Stopped'}`,
         `Mode:           ${state.dry_run  ? '🟡 Dry run' : '🟢 Live trading'}`,
-        `Open positions: ${openCount} cached / ${liveLpCount} Meteora live`,
+        `Wallet:         ${walletSol != null ? walletSol.toFixed(4) : 'n/a'} SOL`,
+        `Open positions: ${liveLpCount} Meteora live / ${openCount} cached`,
         `Meteora live:  ${liveDlmmCount} DLMM / ${liveDammCount} DAMM`,
         `Last tick:      ${lastTickStr}`,
       ].join('\n'))

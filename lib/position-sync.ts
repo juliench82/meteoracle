@@ -1,4 +1,4 @@
-import { fetchLiveMeteoraPositions, type LiveMeteoraPosition } from '@/lib/meteora-live'
+import { fetchLiveMeteoraSnapshot, type LiveMeteoraPosition } from '@/lib/meteora-live'
 
 interface CachedPosition {
   id: string
@@ -7,6 +7,7 @@ interface CachedPosition {
   strategy_id: string | null
   position_type: string | null
   status: string | null
+  dry_run: boolean | null
   metadata: Record<string, unknown> | null
 }
 
@@ -18,7 +19,9 @@ export interface MeteoraPositionSyncResult {
   dammLive: number
   dlmmInserted: number
   dammInserted: number
+  externallyClosed: number
   insertedPositions: LiveMeteoraPosition[]
+  positions: LiveMeteoraPosition[]
 }
 
 function sbUrl(): string {
@@ -46,7 +49,7 @@ async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<stri
   if (positionPubkeys.length === 0) return new Map()
 
   const filter = `position_pubkey=in.(${positionPubkeys.join(',')})`
-  const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,metadata'
+  const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,dry_run,metadata'
   const res = await fetch(`${sbUrl()}/rest/v1/lp_positions?${filter}&${select}`, {
     headers: sbHeaders('representation'),
     signal: AbortSignal.timeout(10_000),
@@ -65,10 +68,25 @@ async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<stri
   return byPubkey
 }
 
+async function fetchOpenCachedPositions(): Promise<CachedPosition[]> {
+  const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,dry_run,metadata'
+  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions?status=in.(active,open,out_of_range,orphaned)&${select}`, {
+    headers: sbHeaders('representation'),
+    signal: AbortSignal.timeout(10_000),
+  })
+
+  if (!res.ok) {
+    throw new Error(`fetchOpenCachedPositions ${res.status}: ${await res.text()}`)
+  }
+
+  return res.json()
+}
+
 function insertBody(live: LiveMeteoraPosition): Record<string, unknown> {
   return {
     symbol: live.symbol,
     mint: live.mint,
+    token_address: live.mint,
     pool_address: live.pool_address,
     strategy_id: live.strategy_id,
     entry_price: 0,
@@ -96,13 +114,14 @@ function insertBody(live: LiveMeteoraPosition): Record<string, unknown> {
 
 function shouldRefreshSymbol(existing: CachedPosition): boolean {
   const symbol = String(existing.symbol ?? '')
-  return !symbol || /^(LIVE|DAMM|ORPHAN)-/.test(symbol) || existing.strategy_id === 'meteora-live' || existing.strategy_id === 'damm-live'
+  return !symbol || symbol === 'SOL' || /^(LIVE|DAMM|ORPHAN)-/.test(symbol) || existing.strategy_id === 'meteora-live' || existing.strategy_id === 'damm-live'
 }
 
 function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record<string, unknown> {
   return {
     ...(shouldRefreshSymbol(existing) && { symbol: live.symbol }),
     mint: live.mint,
+    token_address: live.mint,
     pool_address: live.pool_address,
     status: live.status,
     in_range: live.in_range,
@@ -148,13 +167,65 @@ async function updateCachedPosition(live: LiveMeteoraPosition, existing: CachedP
   }
 }
 
+function isDammCached(row: CachedPosition): boolean {
+  return row.strategy_id === 'damm-edge' || row.strategy_id === 'damm-live' || row.position_type === 'damm-edge'
+}
+
+function isDlmmCached(row: CachedPosition): boolean {
+  return !isDammCached(row)
+}
+
+function shouldMarkExternallyClosed(
+  row: CachedPosition,
+  livePubkeys: Set<string>,
+  sourceOk: { dlmmOk: boolean; dammOk: boolean },
+): boolean {
+  const pubkey = row.position_pubkey
+  if (!pubkey || pubkey === 'DRY_RUN') return false
+  if (row.dry_run === true) return false
+  if (livePubkeys.has(pubkey)) return false
+  if (isDammCached(row)) return sourceOk.dammOk
+  if (isDlmmCached(row)) return sourceOk.dlmmOk
+  return false
+}
+
+async function markCachedPositionExternallyClosed(row: CachedPosition): Promise<void> {
+  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions?id=eq.${row.id}`, {
+    method: 'PATCH',
+    headers: sbHeaders('minimal'),
+    body: JSON.stringify({
+      status: 'closed',
+      closed_at: new Date().toISOString(),
+      close_reason: 'external_close_detected',
+      in_range: false,
+      oor_since_at: null,
+      metadata: {
+        ...(row.metadata ?? {}),
+        source_of_truth: 'meteora',
+        external_close_detected_at: new Date().toISOString(),
+      },
+    }),
+    signal: AbortSignal.timeout(10_000),
+  })
+
+  if (!res.ok) {
+    throw new Error(`markCachedPositionExternallyClosed ${res.status}: ${await res.text()}`)
+  }
+}
+
 export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResult> {
-  const livePositions = await fetchLiveMeteoraPositions()
+  const snapshot = await fetchLiveMeteoraSnapshot()
+  const livePositions = snapshot.positions
   const liveWithPubkeys = livePositions.filter(p => p.position_pubkey && p.position_pubkey !== 'DRY_RUN')
-  const cachedByPubkey = await fetchCachedPositions(liveWithPubkeys.map(p => p.position_pubkey))
+  const [cachedByPubkey, openCachedRows] = await Promise.all([
+    fetchCachedPositions(liveWithPubkeys.map(p => p.position_pubkey)),
+    fetchOpenCachedPositions(),
+  ])
+  const livePubkeys = new Set(liveWithPubkeys.map(p => p.position_pubkey))
 
   const insertedPositions: LiveMeteoraPosition[] = []
   let updated = 0
+  let externallyClosed = 0
 
   for (const live of liveWithPubkeys) {
     const cachedRows = cachedByPubkey.get(live.position_pubkey) ?? []
@@ -171,13 +242,19 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
     }
   }
 
+  for (const cached of openCachedRows) {
+    if (!shouldMarkExternallyClosed(cached, livePubkeys, snapshot)) continue
+    await markCachedPositionExternallyClosed(cached)
+    externallyClosed++
+  }
+
   const dlmmLive = livePositions.filter(p => p.position_type === 'dlmm').length
   const dammLive = livePositions.filter(p => p.position_type === 'damm-edge').length
   const dlmmInserted = insertedPositions.filter(p => p.position_type === 'dlmm').length
   const dammInserted = insertedPositions.filter(p => p.position_type === 'damm-edge').length
 
   console.log(
-    `[position-sync] Meteora sync done live=${livePositions.length} updated=${updated} inserted=${insertedPositions.length} ` +
+    `[position-sync] Meteora sync done live=${livePositions.length} updated=${updated} inserted=${insertedPositions.length} closed=${externallyClosed} ` +
     `(dlmm live=${dlmmLive} inserted=${dlmmInserted}, damm live=${dammLive} inserted=${dammInserted})`,
   )
 
@@ -189,6 +266,8 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
     dammLive,
     dlmmInserted,
     dammInserted,
+    externallyClosed,
     insertedPositions,
+    positions: livePositions,
   }
 }
