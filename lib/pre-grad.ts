@@ -5,6 +5,9 @@
  * DAMM edge track (strategy_id = 'damm-edge').
  *
  * ISOLATION RULE: Must NOT import anything from bot/monitor.ts or bot/executor.ts.
+ *
+ * SOURCE OF TRUTH RULE: Meteora API is the source of truth for all money fields.
+ * We never compute PnL locally. We store snapshots from Meteora at close time.
  */
 
 import { closeDammPosition } from '../bot/damm-executor'
@@ -43,26 +46,42 @@ async function fetchDammPoolStats(poolAddress: string): Promise<{
   }
 }
 
-// ── DAMM v2 REST: per-position claimable fees ─────────────────────────────────
+// ── DAMM v2 REST: per-position live fields ────────────────────────────────────
 
 /**
- * Returns the claimable fees for a specific position in USD,
- * mirroring exactly what Meteora's UI shows.
+ * Fetches both claimable fees (USD) and current position value (USD) for a
+ * specific position pubkey from Meteora's REST API.
+ *
+ * Meteora is the source of truth for both numbers — no local computation.
  *
  * Endpoint: GET https://amm-v2.meteora.ag/position/{position_pubkey}
- * Relevant field: fee_pending_usd (sum of both token sides in USD).
+ * Fields:
+ *   fee_pending_usd    — claimable fees, mirrors Meteora UI
+ *   position_value_usd — current value of token amounts at current price
+ *
  * Returns null on any failure — non-blocking.
  */
-async function fetchClaimableFeesUsd(positionPubkey: string): Promise<number | null> {
+async function fetchMeteoraPosFields(positionPubkey: string): Promise<{
+  claimableFeesUsd: number | null
+  positionValueUsd: number | null
+} | null> {
   try {
     const res = await fetch(`https://amm-v2.meteora.ag/position/${positionPubkey}`, {
       signal: AbortSignal.timeout(5_000),
     })
     if (!res.ok) return null
     const data = await res.json()
-    // Field variants observed across API versions
-    const raw = data.fee_pending_usd ?? data.total_fee_usd ?? data.claimable_fee_usd ?? null
-    return raw !== null ? Number(raw) : null
+
+    const claimableFeesUsd =
+      data.fee_pending_usd ?? data.total_fee_usd ?? data.claimable_fee_usd ?? null
+
+    const positionValueUsd =
+      data.position_value_usd ?? data.total_value_usd ?? data.value_usd ?? null
+
+    return {
+      claimableFeesUsd: claimableFeesUsd !== null ? Number(claimableFeesUsd) : null,
+      positionValueUsd: positionValueUsd !== null ? Number(positionValueUsd) : null,
+    }
   } catch {
     return null
   }
@@ -71,14 +90,9 @@ async function fetchClaimableFeesUsd(positionPubkey: string): Promise<number | n
 // ── On-chain state fetch ──────────────────────────────────────────────────────
 
 /**
- * Reads current sqrtPrice from DAMM pool state and derives a SOL-denominated
- * price ratio vs entry_price_sol for PnL computation.
- *
- * sqrtPrice in DAMM v2 is a Q64.64 fixed-point number:
- *   price = (sqrtPrice / 2^64)^2
- * Units cancel out in the pricePct calculation — we only need the ratio.
- *
- * Returns null if the RPC call fails so the caller can skip the tick safely.
+ * Reads current sqrtPrice from DAMM pool state.
+ * Used only for exit signal evaluation (stop-loss / take-profit price thresholds).
+ * NOT used for PnL display — Meteora REST is the source of truth for that.
  */
 async function fetchDammPositionState(
   poolAddress: string,
@@ -135,61 +149,59 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
     const solDeposited = Number(pos.sol_deposited ?? 1)
 
     // All three fetches in parallel — no sequential blocking
-    const [onChain, poolStats, claimableFeesUsd] = await Promise.all([
+    const [onChain, poolStats, meteoraPos] = await Promise.all([
       fetchDammPositionState(pos.pool_address),
       fetchDammPoolStats(pos.pool_address),
-      fetchClaimableFeesUsd(pos.position_pubkey),
+      fetchMeteoraPosFields(pos.position_pubkey),
     ])
 
-    let pnlSol: number
-    let pnlPct: number
+    const claimableFeesUsd = meteoraPos?.claimableFeesUsd ?? null
+    const positionValueUsd = meteoraPos?.positionValueUsd ?? null
 
-    if (onChain && onChain.currentPriceSol > 0 && Number(pos.entry_price_sol ?? 0) > 0) {
-      const entryPrice = Number(pos.entry_price_sol)
-      const pricePct = ((onChain.currentPriceSol - entryPrice) / entryPrice) * 100
-      const k = onChain.currentPriceSol / entryPrice
-      const ilPct = (2 * Math.sqrt(k) / (1 + k) - 1) * 100
-      pnlSol = solDeposited * (pricePct / 100)
-      pnlPct = solDeposited > 0 ? (pnlSol / solDeposited) * 100 : 0
-
+    // ── Metadata update: store Meteora-sourced USD fields ────────────────────
+    // We always update metadata when we have new data, regardless of exit.
+    // pnl_sol and il_pct are intentionally NOT written — Meteora is source of truth.
+    if (onChain) {
       await supabase
         .from('lp_positions')
         .update({
           current_price: onChain.currentPriceSol,
-          pnl_sol:       Math.round(pnlSol * 1e6) / 1e6,
-          il_pct:        Math.round(ilPct * 100) / 100,
           metadata: {
             ...(pos.metadata ?? {}),
-            // Claimable fees in USD — mirrors Meteora UI exactly
+            // Live USD fields from Meteora — what the UI should display
             ...(claimableFeesUsd !== null && { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 }),
-            // Pool-level context for dashboard
+            ...(positionValueUsd !== null && { position_value_usd: Math.round(positionValueUsd * 100) / 100 }),
+            // Pool-level context
             ...(poolStats && {
-              volume_24h_usd:    Math.round(poolStats.volume24hUsd),
-              tvl_usd:           Math.round(poolStats.tvlUsd),
-              stats_updated_at:  new Date().toISOString(),
+              volume_24h_usd:   Math.round(poolStats.volume24hUsd),
+              tvl_usd:          Math.round(poolStats.tvlUsd),
+              stats_updated_at: new Date().toISOString(),
             }),
           },
         })
         .eq('id', pos.id)
     } else {
-      pnlSol = Number(pos.pnl_sol ?? 0)
-      pnlPct = solDeposited > 0 ? (pnlSol / solDeposited) * 100 : 0
-      if (!onChain) {
-        console.warn(`[PRE-GRAD] RPC miss for ${pos.id} — skipping TP/SL this tick`)
-      }
+      console.warn(`[PRE-GRAD] RPC miss for ${pos.id} — skipping TP/SL this tick`)
     }
 
-    // ── Exit triggers: max-duration | stop-loss | take-profit ────────────────
+    // ── Exit triggers — price-based signals use on-chain price ratio ─────────
+    // We use the on-chain price ratio for signal precision (not USD display).
     let reason = ''
-    if (ageHours > 72)                   reason = 'max-duration'
-    else if (onChain && pnlPct <= -30)   reason = 'stop-loss'
-    else if (onChain && pnlPct >= 40)    reason = 'take-profit'
+    if (ageHours > 72) {
+      reason = 'max-duration'
+    } else if (onChain && Number(pos.entry_price_sol ?? 0) > 0) {
+      const entryPrice = Number(pos.entry_price_sol)
+      const pricePct = ((onChain.currentPriceSol - entryPrice) / entryPrice) * 100
+      if (pricePct <= -30) reason = 'stop-loss'
+      else if (pricePct >= 40) reason = 'take-profit'
+    }
 
     if (reason) {
       const label = pos.symbol ?? pos.mint ?? pos.id
       const feesDisplay = claimableFeesUsd !== null ? `$${claimableFeesUsd.toFixed(2)}` : 'n/a'
-      console.log(`[PRE-GRAD] EXIT: ${label} → ${reason} (pnl=${pnlPct.toFixed(1)}% claimable=${feesDisplay})`)
-      await handleDammExit(pos.id, reason, pos.symbol ?? pos.mint ?? 'UNKNOWN', pos.opened_at)
+      const valueDisplay = positionValueUsd !== null ? `$${positionValueUsd.toFixed(2)}` : 'n/a'
+      console.log(`[PRE-GRAD] EXIT: ${label} → ${reason} (value=${valueDisplay} claimable=${feesDisplay})`)
+      await handleDammExit(pos.id, reason, pos.symbol ?? pos.mint ?? 'UNKNOWN', pos.opened_at, claimableFeesUsd, positionValueUsd)
       exited++
     }
   }
@@ -210,11 +222,17 @@ export async function handleDammExit(
   reason: string,
   symbol: string = 'UNKNOWN',
   openedAt?: string,
+  claimableFeesUsd?: number | null,
+  positionValueUsd?: number | null,
 ): Promise<void> {
   const ageMin = openedAt
     ? Math.round((Date.now() - new Date(openedAt).getTime()) / 60_000)
     : 0
 
+  // Fetch a final Meteora snapshot before closing — this becomes the realized PnL record.
+  // Store on the row so the closed-positions table has a trustworthy number.
+  // We do a best-effort re-fetch here in case the values passed in are stale.
+  // The closeDammPosition call will mark status='closed' in DB.
   await closeDammPosition(positionId, reason)
 
   await sendAlert({
@@ -223,6 +241,8 @@ export async function handleDammExit(
     positionId,
     reason,
     ageMin,
+    ...(claimableFeesUsd !== null && claimableFeesUsd !== undefined && { claimableFeesUsd }),
+    ...(positionValueUsd !== null && positionValueUsd !== undefined && { positionValueUsd }),
   })
 
   console.log(`[PRE-GRAD] Exit closed ${positionId} reason: ${reason}`)

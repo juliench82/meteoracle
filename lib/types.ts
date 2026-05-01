@@ -17,13 +17,16 @@ export interface Position {
   entryPrice: number
   currentPrice?: number
   solDeposited: number
-  /** Claimable fees in USD — mirrors Meteora UI. Stored in metadata.claimable_fees_usd. */
+  /** Claimable fees in USD — live from Meteora API, mirrors Meteora UI. */
   claimableFeesUsd?: number
+  /** Current position value in USD — live from Meteora API (token amounts × price). */
+  positionValueUsd?: number
+  /** Realised PnL in USD — snapshot captured from Meteora at close time only. */
+  realizedPnlUsd?: number
   status: PositionStatus
   inRange: boolean
   openedAt: string
   closedAt?: string
-  pnlSol?: number
   metadata?: Record<string, unknown>
 }
 

@@ -5,6 +5,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   'evil-panda': 'Evil Panda',
   'scalp-spike': 'Scalp Spike',
   'stable-farm': 'Stable Farm',
+  'damm-edge': 'DAMM Edge',
 }
 
 function formatAge(openedAt: string): string {
@@ -12,6 +13,12 @@ function formatAge(openedAt: string): string {
   if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
   if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`
   return `${Math.round(ms / 86_400_000)}d`
+}
+
+function fmtUsd(val: unknown): string {
+  const n = Number(val)
+  if (!val || isNaN(n)) return '—'
+  return `$${n.toFixed(2)}`
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30,7 +37,7 @@ export function PositionsTable({ positions }: { positions: any[] }) {
           <table className="w-full text-xs">
             <thead>
               <tr className="text-slate-500 border-b border-surface-border">
-                {['Token', 'Strategy', 'Deployed', 'Fees (live)', 'Range', 'Age', 'Max Duration'].map(
+                {['Token', 'Strategy', 'Deployed', 'Claimable $', 'Value $', 'Range', 'Age', 'Max Duration'].map(
                   (h) => (
                     <th key={h} className="text-left py-2 pr-4 font-medium">
                       {h}
@@ -42,8 +49,8 @@ export function PositionsTable({ positions }: { positions: any[] }) {
             <tbody>
               {positions.map((p) => {
                 const deployedSol: number = p.sol_deposited ?? 0
-                const feesEarnedSol: number = p.fees_earned_sol ?? 0
-                const feeYieldPct = deployedSol > 0 ? (feesEarnedSol / deployedSol) * 100 : 0
+                const claimableFeesUsd = p.metadata?.claimable_fees_usd
+                const positionValueUsd = p.metadata?.position_value_usd
 
                 return (
                   <tr
@@ -67,16 +74,14 @@ export function PositionsTable({ positions }: { positions: any[] }) {
                       {deployedSol.toFixed(4)} SOL
                     </td>
 
-                    {/* Fees — live from monitor tick, source of truth is Meteora */}
-                    <td className="py-3 pr-4">
-                      <div className="font-mono text-yellow-400">
-                        +{feesEarnedSol.toFixed(4)} SOL
-                      </div>
-                      {deployedSol > 0 && (
-                        <div className="text-slate-500 tabular-nums">
-                          {feeYieldPct.toFixed(1)}% deployed
-                        </div>
-                      )}
+                    {/* Claimable fees — live from Meteora API */}
+                    <td className="py-3 pr-4 font-mono text-yellow-400 tabular-nums">
+                      {fmtUsd(claimableFeesUsd)}
+                    </td>
+
+                    {/* Position value — live from Meteora API */}
+                    <td className="py-3 pr-4 font-mono text-slate-300 tabular-nums">
+                      {fmtUsd(positionValueUsd)}
                     </td>
 
                     {/* Range status */}
