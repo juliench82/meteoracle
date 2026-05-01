@@ -8,7 +8,7 @@
  */
 
 import { closeDammPosition } from '../bot/damm-executor'
-import { sendAlert } from './alerter'
+import { sendAlert } from '../bot/alerter'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
