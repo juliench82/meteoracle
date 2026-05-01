@@ -27,7 +27,7 @@ import BN from 'bn.js'
 import bs58 from 'bs58'
 import type { DammPositionParams } from '@/lib/types'
 import { createServerClient } from '@/lib/supabase'
-import { sendAlert } from '@/lib/alerter'
+import { sendAlert } from './alerter'
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
 
@@ -294,18 +294,19 @@ async function saveDammPosition({
       symbol: params.symbol,
       pool_address: params.poolAddress,
       position_pubkey: positionPubkey,
+      strategy_id: 'damm-edge',
       token_amount: 0,
       sol_deposited: solDeposited,
       entry_price_usd: 0,
       entry_price_sol: 0,
       fees_earned_sol: 0,
+      pnl_sol: 0,
       status: 'active',
       in_range: true,
       dry_run: process.env.BOT_DRY_RUN === 'true',
       opened_at: new Date().toISOString(),
       tx_open: signature,
       metadata: {
-        strategy_id: 'damm-edge',
         age_minutes: params.ageMinutes,
         fee_tvl_24h_pct: params.feeTvl24hPct,
         liquidity_usd: params.liquidityUsd,
