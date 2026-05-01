@@ -20,6 +20,7 @@ ALTER TABLE lp_positions
   CHECK (status IN (
     'active',
     'open',
+    'dry_run',
     'out_of_range',
     'closed',
     'pending_retry',

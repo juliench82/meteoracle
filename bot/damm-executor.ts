@@ -31,6 +31,7 @@ import { TOKEN_PROGRAM_ID, NATIVE_MINT } from '@solana/spl-token'
 import BN from 'bn.js'
 import bs58 from 'bs58'
 import type { DammPositionParams } from '@/lib/types'
+import { getBotState } from '@/lib/botState'
 import { createServerClient } from '@/lib/supabase'
 import { sendAlert } from './alerter'
 
@@ -132,20 +133,10 @@ function sqrtPriceToSol(sqrtPrice: BN): number {
   return ratio * ratio
 }
 
-/** Read dry_run flag from bot_state table (row id=1). Falls back to env var. */
+/** Read dry_run through the shared bot state helper, matching DLMM behavior. */
 async function getBotDryRun(): Promise<boolean> {
-  try {
-    const supabase = createServerClient()
-    const { data } = await supabase
-      .from('bot_state')
-      .select('dry_run')
-      .eq('id', 1)
-      .single()
-    if (data != null) return data.dry_run as boolean
-  } catch {
-    // fall through to env fallback
-  }
-  return process.env.BOT_DRY_RUN === 'true'
+  const botState = await getBotState()
+  return process.env.BOT_DRY_RUN === 'true' || botState.dry_run
 }
 
 /**
@@ -216,10 +207,11 @@ export async function openDammPosition(
   console.log(`[DAMM] Opening position — pool=${params.poolAddress} sol=${params.solAmount}`)
 
   try {
-    // 1. dry_run guard — read from bot_state, not env directly
+    // 1. dry_run guard — match DLMM bot_state + BOT_DRY_RUN behavior
     const dryRun = await getBotDryRun()
+    console.log(`[DAMM] dry_run=${dryRun}`)
+
     if (dryRun) {
-      console.log('[DAMM] dry_run=true — skipping real open')
       const positionId = await saveDammPosition({
         params,
         positionPubkey: 'DRY_RUN',
@@ -228,6 +220,16 @@ export async function openDammPosition(
         entryPriceSol: 0,
         dryRun: true,
       })
+
+      await sendAlert({
+        type: 'pre_grad_opened',
+        symbol: params.symbol,
+        positionId,
+        poolAddress: params.poolAddress,
+        bondingCurvePct: params.bondingCurvePct ?? 0,
+      })
+
+      console.log('[DAMM] dry_run=true — row persisted, alert sent, skipping real open')
       return { positionPubkey: positionId, txSignature: 'DRY_RUN', success: true }
     }
 
@@ -403,7 +405,7 @@ async function saveDammPosition({
       sol_deposited: solDeposited,
       entry_price_usd: 0,
       entry_price_sol: entryPriceSol,
-      status: 'active',
+      status: dryRun ? 'dry_run' : 'active',
       in_range: true,
       dry_run: dryRun,
       opened_at: new Date().toISOString(),
