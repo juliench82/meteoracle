@@ -13,6 +13,12 @@
 import { closeDammPosition } from '../bot/damm-executor'
 import { sendAlert } from '../bot/alerter'
 import { createServerClient } from './supabase'
+import {
+  fetchLiveMeteoraPositions,
+  mergeDbAndLiveLpPositions,
+  type LiveMeteoraPosition,
+} from './meteora-live'
+import { OPEN_LP_STATUSES } from './position-limits'
 
 function getRpcUrl(): string {
   const url = process.env.HELIUS_RPC_URL || process.env.RPC_URL
@@ -125,25 +131,40 @@ async function fetchDammPositionState(
  *
  * Called directly from the tick route on every cron invocation.
  */
-export async function checkDammPositions(): Promise<{ checked: number; exited: number }> {
+export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]): Promise<{ checked: number; exited: number }> {
   const supabase = createServerClient()
+  const live = (livePositions ?? await fetchLiveMeteoraPositions())
+    .filter(position => position.position_type === 'damm-edge')
 
-  const { data: positions, error } = await supabase
+  if (live.length === 0) {
+    return { checked: 0, exited: 0 }
+  }
+
+  const livePubkeys = live
+    .map(position => position.position_pubkey)
+    .filter(Boolean)
+
+  const { data: cachedRows, error } = await supabase
     .from('lp_positions')
     .select('*')
-    .eq('strategy_id', 'damm-edge')
-    .eq('status', 'active')
+    .in('position_pubkey', livePubkeys)
 
   if (error) {
-    console.error('[PRE-GRAD] DB query error:', error.message)
+    console.error('[PRE-GRAD] DB metadata query error:', error.message)
     return { checked: 0, exited: 0 }
   }
 
-  if (!positions || positions.length === 0) {
+  const positions = mergeDbAndLiveLpPositions(cachedRows ?? [], live, { liveFetchOk: true })
+    .filter(pos => pos.strategy_id === 'damm-edge')
+    .filter(pos => OPEN_LP_STATUSES.includes(pos.status))
+    .filter(pos => pos.id && !String(pos.id).startsWith('meteora-'))
+
+  if (positions.length === 0) {
+    console.log(`[PRE-GRAD] ${live.length} live DAMM position(s), none bot-managed`)
     return { checked: 0, exited: 0 }
   }
 
-  console.log(`[PRE-GRAD] Evaluating ${positions.length} DAMM position(s)`)
+  console.log(`[PRE-GRAD] Evaluating ${positions.length} bot-managed live DAMM position(s)`)
   let exited = 0
 
   for (const pos of positions) {

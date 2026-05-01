@@ -11,6 +11,9 @@ import { checkDammPositions } from '@/lib/pre-grad'
 import { sendAlert } from '@/bot/alerter'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
 import { STRATEGIES } from '@/strategies'
+import { mergeDbAndLiveLpPositions, type LiveMeteoraPosition } from '@/lib/meteora-live'
+import { OPEN_LP_STATUSES } from '@/lib/position-limits'
+import { syncAllMeteoraPositions, type MeteoraPositionSyncResult } from '@/lib/position-sync'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 
 async function getDLMM() {
@@ -84,6 +87,15 @@ async function sbInsert(table: string, body: Record<string, unknown>): Promise<v
   if (!res.ok) throw new Error(`sbInsert ${table} ${res.status}: ${await res.text()}`)
 }
 
+async function fetchCachedRowsForLivePositions(livePositions: LiveMeteoraPosition[]): Promise<any[]> {
+  const pubkeys = livePositions
+    .map(position => position.position_pubkey)
+    .filter((pubkey): pubkey is string => Boolean(pubkey))
+
+  if (pubkeys.length === 0) return []
+  return sbSelect('lp_positions', `position_pubkey=in.(${pubkeys.join(',')})&select=*`)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function monitorPositions(): Promise<{
@@ -101,10 +113,11 @@ export async function monitorPositions(): Promise<{
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
 
   tickCount++
+  let reconcile: MeteoraPositionSyncResult | null = null
   if (ORPHAN_CHECK_EVERY_N > 0 && tickCount % ORPHAN_CHECK_EVERY_N === 0) {
     console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
     try {
-      const reconcile = await detectAllOrphanedPositions()
+      reconcile = await detectAllOrphanedPositions()
       console.log(
         `[monitor] Meteora reconcile — live=${reconcile.live} updated=${reconcile.updated} inserted=${reconcile.inserted} ` +
         `(DLMM ${reconcile.dlmmLive}, DAMM ${reconcile.dammLive})`,
@@ -112,27 +125,48 @@ export async function monitorPositions(): Promise<{
     } catch (err) {
       console.warn('[monitor] Meteora position reconcile failed (non-fatal):', err)
     }
+  } else {
+    try {
+      reconcile = await syncAllMeteoraPositions()
+    } catch (err) {
+      console.warn('[monitor] Meteora live sync failed — skipping position exits this tick:', err)
+      return stats
+    }
+  }
+
+  if (!reconcile) {
+    console.warn('[monitor] no live Meteora snapshot available — skipping position exits this tick')
+    return stats
   }
 
   try {
-    const damm = await checkDammPositions()
+    const damm = await checkDammPositions(reconcile.positions)
     stats.checked += damm.checked
     stats.closed += damm.exited
   } catch (err) {
     console.warn('[monitor] DAMM v2 check failed (non-fatal):', err)
   }
 
-  console.log('[monitor] fetching open LP positions')
-  let positions: any[]
-  try {
-    positions = await sbSelect('lp_positions', 'status=in.(active,open,out_of_range)&order=opened_at.desc')
-  } catch (err) {
-    console.warn('[monitor] lp_positions fetch error:', err)
+  const liveDlmmPositions = reconcile.positions.filter(position => position.position_type === 'dlmm')
+  if (!liveDlmmPositions.length) {
+    console.log('[monitor] no live DLMM positions')
     return stats
   }
 
-  if (!positions.length) { console.log('[monitor] no open LP positions'); return stats }
-  console.log(`[monitor] checking ${positions.length} LP positions`)
+  console.log(`[monitor] joining ${liveDlmmPositions.length} live DLMM position(s) with Supabase metadata`)
+  let cachedRows: any[]
+  try {
+    cachedRows = await fetchCachedRowsForLivePositions(liveDlmmPositions)
+  } catch (err) {
+    console.warn('[monitor] lp_positions metadata fetch error — skipping strategy exits:', err)
+    return stats
+  }
+
+  const positions = mergeDbAndLiveLpPositions(cachedRows, liveDlmmPositions, { liveFetchOk: true })
+    .filter(position => OPEN_LP_STATUSES.includes(position.status))
+
+  if (!positions.length) { console.log('[monitor] no monitorable live DLMM positions'); return stats }
+  console.log(`[monitor] checking ${positions.length} live-first DLMM position(s)`)
 
   for (const position of positions) {
     try {
