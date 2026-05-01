@@ -7,6 +7,7 @@
  * ISOLATION RULE: Must NOT import from bot/monitor.ts or bot/executor.ts.
  */
 
+import { closeDammPosition } from '../bot/damm-executor'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
@@ -53,18 +54,16 @@ export async function startPreGradMonitor(): Promise<void> {
  * Explicit exit trigger. Called by startPreGradMonitor (above) or externally
  * when an exit condition fires.
  *
- * TODO: Wire to closeDammPosition() in bot/damm-executor once fully implemented.
+ * Calls closeDammPosition() in bot/damm-executor which handles:
+ *   - Zap Out via @meteora-ag/zap-sdk (100% back to SOL)
+ *   - DB update (status: 'closed', close_reason, closed_at)
  */
 export async function handleDammExit(
   positionId: string,
   reason: string
 ): Promise<void> {
-  // TODO: import { closeDammPosition } from '../bot/damm-executor'
-  // TODO: await closeDammPosition(positionId, reason)
-  // TODO: await supabase.from('lp_positions')
-  //         .update({ status: 'closed', close_reason: reason, closed_at: new Date().toISOString() })
-  //         .eq('id', positionId)
-  console.log(`[PRE-GRAD] Exit requested for ${positionId} reason: ${reason}`)
+  await closeDammPosition(positionId, reason)
+  console.log(`[PRE-GRAD] Exit closed ${positionId} reason: ${reason}`)
 }
 
 // ── monitor.ts compatibility shim ─────────────────────────────────────────────────
