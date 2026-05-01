@@ -7,7 +7,7 @@ import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { getBotState } from '@/lib/botState'
 import { closePosition, openPosition } from '@/bot/executor'
-import { closePreGradPosition } from '@/lib/pre-grad'
+import { checkDammPositions } from '@/lib/pre-grad'
 import { sendAlert } from '@/bot/alerter'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
 import { STRATEGIES } from '@/strategies'
@@ -105,6 +105,14 @@ export async function monitorPositions(): Promise<{
     }
   }
 
+  try {
+    const damm = await checkDammPositions()
+    stats.checked += damm.checked
+    stats.closed += damm.exited
+  } catch (err) {
+    console.warn('[monitor] DAMM v2 check failed (non-fatal):', err)
+  }
+
   console.log('[monitor] fetching open LP positions')
   let positions: any[]
   try {
@@ -119,16 +127,13 @@ export async function monitorPositions(): Promise<{
 
   for (const position of positions) {
     try {
-      stats.checked++
-
-      // Pre-grad DAMM v2 positions — routed to their own close handler
-      if (position.position_type === 'pre_grad') {
-        const closed = await closePreGradPosition(position)
-        if (closed) stats.closed++
+      const strategyId = position.strategy_id ?? position.metadata?.strategy_id
+      if (position.position_type === 'pre_grad' || strategyId === 'damm-edge') {
         continue
       }
 
-      const strategyId = position.strategy_id ?? position.metadata?.strategy_id
+      stats.checked++
+
       const strategy = STRATEGIES.find((s) => s.id === strategyId)
       if (!strategy) {
         console.warn(`[monitor] no strategy found for position ${position.id} (strategy_id=${strategyId})`)
@@ -394,7 +399,9 @@ async function main() {
   }, MONITOR_INTERVAL_MS)
 }
 
-main().catch(err => {
-  console.error('[monitor] fatal startup error:', err)
-  process.exit(1)
-})
+if (require.main === module || process.env.LP_MONITOR_STANDALONE === 'true') {
+  main().catch(err => {
+    console.error('[monitor] fatal startup error:', err)
+    process.exit(1)
+  })
+}

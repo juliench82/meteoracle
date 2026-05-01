@@ -7,8 +7,8 @@ export interface BotState {
 
 /**
  * Read the current bot state from Supabase.
- * Falls back to { enabled: true, dry_run: true } on any error so a
- * transient DB issue never accidentally hard-stops the bot.
+ * Falls back to { enabled: false, dry_run: true } on any error. Runtime
+ * control state is safety-critical, so DB uncertainty must pause bot work.
  */
 export async function getBotState(): Promise<BotState> {
   try {
@@ -20,14 +20,14 @@ export async function getBotState(): Promise<BotState> {
       .single()
 
     if (error || !data) {
-      console.error('[botState] read failed, using safe defaults:', error?.message)
-      return { enabled: true, dry_run: true }
+      console.error('[botState] read failed, failing closed:', error?.message)
+      return { enabled: false, dry_run: true }
     }
 
     return { enabled: data.enabled, dry_run: data.dry_run }
   } catch (err) {
     console.error('[botState] unexpected error:', err)
-    return { enabled: true, dry_run: true }
+    return { enabled: false, dry_run: true }
   }
 }
 

@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { checkDammPositions } from '@/lib/pre-grad'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 
@@ -12,11 +11,40 @@ export const dynamic = 'force-dynamic'
  * Order of checks:
  *  1. BOT_ENABLED env var — hard kill-switch, survives DB outages
  *  2. bot_state.enabled  — soft runtime toggle via /stop and /start
- *  3. monitorPositions   — DLMM exits (time-sensitive)
- *  4. checkDammPositions — DAMM v2 exits (time-sensitive)
- *  5. runScanner         — new candidates
+ *  3. monitorPositions   — DLMM + DAMM exits (time-sensitive)
+ *  4. runScanner         — new candidates
  */
-export async function POST() {
+function getTickSecret(): string | null {
+  return process.env.BOT_TICK_SECRET ?? process.env.CRON_SECRET ?? null
+}
+
+function getBearerToken(request: Request): string | null {
+  const header = request.headers.get('authorization')
+  const match = header?.match(/^Bearer\s+(.+)$/i)
+  return match?.[1] ?? null
+}
+
+function authorizeTick(request: Request): NextResponse | null {
+  const expected = getTickSecret()
+  if (!expected) {
+    return NextResponse.json(
+      { status: 'misconfigured', error: 'BOT_TICK_SECRET or CRON_SECRET is not set' },
+      { status: 500 },
+    )
+  }
+
+  const provided = getBearerToken(request) ?? request.headers.get('x-bot-secret')
+  if (provided !== expected) {
+    return NextResponse.json({ status: 'unauthorized' }, { status: 401 })
+  }
+
+  return null
+}
+
+export async function POST(request: Request) {
+  const authError = authorizeTick(request)
+  if (authError) return authError
+
   if (process.env.BOT_ENABLED !== 'true') {
     return NextResponse.json({
       status: 'disabled',
@@ -38,12 +66,10 @@ export async function POST() {
 
   try {
     const monitorResult = await monitorPositions()
-    const dammResult = await checkDammPositions()
     const scanResult = await runScanner()
 
     const payload = {
       monitor: monitorResult,
-      damm: dammResult,
       scanner: scanResult,
       durationMs: Date.now() - startedAt,
     }
@@ -68,6 +94,6 @@ export async function POST() {
   }
 }
 
-export async function GET() {
-  return POST()
+export async function GET(request: Request) {
+  return POST(request)
 }
