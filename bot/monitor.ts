@@ -21,7 +21,7 @@ async function getDLMM() {
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
-const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit', 'fee_yield', 'fee_target']
+const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit', 'fee_target']
 
 // Run full-wallet orphan scan every N ticks (default 15 ≈ 15 min at 60s interval)
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '15')
@@ -233,20 +233,12 @@ async function checkPosition(
     ? (now - new Date(oorSinceAt).getTime()) / 60_000
     : 0
 
-  // === FEE-YIELD METRICS ===
   const deployedSol = position.sol_deposited || 0
-  const totalFeesSol = feesEarnedSol || 0
-  const feeYieldPct = deployedSol > 0 ? (totalFeesSol / deployedSol) * 100 : 0
-
-  // avgDailyYield is null before 24h — never extrapolate from a partial window
-  const avgDailyYield = ageHours >= 24
-    ? (feeYieldPct / ageHours) * 24
-    : null
+  const feeYieldPct = deployedSol > 0 ? (feesEarnedSol / deployedSol) * 100 : 0
 
   console.log(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
     ` pnl=${pnlSol.toFixed(6)} fees=${feeYieldPct.toFixed(1)}%deployed` +
-    ` dailyYield=${avgDailyYield !== null ? avgDailyYield.toFixed(1) + '%/day' : 'N/A(<24h)'}` +
     ` age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`
   )
 
@@ -259,89 +251,8 @@ async function checkPosition(
     closeReason = `stoploss_${pricePct.toFixed(1)}pct`
   } else if (entryPriceSol > 0 && pricePct >= strategy.exits.takeProfitPct) {
     closeReason = `takeprofit_${pricePct.toFixed(1)}pct`
-  } else if (
-    strategy.exits.feeYieldExitPct &&
-    ageHours <= 12 &&
-    feeYieldPct >= strategy.exits.feeYieldExitPct &&
-    pnlSol > 0  // FIX: only exit early when net PnL is positive — fees alone don't justify exit if price drift is negative
-  ) {
-    closeReason = `fee_yield_early_${feeYieldPct.toFixed(1)}pct`
-  }
-
-  // === FEE-BASED EARLY EXIT (runs before max_duration) ===
-  if (!closeReason && strategy.exits.minFeeYieldToExit) {
-    const deployed = position.sol_deposited || 0
-    const feeYield = deployed > 0 ? (feesEarnedSol / deployed) * 100 : 0
-    if (feeYield >= strategy.exits.minFeeYieldToExit) {
-      closeReason = `fee_target_reached_${feeYield.toFixed(1)}%`
-    }
-  }
-
-  if (!closeReason) {
-    // Extension count is stored in DB metadata — it is the source of truth.
-    // We only increment (and alert) when potentialExtensions strictly exceeds
-    // the persisted value. This prevents the same extension level from firing
-    // an alert on every subsequent tick.
-    // Guard: avgDailyYield is null before 24h — never extend on extrapolated yield.
-    const currentExtensions: number = position.metadata?.feeYieldExtensions ?? 0
-    let effectiveMaxDuration = strategy.exits.maxDurationHours
-    let shouldExtend = false
-    let newExtensions = currentExtensions
-    let addedHoursThisTick = 0
-
-    if (strategy.exits.feeYieldExtendPct && avgDailyYield !== null && avgDailyYield >= strategy.exits.feeYieldExtendPct) {
-      const potentialExtensions = Math.floor(avgDailyYield / strategy.exits.feeYieldExtendPct)
-
-      if (potentialExtensions > currentExtensions) {
-        // New extension level reached — update DB and fire alert ONCE.
-        const prevExtensions = currentExtensions
-        newExtensions = potentialExtensions
-        addedHoursThisTick = (newExtensions - prevExtensions) * (strategy.exits.feeYieldExtensionHours ?? 36)
-        effectiveMaxDuration += newExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
-        shouldExtend = true
-
-        console.log(
-          `${label} FEE-YIELD EXTENSION: avgDailyYield=${avgDailyYield.toFixed(1)}% ` +
-          `extensions ${prevExtensions} → ${newExtensions} (+${addedHoursThisTick}h, effective max=${effectiveMaxDuration}h)`
-        )
-
-        try {
-          const currentMeta = position.metadata || {}
-          await sbUpdate('lp_positions', `id=eq.${position.id}`, {
-            metadata: {
-              ...currentMeta,
-              feeYieldExtensions: newExtensions,
-              lastFeeYieldExtensionAt: new Date().toISOString(),
-              effectiveMaxDurationHours: effectiveMaxDuration,
-            },
-          })
-        } catch (metaErr) {
-          console.error(`${label} failed to update fee-yield metadata:`, metaErr)
-        }
-
-        await sendAlert({
-          type: 'position_fee_yield_extended',
-          symbol: position.symbol,
-          strategy: strategy.id,
-          totalFees: totalFeesSol.toFixed(4),
-          feeYieldPct: feeYieldPct.toFixed(1),
-          avgDailyYield: avgDailyYield.toFixed(1),
-          extensions: newExtensions,
-          extraHours: addedHoursThisTick,
-          effectiveMaxDurationHours: effectiveMaxDuration,
-          positionId: position.id,
-        })
-      } else {
-        // Already at or above this extension level — just apply existing extensions silently.
-        effectiveMaxDuration += currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
-      }
-    } else if (currentExtensions > 0) {
-      effectiveMaxDuration += currentExtensions * (strategy.exits.feeYieldExtensionHours ?? 36)
-    }
-
-    if (ageHours >= effectiveMaxDuration) {
-      closeReason = `max_duration_${Math.round(ageHours)}h${shouldExtend ? '_fee_extended' : ''}`
-    }
+  } else if (ageHours >= strategy.exits.maxDurationHours) {
+    closeReason = `max_duration_${Math.round(ageHours)}h`
   }
 
   if (closeReason) {

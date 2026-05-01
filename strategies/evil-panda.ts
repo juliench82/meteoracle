@@ -19,26 +19,18 @@ import type { Strategy } from '@/lib/types'
  * minBinStep=80: rejects stable/USDC pools (binStep 1–20) that would produce
  * 750+ bins for this range width and always hit the OOM/bin-cap guard.
  *
- * Exit logic (fee-yield-aware):
- * - stopLoss              : −50% price
- * - takeProfit            : +40% price
- * - OOR                   : 45 min out of range (earning nothing)
- * - maxDuration           : 72h (3 days) hard stop
- * - feeYieldExitPct       : close early if fees > 25% of deployed within first 12h
- * - feeYieldExtendPct     : if daily yield >= 12% after 24h → add feeYieldExtensionHours
- * - feeYieldExtensionHours: 36h added per 12% daily yield threshold
- *
- * Note: minFeeYieldToExit removed — it fired at 10% and killed positions before the
- * extend logic could run, contradicting the fee-farming intent. feeYieldExitPct (25%)
- * and maxDurationHours (72h) are sufficient exits.
+ * Exit logic:
+ * - stopLoss    : −50% price
+ * - takeProfit  : +40% price
+ * - OOR         : 45 min out of range (earning nothing)
+ * - maxDuration : 72h (3 days) hard stop
  */
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
   name: 'Evil Panda',
   description:
     'Wide-range memecoin fee farming. Bid-ask distribution, 100% single-sided SOL. ' +
-    '−50% / +100% range captures dumps and moons, auto-sells SOL into token on pumps. ' +
-    'Fee-yield-aware exits — bank fees before IL compounds.',
+    '−50% / +100% range captures dumps and moons, auto-sells SOL into token on pumps.',
   enabled: true,
 
   filters: {
@@ -52,7 +44,7 @@ export const evilPandaStrategy: Strategy = {
     minRugcheckScore:          0,
     requireSocialSignal:   false,
     minFeeTvl24hPct:          15,
-    minBinStep:               80,   // reject stable/USDC pools (binStep 1-20) — bin range always blows cap
+    minBinStep:               80,
   },
 
   position: {
@@ -70,10 +62,5 @@ export const evilPandaStrategy: Strategy = {
     maxDurationHours:          72,
     claimFeesBeforeClose:    true,
     minFeesToClaim:          0.001,
-
-    // === Fee-based exits ===
-    feeYieldExitPct:           25,   // close early if fees > 25% of deployed within first 12h
-    feeYieldExtendPct:         12,   // after 24h: extend if daily yield >= 12%
-    feeYieldExtensionHours:    36,   // +36h per threshold hit
   },
 }

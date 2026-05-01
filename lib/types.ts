@@ -95,7 +95,7 @@ export interface PositionConfig {
   rangeUpPct: number
   distributionType: 'spot' | 'curve' | 'bid-ask'
   solBias: number
-  maxSolPerPosition?: number   // optional — overridden by MAX_SOL_PER_POSITION env var
+  maxSolPerPosition?: number
 }
 
 export interface ExitRules {
@@ -105,28 +105,6 @@ export interface ExitRules {
   maxDurationHours: number
   claimFeesBeforeClose: boolean
   minFeesToClaim: number
-  /**
-   * Exit if fees earned reach this % of deployed SOL — even if price is down.
-   * This is the primary safety net: lock in fee gains before IL worsens.
-   * Optional — omit to disable.
-   */
-  minFeeYieldToExit?: number
-  /**
-   * If fees earned exceed this % of deployed SOL within the first 12h → early exit.
-   * Captures moonshot fee windfalls before volume dies. Optional — omit to disable.
-   */
-  feeYieldExitPct?: number
-  /**
-   * If daily fee yield (annualised from actual age) meets or exceeds this % →
-   * extend maxDurationHours by feeYieldExtensionHours per threshold hit.
-   * Keeps high-yield winners running. Optional — omit to disable.
-   */
-  feeYieldExtendPct?: number
-  /**
-   * Hours added to maxDurationHours per feeYieldExtendPct threshold hit.
-   * Defaults to 24 if feeYieldExtendPct is set but this is omitted.
-   */
-  feeYieldExtensionHours?: number
 }
 
 export interface Strategy {
