@@ -37,6 +37,7 @@ interface InitialData {
   openLp:     any[]
   closedLp:   any[]
   wallet?:    { sol?: number | null } | null
+  portfolio?: any
 }
 
 export function DashboardClient({ initialData }: { initialData: InitialData }) {
@@ -94,6 +95,7 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
         openPositions={allOpen.length}
         totalTrades={allClosed.length}
         walletSol={data.wallet?.sol ?? null}
+        portfolio={data.portfolio}
       />
       <SpotPositionsTable
         openPositions={allOpen}

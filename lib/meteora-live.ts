@@ -4,7 +4,9 @@ import { getConnection, getWallet } from '@/lib/solana'
 const SOL_MINT = 'So11111111111111111111111111111111111111112'
 const DEXSCREENER_SOLANA_PAIR_API = 'https://api.dexscreener.com/latest/dex/pairs/solana'
 const DEXSCREENER_TOKEN_API = 'https://api.dexscreener.com/latest/dex/tokens'
+const METEORA_DLMM_POSITION_API = 'https://dlmm-api.meteora.ag/position'
 const _pairInfoCache = new Map<string, DexPairInfo | null>()
+const _dlmmPositionStatsCache = new Map<string, Record<string, number | null> | null>()
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -267,6 +269,9 @@ function resolveDammMint(poolState: any): string {
 async function fetchMeteoraDammPositionFields(positionPubkey: string): Promise<{
   claimableFeesUsd: number | null
   positionValueUsd: number | null
+  feesClaimedUsd: number | null
+  totalFeeEarnedUsd: number | null
+  totalPnlUsd: number | null
 } | null> {
   try {
     const res = await fetch(`https://amm-v2.meteora.ag/position/${positionPubkey}`, {
@@ -278,12 +283,50 @@ async function fetchMeteoraDammPositionFields(positionPubkey: string): Promise<{
 
     const claimableFeesUsd = data.fee_pending_usd ?? data.total_fee_usd ?? data.claimable_fee_usd ?? null
     const positionValueUsd = data.position_value_usd ?? data.total_value_usd ?? data.value_usd ?? null
+    const feesClaimedUsd = data.total_fee_usd_claimed ?? data.total_fee_claimed_usd ?? data.fee_claimed_usd ?? null
+    const totalFeeEarnedUsd = data.total_fee_earned_usd ?? data.total_fees_earned_usd ?? null
+    const totalPnlUsd = data.position_pnl_usd ?? data.pnl_usd ?? data.total_pnl_usd ?? null
 
     return {
       claimableFeesUsd: claimableFeesUsd !== null ? Number(claimableFeesUsd) : null,
       positionValueUsd: positionValueUsd !== null ? Number(positionValueUsd) : null,
+      feesClaimedUsd: feesClaimedUsd !== null ? Number(feesClaimedUsd) : null,
+      totalFeeEarnedUsd: totalFeeEarnedUsd !== null ? Number(totalFeeEarnedUsd) : null,
+      totalPnlUsd: totalPnlUsd !== null ? Number(totalPnlUsd) : null,
     }
   } catch {
+    return null
+  }
+}
+
+async function fetchMeteoraDlmmPositionStats(positionPubkey: string): Promise<Record<string, number | null> | null> {
+  if (!positionPubkey) return null
+  if (_dlmmPositionStatsCache.has(positionPubkey)) return _dlmmPositionStatsCache.get(positionPubkey) ?? null
+
+  try {
+    const res = await fetch(`${METEORA_DLMM_POSITION_API}/${positionPubkey}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!res.ok) {
+      _dlmmPositionStatsCache.set(positionPubkey, null)
+      return null
+    }
+    const data = await res.json()
+    const stats = {
+      daily_fee_yield: Number(data.daily_fee_yield ?? NaN),
+      fee_apr_24h: Number(data.fee_apr_24h ?? NaN),
+      fee_apy_24h: Number(data.fee_apy_24h ?? NaN),
+      total_fee_usd_claimed: Number(data.total_fee_usd_claimed ?? NaN),
+      total_reward_usd_claimed: Number(data.total_reward_usd_claimed ?? NaN),
+    }
+    const normalized = Object.fromEntries(
+      Object.entries(stats).map(([key, value]) => [key, Number.isFinite(value) ? value : null]),
+    ) as Record<string, number | null>
+    _dlmmPositionStatsCache.set(positionPubkey, normalized)
+    return normalized
+  } catch {
+    _dlmmPositionStatsCache.set(positionPubkey, null)
     return null
   }
 }
@@ -382,6 +425,7 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
       if (!positionPubkey) continue
 
       const positionData = pos.positionData ?? {}
+      const positionStats = await fetchMeteoraDlmmPositionStats(positionPubkey)
       const usdFields = estimateDlmmUsdFields(positionData, positionInfo, resolved.pair)
       const lowerBinId = Number(positionData.lowerBinId ?? 0)
       const upperBinId = Number(positionData.upperBinId ?? 0)
@@ -433,6 +477,11 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
           fee_y_amount: String(positionData.feeY ?? '0'),
           ...(usdFields.claimableFeesUsd !== null && { claimable_fees_usd: usdFields.claimableFeesUsd }),
           ...(usdFields.positionValueUsd !== null && { position_value_usd: usdFields.positionValueUsd }),
+          ...(positionStats?.daily_fee_yield !== null && positionStats?.daily_fee_yield !== undefined && { daily_fee_yield: positionStats.daily_fee_yield }),
+          ...(positionStats?.fee_apr_24h !== null && positionStats?.fee_apr_24h !== undefined && { fee_apr_24h: positionStats.fee_apr_24h }),
+          ...(positionStats?.fee_apy_24h !== null && positionStats?.fee_apy_24h !== undefined && { fee_apy_24h: positionStats.fee_apy_24h }),
+          ...(positionStats?.total_fee_usd_claimed !== null && positionStats?.total_fee_usd_claimed !== undefined && { total_fee_usd_claimed: positionStats.total_fee_usd_claimed }),
+          ...(positionStats?.total_reward_usd_claimed !== null && positionStats?.total_reward_usd_claimed !== undefined && { total_reward_usd_claimed: positionStats.total_reward_usd_claimed }),
           ...(resolved.dexUrl && { dexscreener_url: resolved.dexUrl }),
           version: pos.version ?? null,
           synced_at: new Date().toISOString(),
@@ -479,6 +528,9 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
     const currentPrice = poolState ? sqrtPriceToNumber(poolState.sqrtPrice) : 0
     const claimableFeesUsd = meteoraFields?.claimableFeesUsd ?? null
     const positionValueUsd = meteoraFields?.positionValueUsd ?? null
+    const feesClaimedUsd = meteoraFields?.feesClaimedUsd ?? null
+    const totalFeeEarnedUsd = meteoraFields?.totalFeeEarnedUsd ?? null
+    const totalPnlUsd = meteoraFields?.totalPnlUsd ?? null
 
     live.push({
       id: `meteora-damm-${positionPubkey}`,
@@ -523,6 +575,9 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
         permanent_locked_liquidity: String(positionState.permanentLockedLiquidity ?? '0'),
         ...(claimableFeesUsd !== null && { claimable_fees_usd: claimableFeesUsd }),
         ...(positionValueUsd !== null && { position_value_usd: positionValueUsd }),
+        ...(feesClaimedUsd !== null && { total_fee_usd_claimed: feesClaimedUsd }),
+        ...(totalFeeEarnedUsd !== null && { total_fee_earned_usd: totalFeeEarnedUsd }),
+        ...(totalPnlUsd !== null && { total_pnl_usd: totalPnlUsd }),
         ...(resolved.dexUrl && { dexscreener_url: resolved.dexUrl }),
         synced_at: new Date().toISOString(),
       },
