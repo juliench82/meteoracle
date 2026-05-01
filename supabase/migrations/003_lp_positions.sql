@@ -31,7 +31,7 @@ create table if not exists lp_positions (
 
   -- Status
   status              text not null default 'active'
-                        check (status in ('active', 'out_of_range', 'closed', 'error')),
+                        check (status in ('active', 'out_of_range', 'closed', 'pending_retry', 'error')),
   in_range            boolean not null default true,
   oor_since_at        timestamptz,
 

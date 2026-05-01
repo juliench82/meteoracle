@@ -13,6 +13,7 @@ export const maxDuration = 60
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET
 
 async function reply(chatId: number | string, text: string) {
   if (!TELEGRAM_BOT_TOKEN) return
@@ -105,6 +106,16 @@ function guardBot(state: { enabled: boolean }) {
 
 export async function POST(req: Request) {
   try {
+    if (!TELEGRAM_WEBHOOK_SECRET) {
+      return NextResponse.json(
+        { ok: false, error: 'TELEGRAM_WEBHOOK_SECRET is not configured' },
+        { status: 500 },
+      )
+    }
+    if (req.headers.get('x-telegram-bot-api-secret-token') !== TELEGRAM_WEBHOOK_SECRET) {
+      return NextResponse.json({ ok: false }, { status: 401 })
+    }
+
     const body    = await req.json()
     const message = body?.message
     if (!message) return NextResponse.json({ ok: true })

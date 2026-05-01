@@ -21,7 +21,6 @@ function fmtUsd(val: unknown): string {
   return `$${n.toFixed(2)}`
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function PositionsTable({ positions }: { positions: any[] }) {
   return (
     <Card>

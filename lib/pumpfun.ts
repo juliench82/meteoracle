@@ -132,25 +132,21 @@ export function isSupportedLaunchpadToken(mintAddress: string): boolean {
 }
 
 /**
- * Moonshot bonding curve (starting point — adjust on-chain parameters once confirmed).
- * TODO: Replace with actual Moonshot BondingCurve account fetch when SDK / layout is known.
+ * Moonshot bonding curve lookup is intentionally disabled until the account
+ * layout is implemented. Returning a fabricated near-graduation value would
+ * make scanner logs and scoring decisions look more certain than they are.
  */
+let moonshotUnsupportedLogged = false
+
 export async function fetchMoonshotBondingCurve(
   mintAddress: string,
   heliusRpcUrl: string
 ): Promise<Pick<BondingCurveData, 'progressPct' | 'complete' | 'mintAddress'> | null> {
-  try {
-    // Placeholder: high-momentum Moonshot tokens treated as near-graduation.
-    // Replace body with real on-chain read once Moonshot BondingCurve layout is confirmed.
-    void mintAddress
-    void heliusRpcUrl
-    return {
-      mintAddress,
-      progressPct: 92, // conservative default — above 90% threshold in scanner
-      complete: false,
-    }
-  } catch (err) {
-    console.error(`[moonshot] bonding curve fetch failed for ${mintAddress}`, err)
-    return null
+  void heliusRpcUrl
+  if (!moonshotUnsupportedLogged) {
+    console.warn('[moonshot] bonding curve lookup is not implemented yet; treating progress as unknown')
+    moonshotUnsupportedLogged = true
   }
+  void mintAddress
+  return null
 }

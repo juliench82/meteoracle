@@ -222,15 +222,17 @@ async function handleStatus() {
     return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${oor}`
   })
 
-  // DAMM v2 (pre-grad) positions
+  // DAMM v2 positions are stored in lp_positions with strategy_id='damm-edge'
   const { data: openDamm } = await supabase
-    .from('pre_grad_positions')
-    .select('id, symbol, sol_deposited, opened_at, bonding_curve_pct')
-    .eq('status', 'open')
+    .from('lp_positions')
+    .select('id, symbol, sol_deposited, opened_at, status, metadata')
+    .eq('strategy_id', 'damm-edge')
+    .in('status', ['active', 'out_of_range'])
 
   const dammLines = (openDamm ?? []).map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
-    const curve = p.bonding_curve_pct != null ? ` | curve ${Number(p.bonding_curve_pct).toFixed(1)}%` : ''
+    const bondingCurvePct = p.metadata?.bonding_curve_pct
+    const curve = bondingCurvePct != null ? ` | curve ${Number(bondingCurvePct).toFixed(1)}%` : ''
     return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${curve}`
   })
 

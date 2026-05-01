@@ -35,7 +35,6 @@ async function getStrategyType() {
 }
 async function getZap() {
   const mod = await import('@meteora-ag/zap-sdk')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return new (mod as any).Zap(getConnection())
 }
 
@@ -161,7 +160,6 @@ async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
  * Returns true if the zap was sent successfully, false if skipped.
  */
 async function zapOutDlmmFallback(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   dlmmPool: any,
   wallet: Keypair,
   lbPairAddress: string,
@@ -204,7 +202,6 @@ async function zapOutDlmmFallback(
   console.log(`${label} DLMM zap fallback — zapOutThroughDlmm ${amountIn.toString()} lamports of ${inputMint.toBase58().slice(0, 8)}…`)
 
   const zap = await getZap()
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tx: Transaction = await (zap as any).zapOutThroughDlmm({
     user: wallet.publicKey,
     lbPairAddress: new PublicKey(lbPairAddress),
@@ -223,7 +220,6 @@ async function zapOutDlmmFallback(
   return true
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pricePerToken: string }): number {
   try {
     const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price))
@@ -272,16 +268,13 @@ async function waitForPositionAccountReady(
  * Meteora's position API can lag 1–3s behind the chain after a removeLiquidity tx.
  * Returns the matching position or null if still absent after all retries.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getPositionWithRetry(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   dlmmPool: any,
   walletPubkey: PublicKey,
   positionPubkey: string,
   label: string,
   maxAttempts = 4,
   delayMs = 1_500
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any | null> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(walletPubkey)
@@ -312,7 +305,7 @@ export async function openPosition(
     const dryRunSolAmount = strategy.position.maxSolPerPosition
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
-    return await persistPosition(metrics, strategy, 'dry-run-sig', metrics.priceUsd ?? 0, 0, dryRunSolAmount, undefined, 0)
+    return await persistPosition(metrics, strategy, 'dry-run-sig', metrics.priceUsd ?? 0, 0, dryRunSolAmount, undefined, 0, DRY_RUN)
   }
 
   const connection = getConnection()
@@ -523,7 +516,7 @@ export async function openPosition(
         return await persistPosition(
           metrics, strategy, lastSig,
           metrics.priceUsd ?? 0, entryPriceSol, solAmount,
-          positionKeypair.publicKey.toBase58(), 0, true
+          positionKeypair.publicKey.toBase58(), 0, DRY_RUN, true
         )
       }
     }
@@ -552,7 +545,7 @@ export async function openPosition(
     return await persistPosition(
       metrics, strategy, lastSig,
       metrics.priceUsd ?? 0, entryPriceSol, solAmount,
-      firstPubKey, tokenAmountDeposited
+      firstPubKey, tokenAmountDeposited, DRY_RUN
     )
 
   } catch (err) {
@@ -582,6 +575,23 @@ export async function closePosition(
 
   const label = `[executor][close][${position.symbol}]`
   console.log(`${label} closing — reason: ${reason}`)
+
+  if (position.dry_run === true) {
+    console.log(`${label} DRY RUN row — marking closed in DB only`)
+    await markPositionClosed(positionId, position.fees_earned_sol ?? 0, reason, position)
+    await sendCloseAlert(position, position.fees_earned_sol ?? 0, reason)
+    return true
+  }
+
+  if (ENV_DRY_RUN_FORCED) {
+    console.warn(`${label} BOT_DRY_RUN=true — refusing to close live on-chain position`)
+    await supabase.from('bot_logs').insert({
+      level: 'warn',
+      event: 'close_position_skipped_env_dry_run',
+      payload: { positionId, reason },
+    })
+    return false
+  }
 
   if (!position.position_pubkey) {
     console.error(`${label} position_pubkey is null — cannot close on-chain, marking closed in DB`)
@@ -685,7 +695,6 @@ export async function closePosition(
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function sendCloseAlert(position: any, feesClaimedSol: number, reason: string): Promise<void> {
   try {
     const openedAt  = position.opened_at ? new Date(position.opened_at).getTime() : Date.now()
@@ -715,6 +724,7 @@ async function persistPosition(
   solDeposited: number,
   positionPubKey?: string,
   tokenAmount: number = 0,
+  dryRun: boolean = ENV_DRY_RUN_FORCED,
   needsLiquidityRetry: boolean = false
 ): Promise<string> {
   const supabase = createServerClient()
@@ -732,7 +742,7 @@ async function persistPosition(
       fees_earned_sol: 0,
       status:          needsLiquidityRetry ? 'pending_retry' : 'active',
       in_range:        true,
-      dry_run:         ENV_DRY_RUN_FORCED,
+      dry_run:         dryRun,
       opened_at:       new Date().toISOString(),
       tx_open:         sig,
       metadata: {
@@ -758,7 +768,6 @@ async function markPositionClosed(
   positionId: string,
   feesEarnedSol: number,
   reason: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   position?: Record<string, any>
 ): Promise<void> {
   const supabase = createServerClient()

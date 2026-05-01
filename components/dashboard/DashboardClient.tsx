@@ -6,7 +6,6 @@ import { SpotPositionsTable } from '@/components/dashboard/SpotPositionsTable'
 
 const POLL_INTERVAL_MS = 30_000
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function normaliseLp(p: any, closed = false) {
   return {
     id:              p.id,
@@ -29,13 +28,9 @@ function normaliseLp(p: any, closed = false) {
 }
 
 interface InitialData {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   openSpot:   any[]
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   closedSpot: any[]
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   openLp:     any[]
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   closedLp:   any[]
 }
 
@@ -73,7 +68,6 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
     .sort((a, b) => new Date(b.closed_at ?? 0).getTime() - new Date(a.closed_at ?? 0).getTime())
     .slice(0, 50)
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const solDeployed = allOpen.reduce((s: number, p: any) => s + (p.amount_sol ?? 0), 0)
 
   return (

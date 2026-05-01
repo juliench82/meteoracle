@@ -12,12 +12,13 @@
 
 import { closeDammPosition } from '../bot/damm-executor'
 import { sendAlert } from '../bot/alerter'
-import { createClient } from '@supabase/supabase-js'
+import { createServerClient } from './supabase'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+function getRpcUrl(): string {
+  const url = process.env.RPC_URL ?? process.env.HELIUS_RPC_URL
+  if (!url) throw new Error('RPC_URL or HELIUS_RPC_URL is not set')
+  return url
+}
 
 // ── DAMM v2 REST: pool stats ──────────────────────────────────────────────────
 
@@ -101,15 +102,14 @@ async function fetchDammPositionState(
     const { Connection, PublicKey } = await import('@solana/web3.js')
     const { CpAmm } = await import('@meteora-ag/cp-amm-sdk')
 
-    const connection = new Connection(process.env.RPC_URL!, 'confirmed')
+    const connection = new Connection(getRpcUrl(), 'confirmed')
     const sdk = new CpAmm(connection)
 
     const poolState = await sdk.fetchPoolState(new PublicKey(poolAddress))
     if (!poolState) return null
 
-    const TWO_POW_64 = 2n ** 64n
-    const sqrtPriceBig = BigInt(poolState.sqrtPrice.toString())
-    const currentPriceSol = Number((sqrtPriceBig * sqrtPriceBig) / (TWO_POW_64 * TWO_POW_64))
+    const sqrtPrice = Number(poolState.sqrtPrice.toString()) / 2 ** 64
+    const currentPriceSol = sqrtPrice * sqrtPrice
 
     return { currentPriceSol }
   } catch (err) {
@@ -126,6 +126,8 @@ async function fetchDammPositionState(
  * Called directly from the tick route on every cron invocation.
  */
 export async function checkDammPositions(): Promise<{ checked: number; exited: number }> {
+  const supabase = createServerClient()
+
   const { data: positions, error } = await supabase
     .from('lp_positions')
     .select('*')
@@ -201,8 +203,8 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
       const feesDisplay = claimableFeesUsd !== null ? `$${claimableFeesUsd.toFixed(2)}` : 'n/a'
       const valueDisplay = positionValueUsd !== null ? `$${positionValueUsd.toFixed(2)}` : 'n/a'
       console.log(`[PRE-GRAD] EXIT: ${label} → ${reason} (value=${valueDisplay} claimable=${feesDisplay})`)
-      await handleDammExit(pos.id, reason, pos.symbol ?? pos.mint ?? 'UNKNOWN', pos.opened_at, claimableFeesUsd, positionValueUsd)
-      exited++
+      const closed = await handleDammExit(pos.id, reason, pos.symbol ?? pos.mint ?? 'UNKNOWN', pos.opened_at, claimableFeesUsd, positionValueUsd)
+      if (closed) exited++
     }
   }
 
@@ -224,7 +226,7 @@ export async function handleDammExit(
   openedAt?: string,
   claimableFeesUsd?: number | null,
   positionValueUsd?: number | null,
-): Promise<void> {
+): Promise<boolean> {
   const ageMin = openedAt
     ? Math.round((Date.now() - new Date(openedAt).getTime()) / 60_000)
     : 0
@@ -233,6 +235,15 @@ export async function handleDammExit(
   // post-zap USD values from the Meteora PnL API (4× retry). Use those values in
   // the alert; fall back to the pre-close snapshot only if the API returned null.
   const closeResult = await closeDammPosition(positionId, reason)
+  if (!closeResult.success) {
+    const message = closeResult.error ?? 'unknown close error'
+    console.error(`[PRE-GRAD] closeDammPosition failed for ${positionId}: ${message}`)
+    await sendAlert({
+      type: 'error',
+      message: `DAMM close failed for ${symbol} (${reason})\nPosition: \`${positionId}\`\nError: ${message}`,
+    })
+    return false
+  }
 
   const alertClaimableFeesUsd = closeResult.totalFeeEarnedUsd ?? claimableFeesUsd ?? undefined
   const alertPositionValueUsd = positionValueUsd ?? undefined
@@ -250,4 +261,5 @@ export async function handleDammExit(
   })
 
   console.log(`[PRE-GRAD] Exit closed ${positionId} reason: ${reason}`)
+  return true
 }

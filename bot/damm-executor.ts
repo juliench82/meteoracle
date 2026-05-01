@@ -42,9 +42,15 @@ let _connection: Connection | null = null
 let _cpAmm: any = null
 let _zap: any = null
 
+function getRpcUrl(): string {
+  const url = process.env.RPC_URL ?? process.env.HELIUS_RPC_URL
+  if (!url) throw new Error('[DAMM] RPC_URL or HELIUS_RPC_URL is not set')
+  return url
+}
+
 function getConnection(): Connection {
   if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL!, 'confirmed')
+    _connection = new Connection(getRpcUrl(), 'confirmed')
   }
   return _connection
 }
@@ -52,7 +58,14 @@ function getConnection(): Connection {
 function getWallet(): Keypair {
   const key = process.env.WALLET_PRIVATE_KEY
   if (!key) throw new Error('[DAMM] WALLET_PRIVATE_KEY not set')
-  return Keypair.fromSecretKey(bs58.decode(key))
+  try {
+    if (key.startsWith('[')) {
+      return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(key)))
+    }
+    return Keypair.fromSecretKey(bs58.decode(key))
+  } catch {
+    throw new Error('[DAMM] WALLET_PRIVATE_KEY is invalid — must be base58 or JSON uint8 array')
+  }
 }
 
 async function getCpAmm(): Promise<any> {
@@ -115,9 +128,8 @@ async function sendWithPriority(
 
 /** Convert Q64.64 sqrtPrice BN → SOL-denominated price ratio. */
 function sqrtPriceToSol(sqrtPrice: BN): number {
-  const TWO_POW_64 = 2n ** 64n
-  const sp = BigInt(sqrtPrice.toString())
-  return Number((sp * sp) / (TWO_POW_64 * TWO_POW_64))
+  const ratio = Number(sqrtPrice.toString()) / 2 ** 64
+  return ratio * ratio
 }
 
 /** Read dry_run flag from bot_state table (row id=1). Falls back to env var. */
@@ -208,7 +220,15 @@ export async function openDammPosition(
     const dryRun = await getBotDryRun()
     if (dryRun) {
       console.log('[DAMM] dry_run=true — skipping real open')
-      return { positionPubkey: 'DRY_RUN', txSignature: 'DRY_RUN', success: true }
+      const positionId = await saveDammPosition({
+        params,
+        positionPubkey: 'DRY_RUN',
+        signature: 'DRY_RUN',
+        solDeposited: params.solAmount,
+        entryPriceSol: 0,
+        dryRun: true,
+      })
+      return { positionPubkey: positionId, txSignature: 'DRY_RUN', success: true }
     }
 
     const sdk = await getCpAmm()
@@ -392,6 +412,7 @@ async function saveDammPosition({
         age_minutes: params.ageMinutes,
         fee_tvl_24h_pct: params.feeTvl24hPct,
         liquidity_usd: params.liquidityUsd,
+        ...(params.bondingCurvePct !== undefined && { bonding_curve_pct: params.bondingCurvePct }),
       },
     })
     .select('id')
@@ -438,12 +459,33 @@ export async function closeDammPosition(
     const supabase = createServerClient()
     const { data: row, error: dbErr } = await supabase
       .from('lp_positions')
-      .select('pool_address, position_pubkey, sol_deposited, metadata')
+      .select('pool_address, position_pubkey, sol_deposited, metadata, dry_run')
       .eq('id', positionId)
       .single()
 
     if (dbErr || !row) {
       throw new Error(`[DAMM] lp_position ${positionId} not found: ${dbErr?.message ?? 'null row'}`)
+    }
+
+    if (row.dry_run === true) {
+      await supabase
+        .from('lp_positions')
+        .update({
+          status:       'closed',
+          closed_at:    new Date().toISOString(),
+          close_reason: reason,
+          oor_since_at: null,
+          tx_close:     'DRY_RUN',
+        })
+        .eq('id', positionId)
+
+      console.log(`[DAMM] dry_run row closed in DB only: ${positionId}`)
+      return {
+        txSignature: 'DRY_RUN',
+        success: true,
+        realizedPnlUsd: null,
+        totalFeeEarnedUsd: null,
+      }
     }
 
     const zap = await getZap()
