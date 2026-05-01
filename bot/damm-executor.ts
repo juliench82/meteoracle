@@ -33,9 +33,11 @@ import bs58 from 'bs58'
 import type { DammPositionParams } from '@/lib/types'
 import { getBotState } from '@/lib/botState'
 import { createServerClient } from '@/lib/supabase'
+import { assertCanOpenLpPosition } from '@/lib/position-limits'
 import { sendAlert } from './alerter'
 
 const METEORA_DAMM_API = 'https://amm-v2.meteora.ag'
+const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
 
@@ -232,6 +234,12 @@ export async function openDammPosition(
       console.log('[DAMM] dry_run=true — row persisted, alert sent, skipping real open')
       return { positionPubkey: positionId, txSignature: 'DRY_RUN', success: true }
     }
+
+    const limitState = await assertCanOpenLpPosition(MAX_CONCURRENT_POSITIONS, '[DAMM]')
+    console.log(
+      `[DAMM] LP cap ok (${limitState.effectiveOpenCount}/${MAX_CONCURRENT_POSITIONS}; ` +
+      `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+    )
 
     const sdk = await getCpAmm()
     const wallet = getWallet()

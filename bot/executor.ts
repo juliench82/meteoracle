@@ -24,6 +24,7 @@ import { getBotState } from '@/lib/botState'
 import { swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
+import { OPEN_LP_STATUSES, assertCanOpenLpPosition } from '@/lib/position-limits'
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -323,9 +324,15 @@ export async function openPosition(
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
 
+    const limitState = await assertCanOpenLpPosition(MAX_CONCURRENT_POSITIONS, label)
+    console.log(
+      `${label} LP cap ok (${limitState.effectiveOpenCount}/${MAX_CONCURRENT_POSITIONS}; ` +
+      `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+    )
+
     const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1')
     const { data: openPositions } = await supabase
-      .from('lp_positions').select('sol_deposited').eq('status', 'active')
+      .from('lp_positions').select('sol_deposited').in('status', OPEN_LP_STATUSES)
     const totalDeployed = (openPositions ?? []).reduce(
       (s: number, p: { sol_deposited: number }) => s + (p.sol_deposited ?? 0), 0
     )
@@ -368,8 +375,7 @@ export async function openPosition(
     const balanceSol = balanceLamports / 1e9
     console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
 
-    const currentOpenCount = (openPositions ?? []).length
-    const remainingSlots   = Math.max(0, MAX_CONCURRENT_POSITIONS - currentOpenCount - 1)
+    const remainingSlots   = Math.max(0, MAX_CONCURRENT_POSITIONS - limitState.effectiveOpenCount - 1)
     const dynamicReserve   = remainingSlots * MAX_SOL_PER_POSITION * WALLET_RESERVE_MULTIPLIER
     const requiredSol      = solAmount + METEORA_RENT_RESERVE_SOL + dynamicReserve
 

@@ -22,6 +22,7 @@ import type { TokenMetrics } from '@/lib/types'
 // ── DAMM v2 Edge (additive imports — do not remove or reorder) ────────────────
 import { evaluateDammEdge } from '@/strategies/damm-edge'
 import { openDammPosition } from './damm-executor'
+import { OPEN_LP_STATUSES, getOpenLpLimitState } from '@/lib/position-limits'
 // ─────────────────────────────────────────────────────────────────────────────
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
@@ -202,18 +203,34 @@ export async function runScanner(): Promise<{
     .sort((a, b) => (b.pool.fee_tvl_ratio['24h'] ?? 0) - (a.pool.fee_tvl_ratio['24h'] ?? 0))
     .slice(0, MAX_DEEP_CHECKS)
 
-  console.log('[scanner] step 3/4 — Supabase dedup check')
+  console.log('[scanner] step 3/4 — live Meteora exposure + Supabase dedup check')
   const supabase = createServerClient()
 
-  const countResult = await withTimeout(
-    supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'out_of_range']),
-    SUPABASE_TIMEOUT_MS, 'lp_positions count'
+  const limitState = await withTimeout(
+    getOpenLpLimitState(),
+    METEORA_FETCH_TIMEOUT_MS,
+    'live Meteora position limit state',
   )
-  const openCount = countResult?.count ?? 0
-  if (openCount >= MAX_CONCURRENT_POSITIONS) {
-    console.log(`[scanner] max LP positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS})`)
+  if (!limitState) {
+    console.warn('[scanner] position limit check unavailable — refusing to open new positions')
     return { scanned: pools.length, candidates: 0, opened: 0 }
   }
+  if (!limitState.liveFetchOk) {
+    console.warn(
+      `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}, dammOk=${limitState.dammOk}) — refusing to open new positions`,
+    )
+    return { scanned: pools.length, candidates: 0, opened: 0 }
+  }
+
+  const openCount = limitState.effectiveOpenCount
+  if (openCount >= MAX_CONCURRENT_POSITIONS) {
+    console.log(
+      `[scanner] max LP positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS}; ` +
+      `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+    )
+    return { scanned: pools.length, candidates: 0, opened: 0 }
+  }
+  const availableOpenSlots = MAX_CONCURRENT_POSITIONS - openCount
 
   console.log(`[scanner] step 4/4 — deep checks on ${survivors.length} top survivors (capped from ${allSurvivors.length})`)
   let candidateCount = 0
@@ -221,6 +238,11 @@ export async function runScanner(): Promise<{
   const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
 
   for (const { pool: representativePool, mcUsd, ageHours } of survivors) {
+    if (openedCount >= availableOpenSlots) {
+      console.log(`[scanner] filled remaining LP slots for this tick (${openedCount}/${availableOpenSlots})`)
+      break
+    }
+
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
 
     const token = QUOTE_ASSETS.has(representativePool.token_x.address) ? representativePool.token_y : representativePool.token_x
@@ -237,7 +259,7 @@ export async function runScanner(): Promise<{
 
     const posResult = await withTimeout(
       supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
-        .in('status', ['active', 'out_of_range']).limit(1),
+        .in('status', OPEN_LP_STATUSES).limit(1),
       SUPABASE_TIMEOUT_MS, `lp_positions dedup ${symbol}`
     )
     if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
