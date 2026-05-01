@@ -133,22 +133,9 @@ export function isSupportedLaunchpadToken(mintAddress: string): boolean {
   return isPumpFunToken(mintAddress)
 }
 
-/**
- * Moonshot bonding curve lookup is intentionally disabled until the account
- * layout is implemented. Returning a fabricated near-graduation value would
- * make scanner logs and scoring decisions look more certain than they are.
- */
-let moonshotUnsupportedLogged = false
-
-export async function fetchMoonshotBondingCurve(
-  mintAddress: string,
-  heliusRpcUrl: string
-): Promise<Pick<BondingCurveData, 'progressPct' | 'complete' | 'mintAddress'> | null> {
-  void heliusRpcUrl
-  if (!moonshotUnsupportedLogged) {
-    console.warn('[moonshot] bonding curve lookup is not implemented yet; treating progress as unknown')
-    moonshotUnsupportedLogged = true
-  }
-  void mintAddress
-  return null
+// TODO: Implement real Moonshot bonding curve check using on-chain data
+// For now we disable Moonshot support to avoid false positives
+export async function isMoonshotNearGraduation(tokenAddress: string): Promise<boolean> {
+  console.log(`[launchpad] Moonshot curve check disabled for ${tokenAddress} (placeholder removed)`)
+  return false
 }
