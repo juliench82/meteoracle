@@ -57,7 +57,15 @@ type AlertPayload =
   | { type: 'pre_grad_pool_created'; symbol: string; mint: string; pool: string; sol: number }
   | { type: 'pre_grad_create_failed'; mint: string; error: string }
   | { type: 'pre_grad_opened'; symbol: string; positionId: string; poolAddress: string; bondingCurvePct: number }
-  | { type: 'pre_grad_closed'; symbol: string; positionId: string; ageMin: number; reason: string }
+  | {
+      type: 'pre_grad_closed'
+      symbol: string
+      positionId: string
+      ageMin: number
+      reason: string
+      claimableFeesUsd?: number
+      positionValueUsd?: number
+    }
   | { type: 'pre_grad_graduated'; symbol: string; finalFees?: number; positionId?: string; bondingCurvePct?: number }
   | { type: 'low_balance_warning'; currentSol: number; minSol: number }
   | { type: 'high_il_warning'; symbol: string; ilPct: number; feesEarnedSol: number; netPnlSol: number }
@@ -177,14 +185,23 @@ function formatMessage(payload: AlertPayload): string {
         `Curve: ${payload.bondingCurvePct.toFixed(1)}% ${bondingCurveEmoji(payload.bondingCurvePct)}`,
       ].join('\n')
 
-    case 'pre_grad_closed':
+    case 'pre_grad_closed': {
+      const valueLine = payload.positionValueUsd != null
+        ? `Value: *$${payload.positionValueUsd.toFixed(2)}*`
+        : null
+      const feesLine = payload.claimableFeesUsd != null
+        ? `Claimable Fees: *$${payload.claimableFeesUsd.toFixed(2)}*`
+        : null
       return [
         `🌿 *Pre-Grad Position Closed*`,
         `Token: \`${payload.symbol}\``,
         `ID: \`${payload.positionId}\``,
         `Reason: ${payload.reason}`,
         `Age: ${payload.ageMin}min`,
-      ].join('\n')
+        valueLine,
+        feesLine,
+      ].filter(Boolean).join('\n')
+    }
 
     case 'pre_grad_graduated':
       return [
