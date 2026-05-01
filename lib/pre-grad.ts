@@ -229,11 +229,14 @@ export async function handleDammExit(
     ? Math.round((Date.now() - new Date(openedAt).getTime()) / 60_000)
     : 0
 
-  // Fetch a final Meteora snapshot before closing — this becomes the realized PnL record.
-  // Store on the row so the closed-positions table has a trustworthy number.
-  // We do a best-effort re-fetch here in case the values passed in are stale.
-  // The closeDammPosition call will mark status='closed' in DB.
-  await closeDammPosition(positionId, reason)
+  // closeDammPosition writes status='closed' to DB and returns the authoritative
+  // post-zap USD values from the Meteora PnL API (4× retry). Use those values in
+  // the alert; fall back to the pre-close snapshot only if the API returned null.
+  const closeResult = await closeDammPosition(positionId, reason)
+
+  const alertClaimableFeesUsd = closeResult.totalFeeEarnedUsd ?? claimableFeesUsd ?? undefined
+  const alertPositionValueUsd = positionValueUsd ?? undefined
+  const alertRealizedPnlUsd   = closeResult.realizedPnlUsd ?? undefined
 
   await sendAlert({
     type: 'pre_grad_closed',
@@ -241,8 +244,9 @@ export async function handleDammExit(
     positionId,
     reason,
     ageMin,
-    ...(claimableFeesUsd !== null && claimableFeesUsd !== undefined && { claimableFeesUsd }),
-    ...(positionValueUsd !== null && positionValueUsd !== undefined && { positionValueUsd }),
+    ...(alertClaimableFeesUsd != null && { claimableFeesUsd: alertClaimableFeesUsd }),
+    ...(alertPositionValueUsd != null && { positionValueUsd: alertPositionValueUsd }),
+    ...(alertRealizedPnlUsd   != null && { realizedPnlUsd:   alertRealizedPnlUsd   }),
   })
 
   console.log(`[PRE-GRAD] Exit closed ${positionId} reason: ${reason}`)

@@ -10,6 +10,8 @@
  *   Loads position row from Supabase by positionId before calling zap.
  *   After confirmation, fetches Meteora DAMM v2 position API (4× retry, 1.5s gap)
  *   for authoritative USD PnL and writes realized_pnl_usd top-level + metadata.
+ *   Return value now includes realizedPnlUsd + totalFeeEarnedUsd so callers
+ *   (handleDammExit) can surface them in Telegram alerts without a second fetch.
  *
  * - dry_run: read from bot_state table at open time (same as executor.ts/monitor.ts).
  * - Wallet: loaded from WALLET_PRIVATE_KEY env (base58), never from PublicKey alone.
@@ -416,11 +418,20 @@ async function saveDammPosition({
  * up to 4 retries (1.5s gap) to tolerate post-tx lag. PnL is written to both
  * the top-level realized_pnl_usd column AND metadata for legacy compatibility.
  * Falls back to null if all retries fail — the row is still closed cleanly.
+ *
+ * Return value now surfaces realizedPnlUsd and totalFeeEarnedUsd so callers
+ * (handleDammExit) can include them in Telegram alerts without a second fetch.
  */
 export async function closeDammPosition(
   positionId: string,
   reason: string,
-): Promise<{ txSignature: string; success: boolean; error?: string }> {
+): Promise<{
+  txSignature: string
+  success: boolean
+  error?: string
+  realizedPnlUsd: number | null
+  totalFeeEarnedUsd: number | null
+}> {
   console.log(`[DAMM] Closing position id=${positionId} reason=${reason}`)
 
   try {
@@ -487,11 +498,16 @@ export async function closeDammPosition(
       .eq('id', positionId)
 
     console.log(`[DAMM] ✅ Closed via Zap Out: ${signature}`)
-    return { txSignature: signature, success: true }
+    return {
+      txSignature: signature,
+      success: true,
+      realizedPnlUsd:    pnlData?.realized_pnl_usd    ?? null,
+      totalFeeEarnedUsd: pnlData?.total_fee_earned_usd ?? null,
+    }
   } catch (e: any) {
     const msg = e?.message ?? String(e)
     console.error('[DAMM] closeDammPosition failed:', msg)
-    return { txSignature: '', success: false, error: msg }
+    return { txSignature: '', success: false, error: msg, realizedPnlUsd: null, totalFeeEarnedUsd: null }
   }
 }
 

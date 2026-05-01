@@ -65,6 +65,8 @@ type AlertPayload =
       reason: string
       claimableFeesUsd?: number
       positionValueUsd?: number
+      /** Realized PnL from Meteora API, available after zap-out confirms. */
+      realizedPnlUsd?: number
     }
   | { type: 'pre_grad_graduated'; symbol: string; finalFees?: number; positionId?: string; bondingCurvePct?: number }
   | { type: 'low_balance_warning'; currentSol: number; minSol: number }
@@ -186,10 +188,14 @@ function formatMessage(payload: AlertPayload): string {
       ].join('\n')
 
     case 'pre_grad_closed': {
-      const valueLine = payload.positionValueUsd != null
+      const valueLine      = payload.positionValueUsd  != null
         ? `Value: *$${payload.positionValueUsd.toFixed(2)}*`
         : null
-      const feesLine = payload.claimableFeesUsd != null
+      const pnlSign        = (payload.realizedPnlUsd ?? 0) >= 0 ? '+' : ''
+      const pnlLine        = payload.realizedPnlUsd    != null
+        ? `Realized PnL: *${pnlSign}$${payload.realizedPnlUsd.toFixed(2)}*`
+        : null
+      const feesLine       = payload.claimableFeesUsd  != null
         ? `Claimable Fees: *$${payload.claimableFeesUsd.toFixed(2)}*`
         : null
       return [
@@ -199,6 +205,7 @@ function formatMessage(payload: AlertPayload): string {
         `Reason: ${payload.reason}`,
         `Age: ${payload.ageMin}min`,
         valueLine,
+        pnlLine,
         feesLine,
       ].filter(Boolean).join('\n')
     }
