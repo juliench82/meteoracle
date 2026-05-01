@@ -31,7 +31,8 @@ import { getBotState, setBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { detectOrphanedPositions } from '@/bot/orphan-detector'
+import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
+import { fetchLiveDlmmPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
 
 const execAsync = promisify(exec)
 const PM2 = '/usr/local/bin/pm2'
@@ -209,17 +210,23 @@ async function handleClose(positionId: string) {
 async function handleStatus() {
   const supabase = createServerClient()
   const state = await getBotState()
+  const liveLp = await fetchLiveDlmmPositions().catch(() => [])
 
   // DLMM positions
   const { data: openLp } = await supabase
     .from('lp_positions')
-    .select('id, symbol, sol_deposited, opened_at, status')
-    .in('status', ['active', 'out_of_range'])
+    .select('id, symbol, sol_deposited, opened_at, status, position_pubkey, strategy_id, position_type, metadata')
+    .in('status', ['active', 'out_of_range', 'orphaned'])
 
-  const dlmmLines = (openLp ?? []).map(p => {
+  const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp)
+
+  const dlmmLines = mergedOpenLp
+    .filter(p => p.strategy_id !== 'damm-edge' && p.position_type !== 'damm-edge')
+    .map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
-    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${oor}`
+    const source = p._source?.includes('meteora') ? ' | Meteora live' : ''
+    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${oor}${source}`
   })
 
   // DAMM v2 positions are stored in lp_positions with strategy_id='damm-edge'
@@ -240,8 +247,9 @@ async function handleStatus() {
     `🤖 *Bot Status*`,
     `State: ${state.enabled ? '🟢 Running' : '🛑 Stopped'}`,
     `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
+    `Meteora live DLMM: ${liveLp.length}`,
     ``,
-    `📊 *DLMM Positions (${(openLp ?? []).length})*`,
+    `📊 *DLMM Positions (${dlmmLines.length})*`,
     ...(dlmmLines.length ? dlmmLines : ['  none']),
     ``,
     `🌱 *DAMM v2 Pre-Grad (${(openDamm ?? []).length})*`,
@@ -251,23 +259,28 @@ async function handleStatus() {
 
 async function handlePositions() {
   const supabase = createServerClient()
+  const liveLp = await fetchLiveDlmmPositions().catch(() => [])
   const { data } = await supabase
     .from('lp_positions')
-    .select('id, symbol, status, sol_deposited, pool_address, opened_at')
-    .in('status', ['active', 'out_of_range'])
+    .select('id, symbol, status, sol_deposited, pool_address, opened_at, position_pubkey, strategy_id, position_type, metadata')
+    .in('status', ['active', 'out_of_range', 'orphaned'])
     .order('opened_at', { ascending: false })
 
-  if (!data || data.length === 0) {
+  const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp)
+
+  if (positions.length === 0) {
     await reply('🏊 No open LP positions.')
     return
   }
 
-  const lines = [`🏊 *Open LP Positions (${data.length})*`, ``]
-  for (const p of data) {
+  const lines = [`🏊 *Open LP Positions (${positions.length})*`, ``]
+  for (const p of positions) {
     const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
+    const liveOnly = p._source === 'meteora-live'
+    const source = p._source?.includes('meteora') ? ' | Meteora live' : ''
     lines.push(
-      `• ${p.id.slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h`,
-      `  /close ${p.id}`
+      `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h${source}`,
+      liveOnly ? `  Run /orphans to create a closeable cache row` : `  /close ${p.id}`
     )
   }
   await reply(lines.join('\n'))
@@ -324,24 +337,12 @@ async function handleTick() {
 }
 
 async function handleOrphans() {
-  await reply('⏳ *Running orphan detector on demand...*')
+  await reply('⏳ *Reconciling wallet positions from Meteora...*')
   try {
-    const supabase = createServerClient()
-    const { data } = await supabase
-      .from('lp_positions')
-      .select('pool_address')
-      .in('status', ['active', 'out_of_range'])
-
-    const poolAddresses = Array.from(new Set((data ?? []).map(row => row.pool_address).filter(Boolean)))
-    if (poolAddresses.length === 0) {
-      await reply('ℹ️ No active LP positions to check for orphans.')
-      return
-    }
-
-    await detectOrphanedPositions(poolAddresses)
-    await reply(`✅ Orphan detector finished for ${poolAddresses.length} active pool(s). Check logs/dashboard for any closures.`)
+    const result = await detectAllOrphanedPositions()
+    await reply(`✅ Meteora reconcile complete.\nLive DLMM positions: ${result.live}\nInserted missing cache rows: ${result.inserted}`)
   } catch (err) {
-    await reply(`❌ Orphan check error: ${err instanceof Error ? err.message : String(err)}`)
+    await reply(`❌ Meteora reconcile error: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 

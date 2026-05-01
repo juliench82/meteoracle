@@ -23,8 +23,8 @@ const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
 const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
 
-// Run full-wallet orphan scan every N ticks (default 15 ≈ 15 min at 60s interval)
-const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '15')
+// Reconcile the wallet against Meteora every tick by default. Supabase is a cache.
+const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
 let tickCount = 0
 
 // ── Direct REST helpers (bypasses supabase-js connection pooling issues) ──────
@@ -96,12 +96,13 @@ export async function monitorPositions(): Promise<{
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
 
   tickCount++
-  if (tickCount % ORPHAN_CHECK_EVERY_N === 0) {
-    console.log(`[monitor] tick ${tickCount} — running auto orphan scan`)
+  if (ORPHAN_CHECK_EVERY_N > 0 && tickCount % ORPHAN_CHECK_EVERY_N === 0) {
+    console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
     try {
-      await detectAllOrphanedPositions()
+      const reconcile = await detectAllOrphanedPositions()
+      console.log(`[monitor] Meteora reconcile — live=${reconcile.live} inserted=${reconcile.inserted}`)
     } catch (err) {
-      console.warn('[monitor] auto orphan scan failed (non-fatal):', err)
+      console.warn('[monitor] Meteora position reconcile failed (non-fatal):', err)
     }
   }
 
@@ -129,6 +130,10 @@ export async function monitorPositions(): Promise<{
     try {
       const strategyId = position.strategy_id ?? position.metadata?.strategy_id
       if (position.position_type === 'pre_grad' || strategyId === 'damm-edge') {
+        continue
+      }
+      if (strategyId === 'meteora-live') {
+        console.log(`[monitor] ${position.symbol} is a Meteora-live cache row — dashboard only, skipping strategy exits`)
         continue
       }
 
