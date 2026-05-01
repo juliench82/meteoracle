@@ -16,18 +16,16 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-// ── DAMM v2 REST pool stats ───────────────────────────────────────────────────
+// ── DAMM v2 REST: pool stats ──────────────────────────────────────────────────
 
 /**
- * Fetches pool stats from the Meteora DAMM v2 REST API.
- * Returns trading_volume_24h, fees_24h, and tvl.
- * Non-blocking — returns null on any failure so the monitor tick is never blocked.
+ * Pool-level stats from the Meteora DAMM v2 REST API.
+ * Used for dashboard context (volume, TVL) — not an exit signal.
  *
  * Endpoint: GET https://amm-v2.meteora.ag/pool/{pool_address}
  */
 async function fetchDammPoolStats(poolAddress: string): Promise<{
   volume24hUsd: number
-  fees24hUsd: number
   tvlUsd: number
 } | null> {
   try {
@@ -37,31 +35,54 @@ async function fetchDammPoolStats(poolAddress: string): Promise<{
     if (!res.ok) return null
     const data = await res.json()
     return {
-      volume24hUsd: Number(data.trading_volume   ?? data.volume_24h   ?? 0),
-      fees24hUsd:   Number(data.fees_24h          ?? data.fee_volume   ?? 0),
-      tvlUsd:       Number(data.pool_tvl           ?? data.tvl          ?? 0),
+      volume24hUsd: Number(data.trading_volume ?? data.volume_24h ?? 0),
+      tvlUsd:       Number(data.pool_tvl        ?? data.tvl        ?? 0),
     }
   } catch {
     return null
   }
 }
 
-// ── On-chain state fetch ─────────────────────────────────────────────────────────
+// ── DAMM v2 REST: per-position claimable fees ─────────────────────────────────
+
+/**
+ * Returns the claimable fees for a specific position in USD,
+ * mirroring exactly what Meteora's UI shows.
+ *
+ * Endpoint: GET https://amm-v2.meteora.ag/position/{position_pubkey}
+ * Relevant field: fee_pending_usd (sum of both token sides in USD).
+ * Returns null on any failure — non-blocking.
+ */
+async function fetchClaimableFeesUsd(positionPubkey: string): Promise<number | null> {
+  try {
+    const res = await fetch(`https://amm-v2.meteora.ag/position/${positionPubkey}`, {
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    // Field variants observed across API versions
+    const raw = data.fee_pending_usd ?? data.total_fee_usd ?? data.claimable_fee_usd ?? null
+    return raw !== null ? Number(raw) : null
+  } catch {
+    return null
+  }
+}
+
+// ── On-chain state fetch ──────────────────────────────────────────────────────
 
 /**
  * Reads current sqrtPrice from DAMM pool state and derives a SOL-denominated
- * price. Also reads unclaimed fees from the position account.
+ * price ratio vs entry_price_sol for PnL computation.
  *
  * sqrtPrice in DAMM v2 is a Q64.64 fixed-point number:
  *   price = (sqrtPrice / 2^64)^2
- * We only need a ratio vs entry_price_sol for PnL %, so units cancel out.
+ * Units cancel out in the pricePct calculation — we only need the ratio.
  *
  * Returns null if the RPC call fails so the caller can skip the tick safely.
  */
 async function fetchDammPositionState(
   poolAddress: string,
-  positionPubkey: string,
-): Promise<{ currentPriceSol: number; feesEarnedSol: number } | null> {
+): Promise<{ currentPriceSol: number } | null> {
   try {
     const { Connection, PublicKey } = await import('@solana/web3.js')
     const { CpAmm } = await import('@meteora-ag/cp-amm-sdk')
@@ -76,20 +97,7 @@ async function fetchDammPositionState(
     const sqrtPriceBig = BigInt(poolState.sqrtPrice.toString())
     const currentPriceSol = Number((sqrtPriceBig * sqrtPriceBig) / (TWO_POW_64 * TWO_POW_64))
 
-    let feesEarnedSol = 0
-    try {
-      const positionState = await sdk.fetchPositionState(new PublicKey(positionPubkey))
-      if (positionState) {
-        // SDK fields: feeAPending / feeBPending (BN, in lamports)
-        const feeA = Number(positionState.feeAPending ?? 0) / 1e9
-        const feeB = Number(positionState.feeBPending ?? 0) / 1e9
-        feesEarnedSol = feeA + feeB
-      }
-    } catch {
-      // fees non-critical — carry on with 0
-    }
-
-    return { currentPriceSol, feesEarnedSol }
+    return { currentPriceSol }
   } catch (err) {
     console.error('[PRE-GRAD] fetchDammPositionState failed:', err)
     return null
@@ -102,8 +110,6 @@ async function fetchDammPositionState(
  * checkDammPositions — one evaluation pass over all active DAMM positions.
  *
  * Called directly from the tick route on every cron invocation.
- * Replaces the old setInterval wrapper which never fired a second time in
- * Vercel serverless (each invocation is a fresh execution context).
  */
 export async function checkDammPositions(): Promise<{ checked: number; exited: number }> {
   const { data: positions, error } = await supabase
@@ -128,14 +134,14 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
     const ageHours = (Date.now() - new Date(pos.opened_at).getTime()) / (1000 * 60 * 60)
     const solDeposited = Number(pos.sol_deposited ?? 1)
 
-    // Fetch on-chain state and REST pool stats in parallel
-    const [onChain, poolStats] = await Promise.all([
-      fetchDammPositionState(pos.pool_address, pos.position_pubkey),
+    // All three fetches in parallel — no sequential blocking
+    const [onChain, poolStats, claimableFeesUsd] = await Promise.all([
+      fetchDammPositionState(pos.pool_address),
       fetchDammPoolStats(pos.pool_address),
+      fetchClaimableFeesUsd(pos.position_pubkey),
     ])
 
     let pnlSol: number
-    let feesEarnedSol: number
     let pnlPct: number
 
     if (onChain && onChain.currentPriceSol > 0 && Number(pos.entry_price_sol ?? 0) > 0) {
@@ -143,32 +149,30 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
       const pricePct = ((onChain.currentPriceSol - entryPrice) / entryPrice) * 100
       const k = onChain.currentPriceSol / entryPrice
       const ilPct = (2 * Math.sqrt(k) / (1 + k) - 1) * 100
-      feesEarnedSol = onChain.feesEarnedSol
-      pnlSol = solDeposited * (pricePct / 100) + feesEarnedSol
+      pnlSol = solDeposited * (pricePct / 100)
       pnlPct = solDeposited > 0 ? (pnlSol / solDeposited) * 100 : 0
 
       await supabase
         .from('lp_positions')
         .update({
-          current_price:    onChain.currentPriceSol,
-          fees_earned_sol:  feesEarnedSol,
-          pnl_sol:          Math.round(pnlSol * 1e6) / 1e6,
-          il_pct:           Math.round(ilPct * 100) / 100,
-          // Merge latest pool stats into metadata so dashboard has fresh volume/TVL
-          ...(poolStats && {
-            metadata: {
-              ...(pos.metadata ?? {}),
-              volume_24h_usd: Math.round(poolStats.volume24hUsd),
-              fees_24h_usd:   Math.round(poolStats.fees24hUsd),
-              tvl_usd:        Math.round(poolStats.tvlUsd),
-              stats_updated_at: new Date().toISOString(),
-            },
-          }),
+          current_price: onChain.currentPriceSol,
+          pnl_sol:       Math.round(pnlSol * 1e6) / 1e6,
+          il_pct:        Math.round(ilPct * 100) / 100,
+          metadata: {
+            ...(pos.metadata ?? {}),
+            // Claimable fees in USD — mirrors Meteora UI exactly
+            ...(claimableFeesUsd !== null && { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 }),
+            // Pool-level context for dashboard
+            ...(poolStats && {
+              volume_24h_usd:    Math.round(poolStats.volume24hUsd),
+              tvl_usd:           Math.round(poolStats.tvlUsd),
+              stats_updated_at:  new Date().toISOString(),
+            }),
+          },
         })
         .eq('id', pos.id)
     } else {
       pnlSol = Number(pos.pnl_sol ?? 0)
-      feesEarnedSol = Number(pos.fees_earned_sol ?? 0)
       pnlPct = solDeposited > 0 ? (pnlSol / solDeposited) * 100 : 0
       if (!onChain) {
         console.warn(`[PRE-GRAD] RPC miss for ${pos.id} — skipping TP/SL this tick`)
@@ -176,7 +180,6 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
     }
 
     // ── Exit triggers: max-duration | stop-loss | take-profit ────────────────
-    // fee-yield trigger removed — fees are informational only, not an exit signal.
     let reason = ''
     if (ageHours > 72)                   reason = 'max-duration'
     else if (onChain && pnlPct <= -30)   reason = 'stop-loss'
@@ -184,7 +187,8 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
 
     if (reason) {
       const label = pos.symbol ?? pos.mint ?? pos.id
-      console.log(`[PRE-GRAD] EXIT: ${label} → ${reason} (pnl=${pnlPct.toFixed(1)}% fees=${feesEarnedSol.toFixed(4)} SOL)`)
+      const feesDisplay = claimableFeesUsd !== null ? `$${claimableFeesUsd.toFixed(2)}` : 'n/a'
+      console.log(`[PRE-GRAD] EXIT: ${label} → ${reason} (pnl=${pnlPct.toFixed(1)}% claimable=${feesDisplay})`)
       await handleDammExit(pos.id, reason, pos.symbol ?? pos.mint ?? 'UNKNOWN', pos.opened_at)
       exited++
     }
@@ -195,20 +199,12 @@ export async function checkDammPositions(): Promise<{ checked: number; exited: n
 
 /**
  * startPreGradMonitor — kept for backwards compatibility.
- * On Vercel serverless the setInterval pattern is unreliable; the tick route
- * now calls checkDammPositions() directly. This function is a no-op shim.
+ * No-op shim; monitor is driven by checkDammPositions() in the tick route.
  */
-export async function startPreGradMonitor(): Promise<void> {
-  // No-op: monitor is driven by checkDammPositions() in the tick route.
-  // Retained so any external caller compiles without changes.
-}
+export async function startPreGradMonitor(): Promise<void> {}
 
-// ── Exit handler ───────────────────────────────────────────────────────────────
+// ── Exit handler ──────────────────────────────────────────────────────────────
 
-/**
- * Explicit exit trigger. Called by checkDammPositions or externally
- * when an exit condition fires. Fires pre_grad_closed Telegram alert.
- */
 export async function handleDammExit(
   positionId: string,
   reason: string,
@@ -232,13 +228,8 @@ export async function handleDammExit(
   console.log(`[PRE-GRAD] Exit closed ${positionId} reason: ${reason}`)
 }
 
-// ── monitor.ts compatibility shim ─────────────────────────────────────────────
+// ── monitor.ts compatibility shim ────────────────────────────────────────────
 
-/**
- * Called by bot/monitor.ts for any position with strategy_id === 'damm-edge'.
- * Returns true if the position was closed, false if skipped.
- * Exit ownership belongs to checkDammPositions; this shim defers accordingly.
- */
 export async function closePreGradPosition(
   position: Record<string, unknown>
 ): Promise<boolean> {

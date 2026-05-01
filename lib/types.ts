@@ -17,7 +17,8 @@ export interface Position {
   entryPrice: number
   currentPrice?: number
   solDeposited: number
-  feesEarnedSol: number
+  /** Claimable fees in USD — mirrors Meteora UI. Stored in metadata.claimable_fees_usd. */
+  claimableFeesUsd?: number
   status: PositionStatus
   inRange: boolean
   openedAt: string
