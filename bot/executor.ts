@@ -91,6 +91,16 @@ async function simulateAndCheck(tx: Transaction, label: string): Promise<boolean
   }
 }
 
+/**
+ * Sends a legacy transaction and waits for confirmation.
+ *
+ * If confirmTransaction throws (RPC timeout, block height expiry, etc.)
+ * we fall back to getSignatureStatus. If the chain shows the tx as
+ * 'confirmed' or 'finalized' we treat it as success and return the sig
+ * — the tx landed, the RPC just timed out waiting. Only re-throws when
+ * the chain also has no record of the tx, preventing false-positive
+ * active positions.
+ */
 async function sendLegacyTx(
   tx: Transaction,
   signers: import('@solana/web3.js').Signer[],
@@ -106,7 +116,29 @@ async function sendLegacyTx(
 
   tx.sign(...signers)
   const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
-  await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
+
+  try {
+    await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
+  } catch (confirmErr: unknown) {
+    const errMsg = confirmErr instanceof Error ? confirmErr.message : String(confirmErr)
+    console.warn(`${label} confirmTransaction threw — checking chain directly for ${sig.slice(0, 8)}…`, errMsg)
+
+    // Give the RPC a moment to catch up before we query status
+    await new Promise(r => setTimeout(r, 3_000))
+
+    const statusResp = await connection.getSignatureStatus(sig, { searchTransactionHistory: true })
+    const status = statusResp.value
+
+    if (status && !status.err && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
+      console.log(`${label} tx confirmed on-chain via status fallback ✔ (${status.confirmationStatus}) sig: ${sig}`)
+      return sig
+    }
+
+    // Chain also has no record — tx genuinely did not land
+    console.error(`${label} tx not confirmed on-chain after fallback check — sig: ${sig}`, { status })
+    throw confirmErr
+  }
+
   return sig
 }
 
