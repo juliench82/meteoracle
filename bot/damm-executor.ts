@@ -8,6 +8,7 @@
  *
  * - Real close: zapOutThroughDammV2 via @meteora-ag/zap-sdk → everything to SOL.
  *   Loads position row from Supabase by positionId before calling zap.
+ *   After confirmation, reads the on-chain balance delta to store realized pnl_sol.
  *
  * - Wallet: loaded from WALLET_PRIVATE_KEY env (base58), never from PublicKey alone.
  * - Lazy imports: all SDK imports are dynamic to prevent Next.js build-time IDL crash.
@@ -334,7 +335,12 @@ async function saveDammPosition({
  * Close a DAMM v2 position via Zap Out → 100% back to SOL.
  *
  * positionId: Supabase row id from lp_positions.
- * Loads pool_address and position_pubkey from DB; no guessing.
+ * Loads pool_address, position_pubkey, and sol_deposited from DB; no guessing.
+ *
+ * After the zap-out tx confirms, reads the on-chain pre/post SOL balance of the
+ * wallet to compute the realized return. This overwrites the estimated pnl_sol
+ * written during monitoring with the true realized value, so the dashboard matches
+ * what Meteora reports.
  */
 export async function closeDammPosition(
   positionId: string,
@@ -346,7 +352,7 @@ export async function closeDammPosition(
     const supabase = createServerClient()
     const { data: row, error: dbErr } = await supabase
       .from('lp_positions')
-      .select('pool_address, position_pubkey')
+      .select('pool_address, position_pubkey, sol_deposited')
       .eq('id', positionId)
       .single()
 
@@ -354,6 +360,7 @@ export async function closeDammPosition(
       throw new Error(`[DAMM] lp_position ${positionId} not found: ${dbErr?.message ?? 'null row'}`)
     }
 
+    const solDeposited = Number(row.sol_deposited ?? 0)
     const zap = await getZap()
     const wallet = getWallet()
 
@@ -373,13 +380,43 @@ export async function closeDammPosition(
     const resolved = await resolveTransaction(tx)
     const signature = await sendWithPriority(resolved, [wallet], '[DAMM][close]')
 
+    // ── Realized PnL from on-chain balance delta ───────────────────────────
+    // Read the confirmed tx to get wallet pre/post lamport balances.
+    // post - pre = net SOL received from the zap (tx fees already deducted by runtime).
+    // realizedPnlSol = solReceived - solDeposited.
+    let realizedPnlSol: number | null = null
+    try {
+      const connection = getConnection()
+      const confirmedTx = await connection.getTransaction(signature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      })
+      if (confirmedTx?.meta) {
+        const keys = confirmedTx.transaction.message.staticAccountKeys
+        const walletIdx = keys.findIndex(
+          (k: any) => k.toBase58() === wallet.publicKey.toBase58(),
+        )
+        if (walletIdx >= 0) {
+          const pre  = confirmedTx.meta.preBalances[walletIdx]  ?? 0
+          const post = confirmedTx.meta.postBalances[walletIdx] ?? 0
+          const solReceived = (post - pre) / 1e9
+          realizedPnlSol = Math.round((solReceived - solDeposited) * 1e6) / 1e6
+          console.log(`[DAMM] Realized PnL: ${realizedPnlSol} SOL (deposited=${solDeposited}, received=${solReceived})`)
+        }
+      }
+    } catch (e) {
+      console.warn('[DAMM] Could not compute realized PnL from tx — keeping estimated value:', e)
+    }
+
     await supabase
       .from('lp_positions')
       .update({
-        status: 'closed',
-        closed_at: new Date().toISOString(),
+        status:       'closed',
+        closed_at:    new Date().toISOString(),
         close_reason: reason,
         oor_since_at: null,
+        tx_close:     signature,
+        ...(realizedPnlSol !== null && { pnl_sol: realizedPnlSol }),
       })
       .eq('id', positionId)
 
