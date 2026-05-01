@@ -15,7 +15,7 @@ export const dynamic = 'force-dynamic'
  *  4. runScanner         — new candidates
  */
 function getTickSecret(): string | null {
-  return process.env.BOT_TICK_SECRET ?? process.env.CRON_SECRET ?? null
+  return process.env.BOT_SECRET ?? process.env.BOT_TICK_SECRET ?? process.env.CRON_SECRET ?? null
 }
 
 function getBearerToken(request: Request): string | null {
@@ -27,10 +27,7 @@ function getBearerToken(request: Request): string | null {
 function authorizeTick(request: Request): NextResponse | null {
   const expected = getTickSecret()
   if (!expected) {
-    return NextResponse.json(
-      { status: 'misconfigured', error: 'BOT_TICK_SECRET or CRON_SECRET is not set' },
-      { status: 500 },
-    )
+    return NextResponse.json({ status: 'unauthorized' }, { status: 401 })
   }
 
   const provided = getBearerToken(request) ?? request.headers.get('x-bot-secret')
