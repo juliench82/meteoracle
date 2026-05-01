@@ -3,8 +3,9 @@ import { getConnection, getWallet } from '@/lib/solana'
 
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v6'
-const SWAP_TIMEOUT_MS = 15_000
-const SWAP_MAX_RETRIES = 2
+const SWAP_TIMEOUT_MS = 20_000
+const SWAP_MAX_RETRIES = 3
+const SWAP_RETRY_DELAY_MS = 3_000
 
 // Default: 1% slippage. Override via SWAP_SLIPPAGE_BPS env.
 function slippageBps(): number {
@@ -27,8 +28,8 @@ async function fetchWithRetry(url: string, options: RequestInit, attempt = 1): P
     return res
   } catch (err) {
     if (attempt < SWAP_MAX_RETRIES) {
-      const delay = attempt * 2_000
-      console.warn(`[swap] fetch failed (attempt ${attempt}/${SWAP_MAX_RETRIES}), retrying in ${delay}ms...`)
+      const delay = attempt * SWAP_RETRY_DELAY_MS
+      console.warn(`[swap] fetch failed (attempt ${attempt}/${SWAP_MAX_RETRIES}), retrying in ${delay}ms…`)
       await new Promise(r => setTimeout(r, delay))
       return fetchWithRetry(url, options, attempt + 1)
     }
@@ -39,6 +40,7 @@ async function fetchWithRetry(url: string, options: RequestInit, attempt = 1): P
 /**
  * Swaps all balance of `tokenMint` to native SOL via Jupiter.
  * Returns the swap signature, or null if nothing to swap or dry-run.
+ * Throws on final failure — caller is responsible for alerting.
  */
 export async function swapTokenToSol(
   tokenMint: string,
@@ -64,7 +66,7 @@ export async function swapTokenToSol(
     return null
   }
 
-  console.log(`${label} [swap] swapping ${balance.toString()} lamports of ${tokenMint.slice(0, 8)}... → SOL`)
+  console.log(`${label} [swap] swapping ${balance.toString()} lamports of ${tokenMint.slice(0, 8)}… → SOL`)
 
   // 1. Quote
   const quoteUrl = `${JUPITER_QUOTE_API}/quote?inputMint=${tokenMint}&outputMint=${NATIVE_MINT}&amount=${balance.toString()}&slippageBps=${slippageBps()}&onlyDirectRoutes=false`
