@@ -20,7 +20,7 @@ const supabase = createClient(
 
 /**
  * Start the DAMM position monitor (60s interval).
- * Called once at bot startup.
+ * Called once at bot startup from app/api/bot/tick/route.ts.
  */
 export async function startPreGradMonitor(): Promise<void> {
   console.log('[PRE-GRAD] Starting DAMM position monitor (60s interval)...')
@@ -47,9 +47,14 @@ export async function startPreGradMonitor(): Promise<void> {
     console.log(`[PRE-GRAD] Evaluating ${positions.length} DAMM position(s)`)
 
     for (const pos of positions) {
-      const ageHours = (Date.now() - new Date(pos.created_at).getTime()) / (1000 * 60 * 60)
-      const pnlPct = pos.pnl_pct || 0
-      const feeYield = pos.fee_yield_sol || 0
+      // opened_at is the correct timestamp column in lp_positions
+      const ageHours = (Date.now() - new Date(pos.opened_at).getTime()) / (1000 * 60 * 60)
+      // pnl_sol is the actual column; derive pct from sol_deposited
+      const pnlSol = Number(pos.pnl_sol ?? 0)
+      const solDeposited = Number(pos.sol_deposited ?? 1)
+      const pnlPct = solDeposited > 0 ? (pnlSol / solDeposited) * 100 : 0
+      // fees_earned_sol is the actual column
+      const feeYield = Number(pos.fees_earned_sol ?? 0)
 
       let reason = ''
 
@@ -59,8 +64,9 @@ export async function startPreGradMonitor(): Promise<void> {
       else if (feeYield > 0.10) reason = 'fee-yield'
 
       if (reason) {
-        console.log(`[PRE-GRAD] EXIT triggered: ${pos.token_symbol || pos.token_address} → ${reason}`)
-        await handleDammExit(pos.id, reason, pos.symbol ?? pos.token_symbol ?? pos.mint ?? 'UNKNOWN', pos.created_at)
+        const label = pos.symbol ?? pos.mint ?? pos.id
+        console.log(`[PRE-GRAD] EXIT triggered: ${label} → ${reason}`)
+        await handleDammExit(pos.id, reason, pos.symbol ?? pos.mint ?? 'UNKNOWN', pos.opened_at)
       }
     }
   }, 60_000)

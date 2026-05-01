@@ -164,7 +164,7 @@ export interface DexScreenerPair {
   url?: string
 }
 
-// ── DAMM v2 Edge — isolated type definitions ─────────────────────────────────
+// ── DAMM v2 Edge — isolated type definitions ────────────────────────────────────────────
 // These are ONLY used by strategies/damm-edge.ts and bot/damm-executor.ts.
 // No existing DLMM code references these types.
 
@@ -184,6 +184,8 @@ export interface DammPositionParams {
   feeTvl24hPct: number
   /** Pool liquidity in USD at time of decision (for logging / audit). */
   liquidityUsd: number
+  /** pump.fun bonding curve fill % at time of decision (0–100). Optional. */
+  bondingCurvePct?: number
 }
 
 /**
