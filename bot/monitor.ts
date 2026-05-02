@@ -21,7 +21,7 @@ async function getDLMM() {
   return mod.default as typeof import('@meteora-ag/dlmm').default
 }
 
-const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '300') * 1_000
+const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const MIN_VOLUME_USD_FOR_REBALANCE = 500
 const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']

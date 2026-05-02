@@ -6,8 +6,10 @@ const SOL_MINT = 'So11111111111111111111111111111111111111112'
 const DEXSCREENER_SOLANA_PAIR_API = 'https://api.dexscreener.com/latest/dex/pairs/solana'
 const DEXSCREENER_TOKEN_API = 'https://api.dexscreener.com/latest/dex/tokens'
 const METEORA_DLMM_POSITION_API = 'https://dlmm-api.meteora.ag/position'
-const _pairInfoCache = new Map<string, DexPairInfo | null>()
-const _dlmmPositionStatsCache = new Map<string, Record<string, number | null> | null>()
+const DEX_PAIR_CACHE_TTL_MS = 20_000
+const DLMM_POSITION_STATS_CACHE_TTL_MS = 60_000
+const _pairInfoCache = new Map<string, { value: DexPairInfo | null; expiresAt: number }>()
+const _dlmmPositionStatsCache = new Map<string, { value: Record<string, number | null> | null; expiresAt: number }>()
 const _mintDecimalsCache = new Map<string, number | null>()
 
 async function getDLMM() {
@@ -123,21 +125,35 @@ async function fetchDexJson(url: string): Promise<any | null> {
   }
 }
 
+function getCached<T>(cache: Map<string, { value: T; expiresAt: number }>, key: string): T | undefined {
+  const cached = cache.get(key)
+  if (!cached) return undefined
+  if (cached.expiresAt > Date.now()) return cached.value
+  cache.delete(key)
+  return undefined
+}
+
+function setCached<T>(cache: Map<string, { value: T; expiresAt: number }>, key: string, value: T, ttlMs: number): void {
+  cache.set(key, { value, expiresAt: Date.now() + ttlMs })
+}
+
 async function fetchDexPairByPool(poolAddress: string): Promise<DexPairInfo | null> {
   if (!poolAddress) return null
   const cacheKey = `pool:${poolAddress}`
-  if (_pairInfoCache.has(cacheKey)) return _pairInfoCache.get(cacheKey) ?? null
+  const cached = getCached(_pairInfoCache, cacheKey)
+  if (cached !== undefined) return cached
 
   const data = await fetchDexJson(`${DEXSCREENER_SOLANA_PAIR_API}/${poolAddress}`)
   const pair = (data?.pair ?? data?.pairs?.[0] ?? null) as DexPairInfo | null
-  _pairInfoCache.set(cacheKey, pair)
+  setCached(_pairInfoCache, cacheKey, pair, DEX_PAIR_CACHE_TTL_MS)
   return pair
 }
 
 async function fetchDexPairByToken(mint: string, poolAddress?: string): Promise<DexPairInfo | null> {
   if (!mint) return null
   const cacheKey = `token:${mint}:${poolAddress ?? ''}`
-  if (_pairInfoCache.has(cacheKey)) return _pairInfoCache.get(cacheKey) ?? null
+  const cached = getCached(_pairInfoCache, cacheKey)
+  if (cached !== undefined) return cached
 
   const data = await fetchDexJson(`${DEXSCREENER_TOKEN_API}/${mint}`)
   const pairs = Array.isArray(data?.pairs) ? data.pairs as DexPairInfo[] : []
@@ -151,7 +167,7 @@ async function fetchDexPairByToken(mint: string, poolAddress?: string): Promise<
     normalizeSymbolPart(p.baseToken?.symbol) === 'SOL'
   )
   const pair = exactPool ?? solPair ?? pairs[0] ?? null
-  _pairInfoCache.set(cacheKey, pair)
+  setCached(_pairInfoCache, cacheKey, pair, DEX_PAIR_CACHE_TTL_MS)
   return pair
 }
 
@@ -502,7 +518,8 @@ async function estimateDammDeposits(
 
 async function fetchMeteoraDlmmPositionStats(positionPubkey: string): Promise<Record<string, number | null> | null> {
   if (!positionPubkey) return null
-  if (_dlmmPositionStatsCache.has(positionPubkey)) return _dlmmPositionStatsCache.get(positionPubkey) ?? null
+  const cached = getCached(_dlmmPositionStatsCache, positionPubkey)
+  if (cached !== undefined) return cached
 
   try {
     const res = await fetch(`${METEORA_DLMM_POSITION_API}/${positionPubkey}`, {
@@ -510,7 +527,7 @@ async function fetchMeteoraDlmmPositionStats(positionPubkey: string): Promise<Re
       signal: AbortSignal.timeout(5_000),
     })
     if (!res.ok) {
-      _dlmmPositionStatsCache.set(positionPubkey, null)
+      setCached(_dlmmPositionStatsCache, positionPubkey, null, DLMM_POSITION_STATS_CACHE_TTL_MS)
       return null
     }
     const data = await res.json()
@@ -524,10 +541,10 @@ async function fetchMeteoraDlmmPositionStats(positionPubkey: string): Promise<Re
     const normalized = Object.fromEntries(
       Object.entries(stats).map(([key, value]) => [key, Number.isFinite(value) ? value : null]),
     ) as Record<string, number | null>
-    _dlmmPositionStatsCache.set(positionPubkey, normalized)
+    setCached(_dlmmPositionStatsCache, positionPubkey, normalized, DLMM_POSITION_STATS_CACHE_TTL_MS)
     return normalized
   } catch {
-    _dlmmPositionStatsCache.set(positionPubkey, null)
+    setCached(_dlmmPositionStatsCache, positionPubkey, null, DLMM_POSITION_STATS_CACHE_TTL_MS)
     return null
   }
 }

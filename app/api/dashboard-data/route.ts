@@ -5,6 +5,14 @@ import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 
 export const dynamic = 'force-dynamic'
 
+function dashboardJson(body: Record<string, unknown>) {
+  return NextResponse.json(body, {
+    headers: {
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+    },
+  })
+}
+
 function n(value: unknown): number {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
@@ -91,7 +99,7 @@ export async function GET() {
   const openLp = mergeDbAndLiveLpPositions(dbOpenLp, liveLp, { liveFetchOk: liveLpOk })
   const closedLp = closedLpRes.status === 'fulfilled' ? (closedLpRes.value.data ?? []) : []
 
-  return NextResponse.json({
+  return dashboardJson({
     openSpot:   openSpotRes.status   === 'fulfilled' ? (openSpotRes.value.data   ?? []) : [],
     closedSpot: closedSpotRes.status === 'fulfilled' ? (closedSpotRes.value.data ?? []) : [],
     openLp,

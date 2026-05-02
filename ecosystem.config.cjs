@@ -5,7 +5,7 @@
  *
  * PIPELINE 1: Meteora DLMM LP (the only pipeline)
  *   lp-scanner       — polls Meteora pools every 15min, classifies token, opens LP
- *   lp-monitor-dlmm  — monitors LP range health, rebalances, exits every 5min
+ *   lp-monitor-dlmm  — monitors LP range health, rebalances, exits every 60s
  *
  * INTERFACE
  *   telegram-bot     — Telegram command interface (/tick, /positions, etc.)
@@ -68,6 +68,7 @@ module.exports = {
       env: {
         NODE_ENV:              'production',
         LP_MONITOR_STANDALONE: 'true',
+        LP_MONITOR_INTERVAL_SEC: '60',
         NODE_OPTIONS:          '--conditions=require',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',

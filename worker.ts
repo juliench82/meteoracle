@@ -2,14 +2,14 @@
  * worker.ts — Coolify/server entrypoint
  *
  * Runs as a persistent process (not a cron).
- * Monitor ticks every 5 minutes, scanner every 15 minutes.
+ * Monitor ticks every 60 seconds, scanner every 15 minutes.
  * Set BOT_ENABLED=true and BOT_DRY_RUN=true to start safely.
  */
 import 'dotenv/config'
 import { monitorPositions } from './bot/monitor'
 import { runScanner } from './bot/scanner'
 
-const MONITOR_INTERVAL_MS = 5 * 60 * 1_000   // 5 minutes
+const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
 const SCANNER_INTERVAL_MS = 15 * 60 * 1_000  // 15 minutes
 
 const BOT_ENABLED = process.env.BOT_ENABLED === 'true'
