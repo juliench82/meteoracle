@@ -200,6 +200,7 @@ git pull && npm install && pm2 restart all --update-env && pm2 save
 - [ ] `bot_state` row inserted
 - [ ] Wallet funded (≥ 0.5 SOL recommended for initial positions)
 - [ ] `BOT_TICK_SECRET` set and used for `/api/bot/tick` cron/manual calls
+- [ ] `TELEGRAM_ALLOWED_USERS` set to your Telegram user id for command access
 - [ ] `TELEGRAM_WEBHOOK_SECRET` set if using the webhook route
 - [ ] `BOT_DRY_RUN=false` confirmed in env
 - [ ] `chmod +x start-dashboard.sh`

@@ -8,6 +8,7 @@ import { getBotState, setBotState } from '@/lib/botState'
 import { fetchLiveMeteoraPositions } from '@/lib/meteora-live'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 import { syncAllMeteoraPositions } from '@/lib/position-sync'
+import { isTelegramCommandAllowed } from '@/lib/telegram-auth'
 import { STRATEGIES } from '@/strategies'
 import type { TokenMetrics } from '@/lib/types'
 import axios from 'axios'
@@ -16,7 +17,6 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
-const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID
 const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET
 
 async function reply(chatId: number | string, text: string) {
@@ -198,11 +198,12 @@ export async function POST(req: Request) {
     if (!message) return NextResponse.json({ ok: true })
 
     const chatId  = message.chat?.id
+    const fromId  = message.from?.id
     const text: string = message.text ?? ''
     const parts   = text.trim().split(/\s+/)
     const command = parts[0].toLowerCase()
 
-    if (String(chatId) !== String(TELEGRAM_CHAT_ID)) {
+    if (!isTelegramCommandAllowed(fromId, chatId)) {
       return NextResponse.json({ ok: true })
     }
 

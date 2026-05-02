@@ -37,6 +37,7 @@ import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
 import { fetchLiveMeteoraPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
 import { syncAllMeteoraPositions } from '@/lib/position-sync'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
+import { getTelegramAllowedUsers, isTelegramCommandAllowed } from '@/lib/telegram-auth'
 
 const execAsync = promisify(exec)
 const PM2 = '/usr/local/bin/pm2'
@@ -49,12 +50,18 @@ const WORKER_PROCESSES = [
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? ''
+const ALLOWED_USER_IDS = getTelegramAllowedUsers()
 const POLL_MS = 2_000
 const TICK_TIMEOUT_MS = 55_000
 const API = `https://api.telegram.org/bot${BOT_TOKEN}`
 
 if (!BOT_TOKEN || !CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — exiting')
+  process.exit(1)
+}
+
+if (ALLOWED_USER_IDS.size === 0) {
+  console.error('[telegram-bot] TELEGRAM_ALLOWED_USERS or TELEGRAM_CHAT_ID must include at least one authorized user id — exiting')
   process.exit(1)
 }
 
@@ -173,7 +180,7 @@ async function getUpdates(offset?: number): Promise<TelegramUpdate[]> {
 
 interface TelegramUpdate {
   update_id: number
-  message?: { chat: { id: number }; text?: string }
+  message?: { chat: { id: number }; from?: { id: number }; text?: string }
 }
 
 async function drainPendingUpdates(): Promise<void> {
@@ -532,8 +539,13 @@ async function handleHelp() {
 async function processUpdate(update: TelegramUpdate): Promise<void> {
   const text = update.message?.text?.trim() ?? ''
   const chatId = update.message?.chat?.id
+  const fromId = update.message?.from?.id
 
-  if (!text || String(chatId) !== CHAT_ID) return
+  if (!text) return
+  if (!isTelegramCommandAllowed(fromId, chatId, ALLOWED_USER_IDS)) {
+    console.warn(`[telegram-bot] ignored unauthorized command from user=${fromId ?? 'unknown'} chat=${chatId ?? 'unknown'}`)
+    return
+  }
 
   const [rawCmd, ...args] = text.split(/\s+/)
   const cmd = rawCmd.toLowerCase().replace(/^\//, '')
