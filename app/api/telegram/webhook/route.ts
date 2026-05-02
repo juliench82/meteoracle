@@ -5,7 +5,7 @@ import { addLiquidityToPosition, closePosition, openPosition } from '@/bot/execu
 import { closeDammPosition } from '@/bot/damm-executor'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
-import { fetchLiveMeteoraPositions } from '@/lib/meteora-live'
+import { fetchLiveMeteoraSnapshot } from '@/lib/meteora-live'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 import { syncAllMeteoraPositions } from '@/lib/position-sync'
 import { isTelegramCommandAllowed } from '@/lib/telegram-auth'
@@ -446,19 +446,19 @@ export async function POST(req: Request) {
         getBotState(),
         supabase.from('lp_positions').select('id', { count: 'exact', head: true }).in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry']),
         supabase.from('bot_logs').select('created_at').eq('event', 'bot_tick').order('created_at', { ascending: false }).limit(1).single(),
-        fetchLiveMeteoraPositions(),
+        fetchLiveMeteoraSnapshot(),
         fetchWalletLiveBalances(),
       ])
       const state       = stateRes.status === 'fulfilled' ? stateRes.value : { enabled: false, dry_run: true }
       const openCount   = openRes.status === 'fulfilled' ? openRes.value.count : '?'
       const lastTick    = lastTickRes.status === 'fulfilled' ? lastTickRes.value.data?.created_at : null
-      const liveLpCount = liveLpRes.status === 'fulfilled' ? liveLpRes.value.length : 0
-      const liveDlmmCount = liveLpRes.status === 'fulfilled'
-        ? liveLpRes.value.filter(p => p.position_type === 'dlmm').length
-        : 0
-      const liveDammCount = liveLpRes.status === 'fulfilled'
-        ? liveLpRes.value.filter(p => p.position_type === 'damm-edge').length
-        : 0
+      const liveSnapshot = liveLpRes.status === 'fulfilled' ? liveLpRes.value : null
+      const liveLpCount = liveSnapshot?.positions.length ?? 0
+      const liveDlmmCount = liveSnapshot?.positions.filter(p => p.position_type === 'dlmm').length ?? 0
+      const liveDammCount = liveSnapshot?.positions.filter(p => p.position_type === 'damm-edge').length ?? 0
+      const liveWarning = liveSnapshot && (!liveSnapshot.dlmmOk || !liveSnapshot.dammOk)
+        ? `Meteora fetch: DLMM ${liveSnapshot.dlmmOk ? 'ok' : 'failed'} / DAMM ${liveSnapshot.dammOk ? 'ok' : 'failed'}`
+        : null
       const walletSol = walletRes.status === 'fulfilled' ? walletRes.value.sol : null
       const lastTickStr = lastTick ? new Date(lastTick).toUTCString() : 'Never'
       await reply(chatId, [
@@ -468,6 +468,7 @@ export async function POST(req: Request) {
         `Wallet:         ${walletSol != null ? walletSol.toFixed(4) : 'n/a'} SOL`,
         `Open positions: ${liveLpCount} Meteora live / ${openCount} cached`,
         `Meteora live:  ${liveDlmmCount} DLMM / ${liveDammCount} DAMM`,
+        ...(liveWarning ? [`⚠️ ${liveWarning}`] : []),
         `Last tick:      ${lastTickStr}`,
       ].join('\n'))
     }

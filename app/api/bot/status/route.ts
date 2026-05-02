@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
-import { fetchLiveMeteoraPositions } from '@/lib/meteora-live'
+import { fetchLiveMeteoraSnapshot } from '@/lib/meteora-live'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 
 export const dynamic = 'force-dynamic'
@@ -26,7 +26,7 @@ export async function GET() {
       .from('spot_positions')
       .select('id', { count: 'exact', head: true })
       .eq('status', 'open'),
-    fetchLiveMeteoraPositions(),
+    fetchLiveMeteoraSnapshot(),
     fetchWalletLiveBalances(),
   ])
 
@@ -34,14 +34,12 @@ export async function GET() {
   const lastTick   = lastTickRes.status   === 'fulfilled' ? lastTickRes.value.data : null
   const lpCount    = lpCountRes.status    === 'fulfilled' ? (lpCountRes.value.count   ?? 0) : 0
   const spotCount  = spotCountRes.status  === 'fulfilled' ? (spotCountRes.value.count  ?? 0) : 0
-  const liveLpCount = liveLpRes.status     === 'fulfilled' ? liveLpRes.value.length : 0
+  const liveSnapshot = liveLpRes.status     === 'fulfilled' ? liveLpRes.value : null
+  const liveLpCount = liveSnapshot?.positions.length ?? 0
   const wallet = walletRes.status          === 'fulfilled' ? walletRes.value : null
-  const liveDammCount = liveLpRes.status   === 'fulfilled'
-    ? liveLpRes.value.filter(p => p.position_type === 'damm-edge').length
-    : 0
-  const liveDlmmCount = liveLpRes.status   === 'fulfilled'
-    ? liveLpRes.value.filter(p => p.position_type === 'dlmm').length
-    : 0
+  const liveDammCount = liveSnapshot?.positions.filter(p => p.position_type === 'damm-edge').length ?? 0
+  const liveDlmmCount = liveSnapshot?.positions.filter(p => p.position_type === 'dlmm').length ?? 0
+  const meteoraOk = Boolean(liveSnapshot?.dlmmOk || liveSnapshot?.dammOk)
 
   return NextResponse.json({
     enabled:         state.enabled,
@@ -51,6 +49,9 @@ export async function GET() {
     openPositions:   liveLpCount + spotCount,
     lpPositions:     liveLpCount,
     cachedLpPositions: lpCount,
+    meteoraLiveOk: meteoraOk,
+    meteoraLiveDlmmOk: liveSnapshot?.dlmmOk ?? false,
+    meteoraLiveDammOk: liveSnapshot?.dammOk ?? false,
     meteoraLiveLpPositions: liveLpCount,
     meteoraLiveDlmmPositions: liveDlmmCount,
     meteoraLiveDammPositions: liveDammCount,

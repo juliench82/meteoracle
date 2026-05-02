@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
 import { redis } from '@/lib/redis'
-import { fetchLiveMeteoraPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
+import { fetchLiveMeteoraSnapshot, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
@@ -23,9 +23,18 @@ export async function GET() {
   const cached = await redis.get<object>('pnl:snapshot')
   if (cached) return NextResponse.json(cached)
 
-  let livePositions: Awaited<ReturnType<typeof fetchLiveMeteoraPositions>> = []
+  let livePositions: Awaited<ReturnType<typeof fetchLiveMeteoraSnapshot>>['positions'] = []
+  let liveSource = { dlmmOk: false, dammOk: false }
   try {
-    livePositions = await fetchLiveMeteoraPositions()
+    const snapshot = await fetchLiveMeteoraSnapshot()
+    livePositions = snapshot.positions
+    liveSource = { dlmmOk: snapshot.dlmmOk, dammOk: snapshot.dammOk }
+    if (!snapshot.dlmmOk || !snapshot.dammOk) {
+      console.warn('[positions/pnl] partial Meteora live fetch failure:', {
+        dlmm: snapshot.dlmmError,
+        damm: snapshot.dammError,
+      })
+    }
   } catch (err) {
     console.warn('[positions/pnl] live Meteora fetch failed:', err)
   }
@@ -35,7 +44,12 @@ export async function GET() {
       positions: [],
       totalClaimableFeesUsd: 0,
       totalPositionValueUsd: 0,
-      liveSource: 'meteora',
+      liveSource: liveSource.dlmmOk || liveSource.dammOk ? 'meteora' : 'meteora-unavailable',
+      meteoraLive: {
+        ok: liveSource.dlmmOk || liveSource.dammOk,
+        dlmmOk: liveSource.dlmmOk,
+        dammOk: liveSource.dammOk,
+      },
       cachedAt: new Date().toISOString(),
     })
   }
@@ -54,7 +68,7 @@ export async function GET() {
     console.warn('[positions/pnl] DB metadata query failed, using live rows only:', error.message)
   }
 
-  const positions = mergeDbAndLiveLpPositions(cachedRows ?? [], livePositions, { liveFetchOk: true })
+  const positions = mergeDbAndLiveLpPositions(cachedRows ?? [], livePositions, liveSource)
 
   const enriched = positions.map((pos) => {
     const currentPriceSol = Number(pos.current_price ?? 0)

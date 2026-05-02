@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
-import { fetchLiveMeteoraPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
+import { fetchLiveMeteoraSnapshot, mergeDbAndLiveLpPositions, type MeteoraLiveSourceStatus } from '@/lib/meteora-live'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 
 export const dynamic = 'force-dynamic'
@@ -24,7 +24,13 @@ function average(values: number[]): number | null {
   return valid.reduce((sum, value) => sum + value, 0) / valid.length
 }
 
-function buildPortfolioSummary(openLp: any[], closedLp: any[], liveOk: boolean) {
+function liveSourceLabel(source: MeteoraLiveSourceStatus): 'meteora-live' | 'meteora-live-partial' | 'supabase-cache' {
+  if (source.dlmmOk && source.dammOk) return 'meteora-live'
+  if (source.dlmmOk || source.dammOk) return 'meteora-live-partial'
+  return 'supabase-cache'
+}
+
+function buildPortfolioSummary(openLp: any[], closedLp: any[], liveSource: MeteoraLiveSourceStatus) {
   const totalPositionValueUsd = openLp.reduce(
     (sum, position) => sum + n(position.position_value_usd ?? position.metadata?.position_value_usd),
     0,
@@ -51,7 +57,7 @@ function buildPortfolioSummary(openLp: any[], closedLp: any[], liveOk: boolean) 
   const wins = realizedRows.filter(value => value > 0)
 
   return {
-    source: liveOk ? 'meteora-live' : 'supabase-cache',
+    source: liveSourceLabel(liveSource),
     openCount: openLp.length,
     dlmmCount: openLp.filter(position => position.position_type === 'dlmm').length,
     dammCount: openLp.filter(position => position.position_type === 'damm-edge').length,
@@ -84,11 +90,17 @@ export async function GET() {
   ])
 
   const dbOpenLp = openLpRes.status === 'fulfilled' ? (openLpRes.value.data ?? []) : []
-  let liveLp: Awaited<ReturnType<typeof fetchLiveMeteoraPositions>> = []
-  let liveLpOk = false
+  let liveLp: Awaited<ReturnType<typeof fetchLiveMeteoraSnapshot>>['positions'] = []
+  let liveSource: MeteoraLiveSourceStatus = { dlmmOk: false, dammOk: false }
+  let liveErrors: { dlmm?: string | null; damm?: string | null } = {}
   try {
-    liveLp = await fetchLiveMeteoraPositions()
-    liveLpOk = true
+    const snapshot = await fetchLiveMeteoraSnapshot()
+    liveLp = snapshot.positions
+    liveSource = { dlmmOk: snapshot.dlmmOk, dammOk: snapshot.dammOk }
+    liveErrors = { dlmm: snapshot.dlmmError, damm: snapshot.dammError }
+    if (!snapshot.dlmmOk || !snapshot.dammOk) {
+      console.warn('[dashboard-data] partial Meteora live fetch failure:', liveErrors)
+    }
   } catch (err) {
     console.warn('[dashboard-data] Meteora live position fetch failed; using Supabase cache:', err)
   }
@@ -96,7 +108,7 @@ export async function GET() {
     console.warn('[dashboard-data] wallet balance fetch failed:', err)
     return null
   })
-  const openLp = mergeDbAndLiveLpPositions(dbOpenLp, liveLp, { liveFetchOk: liveLpOk })
+  const openLp = mergeDbAndLiveLpPositions(dbOpenLp, liveLp, liveSource)
   const closedLp = closedLpRes.status === 'fulfilled' ? (closedLpRes.value.data ?? []) : []
 
   return dashboardJson({
@@ -106,9 +118,12 @@ export async function GET() {
     closedLp,
     watchlist:  watchlistRes.status  === 'fulfilled' ? (watchlistRes.value.data  ?? []) : [],
     wallet,
-    portfolio: buildPortfolioSummary(openLp, closedLp, liveLpOk),
+    portfolio: buildPortfolioSummary(openLp, closedLp, liveSource),
     meteoraLive: {
-      ok: liveLpOk,
+      ok: liveSource.dlmmOk || liveSource.dammOk,
+      dlmmOk: liveSource.dlmmOk,
+      dammOk: liveSource.dammOk,
+      errors: liveErrors,
       count: liveLp.length,
       dlmm: liveLp.filter(p => p.position_type === 'dlmm').length,
       damm: liveLp.filter(p => p.position_type === 'damm-edge').length,

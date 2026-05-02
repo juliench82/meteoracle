@@ -139,15 +139,28 @@ export async function monitorPositions(): Promise<{
     return stats
   }
 
+  if (!reconcile.dlmmOk && !reconcile.dammOk) {
+    console.warn('[monitor] Meteora live fetch failed for DLMM and DAMM — skipping position exits this tick')
+    return stats
+  }
+
   try {
-    const damm = await checkDammPositions(reconcile.positions)
-    stats.checked += damm.checked
-    stats.closed += damm.exited
+    if (reconcile.dammOk) {
+      const damm = await checkDammPositions(reconcile.positions)
+      stats.checked += damm.checked
+      stats.closed += damm.exited
+    } else {
+      console.warn('[monitor] DAMM live fetch failed — skipping DAMM exits this tick')
+    }
   } catch (err) {
     console.warn('[monitor] DAMM v2 check failed (non-fatal):', err)
   }
 
   const liveDlmmPositions = reconcile.positions.filter(position => position.position_type === 'dlmm')
+  if (!reconcile.dlmmOk) {
+    console.warn('[monitor] DLMM live fetch failed — skipping DLMM exits this tick')
+    return stats
+  }
   if (!liveDlmmPositions.length) {
     console.log('[monitor] no live DLMM positions')
     return stats
@@ -162,7 +175,7 @@ export async function monitorPositions(): Promise<{
     return stats
   }
 
-  const positions = mergeDbAndLiveLpPositions(cachedRows, liveDlmmPositions, { liveFetchOk: true })
+  const positions = mergeDbAndLiveLpPositions(cachedRows, liveDlmmPositions, { dlmmOk: true, dammOk: reconcile.dammOk })
     .filter(position => OPEN_LP_STATUSES.includes(position.status))
 
   if (!positions.length) { console.log('[monitor] no monitorable live DLMM positions'); return stats }

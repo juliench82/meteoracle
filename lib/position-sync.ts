@@ -15,6 +15,10 @@ export interface MeteoraPositionSyncResult {
   live: number
   inserted: number
   updated: number
+  dlmmOk: boolean
+  dammOk: boolean
+  dlmmError?: string | null
+  dammError?: string | null
   dlmmLive: number
   dammLive: number
   dlmmInserted: number
@@ -255,6 +259,7 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
 
   console.log(
     `[position-sync] Meteora sync done live=${livePositions.length} updated=${updated} inserted=${insertedPositions.length} closed=${externallyClosed} ` +
+    `(source dlmm=${snapshot.dlmmOk ? 'ok' : 'failed'}, damm=${snapshot.dammOk ? 'ok' : 'failed'}) ` +
     `(dlmm live=${dlmmLive} inserted=${dlmmInserted}, damm live=${dammLive} inserted=${dammInserted})`,
   )
 
@@ -262,6 +267,10 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
     live: livePositions.length,
     inserted: insertedPositions.length,
     updated,
+    dlmmOk: snapshot.dlmmOk,
+    dammOk: snapshot.dammOk,
+    dlmmError: snapshot.dlmmError,
+    dammError: snapshot.dammError,
     dlmmLive,
     dammLive,
     dlmmInserted,

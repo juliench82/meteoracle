@@ -40,6 +40,12 @@ interface InitialData {
   closedLp:   any[]
   wallet?:    { sol?: number | null } | null
   portfolio?: any
+  meteoraLive?: {
+    ok?: boolean
+    dlmmOk?: boolean
+    dammOk?: boolean
+    count?: number
+  }
 }
 
 export function DashboardClient({ initialData }: { initialData: InitialData }) {
@@ -77,6 +83,7 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
     .slice(0, 50)
 
   const solDeployed = allOpen.reduce((s: number, p: any) => s + (p.amount_sol ?? 0), 0)
+  const liveWarning = data.meteoraLive && !data.meteoraLive.ok
 
   return (
     <div className="p-6 space-y-6">
@@ -92,6 +99,11 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
           ↻ Refresh
         </button>
       </div>
+      {liveWarning && (
+        <div className="rounded border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
+          Meteora live fetch is incomplete: DLMM {data.meteoraLive?.dlmmOk ? 'ok' : 'failed'} / DAMM {data.meteoraLive?.dammOk ? 'ok' : 'failed'}. Showing any available cache rows until live data recovers.
+        </div>
+      )}
       <SpotKPIBar
         solDeployed={solDeployed}
         openPositions={allOpen.length}

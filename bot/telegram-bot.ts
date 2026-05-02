@@ -34,7 +34,7 @@ import { closeDammPosition } from '@/bot/damm-executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
-import { fetchLiveMeteoraPositions, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
+import { fetchLiveMeteoraSnapshot, mergeDbAndLiveLpPositions, type MeteoraLiveSourceStatus, type LiveMeteoraPosition } from '@/lib/meteora-live'
 import { syncAllMeteoraPositions } from '@/lib/position-sync'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 import { getTelegramAllowedUsers, isTelegramCommandAllowed } from '@/lib/telegram-auth'
@@ -98,6 +98,11 @@ function parseSolAmount(value: string | undefined): number | null {
   const normalized = value.replace(',', '.')
   const amount = Number(normalized)
   return Number.isFinite(amount) && amount > 0 ? amount : null
+}
+
+function liveSourceWarning(source: MeteoraLiveSourceStatus): string | null {
+  if (source.dlmmOk && source.dammOk) return null
+  return `⚠️ Meteora live fetch: DLMM ${source.dlmmOk ? 'ok' : 'failed'} / DAMM ${source.dammOk ? 'ok' : 'failed'}`
 }
 
 async function resolveAddTarget(args: string[]): Promise<{
@@ -346,23 +351,23 @@ async function handleAdd(args: string[]) {
 async function handleStatus() {
   const supabase = createServerClient()
   const state = await getBotState()
-  let liveOk = false
-  const liveLp = await fetchLiveMeteoraPositions()
-    .then(rows => {
-      liveOk = true
-      return rows
-    })
-    .catch(() => [])
+  const liveSnapshot = await fetchLiveMeteoraSnapshot()
+  const liveSource: MeteoraLiveSourceStatus = {
+    dlmmOk: liveSnapshot.dlmmOk,
+    dammOk: liveSnapshot.dammOk,
+  }
+  const liveLp = liveSnapshot.positions
   const liveDlmmCount = liveLp.filter(p => p.position_type === 'dlmm').length
   const liveDammCount = liveLp.filter(p => p.position_type === 'damm-edge').length
   const wallet = await fetchWalletLiveBalances(liveLp.map(p => p.mint)).catch(() => null)
+  const warning = liveSourceWarning(liveSource)
 
   const { data: openLp } = await supabase
     .from('lp_positions')
     .select('id, symbol, sol_deposited, opened_at, status, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, metadata')
     .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
 
-  const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp, { liveFetchOk: liveOk })
+  const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp, liveSource)
 
   const dlmmLines = mergedOpenLp
     .filter(p => p.strategy_id !== 'damm-edge' && p.strategy_id !== 'damm-live' && p.position_type !== 'damm-edge')
@@ -396,6 +401,7 @@ async function handleStatus() {
     `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
     `Wallet: ${wallet ? wallet.sol.toFixed(4) : 'n/a'} SOL`,
     `Meteora live: ${liveLp.length} total (${liveDlmmCount} DLMM / ${liveDammCount} DAMM)`,
+    ...(warning ? [warning] : []),
     `Supabase cache: ${(openLp ?? []).length} open rows`,
     ``,
     `📊 *DLMM Positions (${dlmmLines.length})*`,
@@ -408,30 +414,36 @@ async function handleStatus() {
 
 async function handlePositions() {
   const supabase = createServerClient()
-  await syncAllMeteoraPositions().catch(err =>
+  let liveLp: LiveMeteoraPosition[] = []
+  let liveSource: MeteoraLiveSourceStatus = { dlmmOk: false, dammOk: false }
+  const syncResult = await syncAllMeteoraPositions().catch(err => {
     console.warn('[telegram-bot] /positions sync failed:', err)
-  )
-  let liveOk = false
-  const liveLp = await fetchLiveMeteoraPositions()
-    .then(rows => {
-      liveOk = true
-      return rows
-    })
-    .catch(() => [])
+    return null
+  })
+  if (syncResult) {
+    liveLp = syncResult.positions
+    liveSource = { dlmmOk: syncResult.dlmmOk, dammOk: syncResult.dammOk }
+  } else {
+    const snapshot = await fetchLiveMeteoraSnapshot()
+    liveLp = snapshot.positions
+    liveSource = { dlmmOk: snapshot.dlmmOk, dammOk: snapshot.dammOk }
+  }
   const { data } = await supabase
     .from('lp_positions')
     .select('id, symbol, status, sol_deposited, pool_address, opened_at, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, current_price, metadata')
     .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
     .order('opened_at', { ascending: false })
 
-  const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp, { liveFetchOk: liveOk })
+  const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp, liveSource)
+  const warning = liveSourceWarning(liveSource)
 
   if (positions.length === 0) {
-    await reply('🏊 No open LP positions.')
+    await reply(warning ? `${warning}\n\n🏊 No cached open LP positions.` : '🏊 No open LP positions.')
     return
   }
 
   const lines = [`🏊 *Open LP Positions (${positions.length})*`, ``]
+  if (warning) lines.push(warning, '')
   for (const p of positions) {
     const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
     const liveOnly = p._source === 'meteora-live'

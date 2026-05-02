@@ -607,6 +607,13 @@ export interface LiveMeteoraSnapshot {
   positions: LiveMeteoraPosition[]
   dlmmOk: boolean
   dammOk: boolean
+  dlmmError?: string | null
+  dammError?: string | null
+}
+
+export interface MeteoraLiveSourceStatus {
+  dlmmOk: boolean
+  dammOk: boolean
 }
 
 export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
@@ -842,11 +849,26 @@ export async function fetchLiveMeteoraSnapshot(): Promise<LiveMeteoraSnapshot> {
     ],
     dlmmOk: dlmm.status === 'fulfilled',
     dammOk: damm.status === 'fulfilled',
+    dlmmError: dlmm.status === 'rejected' ? errorMessage(dlmm.reason) : null,
+    dammError: damm.status === 'rejected' ? errorMessage(damm.reason) : null,
   }
 }
 
 export async function fetchLiveMeteoraPositions(): Promise<LiveMeteoraPosition[]> {
-  return (await fetchLiveMeteoraSnapshot()).positions
+  const snapshot = await fetchLiveMeteoraSnapshot()
+  if (!snapshot.dlmmOk && !snapshot.dammOk) {
+    throw new Error(
+      `Meteora live fetch failed for DLMM and DAMM` +
+      `${snapshot.dlmmError ? `; DLMM: ${snapshot.dlmmError}` : ''}` +
+      `${snapshot.dammError ? `; DAMM: ${snapshot.dammError}` : ''}`,
+    )
+  }
+  return snapshot.positions
+}
+
+function errorMessage(reason: unknown): string {
+  if (reason instanceof Error) return reason.message
+  return String(reason)
 }
 
 function firstFiniteNumber(...values: unknown[]): number | null {
@@ -884,10 +906,14 @@ function deriveOpenPnlUsd(
 export function mergeDbAndLiveLpPositions(
   dbRows: any[],
   liveRows: LiveMeteoraPosition[],
-  options: { liveFetchOk?: boolean; includeDbClosed?: boolean } = {},
+  options: { liveFetchOk?: boolean; includeDbClosed?: boolean; dlmmOk?: boolean; dammOk?: boolean } = {},
 ): any[] {
   const liveFetchOk = options.liveFetchOk ?? liveRows.length > 0
-  if (!liveFetchOk && liveRows.length === 0) return dbRows
+  const sourceOk = {
+    dlmmOk: options.dlmmOk ?? liveFetchOk,
+    dammOk: options.dammOk ?? liveFetchOk,
+  }
+  if (!sourceOk.dlmmOk && !sourceOk.dammOk && liveRows.length === 0) return dbRows
 
   const liveByPubkey = new Map(liveRows.map(row => [row.position_pubkey, row]))
   const merged: any[] = []
@@ -896,7 +922,8 @@ export function mergeDbAndLiveLpPositions(
   for (const row of dbRows) {
     const live = liveByPubkey.get(row.position_pubkey)
     const keepDbOnly = row.dry_run === true || row.status === 'pending_retry' || (options.includeDbClosed === true && row.status === 'closed')
-    if (!live && !keepDbOnly) continue
+    const rowSourceOk = isDammLike(row) ? sourceOk.dammOk : sourceOk.dlmmOk
+    if (!live && !keepDbOnly && rowSourceOk) continue
 
     if (live) {
       seen.add(live.position_pubkey)
@@ -960,4 +987,8 @@ export function mergeDbAndLiveLpPositions(
   }
 
   return merged
+}
+
+function isDammLike(row: { strategy_id?: string | null; position_type?: string | null }): boolean {
+  return row.strategy_id === 'damm-edge' || row.strategy_id === 'damm-live' || row.position_type === 'damm-edge'
 }

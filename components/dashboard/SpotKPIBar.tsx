@@ -52,7 +52,11 @@ export function SpotKPIBar({
     {
       label: 'Live LP Value',
       value: fmtUsd(portfolio?.totalPositionValueUsd),
-      sub:   portfolio?.source === 'meteora-live' ? 'Meteora live positions' : 'cache fallback',
+      sub:   portfolio?.source === 'meteora-live'
+        ? 'Meteora live positions'
+        : portfolio?.source === 'meteora-live-partial'
+          ? 'partial Meteora live'
+          : 'cache fallback',
       color: 'text-white',
     },
     {
