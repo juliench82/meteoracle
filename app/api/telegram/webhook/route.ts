@@ -1,16 +1,15 @@
 import { NextResponse } from 'next/server'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { addLiquidityToPosition, closePosition, openPosition } from '@/bot/executor'
+import { addLiquidityToPosition, closePosition } from '@/bot/executor'
 import { closeDammPosition } from '@/bot/damm-executor'
+import { rebalanceDlmmPosition } from '@/bot/rebalance'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { fetchLiveMeteoraSnapshot } from '@/lib/meteora-live'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
 import { syncAllMeteoraPositions } from '@/lib/position-sync'
 import { isTelegramCommandAllowed } from '@/lib/telegram-auth'
-import { STRATEGIES } from '@/strategies'
-import type { TokenMetrics } from '@/lib/types'
 import axios from 'axios'
 
 export const dynamic = 'force-dynamic'
@@ -277,74 +276,20 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true })
       }
       await reply(chatId, `⏳ Rebalancing position \`${positionId}\`...`)
-      const supabase = createServerClient()
-      const { data: pos, error } = await supabase
-        .from('lp_positions')
-        .select('*')
-        .eq('id', positionId)
-        .single()
-      if (error || !pos) {
-        await reply(chatId, `❌ Position \`${positionId}\` not found.`)
-        return NextResponse.json({ ok: true })
-      }
-      if (pos.status === 'closed') {
-        await reply(chatId, `ℹ️ Position \`${positionId}\` (${pos.symbol}) is already closed.`)
-        return NextResponse.json({ ok: true })
-      }
-      if (isDammLp(pos)) {
-        await reply(chatId, `❌ Rebalance is only supported for DLMM positions. Use /close for DAMM position \`${positionId}\`.`)
-        return NextResponse.json({ ok: true })
-      }
-      const strategyId = pos.strategy_id ?? pos.metadata?.strategy_id
-      const strategy = STRATEGIES.find((s) => s.id === strategyId)
-      if (!strategy) {
-        await reply(chatId, `❌ Strategy \`${strategyId}\` not found for position \`${positionId}\`.`)
-        return NextResponse.json({ ok: true })
-      }
-      let closeOk = false
-      let closeErr = ''
-      try {
-        closeOk = await closePosition(positionId, 'manual_rebalance')
-      } catch (err) {
-        closeErr = err instanceof Error ? err.message : String(err)
-      }
-      if (!closeOk) {
-        const detail = closeErr ? `: ${closeErr}` : ' — check logs'
-        await reply(chatId, `❌ Rebalance: failed to close \`${positionId}\` (${pos.symbol})${detail}`)
-        return NextResponse.json({ ok: true })
-      }
-      // Reopen centered at current price using the same strategy
-      let reopenId: string | null = null
-      let reopenErr = ''
-      try {
-        const metrics: TokenMetrics = {
-          address:       pos.mint,
-          symbol:        pos.symbol,
-          poolAddress:   pos.pool_address,
-          priceUsd:      pos.current_price ?? pos.entry_price_sol ?? 0,
-          dexId:         pos.metadata?.dexId ?? 'meteora',
-          mcUsd:         0,
-          volume24h:     0,
-          liquidityUsd:  0,
-          topHolderPct:  0,
-          holderCount:   0,
-          ageHours:      0,
-          rugcheckScore: 0,
-          feeTvl24hPct:  0, // scorer re-evaluates live pool against strategy.filters.minFeeTvl24hPct
-        }
-        reopenId = await openPosition(metrics, strategy)
-      } catch (err) {
-        reopenErr = err instanceof Error ? err.message : String(err)
-      }
-      if (reopenId) {
+      const result = await rebalanceDlmmPosition(positionId, {
+        reason: 'manual_rebalance',
+        source: 'telegram_webhook',
+      })
+      if (result.reopened && result.newPositionId) {
         await reply(chatId, [
-          `✅ *Rebalance complete* for ${pos.symbol}`,
-          `Old: \`${positionId}\` closed`,
-          `New: \`${reopenId}\` opened centered at current price`,
+          `✅ *Rebalance complete* for ${result.symbol}`,
+          `Old: \`${result.oldPositionId}\` closed`,
+          `New: \`${result.newPositionId}\` opened centered at current price`,
         ].join('\n'))
+      } else if (result.closed) {
+        await reply(chatId, `⚠️ Position \`${result.oldPositionId}\` closed but reopen failed: ${result.error ?? 'unknown error'}`)
       } else {
-        const detail = reopenErr ? `: ${reopenErr}` : ' — check logs'
-        await reply(chatId, `⚠️ Position \`${positionId}\` closed but reopen failed${detail}`)
+        await reply(chatId, `❌ Rebalance skipped for \`${positionId}\`: ${result.error ?? 'unknown error'}`)
       }
       return NextResponse.json({ ok: true })
     }

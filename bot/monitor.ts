@@ -6,7 +6,8 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { getBotState } from '@/lib/botState'
-import { closePosition, openPosition } from '@/bot/executor'
+import { closePosition } from '@/bot/executor'
+import { rebalanceDlmmPosition } from '@/bot/rebalance'
 import { checkDammPositions } from '@/lib/pre-grad'
 import { sendAlert } from '@/bot/alerter'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
@@ -14,7 +15,7 @@ import { STRATEGIES } from '@/strategies'
 import { mergeDbAndLiveLpPositions, type LiveMeteoraPosition } from '@/lib/meteora-live'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 import { syncAllMeteoraPositions, type MeteoraPositionSyncResult } from '@/lib/position-sync'
-import type { Strategy, TokenMetrics } from '@/lib/types'
+import type { Strategy } from '@/lib/types'
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -23,8 +24,8 @@ async function getDLMM() {
 
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
-const MIN_VOLUME_USD_FOR_REBALANCE = 500
-const HARD_EXIT_PREFIXES = ['stoploss', 'out_of_range', 'max_duration', 'takeprofit']
+const AUTO_REBALANCE_OUT_OF_RANGE = process.env.LP_AUTO_REBALANCE_OOR !== 'false'
+const SMART_REBALANCE_IN_RANGE = process.env.LP_SMART_REBALANCE_IN_RANGE === 'true'
 
 // Reconcile the wallet against Meteora every tick by default. Supabase is a cache.
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
@@ -222,7 +223,7 @@ async function checkPosition(
   const label = `[monitor][${position.symbol}][${strategy.id}]`
   const now = Date.now()
 
-  const { inRange, currentPriceSol, claimableFeesSolEquivalent, volume1hUsd, externallyClosed } = await fetchPositionState(
+  const { inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed } = await fetchPositionState(
     position.pool_address,
     position.position_pubkey
   )
@@ -328,7 +329,31 @@ async function checkPosition(
   let closeReason: string | null = null
 
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
-    closeReason = `out_of_range_${Math.round(oorSince)}min`
+    const roundedOor = Math.round(oorSince)
+    if (AUTO_REBALANCE_OUT_OF_RANGE) {
+      const rebalanceReason = `out_of_range_rebalance_${roundedOor}min`
+      const result = await rebalanceDlmmPosition(position.id, {
+        reason: rebalanceReason,
+        source: 'monitor_oor',
+        position,
+        liveSourceOk: true,
+      })
+
+      if (result.reopened) {
+        console.log(`${label} OOR rebalance complete → ${result.newPositionId}`)
+        stats.rebalanced++
+        return
+      }
+
+      if (result.closed) {
+        console.warn(`${label} OOR rebalance closed but reopen failed: ${result.error ?? 'unknown error'}`)
+        stats.closed++
+        return
+      }
+
+      console.warn(`${label} OOR rebalance skipped — closing only: ${result.error ?? 'unknown error'}`)
+    }
+    closeReason = `out_of_range_${roundedOor}min`
   } else if (entryPriceSol > 0 && pricePct <= strategy.exits.stopLossPct) {
     closeReason = `stoploss_${pricePct.toFixed(1)}pct`
   } else if (entryPriceSol > 0 && pricePct >= strategy.exits.takeProfitPct) {
@@ -355,7 +380,7 @@ async function checkPosition(
     return
   }
 
-  if (inRange) {
+  if (inRange && SMART_REBALANCE_IN_RANGE) {
     const rangeWidth = rangeUpper - rangeLower
     const positionInRange = rangeWidth > 0
       ? ((currentPriceSol - rangeLower) / rangeWidth) * 100
@@ -364,45 +389,23 @@ async function checkPosition(
     const driftedHighInRange = positionInRange > (50 + SMART_REBALANCE_THRESHOLD_PCT / 2)
     const driftedLowInRange = positionInRange < (50 - SMART_REBALANCE_THRESHOLD_PCT / 2)
 
-    if ((driftedHighInRange || driftedLowInRange) && volume1hUsd >= MIN_VOLUME_USD_FOR_REBALANCE) {
-      console.log(`${label} SMART REBALANCE — price at ${positionInRange.toFixed(0)}% of range, vol=$${volume1hUsd.toFixed(0)}/h`)
+    if (driftedHighInRange || driftedLowInRange) {
+      console.log(`${label} SMART REBALANCE — price at ${positionInRange.toFixed(0)}% of range`)
       const rebalanceReason = `smart_rebalance_${positionInRange.toFixed(0)}pct`
-      const closed = await closePosition(position.id, rebalanceReason)
-      if (closed) {
+      const result = await rebalanceDlmmPosition(position.id, {
+        reason: rebalanceReason,
+        source: 'monitor_smart',
+        position,
+        liveSourceOk: true,
+      })
+
+      if (result.reopened) {
         stats.rebalanced++
-        await sendAlert({
-          type: 'position_closed',
-          symbol: position.symbol,
-          strategy: strategy.id,
-          reason: `smart_rebalance (price at ${positionInRange.toFixed(0)}% of range)`,
-          ...(claimableFeesUsd !== null ? { claimableFeesUsd } : {}),
-          ilPct,
-          ageHours: Math.round(ageHours * 10) / 10,
-        })
-        const isHardExit = HARD_EXIT_PREFIXES.some(prefix => rebalanceReason.startsWith(prefix))
-        if (!isHardExit) {
-          try {
-            const metrics: TokenMetrics = {
-              address: position.mint,
-              symbol: position.symbol,
-              poolAddress: position.pool_address,
-              priceUsd: currentPriceSol,
-              dexId: position.metadata?.dexId ?? 'meteora',
-              mcUsd: 0,
-              volume24h: 0,
-              liquidityUsd: 0,
-              topHolderPct: 0,
-              holderCount: 0,
-              ageHours,
-              rugcheckScore: 0,
-              feeTvl24hPct: 0,
-            }
-            await openPosition(metrics, strategy)
-            console.log(`${label} reopened centered at ${currentPriceSol}`)
-          } catch (reopenErr) {
-            console.error(`${label} reopen after rebalance failed:`, reopenErr)
-          }
-        }
+      } else if (result.closed) {
+        stats.closed++
+        console.warn(`${label} smart rebalance closed but reopen failed: ${result.error ?? 'unknown error'}`)
+      } else {
+        console.warn(`${label} smart rebalance skipped: ${result.error ?? 'unknown error'}`)
       }
     }
   }
@@ -411,7 +414,7 @@ async function checkPosition(
 async function fetchPositionState(
   poolAddress: string,
   positionPubKey: string
-): Promise<{ inRange: boolean; currentPriceSol: number; claimableFeesSolEquivalent: number; volume1hUsd: number; externallyClosed: boolean }> {
+): Promise<{ inRange: boolean; currentPriceSol: number; claimableFeesSolEquivalent: number; externallyClosed: boolean }> {
   const connection = getConnection()
   const DLMM = await getDLMM()
 
@@ -424,7 +427,7 @@ async function fetchPositionState(
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const pos = userPositions.find(p => p.publicKey.toBase58() === positionPubKey)
 
-    if (!pos) return { inRange: false, currentPriceSol, claimableFeesSolEquivalent: 0, volume1hUsd: 0, externallyClosed: true }
+    if (!pos) return { inRange: false, currentPriceSol, claimableFeesSolEquivalent: 0, externallyClosed: true }
 
     const posData = pos.positionData
     const activeBinId = activeBin.binId
@@ -434,16 +437,10 @@ async function fetchPositionState(
     const feeY = Number(posData.feeY ?? 0) / 1e9
     const claimableFeesSolEquivalent = feeX + feeY
 
-    // NOTE: volume1hUsd intentionally set to 0 — the undocumented
-    // dlmm-api.meteora.ag endpoint is rate-limited and not part of any
-    // official Meteora API. Will be replaced with the official
-    // DAMM v2 / DLMM API once endpoints are confirmed.
-    const volume1hUsd = 0
-
-    return { inRange, currentPriceSol, claimableFeesSolEquivalent, volume1hUsd, externallyClosed: false }
+    return { inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed: false }
   } catch (err) {
     console.error(`[fetchPositionState] error for pool ${poolAddress}:`, err)
-    return { inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, volume1hUsd: 0, externallyClosed: false }
+    return { inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: false }
   }
 }
 

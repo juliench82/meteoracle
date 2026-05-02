@@ -53,6 +53,7 @@ type AlertPayload =
       positionId: string
     }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
+  | { type: 'position_rebalanced'; symbol: string; strategy: string; reason: string; oldPositionId: string; newPositionId: string; feeTvl24hPct?: number; volume24hUsd?: number; liquidityUsd?: number }
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string; mint?: string; positionType?: string }
   | { type: 'cooldown_skip'; symbol: string; strategy: string; cooldownHours: number }
   | { type: 'pre_grad_pool_created'; symbol: string; mint: string; pool: string; sol: number }
@@ -154,6 +155,18 @@ function formatMessage(payload: AlertPayload): string {
     // candidate_found intentionally produces no Telegram message (noise reduction)
     case 'candidate_found':
       return ''
+
+    case 'position_rebalanced':
+      return [
+        `🔄 *REBALANCED* ${payload.symbol}`,
+        `Reason: ${payload.reason}`,
+        `Strategy: ${payload.strategy}`,
+        `Old: \`${payload.oldPositionId}\``,
+        `New: \`${payload.newPositionId}\``,
+        payload.feeTvl24hPct != null ? `24h Fees/TVL: ${payload.feeTvl24hPct.toFixed(2)}%` : null,
+        payload.volume24hUsd != null ? `24h Volume: $${payload.volume24hUsd.toFixed(0)}` : null,
+        payload.liquidityUsd != null ? `Liquidity: $${payload.liquidityUsd.toFixed(0)}` : null,
+      ].filter(Boolean).join('\n')
 
     case 'orphan_detected':
       return [

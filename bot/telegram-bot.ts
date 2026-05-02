@@ -11,6 +11,7 @@
  *   /live           — switch to live trading
  *   /close <id>     — force-close an LP position by ID
  *   /add <id> <sol> — add SOL liquidity to an existing DLMM position
+ *   /rebalance <id> — close + reopen a DLMM position centered at current price
  *   /positions      — list all open LP positions
  *   /status         — snapshot: state, open positions, wallet SOL
  *   /tick           — manually trigger scanner + monitor in parallel
@@ -31,6 +32,7 @@ import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { addLiquidityToPosition, closePosition } from '@/bot/executor'
 import { closeDammPosition } from '@/bot/damm-executor'
+import { rebalanceDlmmPosition } from '@/bot/rebalance'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
@@ -348,6 +350,35 @@ async function handleAdd(args: string[]) {
   await reply(`❌ Add liquidity failed for ${result.symbol}: ${result.error ?? 'unknown error'}`)
 }
 
+async function handleRebalance(positionId: string) {
+  if (!positionId) {
+    await reply('❌ Usage: `/rebalance <position_id>`')
+    return
+  }
+
+  await reply(`⏳ Rebalancing LP position \`${positionId}\`...`)
+  const result = await rebalanceDlmmPosition(positionId, {
+    reason: 'manual_rebalance',
+    source: 'telegram_pm2',
+  })
+
+  if (result.reopened && result.newPositionId) {
+    await reply([
+      `✅ *Rebalance complete* for ${result.symbol}`,
+      `Old: \`${result.oldPositionId}\` closed`,
+      `New: \`${result.newPositionId}\` opened centered at current price`,
+    ].join('\n'))
+    return
+  }
+
+  if (result.closed) {
+    await reply(`⚠️ \`${result.oldPositionId}\` closed but reopen failed: ${result.error ?? 'unknown error'}`)
+    return
+  }
+
+  await reply(`❌ Rebalance skipped for \`${positionId}\`: ${result.error ?? 'unknown error'}`)
+}
+
 async function handleStatus() {
   const supabase = createServerClient()
   const state = await getBotState()
@@ -453,7 +484,7 @@ async function handlePositions() {
     const poolStats = p.metadata?.volume_24h_usd ? ` | vol24h ${fmtUsd(p.metadata.volume_24h_usd)}` : ''
     const actionLine = liveOnly
       ? `  Run /orphans to create a manageable cache row`
-      : `  /close ${p.id}${!isDammLp(p) ? ` | /add ${p.id} 0.05` : ''}`
+      : `  /close ${p.id}${!isDammLp(p) ? ` | /rebalance ${p.id} | /add ${p.id} 0.05` : ''}`
     lines.push(
       `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h${source}`,
       `  value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | price ${fmtPrice(p.current_price)}${poolStats}`,
@@ -541,6 +572,7 @@ async function handleHelp() {
     `/positions — list all open Meteora LP positions`,
     `/close <id> — force-close an LP position`,
     `/add <id> <SOL> — add SOL liquidity to a DLMM position`,
+    `/rebalance <id> — close + reopen a DLMM position centered at current price`,
     `/tick — manually trigger scanner + monitor`,
     `/orphans — manually run orphan detector`,
     `/candidates — top candidates from last 24h sorted by score`,
@@ -571,6 +603,7 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
     case 'live': await handleLive(); break
     case 'close': await handleClose(args[0] ?? ''); break
     case 'add': await handleAdd(args); break
+    case 'rebalance': await handleRebalance(args[0] ?? ''); break
     case 'status': await handleStatus(); break
     case 'positions': await handlePositions(); break
     case 'candidates': await handleCandidates(); break

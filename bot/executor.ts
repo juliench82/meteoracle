@@ -24,7 +24,7 @@ import { getBotState } from '@/lib/botState'
 import { swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
-import { OPEN_LP_STATUSES, assertCanOpenLpPosition } from '@/lib/position-limits'
+import { OPEN_LP_STATUSES, assertCanOpenLpPosition, getOpenLpLimitState } from '@/lib/position-limits'
 import { STRATEGIES } from '@/strategies'
 
 async function getDLMM() {
@@ -67,6 +67,11 @@ const MAX_BINS_BY_STRATEGY: Record<string, number> = {
   'stable-farm':   100,
 }
 const MAX_BINS_DEFAULT = 150
+
+interface OpenPositionOptions {
+  bypassCooldownReason?: string
+  rebalanceFromPositionId?: string
+}
 
 interface LiquidityStrategyParams {
   minBinId: number
@@ -526,7 +531,8 @@ export async function addLiquidityToPosition(
 
 export async function openPosition(
   metrics: TokenMetrics,
-  strategy: Strategy
+  strategy: Strategy,
+  options: OpenPositionOptions = {},
 ): Promise<string | null> {
   const label = `[executor][${strategy.id}][${metrics.symbol}]`
   console.log(`${label} opening position`)
@@ -553,9 +559,27 @@ export async function openPosition(
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
 
-    const limitState = await assertCanOpenLpPosition(MAX_CONCURRENT_POSITIONS, label)
+    const limitState = options.rebalanceFromPositionId
+      ? await getOpenLpLimitState()
+      : await assertCanOpenLpPosition(MAX_CONCURRENT_POSITIONS, label)
+    const effectiveOpenCountForCap = options.rebalanceFromPositionId
+      ? Math.max(0, limitState.effectiveOpenCount - 1)
+      : limitState.effectiveOpenCount
+    if (options.rebalanceFromPositionId) {
+      if (!limitState.liveFetchOk) {
+        throw new Error(
+          `${label} live Meteora position count incomplete (dlmmOk=${limitState.dlmmOk}, dammOk=${limitState.dammOk}); refusing to reopen`,
+        )
+      }
+      if (effectiveOpenCountForCap >= MAX_CONCURRENT_POSITIONS) {
+        throw new Error(
+          `${label} max LP positions reached after rebalance adjustment ` +
+          `(${effectiveOpenCountForCap}/${MAX_CONCURRENT_POSITIONS}; live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+        )
+      }
+    }
     console.log(
-      `${label} LP cap ok (${limitState.effectiveOpenCount}/${MAX_CONCURRENT_POSITIONS}; ` +
+      `${label} LP cap ok (${effectiveOpenCountForCap}/${MAX_CONCURRENT_POSITIONS}; ` +
       `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
     )
 
@@ -590,13 +614,32 @@ export async function openPosition(
       const cooldownHours = isEmergency ? emergencyCooldownHours : defaultCooldownHours
       const cutoff        = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
       if (lastClose[0].closed_at >= cutoff) {
-        console.warn(`${label} token in cooldown — closed within last ${cooldownHours}h`)
-        await supabase.from('bot_logs').insert({
-          level: 'warn', event: 'open_position_skipped_cooldown',
-          payload: { symbol: metrics.symbol, cooldownHours, closeReason: lastClose[0].close_reason },
-        })
-        await sendAlert({ type: 'cooldown_skip', symbol: metrics.symbol, strategy: strategy.id, cooldownHours })
-        return null
+        if (options.bypassCooldownReason?.includes('rebalance')) {
+          console.log(`${label} cooldown bypass for rebalance reopen`, {
+            closeReason: lastClose[0].close_reason,
+            bypassReason: options.bypassCooldownReason,
+            rebalanceFromPositionId: options.rebalanceFromPositionId,
+          })
+          await supabase.from('bot_logs').insert({
+            level: 'info',
+            event: 'open_position_cooldown_bypassed_rebalance',
+            payload: {
+              symbol: metrics.symbol,
+              strategy: strategy.id,
+              closeReason: lastClose[0].close_reason,
+              bypassReason: options.bypassCooldownReason,
+              rebalanceFromPositionId: options.rebalanceFromPositionId,
+            },
+          })
+        } else {
+          console.warn(`${label} token in cooldown — closed within last ${cooldownHours}h`)
+          await supabase.from('bot_logs').insert({
+            level: 'warn', event: 'open_position_skipped_cooldown',
+            payload: { symbol: metrics.symbol, cooldownHours, closeReason: lastClose[0].close_reason },
+          })
+          await sendAlert({ type: 'cooldown_skip', symbol: metrics.symbol, strategy: strategy.id, cooldownHours })
+          return null
+        }
       }
     }
 
