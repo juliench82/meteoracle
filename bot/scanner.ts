@@ -57,7 +57,7 @@ const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
 const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
-const HARD_MAX_TOKEN_AGE_MINUTES = 45
+const HARD_MAX_TOKEN_AGE_MINUTES = 90
 
 // Strict 15-min gate for new Meteora listings (0.25h)
 const METEORA_NEW_LISTING_AGE_H   = 0.25
