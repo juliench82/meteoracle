@@ -266,6 +266,7 @@ export async function runScanner(): Promise<ScannerResult> {
 
   console.log('[scanner] step 2/4 — cheap pre-screen')
   const mintBestMap = new Map<string, { pool: MeteoraPool; mcUsd: number; ageHours: number }>()
+  let staleRejected = 0
 
   for (const pool of pools) {
     const token = QUOTE_ASSETS.has(pool.token_x.address) ? pool.token_y : pool.token_x
@@ -275,7 +276,15 @@ export async function runScanner(): Promise<ScannerResult> {
     const feeTvl24h = pool.fee_tvl_ratio['24h'] * 100
     const ageHours = pool.created_at
       ? (Date.now() / 1000 - toUnixSeconds(pool.created_at)) / 3600
-      : 0
+      : 999
+    const ageMinutes = Number.isFinite(ageHours) ? ageHours * 60 : 999
+
+    // ── HARD GLOBAL FRESHNESS GATE ──
+    if (ageMinutes > HARD_MAX_TOKEN_AGE_MINUTES) {
+      staleRejected++
+      console.log(`[scanner] REJECT - ${pool.name ?? token.symbol} is ${ageMinutes.toFixed(1)}min old (max ${HARD_MAX_TOKEN_AGE_MINUTES}min)`)
+      continue
+    }
 
     if (mcUsd < CHEAP_FILTER.minMcUsd) continue
     if (mcUsd > CHEAP_FILTER.maxMcUsd) continue
@@ -290,7 +299,10 @@ export async function runScanner(): Promise<ScannerResult> {
   }
 
   const allSurvivors = Array.from(mintBestMap.values())
-  console.log(`[scanner] step 2/4 — ${allSurvivors.length} unique tokens passed cheap filter (from ${pools.length} pools)`)
+  console.log(
+    `[scanner] step 2/4 — ${allSurvivors.length} unique fresh tokens passed cheap filter ` +
+    `(from ${pools.length} pools; stale rejected=${staleRejected})`,
+  )
 
   if (allSurvivors.length === 0) {
     console.log('[scanner] done — no survivors')
@@ -363,13 +375,6 @@ export async function runScanner(): Promise<ScannerResult> {
     const symbol = representativePool.name ?? token.symbol
     const launchpadSource = detectLaunchpadSource(tokenAddress)
     const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address)
-
-    // ── HARD GLOBAL FRESHNESS GATE ──
-    const ageMinutes = Number.isFinite(ageHours) ? ageHours * 60 : 999
-    if (ageMinutes > HARD_MAX_TOKEN_AGE_MINUTES) {
-      console.log(`[scanner] REJECT - ${symbol} is ${ageMinutes.toFixed(1)}min old (max ${HARD_MAX_TOKEN_AGE_MINUTES}min)`)
-      continue
-    }
 
     if (CANDIDATE_DEDUP_HOURS > 0) {
       const recentResult = await withTimeout(
