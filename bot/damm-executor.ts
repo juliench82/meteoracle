@@ -241,7 +241,7 @@ export async function openDammPosition(
     const limitState = await assertCanOpenLpPosition(MAX_CONCURRENT_POSITIONS, '[DAMM]')
     console.log(
       `[DAMM] LP cap ok (${limitState.effectiveOpenCount}/${MAX_CONCURRENT_POSITIONS}; ` +
-      `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+      `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
     )
 
     const sdk = await getCpAmm()

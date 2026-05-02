@@ -24,7 +24,7 @@ import { getBotState } from '@/lib/botState'
 import { swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
-import { OPEN_LP_STATUSES, assertCanOpenLpPosition, getOpenLpLimitState } from '@/lib/position-limits'
+import { OPEN_LP_STATUSES, assertCanOpenLpPosition, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { STRATEGIES } from '@/strategies'
 
 async function getDLMM() {
@@ -340,6 +340,54 @@ function findStrategyForPosition(position: Record<string, any>): Strategy | null
   return STRATEGIES.find(strategy => strategy.id === strategyId) ?? null
 }
 
+async function getTotalDeployedSolForCap(
+  supabase: ReturnType<typeof createServerClient>,
+  limitState: OpenLpLimitState,
+): Promise<{ totalDeployed: number; source: OpenLpLimitState['countSource'] }> {
+  if (limitState.liveFetchOk) {
+    const livePubkeys = limitState.livePositions
+      .map(position => position.position_pubkey)
+      .filter(Boolean)
+
+    if (livePubkeys.length === 0) {
+      return { totalDeployed: 0, source: limitState.countSource }
+    }
+
+    const { data, error } = await supabase
+      .from('lp_positions')
+      .select('position_pubkey, sol_deposited')
+      .in('position_pubkey', livePubkeys)
+
+    if (error) {
+      console.warn(`[executor] live exposure DB join failed; using Meteora live estimates: ${error.message}`)
+    }
+
+    const cachedSolByPubkey = new Map(
+      (data ?? []).map((row: { position_pubkey: string | null; sol_deposited: number | null }) => [
+        row.position_pubkey,
+        Number(row.sol_deposited ?? 0),
+      ]),
+    )
+
+    const totalDeployed = limitState.livePositions.reduce((sum, position) => {
+      const cachedSol = cachedSolByPubkey.get(position.position_pubkey) ?? 0
+      const liveSol = Number(position.sol_deposited ?? 0)
+      return sum + (cachedSol > 0 ? cachedSol : liveSol)
+    }, 0)
+
+    return { totalDeployed, source: limitState.countSource }
+  }
+
+  const { data: openPositions } = await supabase
+    .from('lp_positions').select('sol_deposited').in('status', OPEN_LP_STATUSES)
+  const totalDeployed = (openPositions ?? []).reduce(
+    (sum: number, position: { sol_deposited: number | null }) => sum + Number(position.sol_deposited ?? 0),
+    0,
+  )
+
+  return { totalDeployed, source: limitState.countSource }
+}
+
 export async function addLiquidityToPosition(
   positionId: string,
   solAmount: number,
@@ -577,34 +625,26 @@ export async function openPosition(
       ? Math.max(0, limitState.effectiveOpenCount - 1)
       : limitState.effectiveOpenCount
     if (options.rebalanceFromPositionId) {
-      if (!limitState.liveFetchOk) {
-        throw new Error(
-          `${label} live Meteora position count incomplete (dlmmOk=${limitState.dlmmOk}, dammOk=${limitState.dammOk}); refusing to reopen`,
-        )
-      }
       if (effectiveOpenCountForCap >= MAX_CONCURRENT_POSITIONS) {
         throw new Error(
           `${label} max LP positions reached after rebalance adjustment ` +
-          `(${effectiveOpenCountForCap}/${MAX_CONCURRENT_POSITIONS}; live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+          `(${effectiveOpenCountForCap}/${MAX_CONCURRENT_POSITIONS}; source=${limitState.countSource}, ` +
+          `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
         )
       }
     }
     console.log(
       `${label} LP cap ok (${effectiveOpenCountForCap}/${MAX_CONCURRENT_POSITIONS}; ` +
-      `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+      `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
     )
 
     const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1')
-    const { data: openPositions } = await supabase
-      .from('lp_positions').select('sol_deposited').in('status', OPEN_LP_STATUSES)
-    const totalDeployed = (openPositions ?? []).reduce(
-      (s: number, p: { sol_deposited: number }) => s + (p.sol_deposited ?? 0), 0
-    )
+    const { totalDeployed, source: exposureSource } = await getTotalDeployedSolForCap(supabase, limitState)
     if (totalDeployed + solAmount > maxTotalDeployed) {
-      console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed`)
+      console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed (${exposureSource})`)
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_exposure_cap',
-        payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed },
+        payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed, source: exposureSource },
       })
       return null
     }

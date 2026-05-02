@@ -22,7 +22,7 @@ import type { TokenMetrics } from '@/lib/types'
 // ── DAMM v2 Edge (additive imports — do not remove or reorder) ────────────────
 import { evaluateDammEdge } from '@/strategies/damm-edge'
 import { openDammPosition } from './damm-executor'
-import { OPEN_LP_STATUSES, getOpenLpLimitState } from '@/lib/position-limits'
+import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 // ─────────────────────────────────────────────────────────────────────────────
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
@@ -189,6 +189,17 @@ function survivorTokenAddress(item: { pool: MeteoraPool }): string {
   return token.address
 }
 
+function findLiveOpenPosition(
+  limitState: OpenLpLimitState | null,
+  tokenAddress: string,
+  poolAddress?: string,
+) {
+  return limitState?.livePositions.find(position =>
+    position.mint === tokenAddress ||
+    (!!poolAddress && position.pool_address === poolAddress),
+  ) ?? null
+}
+
 async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createServerClient>): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
 
@@ -305,7 +316,7 @@ export async function runScanner(): Promise<ScannerResult> {
     )
   }
 
-  console.log('[scanner] step 3/4 — live Meteora exposure + Supabase dedup check')
+  console.log('[scanner] step 3/4 — live Meteora exposure + DB fallback check')
 
   const limitState = await withTimeout(
     getOpenLpLimitState(),
@@ -319,20 +330,20 @@ export async function runScanner(): Promise<ScannerResult> {
   if (!limitState) {
     openBlockedReason = 'position_limit_unavailable'
     console.warn('[scanner] position limit check unavailable — scoring candidates but refusing to open new positions')
-  } else if (!limitState.liveFetchOk) {
-    openCount = limitState.effectiveOpenCount
-    openBlockedReason = 'live_position_count_incomplete'
-    console.warn(
-      `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}, dammOk=${limitState.dammOk}) — scoring candidates but refusing to open new positions`,
-    )
   } else {
     openCount = limitState.effectiveOpenCount
+    if (!limitState.liveFetchOk) {
+      console.warn(
+        `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}, dammOk=${limitState.dammOk}) — ` +
+        `using Supabase cache fallback for open caps`,
+      )
+    }
     availableOpenSlots = Math.max(0, MAX_CONCURRENT_POSITIONS - openCount)
     if (availableOpenSlots === 0) {
       openBlockedReason = 'max_positions_reached'
       console.log(
         `[scanner] max LP positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS}; ` +
-        `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount}) — scoring candidates only`,
+        `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount}) — scoring candidates only`,
       )
     }
   }
@@ -350,6 +361,7 @@ export async function runScanner(): Promise<ScannerResult> {
     const tokenAddress = token.address
     const symbol = representativePool.name ?? token.symbol
     const launchpadSource = detectLaunchpadSource(tokenAddress)
+    const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address)
 
     // ── HARD GLOBAL FRESHNESS GATE ──
     const ageMinutes = Number.isFinite(ageHours) ? ageHours * 60 : 999
@@ -367,12 +379,19 @@ export async function runScanner(): Promise<ScannerResult> {
       if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last ${CANDIDATE_DEDUP_HOURS}h`); continue }
     }
 
-    const posResult = await withTimeout(
-      supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
-        .in('status', OPEN_LP_STATUSES).limit(1),
-      SUPABASE_TIMEOUT_MS, `lp_positions dedup ${symbol}`
-    )
-    if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: open LP position exists`); continue }
+    if (liveOpenPosition) {
+      console.log(`[scanner] ${symbol} — skip: live Meteora position already exists (${liveOpenPosition.position_pubkey})`)
+      continue
+    }
+
+    if (!limitState?.liveFetchOk) {
+      const posResult = await withTimeout(
+        supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
+          .in('status', OPEN_LP_STATUSES).limit(1),
+        SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
+      )
+      if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: cached open LP position exists (live fallback mode)`); continue }
+    }
 
     // Pump.fun high-curve detection: log progress, then fall through to normal scoring.
     // The scorer awards +8 curveBonus at 70-95% and +4 at 95-99%.
@@ -390,6 +409,11 @@ export async function runScanner(): Promise<ScannerResult> {
     const bestPool = selectBestPool(pools, tokenAddress)
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
+      continue
+    }
+    const liveBestPoolPosition = findLiveOpenPosition(limitState, tokenAddress, bestPool.address)
+    if (liveBestPoolPosition) {
+      console.log(`[scanner] ${symbol} — skip: live Meteora position already exists for best pool (${liveBestPoolPosition.position_pubkey})`)
       continue
     }
 
