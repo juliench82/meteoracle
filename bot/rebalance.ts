@@ -56,6 +56,19 @@ function numberFromMetadata(metadata: Record<string, unknown>, keys: string[]): 
   return firstFiniteNumber(...keys.map(key => metadata[key]))
 }
 
+function feeTvlFromMetadata(metadata: Record<string, unknown>): number | null {
+  const direct = numberFromMetadata(metadata, [
+    'fee_tvl_24h_pct',
+    'feeTvl24hPct',
+    'daily_fee_yield',
+    'fee_24h_tvl_pct',
+  ])
+  if (direct !== null) return direct
+
+  const feeApr24h = numberFromMetadata(metadata, ['fee_apr_24h'])
+  return feeApr24h !== null ? feeApr24h / 365 : null
+}
+
 function strategyForPosition(pos: LpPositionRow): Strategy | null {
   const strategyId = pos.strategy_id ?? pos.metadata?.strategy_id
   return STRATEGIES.find(strategy => strategy.id === strategyId) ?? null
@@ -81,12 +94,7 @@ function quoteMintForPosition(pos: LpPositionRow): string | undefined {
 
 function evaluateRebalanceHealth(pos: LpPositionRow, strategy: Strategy): RebalanceHealth {
   const metadata = (pos.metadata ?? {}) as Record<string, unknown>
-  const feeTvl24hPct = numberFromMetadata(metadata, [
-    'fee_tvl_24h_pct',
-    'feeTvl24hPct',
-    'daily_fee_yield',
-    'fee_24h_tvl_pct',
-  ])
+  const feeTvl24hPct = feeTvlFromMetadata(metadata)
   const volume24hUsd = numberFromMetadata(metadata, [
     'volume_24h_usd',
     'volume24hUsd',
@@ -276,7 +284,6 @@ export async function rebalanceDlmmPosition(
 
   const metrics = metricsForRebalance(position, strategy, health)
   const newPositionId = await openPosition(metrics, strategy, {
-    bypassCooldownReason: reason,
     rebalanceFromPositionId: positionId,
   })
 

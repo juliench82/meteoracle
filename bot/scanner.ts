@@ -50,11 +50,12 @@ const DEEP_CHECK_DELAY_MS      = parseInt(process.env.DEEP_CHECK_DELAY_MS      ?
 const POOL_MIN_TVL_USD         = 20_000
 const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
 
-const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '60')
+const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
 const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?? '0.05')
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
-const CANDIDATE_DEDUP_HOURS    = parseInt(process.env.CANDIDATE_DEDUP_HOURS    ?? '6')
+const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
+const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
 
 // Strict 15-min gate for new Meteora listings (0.25h)
 const METEORA_NEW_LISTING_AGE_H   = 0.25
@@ -182,6 +183,42 @@ function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPo
   return best
 }
 
+function survivorTokenAddress(item: { pool: MeteoraPool }): string {
+  const token = QUOTE_ASSETS.has(item.pool.token_x.address) ? item.pool.token_y : item.pool.token_x
+  return token.address
+}
+
+async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createServerClient>): Promise<Set<string>> {
+  if (OOR_RECHECK_HOURS <= 0) return new Set()
+
+  const result = await withTimeout(
+    supabase
+      .from('lp_positions')
+      .select('mint, symbol, closed_at, close_reason')
+      .eq('status', 'closed')
+      .gte('closed_at', new Date(Date.now() - OOR_RECHECK_HOURS * 3_600_000).toISOString())
+      .order('closed_at', { ascending: false })
+      .limit(50),
+    SUPABASE_TIMEOUT_MS,
+    'recent OOR recheck rows',
+  )
+
+  if (!result || ('error' in result && result.error)) {
+    const message = result && 'error' in result ? result.error?.message : 'timeout'
+    console.warn(`[scanner] recent OOR recheck lookup failed: ${message}`)
+    return new Set()
+  }
+
+  const rows = 'data' in result ? (result.data ?? []) : []
+  return new Set(
+    rows
+      .filter((row: { mint?: string | null; close_reason?: string | null }) =>
+        Boolean(row.mint) && String(row.close_reason ?? '').startsWith('out_of_range_'),
+      )
+      .map((row: { mint: string }) => row.mint),
+  )
+}
+
 export async function runScanner(): Promise<ScannerResult> {
   const startedAt = Date.now()
   const finish = async (result: Partial<ScannerResult>): Promise<ScannerResult> => {
@@ -247,12 +284,27 @@ export async function runScanner(): Promise<ScannerResult> {
     return finish({ scanned: pools.length, survivors: 0 })
   }
 
-  const survivors = allSurvivors
+  const supabase = createServerClient()
+  const recentlyClosedOorMints = await fetchRecentlyClosedOorMints(supabase)
+  const prioritySurvivors = allSurvivors.filter(item => recentlyClosedOorMints.has(survivorTokenAddress(item)))
+  const priorityMintSet = new Set(prioritySurvivors.map(survivorTokenAddress))
+  const rankedSurvivors = allSurvivors
+    .filter(item => !priorityMintSet.has(survivorTokenAddress(item)))
     .sort((a, b) => (b.pool.fee_tvl_ratio['24h'] ?? 0) - (a.pool.fee_tvl_ratio['24h'] ?? 0))
-    .slice(0, MAX_DEEP_CHECKS)
+  const survivors = [
+    ...prioritySurvivors,
+    ...rankedSurvivors.slice(0, Math.max(0, MAX_DEEP_CHECKS - prioritySurvivors.length)),
+  ]
+
+  if (recentlyClosedOorMints.size > 0) {
+    const missed = Array.from(recentlyClosedOorMints).filter(mint => !priorityMintSet.has(mint))
+    console.log(
+      `[scanner] OOR recheck priority — ${prioritySurvivors.length} token(s) queued` +
+      `${missed.length ? `, ${missed.length} did not pass cheap filter` : ''}`,
+    )
+  }
 
   console.log('[scanner] step 3/4 — live Meteora exposure + Supabase dedup check')
-  const supabase = createServerClient()
 
   const limitState = await withTimeout(
     getOpenLpLimitState(),
@@ -298,12 +350,14 @@ export async function runScanner(): Promise<ScannerResult> {
     const symbol = representativePool.name ?? token.symbol
     const launchpadSource = detectLaunchpadSource(tokenAddress)
 
-    const recentResult = await withTimeout(
-      supabase.from('candidates').select('id').eq('token_address', tokenAddress)
-        .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString()).limit(1),
-      SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
-    )
-    if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last ${CANDIDATE_DEDUP_HOURS}h`); continue }
+    if (CANDIDATE_DEDUP_HOURS > 0) {
+      const recentResult = await withTimeout(
+        supabase.from('candidates').select('id').eq('token_address', tokenAddress)
+          .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString()).limit(1),
+        SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
+      )
+      if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last ${CANDIDATE_DEDUP_HOURS}h`); continue }
+    }
 
     const posResult = await withTimeout(
       supabase.from('lp_positions').select('id').eq('mint', tokenAddress)

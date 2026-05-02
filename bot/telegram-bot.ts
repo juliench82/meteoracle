@@ -262,6 +262,15 @@ function formatScannerSummary(result: ScannerResult): string {
   return parts.join(' | ')
 }
 
+function formatMonitorSummary(result: Awaited<ReturnType<typeof monitorPositions>>): string {
+  return [
+    `✅ monitor done`,
+    `checked=${result.checked}`,
+    `closed=${result.closed}`,
+    `rebalanced=${result.rebalanced}`,
+  ].join(' | ')
+}
+
 async function handleStop() {
   await reply('🛑 *EMERGENCY STOP initiated...*')
   await setBotState({ enabled: false })
@@ -537,13 +546,20 @@ async function handlePositions() {
     const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
     const value = p.position_value_usd ?? p.metadata?.position_value_usd
     const poolStats = p.metadata?.volume_24h_usd ? ` | vol24h ${fmtUsd(p.metadata.volume_24h_usd)}` : ''
-    const actionLine = liveOnly
-      ? `  Run /orphans to create a manageable cache row`
-      : `  /close ${p.id}${!isDammLp(p) ? ` | /rebalance ${p.id} | /add ${p.id} 0.05` : ''}`
+    const actionLines = liveOnly
+      ? [`  Run \`/orphans\` to create a manageable cache row`]
+      : [
+          `  ID: \`${p.id}\``,
+          `  \`/close ${p.id}\``,
+          ...(!isDammLp(p) ? [
+            `  \`/rebalance ${p.id}\``,
+            `  \`/add ${p.id} 0.05\``,
+          ] : []),
+        ]
     lines.push(
       `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h | ${source}`,
       `  value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | price ${fmtPrice(p.current_price)}${poolStats}`,
-      actionLine
+      ...actionLines
     )
   }
   await reply(lines.join('\n'))
@@ -589,14 +605,12 @@ async function handleCandidates() {
 }
 
 async function handleTick() {
-  await reply('⏳ *Running scanner + monitor...*')
+  await reply('⏳ *Running monitor, then scanner...*')
 
-  const results = await Promise.all([
-    withTickTimeout(() => runScanner().then(formatScannerSummary), 'scanner'),
-    withTickTimeout(() => monitorPositions().then(() => '✅ monitor done'), 'monitor'),
-  ])
+  const monitorResult = await withTickTimeout(() => monitorPositions().then(formatMonitorSummary), 'monitor')
+  const scannerResult = await withTickTimeout(() => runScanner().then(formatScannerSummary), 'scanner')
 
-  await reply(['*Tick complete:*', ...results.map(r => `• ${r}`)].join('\n'))
+  await reply(['*Tick complete:*', `• ${monitorResult}`, `• ${scannerResult}`].join('\n'))
 }
 
 async function handleOrphans() {

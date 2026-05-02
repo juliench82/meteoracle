@@ -55,7 +55,6 @@ type AlertPayload =
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
   | { type: 'position_rebalanced'; symbol: string; strategy: string; reason: string; oldPositionId: string; newPositionId: string; feeTvl24hPct?: number; volume24hUsd?: number; liquidityUsd?: number }
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string; mint?: string; positionType?: string }
-  | { type: 'cooldown_skip'; symbol: string; strategy: string; cooldownHours: number }
   | { type: 'pre_grad_pool_created'; symbol: string; mint: string; pool: string; sol: number }
   | { type: 'pre_grad_create_failed'; mint: string; error: string }
   | { type: 'pre_grad_opened'; symbol: string; positionId: string; poolAddress: string; bondingCurvePct: number }
@@ -134,8 +133,8 @@ function formatMessage(payload: AlertPayload): string {
         `⚠️ *Out of Range*`,
         `Token: \`${payload.symbol}\``,
         `Strategy: ${payload.strategy}`,
-        `Current price: $${payload.currentPrice.toFixed(8)}`,
-        `Range: $${payload.binRangeLower.toFixed(8)} – $${payload.binRangeUpper.toFixed(8)}`,
+        `Current price: ${payload.currentPrice.toFixed(9)} SOL`,
+        `Range: ${payload.binRangeLower.toFixed(9)} - ${payload.binRangeUpper.toFixed(9)} SOL`,
         `Will close in: ${payload.oorExitMinutes}min if not recovered`,
       ].join('\n')
 
@@ -178,14 +177,6 @@ function formatMessage(payload: AlertPayload): string {
         `Pool: \`${payload.poolAddress}\``,
         `_On-chain in Meteora but missing from Supabase cache — inserted automatically_`,
       ].filter(Boolean).join('\n')
-
-    case 'cooldown_skip':
-      return [
-        `⏳ *Cooldown Skip*`,
-        `Token: \`${payload.symbol}\``,
-        `Strategy: ${payload.strategy}`,
-        `Skipped — closed within last ${payload.cooldownHours}h`,
-      ].join('\n')
 
     case 'pre_grad_pool_created':
       return [

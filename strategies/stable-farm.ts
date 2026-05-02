@@ -67,7 +67,7 @@ export const stableFarmStrategy: Strategy = {
     // No rush to take profit — compound fees over time
     takeProfitPct: 500,
 
-    // Tightened from 240 — rebalance after 60min OOR
+    // Tightened from 240 — close after 60min OOR
     outOfRangeMinutes: 60,
 
     // Long duration — this is a farming strategy, not a trade

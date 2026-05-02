@@ -25,7 +25,6 @@ async function getDLMM() {
 
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
-const AUTO_REBALANCE_OUT_OF_RANGE = process.env.LP_AUTO_REBALANCE_OOR !== 'false'
 const SMART_REBALANCE_IN_RANGE = process.env.LP_SMART_REBALANCE_IN_RANGE === 'true'
 
 // Reconcile the wallet against Meteora every tick by default. Supabase is a cache.
@@ -259,7 +258,7 @@ async function checkPosition(
   const claimableFeesUsd = liveClaimableFeesUsd ?? derivedClaimableFeesUsd
   const positionValueUsd = livePositionValueUsd ?? derivedPositionValueUsd
 
-  const wasInRange = position.status === 'active'
+  const wasInRange = position.status !== 'out_of_range' && position.in_range !== false
   const justWentOOR = !inRange && wasInRange
   const oorSinceAt: string | null = justWentOOR
     ? new Date().toISOString()
@@ -287,6 +286,18 @@ async function checkPosition(
     console.error(`${label} DB update failed:`, err)
   }
 
+  if (justWentOOR) {
+    await sendAlert({
+      type: 'position_oor',
+      symbol: position.symbol,
+      strategy: strategy.id,
+      currentPrice: currentPriceSol,
+      binRangeLower: rangeLower,
+      binRangeUpper: rangeUpper,
+      oorExitMinutes: strategy.exits.outOfRangeMinutes,
+    })
+  }
+
   const openedAt = new Date(position.opened_at).getTime()
   const ageHours = (now - openedAt) / (1000 * 60 * 60)
   const oorSince = !inRange && oorSinceAt
@@ -308,29 +319,6 @@ async function checkPosition(
 
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
     const roundedOor = Math.round(oorSince)
-    if (AUTO_REBALANCE_OUT_OF_RANGE) {
-      const rebalanceReason = `out_of_range_rebalance_${roundedOor}min`
-      const result = await rebalanceDlmmPosition(position.id, {
-        reason: rebalanceReason,
-        source: 'monitor_oor',
-        position,
-        liveSourceOk: true,
-      })
-
-      if (result.reopened) {
-        console.log(`${label} OOR rebalance complete → ${result.newPositionId}`)
-        stats.rebalanced++
-        return
-      }
-
-      if (result.closed) {
-        console.warn(`${label} OOR rebalance closed but reopen failed: ${result.error ?? 'unknown error'}`)
-        stats.closed++
-        return
-      }
-
-      console.warn(`${label} OOR rebalance skipped — closing only: ${result.error ?? 'unknown error'}`)
-    }
     closeReason = `out_of_range_${roundedOor}min`
   } else if (entryPriceSol > 0 && pricePct <= strategy.exits.stopLossPct) {
     closeReason = `stoploss_${pricePct.toFixed(1)}pct`

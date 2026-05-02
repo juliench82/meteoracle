@@ -74,6 +74,8 @@ export async function GET() {
     const currentPriceSol = Number(pos.current_price ?? 0)
     const claimableFeesUsd = Number(pos.claimable_fees_usd ?? pos.metadata?.claimable_fees_usd ?? 0)
     const positionValueUsd = Number(pos.position_value_usd ?? pos.metadata?.position_value_usd ?? 0)
+    const pnlUsdRaw = pos.pnl_usd ?? pos.metadata?.pnl_usd ?? pos.metadata?.position_pnl_usd ?? null
+    const pnlUsd = pnlUsdRaw !== null && Number.isFinite(Number(pnlUsdRaw)) ? Number(pnlUsdRaw) : null
     const entryPriceSol: number = Number(
       pos.entry_price_sol ??
       pos.metadata?.entry_price_sol ??
@@ -101,6 +103,7 @@ export async function GET() {
       pricePct: Math.round(pricePct * 100) / 100,
       claimableFeesUsd: Math.round(claimableFeesUsd * 100) / 100,
       positionValueUsd: Math.round(positionValueUsd * 100) / 100,
+      pnlUsd: pnlUsd !== null ? Math.round(pnlUsd * 100) / 100 : null,
       ilPct: Math.round(ilPct * 100) / 100,
       realizedPnlUsd: pos.realized_pnl_usd ?? pos.metadata?.realized_pnl_usd ?? null,
       status: pos.status,

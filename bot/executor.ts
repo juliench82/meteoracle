@@ -69,7 +69,6 @@ const MAX_BINS_BY_STRATEGY: Record<string, number> = {
 const MAX_BINS_DEFAULT = 150
 
 interface OpenPositionOptions {
-  bypassCooldownReason?: string
   rebalanceFromPositionId?: string
 }
 
@@ -493,6 +492,16 @@ export async function addLiquidityToPosition(
     const previousSol = Number(position.sol_deposited ?? 0)
     const metadata = (position.metadata ?? {}) as Record<string, unknown>
     const previousManualAdds = Number(metadata.manual_add_sol_total ?? 0)
+    const entrySolPriceUsd = Number(position.entry_price_usd) > 0 && Number(position.entry_price_sol) > 0
+      ? Number(position.entry_price_usd) / Number(position.entry_price_sol)
+      : 0
+    const currentSolPriceUsd = Number(metadata.sol_price_usd ?? metadata.current_sol_price_usd ?? 0)
+    const addSolPriceUsd = currentSolPriceUsd > 0 ? currentSolPriceUsd : entrySolPriceUsd
+    const parsedManualAddCostUsd = Number(metadata.manual_add_cost_usd ?? metadata.manual_add_estimated_cost_usd ?? 0)
+    const previousManualAddCostUsd = Number.isFinite(parsedManualAddCostUsd) ? parsedManualAddCostUsd : 0
+    const manualAddCostUsd = addSolPriceUsd > 0
+      ? Math.round((previousManualAddCostUsd + solAmount * addSolPriceUsd) * 100) / 100
+      : previousManualAddCostUsd
 
     await supabase
       .from('lp_positions')
@@ -501,10 +510,12 @@ export async function addLiquidityToPosition(
         metadata: {
           ...metadata,
           manual_add_sol_total: Math.round((previousManualAdds + solAmount) * 1e9) / 1e9,
+          manual_add_cost_usd: manualAddCostUsd,
           last_add_liquidity_sol: solAmount,
           last_add_liquidity_tx: sig,
           last_add_liquidity_at: new Date().toISOString(),
           last_add_liquidity_distribution: strategy.position.distributionType,
+          last_add_liquidity_sol_price_usd: addSolPriceUsd > 0 ? Math.round(addSolPriceUsd * 100) / 100 : null,
         },
       })
       .eq('id', positionId)
@@ -596,51 +607,6 @@ export async function openPosition(
         payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed },
       })
       return null
-    }
-
-    const defaultCooldownHours   = parseFloat(process.env.TOKEN_COOLDOWN_HOURS          ?? '6')
-    const emergencyCooldownHours = parseFloat(process.env.TOKEN_EMERGENCY_COOLDOWN_HOURS ?? '1')
-
-    const { data: lastClose } = await supabase
-      .from('lp_positions')
-      .select('id, close_reason, closed_at')
-      .eq('mint', metrics.address)
-      .eq('status', 'closed')
-      .order('closed_at', { ascending: false })
-      .limit(1)
-
-    if (lastClose?.length) {
-      const isEmergency   = lastClose[0].close_reason?.startsWith('emergency_stop')
-      const cooldownHours = isEmergency ? emergencyCooldownHours : defaultCooldownHours
-      const cutoff        = new Date(Date.now() - cooldownHours * 3_600_000).toISOString()
-      if (lastClose[0].closed_at >= cutoff) {
-        if (options.bypassCooldownReason?.includes('rebalance')) {
-          console.log(`${label} cooldown bypass for rebalance reopen`, {
-            closeReason: lastClose[0].close_reason,
-            bypassReason: options.bypassCooldownReason,
-            rebalanceFromPositionId: options.rebalanceFromPositionId,
-          })
-          await supabase.from('bot_logs').insert({
-            level: 'info',
-            event: 'open_position_cooldown_bypassed_rebalance',
-            payload: {
-              symbol: metrics.symbol,
-              strategy: strategy.id,
-              closeReason: lastClose[0].close_reason,
-              bypassReason: options.bypassCooldownReason,
-              rebalanceFromPositionId: options.rebalanceFromPositionId,
-            },
-          })
-        } else {
-          console.warn(`${label} token in cooldown — closed within last ${cooldownHours}h`)
-          await supabase.from('bot_logs').insert({
-            level: 'warn', event: 'open_position_skipped_cooldown',
-            payload: { symbol: metrics.symbol, cooldownHours, closeReason: lastClose[0].close_reason },
-          })
-          await sendAlert({ type: 'cooldown_skip', symbol: metrics.symbol, strategy: strategy.id, cooldownHours })
-          return null
-        }
-      }
     }
 
     const balanceLamports = await connection.getBalance(wallet.publicKey)
@@ -1049,6 +1015,22 @@ async function persistPosition(
         strategy_id:           strategy.id,
         bin_range_down:        strategy.position.rangeDownPct,
         bin_range_up:          strategy.position.rangeUpPct,
+        maxDurationHours:      strategy.exits.maxDurationHours,
+        stop_loss_pct:         strategy.exits.stopLossPct,
+        take_profit_pct:       strategy.exits.takeProfitPct,
+        out_of_range_minutes:  strategy.exits.outOfRangeMinutes,
+        market_cap_usd:        metrics.mcUsd,
+        volume_24h_usd:        metrics.volume24h,
+        dex_liquidity_usd:     metrics.liquidityUsd,
+        fee_tvl_24h_pct:       metrics.feeTvl24hPct,
+        rugcheck_score:        metrics.rugcheckScore,
+        top_holder_pct:        metrics.topHolderPct,
+        holder_count:          metrics.holderCount,
+        quote_token_mint:      metrics.quoteTokenMint ?? null,
+        bin_step:              metrics.binStep ?? null,
+        dex_id:                metrics.dexId,
+        dex_price_usd:         metrics.priceUsd,
+        entry_sol_price_usd:   entryPriceSol > 0 ? entryPriceUsd / entryPriceSol : null,
         needs_liquidity_retry: needsLiquidityRetry,
       },
     })

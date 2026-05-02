@@ -16,7 +16,7 @@ export default function StrategiesPage() {
         { label: 'Target',        value: 'Low-cap memes' },
         { label: 'Deposit',       value: 'Single-sided SOL' },
         { label: 'Distribution',  value: 'Bid-ask' },
-        { label: 'Exit: OOR',     value: '120 min' },
+        { label: 'Exit: OOR',     value: '15 min' },
         { label: 'Exit: Max Age', value: '72h' },
         { label: 'Fee exit',      value: 'Yes' },
       ],

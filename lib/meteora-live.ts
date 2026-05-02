@@ -538,6 +538,7 @@ async function fetchMeteoraDlmmPositionStats(positionPubkey: string): Promise<Re
       fee_apy_24h: Number(data.fee_apy_24h ?? NaN),
       total_fee_usd_claimed: Number(data.total_fee_usd_claimed ?? NaN),
       total_reward_usd_claimed: Number(data.total_reward_usd_claimed ?? NaN),
+      position_pnl_usd: Number(data.position_pnl_usd ?? data.pnl_usd ?? data.total_pnl_usd ?? NaN),
     }
     const normalized = Object.fromEntries(
       Object.entries(stats).map(([key, value]) => [key, Number.isFinite(value) ? value : null]),
@@ -679,7 +680,7 @@ export async function fetchLiveDlmmPositions(connection: Connection = getConnect
         current_price: currentPrice,
         claimable_fees_usd: usdFields.claimableFeesUsd,
         position_value_usd: usdFields.positionValueUsd,
-        pnl_usd: null,
+        pnl_usd: positionStats?.position_pnl_usd ?? null,
         deposits: usdFields.deposits,
         dry_run: false,
         metadata: {
@@ -713,6 +714,8 @@ export async function fetchLiveDlmmPositions(connection: Connection = getConnect
           ...(positionStats?.fee_apy_24h !== null && positionStats?.fee_apy_24h !== undefined && { fee_apy_24h: positionStats.fee_apy_24h }),
           ...(positionStats?.total_fee_usd_claimed !== null && positionStats?.total_fee_usd_claimed !== undefined && { total_fee_usd_claimed: positionStats.total_fee_usd_claimed }),
           ...(positionStats?.total_reward_usd_claimed !== null && positionStats?.total_reward_usd_claimed !== undefined && { total_reward_usd_claimed: positionStats.total_reward_usd_claimed }),
+          ...(positionStats?.position_pnl_usd !== null && positionStats?.position_pnl_usd !== undefined && { position_pnl_usd: positionStats.position_pnl_usd }),
+          ...(positionStats?.position_pnl_usd !== null && positionStats?.position_pnl_usd !== undefined && { pnl_usd: positionStats.position_pnl_usd }),
           ...(resolved.dexUrl && { dexscreener_url: resolved.dexUrl }),
           version: pos.version ?? null,
           synced_at: new Date().toISOString(),
@@ -931,11 +934,23 @@ function deriveOpenPnlUsd(
   claimableFeesUsd: number | null,
   solDeposited: number,
   metadata: Record<string, unknown>,
+  entryPriceUsd: number | null,
+  entryPriceSol: number | null,
 ): number | null {
   if (positionValueUsd === null || solDeposited <= 0) return null
 
-  const solPriceUsd = firstFiniteNumber(metadata.sol_price_usd, metadata.current_sol_price_usd)
+  const entrySolPriceUsd = entryPriceUsd !== null && entryPriceSol !== null && entryPriceUsd > 0 && entryPriceSol > 0
+    ? entryPriceUsd / entryPriceSol
+    : null
+  const solPriceUsd = firstFiniteNumber(metadata.entry_sol_price_usd, entrySolPriceUsd, metadata.sol_price_usd, metadata.current_sol_price_usd)
   if (solPriceUsd === null || solPriceUsd <= 0) return null
+
+  const manualAddSol = firstFiniteNumber(metadata.manual_add_sol_total) ?? 0
+  const manualAddCostUsd = firstFiniteNumber(metadata.manual_add_cost_usd, metadata.manual_add_estimated_cost_usd)
+  const originalSolDeposited = manualAddCostUsd !== null
+    ? Math.max(0, solDeposited - manualAddSol)
+    : solDeposited
+  const costBasisUsd = originalSolDeposited * solPriceUsd + (manualAddCostUsd ?? 0)
 
   const claimedUsd =
     (firstFiniteNumber(metadata.total_fee_usd_claimed) ?? 0) +
@@ -946,7 +961,7 @@ function deriveOpenPnlUsd(
     positionValueUsd +
     (claimableFeesUsd ?? 0) +
     claimedUsd -
-    solDeposited * solPriceUsd,
+    costBasisUsd,
   )
 }
 
@@ -998,6 +1013,8 @@ export function mergeDbAndLiveLpPositions(
         firstFiniteNumber(claimableFeesUsd),
         Number(solDeposited ?? 0),
         metadata,
+        firstFiniteNumber(row.entry_price_usd, live.entry_price_usd),
+        firstFiniteNumber(row.entry_price_sol, live.entry_price_sol),
       )
       merged.push({
         ...row,
