@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { runScanner } from '@/bot/scanner'
+import { runScanner, type ScannerResult } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { addLiquidityToPosition, closePosition } from '@/bot/executor'
 import { closeDammPosition } from '@/bot/damm-executor'
@@ -31,6 +31,26 @@ function logToDB(supabase: ReturnType<typeof createServerClient>, payload: objec
   void Promise.resolve(supabase.from('bot_logs').insert(payload)).catch(() => {})
 }
 
+function formatReason(reason?: string): string {
+  return reason ? reason.replace(/_/g, ' ') : ''
+}
+
+function formatScanResult(scanResult: ScannerResult): string[] {
+  const lines = [
+    `📡 Scanned: ${scanResult.scanned} pairs`,
+    `🔎 Deep checked: ${scanResult.deepChecked}/${scanResult.survivors}`,
+    `🎯 Candidates: ${scanResult.candidates}`,
+    `📂 Opened: ${scanResult.opened} positions`,
+  ]
+  if (scanResult.openSkipped > 0) {
+    lines.push(`⏸ Opening skipped: ${scanResult.openSkipped}`)
+  }
+  if (scanResult.openBlockedReason) {
+    lines.push(`🚧 Opening blocked: ${formatReason(scanResult.openBlockedReason)}`)
+  }
+  return lines
+}
+
 async function runTick(chatId: number | string) {
   const startedAt = Date.now()
   try {
@@ -45,9 +65,7 @@ async function runTick(chatId: number | string) {
     })
     await reply(chatId, [
       `✅ *Tick complete* (${durationMs}ms)`,
-      `📡 Scanned: ${scanResult.scanned} pairs`,
-      `🎯 Candidates: ${scanResult.candidates}`,
-      `📂 Opened: ${scanResult.opened} positions`,
+      ...formatScanResult(scanResult),
       `👁 Monitored: ${monitorResult.checked} positions`,
       `🔒 Closed: ${monitorResult.closed}`,
     ].join('\n'))
@@ -69,9 +87,7 @@ async function runScanOnly(chatId: number | string) {
     })
     await reply(chatId, [
       `📡 *Scan complete* (${durationMs}ms)`,
-      `Scanned: ${scanResult.scanned} pairs`,
-      `🎯 Candidates: ${scanResult.candidates}`,
-      `📂 Opened: ${scanResult.opened} positions`,
+      ...formatScanResult(scanResult),
     ].join('\n'))
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

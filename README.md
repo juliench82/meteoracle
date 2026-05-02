@@ -42,8 +42,8 @@ Next.js Dashboard
 
 Supabase (Postgres)
   ├── lp_positions            ← all positions, open and closed
-  ├── candidates              ← every scanned token with full classifier output
-  ├── bot_logs                ← structured event log
+  ├── candidates              ← scored strategy matches from scanner deep checks
+  ├── bot_logs                ← structured event log, including scanner_tick heartbeat rows
   └── bot_state               ← killswitch + runtime flags (dry_run)
 ```
 

@@ -76,6 +76,20 @@ const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
 // Thresholds for high-curve detection (logged, falls through to normal scoring)
 const PUMPFUN_HIGHCURVE_THRESHOLD  = 95
 
+export type ScannerResult = {
+  scanned: number
+  survivors: number
+  deepChecked: number
+  candidates: number
+  opened: number
+  openSkipped: number
+  openSlots: number
+  maxOpen: number
+  openCount?: number
+  openBlockedReason?: string
+  error?: string
+}
+
 function detectLaunchpadSource(tokenAddress: string): 'pumpfun' | 'moonshot' | 'meteora' {
   if (isPumpFunToken(tokenAddress)) return 'pumpfun'
   if (isMoonshotToken(tokenAddress)) return 'moonshot'
@@ -114,6 +128,25 @@ async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string
   return result
 }
 
+async function logScannerTick(result: ScannerResult, durationMs: number, source = 'scanner'): Promise<void> {
+  try {
+    const insertResult = await withTimeout(
+      createServerClient().from('bot_logs').insert({
+        level: result.error ? 'error' : 'info',
+        event: result.error ? 'scanner_tick_failed' : 'scanner_tick',
+        payload: { ...result, durationMs, source },
+      }),
+      SUPABASE_TIMEOUT_MS,
+      'bot_logs insert scanner_tick',
+    )
+    if (insertResult && 'error' in insertResult && insertResult.error) {
+      console.warn('[scanner] bot_logs insert failed:', insertResult.error.message)
+    }
+  } catch (err) {
+    console.warn('[scanner] bot_logs insert failed:', err)
+  }
+}
+
 function getQuoteTokenMint(pool: MeteoraPool): string {
   return QUOTE_ASSETS.has(pool.token_x.address)
     ? pool.token_x.address
@@ -149,20 +182,35 @@ function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPo
   return best
 }
 
-export async function runScanner(): Promise<{
-  scanned: number; candidates: number; opened: number; error?: string
-}> {
+export async function runScanner(): Promise<ScannerResult> {
+  const startedAt = Date.now()
+  const finish = async (result: Partial<ScannerResult>): Promise<ScannerResult> => {
+    const fullResult: ScannerResult = {
+      scanned: 0,
+      survivors: 0,
+      deepChecked: 0,
+      candidates: 0,
+      opened: 0,
+      openSkipped: 0,
+      openSlots: 0,
+      maxOpen: MAX_CONCURRENT_POSITIONS,
+      ...result,
+    }
+    await logScannerTick(fullResult, Date.now() - startedAt)
+    return fullResult
+  }
+
   const state = await getBotState()
   if (!state.enabled) {
     console.log('[scanner] bot is stopped — skipping tick')
-    return { scanned: 0, candidates: 0, opened: 0 }
+    return finish({ openBlockedReason: 'bot_stopped' })
   }
 
   console.log('[scanner] step 1/4 — fetching Meteora pools')
   const { pools, error: fetchError } = await fetchMeteoraPools()
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
-    return { scanned: 0, candidates: 0, opened: 0, error: fetchError }
+    return finish({ error: fetchError, openBlockedReason: 'pool_fetch_failed' })
   }
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
 
@@ -196,7 +244,7 @@ export async function runScanner(): Promise<{
 
   if (allSurvivors.length === 0) {
     console.log('[scanner] done — no survivors')
-    return { scanned: pools.length, candidates: 0, opened: 0 }
+    return finish({ scanned: pools.length, survivors: 0 })
   }
 
   const survivors = allSurvivors
@@ -211,38 +259,38 @@ export async function runScanner(): Promise<{
     METEORA_FETCH_TIMEOUT_MS,
     'live Meteora position limit state',
   )
-  if (!limitState) {
-    console.warn('[scanner] position limit check unavailable — refusing to open new positions')
-    return { scanned: pools.length, candidates: 0, opened: 0 }
-  }
-  if (!limitState.liveFetchOk) {
-    console.warn(
-      `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}, dammOk=${limitState.dammOk}) — refusing to open new positions`,
-    )
-    return { scanned: pools.length, candidates: 0, opened: 0 }
-  }
+  let openCount: number | undefined
+  let availableOpenSlots = 0
+  let openBlockedReason: string | undefined
 
-  const openCount = limitState.effectiveOpenCount
-  if (openCount >= MAX_CONCURRENT_POSITIONS) {
-    console.log(
-      `[scanner] max LP positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS}; ` +
-      `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+  if (!limitState) {
+    openBlockedReason = 'position_limit_unavailable'
+    console.warn('[scanner] position limit check unavailable — scoring candidates but refusing to open new positions')
+  } else if (!limitState.liveFetchOk) {
+    openCount = limitState.effectiveOpenCount
+    openBlockedReason = 'live_position_count_incomplete'
+    console.warn(
+      `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}, dammOk=${limitState.dammOk}) — scoring candidates but refusing to open new positions`,
     )
-    return { scanned: pools.length, candidates: 0, opened: 0 }
+  } else {
+    openCount = limitState.effectiveOpenCount
+    availableOpenSlots = Math.max(0, MAX_CONCURRENT_POSITIONS - openCount)
+    if (availableOpenSlots === 0) {
+      openBlockedReason = 'max_positions_reached'
+      console.log(
+        `[scanner] max LP positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS}; ` +
+        `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount}) — scoring candidates only`,
+      )
+    }
   }
-  const availableOpenSlots = MAX_CONCURRENT_POSITIONS - openCount
 
   console.log(`[scanner] step 4/4 — deep checks on ${survivors.length} top survivors (capped from ${allSurvivors.length})`)
   let candidateCount = 0
   let openedCount = 0
+  let openSkippedCount = 0
   const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
 
   for (const { pool: representativePool, mcUsd, ageHours } of survivors) {
-    if (openedCount >= availableOpenSlots) {
-      console.log(`[scanner] filled remaining LP slots for this tick (${openedCount}/${availableOpenSlots})`)
-      break
-    }
-
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
 
     const token = QUOTE_ASSETS.has(representativePool.token_x.address) ? representativePool.token_y : representativePool.token_x
@@ -379,6 +427,12 @@ export async function runScanner(): Promise<{
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
       if (dammDecision.shouldUseDamm && dammDecision.params) {
+        if (openBlockedReason || openedCount >= availableOpenSlots) {
+          openSkippedCount++
+          const reason = openBlockedReason ?? 'slots_filled_this_tick'
+          console.log(`[scanner][damm-edge] ${symbol} qualifies but open skipped: ${reason}`)
+          continue
+        }
         console.log(`[scanner][damm-edge] TRIGGERED — opening DAMM v2 position for ${symbol}`)
         const result = await openDammPosition(dammDecision.params)
         if (result.success) {
@@ -489,6 +543,13 @@ export async function runScanner(): Promise<{
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (score >= MIN_SCORE_TO_OPEN) {
+      if (openBlockedReason || openedCount >= availableOpenSlots) {
+        openSkippedCount++
+        const reason = openBlockedReason ?? 'slots_filled_this_tick'
+        console.log(`[scanner] ${symbol} qualifies but open skipped: ${reason}`)
+        continue
+      }
+
       const positionId = await openPosition(metrics, strategy)
       if (positionId) {
         openedCount++
@@ -514,8 +575,22 @@ export async function runScanner(): Promise<{
   }
   console.log(`[scanner] Rugcheck cache: ${getRugcheckCacheSize()} entries`)
 
-  console.log(`[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}`)
-  return { scanned: pools.length, candidates: candidateCount, opened: openedCount }
+  console.log(
+    `[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, ` +
+    `deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}, ` +
+    `open-skipped: ${openSkippedCount}${openBlockedReason ? ` (${openBlockedReason})` : ''}`,
+  )
+  return finish({
+    scanned: pools.length,
+    survivors: allSurvivors.length,
+    deepChecked: survivors.length,
+    candidates: candidateCount,
+    opened: openedCount,
+    openSkipped: openSkippedCount,
+    openSlots: availableOpenSlots,
+    openCount,
+    openBlockedReason,
+  })
 }
 
 async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Promise<number> {
@@ -587,9 +662,26 @@ const standaloneScannerTick = async (): Promise<void> => {
   const label = '[lp-scanner]'
   try {
     const result = await runScanner()
-    console.log(`${label} tick done — scanned=${result.scanned} candidates=${result.candidates} opened=${result.opened}`)
+    const blocked = result.openBlockedReason ? ` openBlocked=${result.openBlockedReason}` : ''
+    console.log(
+      `${label} tick done — scanned=${result.scanned} survivors=${result.survivors} ` +
+      `deepChecked=${result.deepChecked} candidates=${result.candidates} opened=${result.opened} ` +
+      `openSkipped=${result.openSkipped}${blocked}`,
+    )
   } catch (err) {
     console.error(`${label} tick error:`, err)
+    await logScannerTick({
+      scanned: 0,
+      survivors: 0,
+      deepChecked: 0,
+      candidates: 0,
+      opened: 0,
+      openSkipped: 0,
+      openSlots: 0,
+      maxOpen: MAX_CONCURRENT_POSITIONS,
+      openBlockedReason: 'unhandled_error',
+      error: err instanceof Error ? err.message : String(err),
+    }, 0)
   }
 }
 

@@ -33,7 +33,7 @@ import { getBotState, setBotState } from '@/lib/botState'
 import { addLiquidityToPosition, closePosition } from '@/bot/executor'
 import { closeDammPosition } from '@/bot/damm-executor'
 import { rebalanceDlmmPosition } from '@/bot/rebalance'
-import { runScanner } from '@/bot/scanner'
+import { runScanner, type ScannerResult } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
 import { fetchLiveMeteoraSnapshot, mergeDbAndLiveLpPositions, type MeteoraLiveSourceStatus, type LiveMeteoraPosition } from '@/lib/meteora-live'
@@ -223,6 +223,23 @@ function withTickTimeout(fn: () => Promise<string>, name: string): Promise<strin
       setTimeout(() => resolve(`⏱️ ${name}: timeout (${TICK_TIMEOUT_MS / 1000}s)`), TICK_TIMEOUT_MS)
     ),
   ])
+}
+
+function formatReason(reason?: string): string {
+  return reason ? reason.replace(/_/g, ' ') : ''
+}
+
+function formatScannerSummary(result: ScannerResult): string {
+  const parts = [
+    `✅ scanner done`,
+    `scanned=${result.scanned}`,
+    `deep=${result.deepChecked}/${result.survivors}`,
+    `candidates=${result.candidates}`,
+    `opened=${result.opened}`,
+  ]
+  if (result.openSkipped > 0) parts.push(`open-skipped=${result.openSkipped}`)
+  if (result.openBlockedReason) parts.push(`blocked=${formatReason(result.openBlockedReason)}`)
+  return parts.join(' | ')
 }
 
 async function handleStop() {
@@ -537,7 +554,7 @@ async function handleTick() {
   await reply('⏳ *Running scanner + monitor...*')
 
   const results = await Promise.all([
-    withTickTimeout(() => runScanner().then(() => '✅ scanner done'), 'scanner'),
+    withTickTimeout(() => runScanner().then(formatScannerSummary), 'scanner'),
     withTickTimeout(() => monitorPositions().then(() => '✅ monitor done'), 'monitor'),
   ])
 

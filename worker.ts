@@ -10,7 +10,7 @@ import { monitorPositions } from './bot/monitor'
 import { runScanner } from './bot/scanner'
 
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
-const SCANNER_INTERVAL_MS = 15 * 60 * 1_000  // 15 minutes
+const SCANNER_INTERVAL_MS = parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') * 1_000
 
 const BOT_ENABLED = process.env.BOT_ENABLED === 'true'
 const DRY_RUN     = process.env.BOT_DRY_RUN === 'true'
@@ -35,7 +35,12 @@ async function tickScanner() {
   try {
     log('scanner tick start')
     const stats = await runScanner()
-    log(`scanner tick done — scanned=${stats.scanned} candidates=${stats.candidates} opened=${stats.opened}`)
+    const blocked = stats.openBlockedReason ? ` openBlocked=${stats.openBlockedReason}` : ''
+    log(
+      `scanner tick done — scanned=${stats.scanned} survivors=${stats.survivors} ` +
+      `deepChecked=${stats.deepChecked} candidates=${stats.candidates} opened=${stats.opened} ` +
+      `openSkipped=${stats.openSkipped}${blocked}`,
+    )
   } catch (err) {
     console.error('[worker] scanner tick error:', err)
   }
