@@ -95,6 +95,10 @@ function fmtPrice(value: unknown): string {
   return n >= 1 ? n.toFixed(4) : n.toPrecision(6)
 }
 
+function isLiveConfirmedPosition(pos: { _source?: string | null }): boolean {
+  return Boolean(pos._source?.includes('meteora'))
+}
+
 function parseSolAmount(value: string | undefined): number | null {
   if (!value) return null
   const normalized = value.replace(',', '.')
@@ -102,9 +106,25 @@ function parseSolAmount(value: string | undefined): number | null {
   return Number.isFinite(amount) && amount > 0 ? amount : null
 }
 
-function liveSourceWarning(source: MeteoraLiveSourceStatus): string | null {
+function sanitizeLiveError(message?: string | null): string | null {
+  if (!message) return null
+  return message
+    .replace(/api-key=[^"'\s&]+/gi, 'api-key=redacted')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180)
+}
+
+function liveSourceWarning(source: MeteoraLiveSourceStatus, errors?: { dlmm?: string | null; damm?: string | null }): string | null {
   if (source.dlmmOk && source.dammOk) return null
-  return `⚠️ Meteora live fetch: DLMM ${source.dlmmOk ? 'ok' : 'failed'} / DAMM ${source.dammOk ? 'ok' : 'failed'}`
+  const details = [
+    source.dlmmOk ? null : sanitizeLiveError(errors?.dlmm),
+    source.dammOk ? null : sanitizeLiveError(errors?.damm),
+  ].filter(Boolean)
+  return [
+    `⚠️ Meteora live fetch incomplete: DLMM ${source.dlmmOk ? 'ok' : 'failed'} / DAMM ${source.dammOk ? 'ok' : 'failed'}`,
+    ...(details.length ? [`Reason: ${details.join(' | ')}`] : []),
+  ].join('\n')
 }
 
 async function resolveAddTarget(args: string[]): Promise<{
@@ -408,7 +428,10 @@ async function handleStatus() {
   const liveDlmmCount = liveLp.filter(p => p.position_type === 'dlmm').length
   const liveDammCount = liveLp.filter(p => p.position_type === 'damm-edge').length
   const wallet = await fetchWalletLiveBalances(liveLp.map(p => p.mint)).catch(() => null)
-  const warning = liveSourceWarning(liveSource)
+  const warning = liveSourceWarning(liveSource, {
+    dlmm: liveSnapshot.dlmmError,
+    damm: liveSnapshot.dammError,
+  })
 
   const { data: openLp } = await supabase
     .from('lp_positions')
@@ -416,13 +439,15 @@ async function handleStatus() {
     .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
 
   const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp, liveSource)
+  const liveConfirmedCount = mergedOpenLp.filter(isLiveConfirmedPosition).length
+  const cacheOnlyCount = mergedOpenLp.length - liveConfirmedCount
 
   const dlmmLines = mergedOpenLp
     .filter(p => p.strategy_id !== 'damm-edge' && p.strategy_id !== 'damm-live' && p.position_type !== 'damm-edge')
     .map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
-    const source = p._source?.includes('meteora') ? ' | Meteora live' : ''
+    const source = isLiveConfirmedPosition(p) ? ' | Meteora live' : ' | Supabase cache only'
     const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
     const value = p.position_value_usd ?? p.metadata?.position_value_usd
     return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | ${mins}min${oor}${source}`
@@ -439,7 +464,7 @@ async function handleStatus() {
     const valueText = value != null ? ` | value $${Number(value).toFixed(2)}` : ''
     const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
     const feesText = fees != null ? ` | fees $${Number(fees).toFixed(2)}` : ''
-    const source = p._source?.includes('meteora') || p.strategy_id === 'damm-live' ? ' | Meteora live' : ''
+    const source = isLiveConfirmedPosition(p) || p.strategy_id === 'damm-live' ? ' | Meteora live' : ' | Supabase cache only'
     return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${curve}${valueText}${feesText}${source}`
   })
 
@@ -451,6 +476,7 @@ async function handleStatus() {
     `Meteora live: ${liveLp.length} total (${liveDlmmCount} DLMM / ${liveDammCount} DAMM)`,
     ...(warning ? [warning] : []),
     `Supabase cache: ${(openLp ?? []).length} open rows`,
+    `Rows below: ${liveConfirmedCount} live-confirmed / ${cacheOnlyCount} cache-only`,
     ``,
     `📊 *DLMM Positions (${dlmmLines.length})*`,
     ...(dlmmLines.length ? dlmmLines : ['  none']),
@@ -464,6 +490,7 @@ async function handlePositions() {
   const supabase = createServerClient()
   let liveLp: LiveMeteoraPosition[] = []
   let liveSource: MeteoraLiveSourceStatus = { dlmmOk: false, dammOk: false }
+  let liveErrors: { dlmm?: string | null; damm?: string | null } = {}
   const syncResult = await syncAllMeteoraPositions().catch(err => {
     console.warn('[telegram-bot] /positions sync failed:', err)
     return null
@@ -471,10 +498,12 @@ async function handlePositions() {
   if (syncResult) {
     liveLp = syncResult.positions
     liveSource = { dlmmOk: syncResult.dlmmOk, dammOk: syncResult.dammOk }
+    liveErrors = { dlmm: syncResult.dlmmError, damm: syncResult.dammError }
   } else {
     const snapshot = await fetchLiveMeteoraSnapshot()
     liveLp = snapshot.positions
     liveSource = { dlmmOk: snapshot.dlmmOk, dammOk: snapshot.dammOk }
+    liveErrors = { dlmm: snapshot.dlmmError, damm: snapshot.dammError }
   }
   const { data } = await supabase
     .from('lp_positions')
@@ -483,19 +512,28 @@ async function handlePositions() {
     .order('opened_at', { ascending: false })
 
   const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp, liveSource)
-  const warning = liveSourceWarning(liveSource)
+  const warning = liveSourceWarning(liveSource, liveErrors)
+  const liveConfirmedCount = positions.filter(isLiveConfirmedPosition).length
+  const cacheOnlyCount = positions.length - liveConfirmedCount
 
   if (positions.length === 0) {
     await reply(warning ? `${warning}\n\n🏊 No cached open LP positions.` : '🏊 No open LP positions.')
     return
   }
 
-  const lines = [`🏊 *Open LP Positions (${positions.length})*`, ``]
+  const lines = [
+    `🏊 *LP Positions (${positions.length})*`,
+    `Live-confirmed: ${liveConfirmedCount} | Cache-only: ${cacheOnlyCount}`,
+    ``,
+  ]
   if (warning) lines.push(warning, '')
+  if (cacheOnlyCount > 0) {
+    lines.push(`Cache-only rows are Supabase snapshots and may be stale until Meteora live fetch recovers.`, '')
+  }
   for (const p of positions) {
     const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
     const liveOnly = p._source === 'meteora-live'
-    const source = p._source?.includes('meteora') ? ' | Meteora live' : ''
+    const source = isLiveConfirmedPosition(p) ? 'Meteora live' : 'Supabase cache only'
     const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
     const value = p.position_value_usd ?? p.metadata?.position_value_usd
     const poolStats = p.metadata?.volume_24h_usd ? ` | vol24h ${fmtUsd(p.metadata.volume_24h_usd)}` : ''
@@ -503,7 +541,7 @@ async function handlePositions() {
       ? `  Run /orphans to create a manageable cache row`
       : `  /close ${p.id}${!isDammLp(p) ? ` | /rebalance ${p.id} | /add ${p.id} 0.05` : ''}`
     lines.push(
-      `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h${source}`,
+      `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h | ${source}`,
       `  value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | price ${fmtPrice(p.current_price)}${poolStats}`,
       actionLine
     )
@@ -586,7 +624,7 @@ async function handleHelp() {
     `/dry — switch to dry-run mode`,
     `/live — switch to live trading`,
     `/status — snapshot: bot state + DLMM + DAMM v2 positions`,
-    `/positions — list all open Meteora LP positions`,
+    `/positions — list live-confirmed and cached LP rows`,
     `/close <id> — force-close an LP position`,
     `/add <id> <SOL> — add SOL liquidity to a DLMM position`,
     `/rebalance <id> — close + reopen a DLMM position centered at current price`,

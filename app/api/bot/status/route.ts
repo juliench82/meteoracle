@@ -52,6 +52,10 @@ export async function GET() {
     meteoraLiveOk: meteoraOk,
     meteoraLiveDlmmOk: liveSnapshot?.dlmmOk ?? false,
     meteoraLiveDammOk: liveSnapshot?.dammOk ?? false,
+    meteoraLiveErrors: {
+      dlmm: liveSnapshot?.dlmmError ?? null,
+      damm: liveSnapshot?.dammError ?? null,
+    },
     meteoraLiveLpPositions: liveLpCount,
     meteoraLiveDlmmPositions: liveDlmmCount,
     meteoraLiveDammPositions: liveDammCount,

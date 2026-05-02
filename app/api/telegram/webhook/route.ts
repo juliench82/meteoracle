@@ -35,6 +35,15 @@ function formatReason(reason?: string): string {
   return reason ? reason.replace(/_/g, ' ') : ''
 }
 
+function sanitizeLiveError(message?: string | null): string | null {
+  if (!message) return null
+  return message
+    .replace(/api-key=[^"'\s&]+/gi, 'api-key=redacted')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180)
+}
+
 function formatScanResult(scanResult: ScannerResult): string[] {
   const lines = [
     `📡 Scanned: ${scanResult.scanned} pairs`,
@@ -418,7 +427,13 @@ export async function POST(req: Request) {
       const liveDlmmCount = liveSnapshot?.positions.filter(p => p.position_type === 'dlmm').length ?? 0
       const liveDammCount = liveSnapshot?.positions.filter(p => p.position_type === 'damm-edge').length ?? 0
       const liveWarning = liveSnapshot && (!liveSnapshot.dlmmOk || !liveSnapshot.dammOk)
-        ? `Meteora fetch: DLMM ${liveSnapshot.dlmmOk ? 'ok' : 'failed'} / DAMM ${liveSnapshot.dammOk ? 'ok' : 'failed'}`
+        ? [
+          `Meteora fetch incomplete: DLMM ${liveSnapshot.dlmmOk ? 'ok' : 'failed'} / DAMM ${liveSnapshot.dammOk ? 'ok' : 'failed'}`,
+          ...[
+            liveSnapshot.dlmmOk ? null : sanitizeLiveError(liveSnapshot.dlmmError),
+            liveSnapshot.dammOk ? null : sanitizeLiveError(liveSnapshot.dammError),
+          ].filter(Boolean).map(reason => `Reason: ${reason}`),
+        ].join('\n')
         : null
       const walletSol = walletRes.status === 'fulfilled' ? walletRes.value.sol : null
       const lastTickStr = lastTick ? new Date(lastTick).toUTCString() : 'Never'

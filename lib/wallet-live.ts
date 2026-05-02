@@ -1,5 +1,5 @@
-import { PublicKey } from '@solana/web3.js'
-import { getConnection, getWalletPublicKey } from '@/lib/solana'
+import { Connection, PublicKey } from '@solana/web3.js'
+import { createConnection, getConnection, getRpcEndpointCandidates, getWalletPublicKey } from '@/lib/solana'
 
 export interface WalletTokenBalance {
   mint: string
@@ -13,9 +13,11 @@ export interface WalletLiveBalances {
   tokens: WalletTokenBalance[]
 }
 
-export async function fetchWalletLiveBalances(mints: string[] = []): Promise<WalletLiveBalances> {
-  const connection = getConnection()
-  const walletPublicKey = getWalletPublicKey()
+async function fetchWalletLiveBalancesWithConnection(
+  connection: Connection,
+  walletPublicKey: PublicKey,
+  mints: string[],
+): Promise<WalletLiveBalances> {
   const solLamports = await connection.getBalance(walletPublicKey, 'confirmed')
   const uniqueMints = [...new Set(mints.filter(Boolean))]
 
@@ -43,4 +45,24 @@ export async function fetchWalletLiveBalances(mints: string[] = []): Promise<Wal
     sol: solLamports / 1e9,
     tokens,
   }
+}
+
+export async function fetchWalletLiveBalances(mints: string[] = []): Promise<WalletLiveBalances> {
+  const walletPublicKey = getWalletPublicKey()
+  const endpoints = getRpcEndpointCandidates({ includePublicFallback: true })
+  let lastError: unknown = null
+
+  for (const endpoint of endpoints) {
+    try {
+      return await fetchWalletLiveBalancesWithConnection(createConnection(endpoint), walletPublicKey, mints)
+    } catch (err) {
+      lastError = err
+    }
+  }
+
+  if (endpoints.length === 0) {
+    return fetchWalletLiveBalancesWithConnection(getConnection(), walletPublicKey, mints)
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'wallet balance fetch failed'))
 }
