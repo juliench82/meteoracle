@@ -50,6 +50,9 @@ const MAX_CONCURRENT_POSITIONS  = parseInt(process.env.MAX_CONCURRENT_POSITIONS 
 const WALLET_MIN_SOL_RESERVE    = parseFloat(process.env.WALLET_MIN_SOL_RESERVE    ?? '0.1')
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
+const COMPUTE_BUDGET_SET_UNIT_LIMIT = 2
+const COMPUTE_BUDGET_SET_UNIT_PRICE = 3
+const ADD_LIQUIDITY_FALLBACK_CU = 1_400_000
 
 function getClaimableFeesUsd(position: Record<string, any>): number | null {
   const value = position.claimable_fees_usd ?? position.metadata?.claimable_fees_usd
@@ -73,6 +76,26 @@ interface LiquidityStrategyParams {
 
 function stripComputeBudgetIxs(ixs: TransactionInstruction[]): TransactionInstruction[] {
   return ixs.filter(ix => ix.programId.toBase58() !== COMPUTE_BUDGET_PROGRAM_ID)
+}
+
+function computeBudgetKind(ix: TransactionInstruction): number | null {
+  if (ix.programId.toBase58() !== COMPUTE_BUDGET_PROGRAM_ID) return null
+  return ix.data[0] ?? null
+}
+
+function addPriorityFeeAndPreserveComputeLimit(
+  ixs: TransactionInstruction[],
+  priorityFee: number,
+  fallbackUnits: number,
+): TransactionInstruction[] {
+  const withoutUnitPrice = ixs.filter(ix => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_PRICE)
+  const hasUnitLimit = withoutUnitPrice.some(ix => computeBudgetKind(ix) === COMPUTE_BUDGET_SET_UNIT_LIMIT)
+
+  return [
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
+    ...(hasUnitLimit ? [] : [ComputeBudgetProgram.setComputeUnitLimit({ units: fallbackUnits })]),
+    ...withoutUnitPrice,
+  ]
 }
 
 function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): TransactionInstruction[] {
@@ -455,9 +478,11 @@ export async function addLiquidityToPosition(
     })
 
     const tx = new Transaction().add(
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-      ...stripComputeBudgetIxs(rawTx.instructions),
+      ...addPriorityFeeAndPreserveComputeLimit(
+        rawTx.instructions,
+        priorityFee,
+        ADD_LIQUIDITY_FALLBACK_CU,
+      ),
     )
     const sig = await sendLegacyTx(tx, [wallet], label)
     const previousSol = Number(position.sol_deposited ?? 0)
@@ -699,23 +724,32 @@ export async function openPosition(
         ...initIxs
       )
       lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair], label)
+      const initSig = lastSig
       console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
 
       await waitForPositionAccountReady(dlmmPool, positionKeypair.publicKey, wallet.publicKey, label)
 
+      const liquiditySigs: string[] = []
+      let failedChunk = 0
+      let totalChunks = 0
       try {
         const chunks = (addLiquidityIxs as TransactionInstruction[][]).length > 0
           ? addLiquidityIxs as TransactionInstruction[][]
           : [[...(addLiquidityIxs as unknown as TransactionInstruction[])]]
+        totalChunks = chunks.length
 
         for (let ci = 0; ci < chunks.length; ci++) {
-          const liqIxs = stripComputeBudgetIxs(chunks[ci])
+          failedChunk = ci + 1
+          const liqIxs = addPriorityFeeAndPreserveComputeLimit(
+            chunks[ci],
+            priorityFee,
+            ADD_LIQUIDITY_FALLBACK_CU,
+          )
           const liqTx  = new Transaction().add(
-            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
-            ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
             ...liqIxs
           )
           lastSig = await sendLegacyTx(liqTx, [wallet], label)
+          liquiditySigs.push(lastSig)
           console.log(`${label} seg ${posIndex}/${total} liq chunk ${ci + 1}/${chunks.length} confirmed ✔ sig: ${lastSig}`)
         }
       } catch (liqErr: unknown) {
@@ -726,11 +760,18 @@ export async function openPosition(
           payload: {
             symbol: metrics.symbol, strategy: strategy.id,
             positionPubkey: positionKeypair.publicKey.toBase58(),
-            initSig: lastSig, error: liqMsg,
+            initSig,
+            lastSuccessfulSig: lastSig,
+            liquiditySigs,
+            failedSegment: posIndex,
+            totalSegments: total,
+            failedChunk,
+            totalChunks,
+            error: liqMsg,
           },
         })
         return await persistPosition(
-          metrics, strategy, lastSig,
+          metrics, strategy, initSig,
           metrics.priceUsd ?? 0, entryPriceSol, solAmount,
           positionKeypair.publicKey.toBase58(), 0, DRY_RUN, true
         )
