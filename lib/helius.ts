@@ -1,6 +1,6 @@
 import axios from 'axios'
+import { getHeliusRpcEndpoint } from '@/lib/solana'
 
-const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL!
 const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1') // default 1 page = 1000 holders
 
 const DAS_CACHE_TTL_MS       = 8 * 60 * 1_000  // 8 min — reliable DAS result
@@ -51,6 +51,11 @@ async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
   if (process.env.HELIUS_ENABLED !== 'true') {
     return { holderCount: 0, topHolderPct: 0, reliable: false }
   }
+  const heliusRpcUrl = getHeliusRpcEndpoint()
+  if (!heliusRpcUrl) {
+    console.warn('[helius] HELIUS_ENABLED=true but HELIUS_API_KEY is missing')
+    return { holderCount: 0, topHolderPct: 0, reliable: false }
+  }
 
   const cached = _holderCache.get(mintAddress)
   if (cached) {
@@ -64,11 +69,11 @@ async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
   // 1. DAS — sequential, globally gated
   let holderCount: number | null = null
   if (DAS_MAX_PAGES > 0) {
-    holderCount = await fetchDasHolderCount(mintAddress, 1_000, DAS_MAX_PAGES).catch(() => null)
+    holderCount = await fetchDasHolderCount(heliusRpcUrl, mintAddress, 1_000, DAS_MAX_PAGES).catch(() => null)
   }
 
   // 2. RPC — sequential after DAS, same global gate
-  const rpcResult = await fetchTopAccountsAndSupply(mintAddress).catch(() => null)
+  const rpcResult = await fetchTopAccountsAndSupply(heliusRpcUrl, mintAddress).catch(() => null)
 
   const topHolderPct = rpcResult?.topHolderPct ?? 0
   const rpcAccounts  = rpcResult?.accounts ?? []
@@ -99,12 +104,12 @@ async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
-async function fetchTopAccountsAndSupply(mint: string): Promise<{
+async function fetchTopAccountsAndSupply(heliusRpcUrl: string, mint: string): Promise<{
   accounts:     Array<{ uiAmount: number | null }>
   topHolderPct: number
 } | null> {
-  const largestRes = await rpcCall('getTokenLargestAccounts', [mint])
-  const supplyRes  = await rpcCall('getTokenSupply',          [mint])
+  const largestRes = await rpcCall(heliusRpcUrl, 'getTokenLargestAccounts', [mint])
+  const supplyRes  = await rpcCall(heliusRpcUrl, 'getTokenSupply',          [mint])
 
   const accounts: Array<{ uiAmount: number | null }> =
     (largestRes as { value?: Array<{ uiAmount: number | null }> })?.value ?? []
@@ -118,6 +123,7 @@ async function fetchTopAccountsAndSupply(mint: string): Promise<{
 }
 
 async function fetchDasHolderCount(
+  heliusRpcUrl: string,
   mint: string, pageSize: number, maxPages: number,
 ): Promise<number | null> {
   let total = 0
@@ -127,7 +133,7 @@ async function fetchDasHolderCount(
       try {
         await acquireGlobalSlot()
         res = await axios.post(
-          HELIUS_RPC_URL,
+          heliusRpcUrl,
           {
             jsonrpc: '2.0', id: `das-${page}`, method: 'getTokenAccounts',
             params: { mint, limit: pageSize, page, options: { showZeroBalance: false } },
@@ -160,12 +166,12 @@ async function fetchDasHolderCount(
   return total > 0 ? total : null
 }
 
-async function rpcCall(method: string, params: unknown[], retries = 3): Promise<unknown> {
+async function rpcCall(heliusRpcUrl: string, method: string, params: unknown[], retries = 3): Promise<unknown> {
   for (let i = 0; i < retries; i++) {
     await acquireGlobalSlot()
     try {
       const res = await axios.post(
-        HELIUS_RPC_URL,
+        heliusRpcUrl,
         { jsonrpc: '2.0', id: 1, method, params },
         { timeout: 8_000 },
       )

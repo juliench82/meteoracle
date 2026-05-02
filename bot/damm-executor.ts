@@ -34,6 +34,7 @@ import type { DammPositionParams } from '@/lib/types'
 import { getBotState } from '@/lib/botState'
 import { createServerClient } from '@/lib/supabase'
 import { assertCanOpenLpPosition } from '@/lib/position-limits'
+import { getRpcEndpointCandidates } from '@/lib/solana'
 import { sendAlert } from './alerter'
 
 const METEORA_DAMM_API = 'https://amm-v2.meteora.ag'
@@ -46,10 +47,7 @@ let _cpAmm: any = null
 let _zap: any = null
 
 function getRpcUrl(): string {
-  const heliusFromKey = process.env.HELIUS_API_KEY
-    ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`
-    : ''
-  const url = process.env.RPC_URL || process.env.HELIUS_RPC_URL || heliusFromKey
+  const url = getRpcEndpointCandidates()[0]
   if (!url) throw new Error('[DAMM] RPC_URL, HELIUS_RPC_URL, or HELIUS_API_KEY is not set')
   return url
 }

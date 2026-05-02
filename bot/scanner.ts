@@ -23,6 +23,7 @@ import type { TokenMetrics } from '@/lib/types'
 import { evaluateDammEdge } from '@/strategies/damm-edge'
 import { openDammPosition } from './damm-executor'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
+import { getHeliusRpcEndpoint } from '@/lib/solana'
 // ─────────────────────────────────────────────────────────────────────────────
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
@@ -352,7 +353,7 @@ export async function runScanner(): Promise<ScannerResult> {
   let candidateCount = 0
   let openedCount = 0
   let openSkippedCount = 0
-  const heliusRpcUrl = process.env.HELIUS_RPC_URL ?? ''
+  const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
 
   for (const { pool: representativePool, mcUsd, ageHours } of survivors) {
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))

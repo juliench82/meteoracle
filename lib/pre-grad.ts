@@ -19,12 +19,10 @@ import {
   type LiveMeteoraPosition,
 } from './meteora-live'
 import { OPEN_LP_STATUSES } from './position-limits'
+import { getRpcEndpointCandidates } from './solana'
 
 function getRpcUrl(): string {
-  const heliusFromKey = process.env.HELIUS_API_KEY
-    ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`
-    : ''
-  const url = process.env.RPC_URL || process.env.HELIUS_RPC_URL || heliusFromKey
+  const url = getRpcEndpointCandidates()[0]
   if (!url) throw new Error('RPC_URL, HELIUS_RPC_URL, or HELIUS_API_KEY is not set')
   return url
 }
