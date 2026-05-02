@@ -1,4 +1,5 @@
 import { fetchLiveMeteoraSnapshot, type LiveMeteoraPosition } from '@/lib/meteora-live'
+import { getSupabaseRestHeaders, getSupabaseUrl } from '@/lib/supabase'
 
 interface CachedPosition {
   id: string
@@ -28,34 +29,13 @@ export interface MeteoraPositionSyncResult {
   positions: LiveMeteoraPosition[]
 }
 
-function sbUrl(): string {
-  const u = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL
-  if (!u) throw new Error('SUPABASE_URL not set')
-  return u
-}
-
-function sbKey(): string {
-  const k = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!k) throw new Error('SUPABASE_SERVICE_ROLE_KEY not set')
-  return k
-}
-
-function sbHeaders(prefer: 'minimal' | 'representation' = 'minimal') {
-  return {
-    apikey: sbKey(),
-    Authorization: `Bearer ${sbKey()}`,
-    'Content-Type': 'application/json',
-    Prefer: `return=${prefer}`,
-  }
-}
-
 async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<string, CachedPosition[]>> {
   if (positionPubkeys.length === 0) return new Map()
 
   const filter = `position_pubkey=in.(${positionPubkeys.join(',')})`
   const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,dry_run,metadata'
-  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions?${filter}&${select}`, {
-    headers: sbHeaders('representation'),
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions?${filter}&${select}`, {
+    headers: getSupabaseRestHeaders('representation'),
     signal: AbortSignal.timeout(10_000),
   })
 
@@ -74,8 +54,8 @@ async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<stri
 
 async function fetchOpenCachedPositions(): Promise<CachedPosition[]> {
   const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,dry_run,metadata'
-  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions?status=in.(active,open,out_of_range,orphaned)&${select}`, {
-    headers: sbHeaders('representation'),
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions?status=in.(active,open,out_of_range,orphaned)&${select}`, {
+    headers: getSupabaseRestHeaders('representation'),
     signal: AbortSignal.timeout(10_000),
   })
 
@@ -146,9 +126,9 @@ function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record
 }
 
 async function insertCachedPosition(live: LiveMeteoraPosition): Promise<void> {
-  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions`, {
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions`, {
     method: 'POST',
-    headers: sbHeaders('minimal'),
+    headers: getSupabaseRestHeaders('minimal'),
     body: JSON.stringify(insertBody(live)),
     signal: AbortSignal.timeout(10_000),
   })
@@ -159,9 +139,9 @@ async function insertCachedPosition(live: LiveMeteoraPosition): Promise<void> {
 }
 
 async function updateCachedPosition(live: LiveMeteoraPosition, existing: CachedPosition): Promise<void> {
-  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions?id=eq.${existing.id}`, {
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions?id=eq.${existing.id}`, {
     method: 'PATCH',
-    headers: sbHeaders('minimal'),
+    headers: getSupabaseRestHeaders('minimal'),
     body: JSON.stringify(updateBody(live, existing)),
     signal: AbortSignal.timeout(10_000),
   })
@@ -194,9 +174,9 @@ function shouldMarkExternallyClosed(
 }
 
 async function markCachedPositionExternallyClosed(row: CachedPosition): Promise<void> {
-  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions?id=eq.${row.id}`, {
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions?id=eq.${row.id}`, {
     method: 'PATCH',
-    headers: sbHeaders('minimal'),
+    headers: getSupabaseRestHeaders('minimal'),
     body: JSON.stringify({
       status: 'closed',
       closed_at: new Date().toISOString(),

@@ -2,35 +2,17 @@ import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
 import { syncAllMeteoraPositions, type MeteoraPositionSyncResult } from '@/lib/position-sync'
+import { getSupabaseRestHeaders, getSupabaseUrl } from '@/lib/supabase'
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
   return mod.default as typeof import('@meteora-ag/dlmm').default
 }
 
-function sbUrl(): string {
-  const u = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL
-  if (!u) throw new Error('SUPABASE_URL not set')
-  return u
-}
-function sbKey(): string {
-  const k = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!k) throw new Error('SUPABASE_SERVICE_ROLE_KEY not set')
-  return k
-}
-function sbHeaders() {
-  return {
-    'apikey': sbKey(),
-    'Authorization': `Bearer ${sbKey()}`,
-    'Content-Type': 'application/json',
-    'Prefer': 'return=representation',
-  }
-}
-
 async function positionExistsInDb(positionPubKey: string): Promise<boolean> {
   const res = await fetch(
-    `${sbUrl()}/rest/v1/lp_positions?position_pubkey=eq.${positionPubKey}&select=id&limit=1`,
-    { headers: sbHeaders(), signal: AbortSignal.timeout(8_000) },
+    `${getSupabaseUrl()}/rest/v1/lp_positions?position_pubkey=eq.${positionPubKey}&select=id&limit=1`,
+    { headers: getSupabaseRestHeaders('representation'), signal: AbortSignal.timeout(8_000) },
   )
   if (!res.ok) throw new Error(`positionExistsInDb ${res.status}: ${await res.text()}`)
   const rows: unknown[] = await res.json()
@@ -65,9 +47,9 @@ async function insertOrphan(
   mint: string,
   inRange: boolean,
 ): Promise<void> {
-  const res = await fetch(`${sbUrl()}/rest/v1/lp_positions`, {
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions`, {
     method: 'POST',
-    headers: { ...sbHeaders(), 'Prefer': 'return=minimal' },
+    headers: getSupabaseRestHeaders('minimal'),
     body: JSON.stringify({
       symbol:          `ORPHAN-${positionPubKey.slice(0, 6)}`,
       mint,

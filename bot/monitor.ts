@@ -15,6 +15,7 @@ import { STRATEGIES } from '@/strategies'
 import { mergeDbAndLiveLpPositions, type LiveMeteoraPosition } from '@/lib/meteora-live'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 import { syncAllMeteoraPositions, type MeteoraPositionSyncResult } from '@/lib/position-sync'
+import { getSupabaseRestHeaders, getSupabaseUrl } from '@/lib/supabase'
 import type { Strategy } from '@/lib/types'
 
 async function getDLMM() {
@@ -31,37 +32,14 @@ const SMART_REBALANCE_IN_RANGE = process.env.LP_SMART_REBALANCE_IN_RANGE === 'tr
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
 let tickCount = 0
 
-// ── Direct REST helpers (bypasses supabase-js connection pooling issues) ──────
-
-function sbUrl(): string {
-  const u = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL
-  if (!u) throw new Error('SUPABASE_URL not set')
-  return u
-}
-
-function sbKey(): string {
-  const k = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!k) throw new Error('SUPABASE_SERVICE_ROLE_KEY not set')
-  return k
-}
-
-function sbHeaders() {
-  return {
-    'apikey': sbKey(),
-    'Authorization': `Bearer ${sbKey()}`,
-    'Content-Type': 'application/json',
-    'Prefer': 'return=minimal',
-  }
-}
-
 function nullableNumber(value: unknown): number | null {
   const n = Number(value)
   return Number.isFinite(n) ? n : null
 }
 
 async function sbSelect<T>(table: string, params: string): Promise<T[]> {
-  const res = await fetch(`${sbUrl()}/rest/v1/${table}?${params}`, {
-    headers: { ...sbHeaders(), 'Prefer': 'return=representation' },
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/${table}?${params}`, {
+    headers: getSupabaseRestHeaders('representation'),
     signal: AbortSignal.timeout(10_000),
   })
   if (!res.ok) throw new Error(`sbSelect ${table} ${res.status}: ${await res.text()}`)
@@ -69,9 +47,9 @@ async function sbSelect<T>(table: string, params: string): Promise<T[]> {
 }
 
 async function sbUpdate(table: string, matchParam: string, body: Record<string, unknown>): Promise<void> {
-  const res = await fetch(`${sbUrl()}/rest/v1/${table}?${matchParam}`, {
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/${table}?${matchParam}`, {
     method: 'PATCH',
-    headers: sbHeaders(),
+    headers: getSupabaseRestHeaders('minimal'),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   })
@@ -79,9 +57,9 @@ async function sbUpdate(table: string, matchParam: string, body: Record<string, 
 }
 
 async function sbInsert(table: string, body: Record<string, unknown>): Promise<void> {
-  const res = await fetch(`${sbUrl()}/rest/v1/${table}`, {
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/${table}`, {
     method: 'POST',
-    headers: sbHeaders(),
+    headers: getSupabaseRestHeaders('minimal'),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   })

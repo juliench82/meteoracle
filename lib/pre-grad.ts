@@ -21,8 +21,11 @@ import {
 import { OPEN_LP_STATUSES } from './position-limits'
 
 function getRpcUrl(): string {
-  const url = process.env.HELIUS_RPC_URL || process.env.RPC_URL
-  if (!url) throw new Error('HELIUS_RPC_URL or RPC_URL is not set')
+  const heliusFromKey = process.env.HELIUS_API_KEY
+    ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`
+    : ''
+  const url = process.env.RPC_URL || process.env.HELIUS_RPC_URL || heliusFromKey
+  if (!url) throw new Error('RPC_URL, HELIUS_RPC_URL, or HELIUS_API_KEY is not set')
   return url
 }
 
