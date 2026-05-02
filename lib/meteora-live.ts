@@ -1,4 +1,5 @@
 import { PublicKey } from '@solana/web3.js'
+import BN from 'bn.js'
 import { getConnection, getWallet } from '@/lib/solana'
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -7,6 +8,7 @@ const DEXSCREENER_TOKEN_API = 'https://api.dexscreener.com/latest/dex/tokens'
 const METEORA_DLMM_POSITION_API = 'https://dlmm-api.meteora.ag/position'
 const _pairInfoCache = new Map<string, DexPairInfo | null>()
 const _dlmmPositionStatsCache = new Map<string, Record<string, number | null> | null>()
+const _mintDecimalsCache = new Map<string, number | null>()
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -36,6 +38,22 @@ function toNumber(value: unknown): number {
   return Number(value) || 0
 }
 
+function numberOrNull(value: unknown): number | null {
+  if (value == null) return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function toBn(value: unknown): BN {
+  if (BN.isBN(value)) return value as BN
+  if (typeof value === 'bigint') return new BN(value.toString())
+  if (typeof value === 'number') return new BN(Math.trunc(value).toString())
+  if (typeof (value as { toString?: unknown })?.toString === 'function') {
+    return new BN((value as { toString: () => string }).toString())
+  }
+  return new BN(0)
+}
+
 function toBase58(value: unknown): string {
   if (value instanceof PublicKey) return value.toBase58()
   if (value && typeof (value as { toBase58?: unknown }).toBase58 === 'function') {
@@ -53,6 +71,12 @@ interface DexPairInfo {
   volume?: { h24?: number; h6?: number; h1?: number; m5?: number }
   baseToken?: { address?: string; symbol?: string }
   quoteToken?: { address?: string; symbol?: string }
+}
+
+interface TokenDeposit {
+  mint: string
+  symbol: string
+  amount: number
 }
 
 function normalizeSymbolPart(symbol: unknown): string {
@@ -129,6 +153,22 @@ async function fetchDexPairByToken(mint: string, poolAddress?: string): Promise<
   const pair = exactPool ?? solPair ?? pairs[0] ?? null
   _pairInfoCache.set(cacheKey, pair)
   return pair
+}
+
+async function fetchMintDecimals(mint: string): Promise<number | null> {
+  if (!mint) return null
+  if (mint === SOL_MINT) return 9
+  if (_mintDecimalsCache.has(mint)) return _mintDecimalsCache.get(mint) ?? null
+
+  try {
+    const account = await getConnection().getParsedAccountInfo(new PublicKey(mint), 'confirmed')
+    const decimals = parseDecimalCount((account.value?.data as any)?.parsed?.info?.decimals)
+    _mintDecimalsCache.set(mint, decimals)
+    return decimals
+  } catch {
+    _mintDecimalsCache.set(mint, null)
+    return null
+  }
 }
 
 async function resolveLiveSymbol(
@@ -217,6 +257,30 @@ function uiAmount(raw: unknown, decimals: number | null): number | null {
   return amount / 10 ** decimals
 }
 
+function tokenSymbol(token: unknown, mint: string, pair?: DexPairInfo | null): string {
+  const tokenLike = token as { symbol?: unknown; name?: unknown } | null
+  const localSymbol = normalizeSymbolPart(tokenLike?.symbol ?? tokenLike?.name)
+  if (localSymbol) return localSymbol
+  if (mint === SOL_MINT) return 'SOL'
+  if (pair?.baseToken?.address === mint) return normalizeSymbolPart(pair.baseToken.symbol) || mint.slice(0, 4)
+  if (pair?.quoteToken?.address === mint) return normalizeSymbolPart(pair.quoteToken.symbol) || mint.slice(0, 4)
+  return mint.slice(0, 4)
+}
+
+function depositComponents(...deposits: Array<TokenDeposit | null>): TokenDeposit[] {
+  return deposits.filter((deposit): deposit is TokenDeposit =>
+    deposit !== null &&
+    Number.isFinite(deposit.amount) &&
+    deposit.amount > 0,
+  )
+}
+
+function solUsdPrice(tokenXMint: string, tokenYMint: string, tokenXUsd: number | null, tokenYUsd: number | null): number | null {
+  if (tokenXMint === SOL_MINT) return tokenXUsd
+  if (tokenYMint === SOL_MINT) return tokenYUsd
+  return null
+}
+
 function usdAmount(amount: number | null, priceUsd: number | null): number | null {
   if (amount === null || priceUsd === null) return null
   return amount * priceUsd
@@ -230,6 +294,11 @@ function sumUsd(values: Array<number | null>): number | null {
 
 function roundUsd(value: number): number | null {
   if (!Number.isFinite(value) || value <= 0) return null
+  return Math.round(value * 100) / 100
+}
+
+function roundMoney(value: number): number | null {
+  if (!Number.isFinite(value)) return null
   return Math.round(value * 100) / 100
 }
 
@@ -265,6 +334,8 @@ function inferUsdPrices(pair: DexPairInfo | null | undefined, tokenXMint: string
 function estimateDlmmUsdFields(positionData: any, positionInfo: any, pair: DexPairInfo | null | undefined): {
   claimableFeesUsd: number | null
   positionValueUsd: number | null
+  deposits: TokenDeposit[]
+  solPriceUsd: number | null
 } {
   const tokenXMint = toBase58(positionInfo?.tokenX?.publicKey)
   const tokenYMint = toBase58(positionInfo?.tokenY?.publicKey)
@@ -285,8 +356,21 @@ function estimateDlmmUsdFields(positionData: any, positionInfo: any, pair: DexPa
     usdAmount(totalX, tokenXUsd),
     usdAmount(totalY, tokenYUsd),
   ])
+  const deposits = depositComponents(
+    totalX !== null
+      ? { mint: tokenXMint, symbol: tokenSymbol(positionInfo?.tokenX, tokenXMint, pair), amount: totalX }
+      : null,
+    totalY !== null
+      ? { mint: tokenYMint, symbol: tokenSymbol(positionInfo?.tokenY, tokenYMint, pair), amount: totalY }
+      : null,
+  )
 
-  return { claimableFeesUsd, positionValueUsd }
+  return {
+    claimableFeesUsd,
+    positionValueUsd,
+    deposits,
+    solPriceUsd: solUsdPrice(tokenXMint, tokenYMint, tokenXUsd, tokenYUsd),
+  }
 }
 
 function openedAtFromPosition(positionData: any): string {
@@ -320,6 +404,7 @@ async function fetchMeteoraDammPositionFields(positionPubkey: string): Promise<{
   feesClaimedUsd: number | null
   totalFeeEarnedUsd: number | null
   totalPnlUsd: number | null
+  deposits: TokenDeposit[]
 } | null> {
   try {
     const res = await fetch(`https://amm-v2.meteora.ag/position/${positionPubkey}`, {
@@ -334,6 +419,22 @@ async function fetchMeteoraDammPositionFields(positionPubkey: string): Promise<{
     const feesClaimedUsd = data.total_fee_usd_claimed ?? data.total_fee_claimed_usd ?? data.fee_claimed_usd ?? null
     const totalFeeEarnedUsd = data.total_fee_earned_usd ?? data.total_fees_earned_usd ?? null
     const totalPnlUsd = data.position_pnl_usd ?? data.pnl_usd ?? data.total_pnl_usd ?? null
+    const tokenADecimals = parseDecimalCount(data.token_a_decimals ?? data.tokenADecimals)
+    const tokenBDecimals = parseDecimalCount(data.token_b_decimals ?? data.tokenBDecimals)
+    const tokenAAmountRaw = numberOrNull(data.token_a_amount ?? data.amount_a)
+    const tokenBAmountRaw = numberOrNull(data.token_b_amount ?? data.amount_b)
+    const tokenAAmount = numberOrNull(
+      data.token_a_amount_ui ??
+      data.token_a_ui_amount ??
+      data.token_a_deposit_amount_ui,
+    ) ?? (tokenAAmountRaw !== null && tokenADecimals !== null ? tokenAAmountRaw / 10 ** tokenADecimals : null)
+    const tokenBAmount = numberOrNull(
+      data.token_b_amount_ui ??
+      data.token_b_ui_amount ??
+      data.token_b_deposit_amount_ui,
+    ) ?? (tokenBAmountRaw !== null && tokenBDecimals !== null ? tokenBAmountRaw / 10 ** tokenBDecimals : null)
+    const tokenAMint = String(data.token_a_mint ?? data.tokenAMint ?? '')
+    const tokenBMint = String(data.token_b_mint ?? data.tokenBMint ?? '')
 
     return {
       claimableFeesUsd: claimableFeesUsd !== null ? Number(claimableFeesUsd) : null,
@@ -341,9 +442,61 @@ async function fetchMeteoraDammPositionFields(positionPubkey: string): Promise<{
       feesClaimedUsd: feesClaimedUsd !== null ? Number(feesClaimedUsd) : null,
       totalFeeEarnedUsd: totalFeeEarnedUsd !== null ? Number(totalFeeEarnedUsd) : null,
       totalPnlUsd: totalPnlUsd !== null ? Number(totalPnlUsd) : null,
+      deposits: depositComponents(
+        tokenAAmount !== null && tokenAMint ? { mint: tokenAMint, symbol: normalizeSymbolPart(data.token_a_symbol) || tokenAMint.slice(0, 4), amount: tokenAAmount } : null,
+        tokenBAmount !== null && tokenBMint ? { mint: tokenBMint, symbol: normalizeSymbolPart(data.token_b_symbol) || tokenBMint.slice(0, 4), amount: tokenBAmount } : null,
+      ),
     }
   } catch {
     return null
+  }
+}
+
+async function estimateDammDeposits(
+  positionState: any,
+  poolState: any,
+  pair: DexPairInfo | null | undefined,
+): Promise<TokenDeposit[]> {
+  if (!positionState || !poolState) return []
+
+  try {
+    const mod = await import('@meteora-ag/cp-amm-sdk')
+    const tokenAMint = toBase58(poolState.tokenAMint)
+    const tokenBMint = toBase58(poolState.tokenBMint)
+    const liquidity = toBn(positionState.unlockedLiquidity)
+      .add(toBn(positionState.vestedLiquidity))
+      .add(toBn(positionState.permanentLockedLiquidity))
+
+    if (liquidity.isZero()) return []
+
+    const tokenADecimals = await fetchMintDecimals(tokenAMint)
+    const tokenBDecimals = await fetchMintDecimals(tokenBMint)
+    const amountA = mod.getAmountAFromLiquidityDelta(
+      poolState.sqrtPrice,
+      poolState.sqrtMaxPrice,
+      liquidity,
+      mod.Rounding.Up,
+      poolState.collectFeeMode,
+      poolState.tokenAAmount,
+      poolState.liquidity,
+    )
+    const amountB = mod.getAmountBFromLiquidityDelta(
+      poolState.sqrtMinPrice,
+      poolState.sqrtPrice,
+      liquidity,
+      mod.Rounding.Up,
+      poolState.collectFeeMode,
+      poolState.tokenBAmount,
+      poolState.liquidity,
+    )
+
+    return depositComponents(
+      { mint: tokenAMint, symbol: tokenSymbol(null, tokenAMint, pair), amount: uiAmount(amountA, tokenADecimals) ?? 0 },
+      { mint: tokenBMint, symbol: tokenSymbol(null, tokenBMint, pair), amount: uiAmount(amountB, tokenBDecimals) ?? 0 },
+    )
+  } catch (err) {
+    console.warn('[meteora-live] could not estimate DAMM deposits:', err)
+    return []
   }
 }
 
@@ -418,6 +571,8 @@ export interface LiveDlmmPosition {
   current_price: number
   claimable_fees_usd?: number | null
   position_value_usd?: number | null
+  pnl_usd?: number | null
+  deposits?: TokenDeposit[]
   dry_run: boolean
   metadata: Record<string, unknown>
   _source: 'meteora-live'
@@ -500,6 +655,8 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
         current_price: currentPrice,
         claimable_fees_usd: usdFields.claimableFeesUsd,
         position_value_usd: usdFields.positionValueUsd,
+        pnl_usd: null,
+        deposits: usdFields.deposits,
         dry_run: false,
         metadata: {
           source_of_truth: 'meteora',
@@ -523,6 +680,8 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
           total_y_amount: String(positionData.totalYAmount ?? '0'),
           fee_x_amount: String(positionData.feeX ?? '0'),
           fee_y_amount: String(positionData.feeY ?? '0'),
+          deposits: usdFields.deposits,
+          sol_price_usd: usdFields.solPriceUsd,
           ...(usdFields.claimableFeesUsd !== null && { claimable_fees_usd: usdFields.claimableFeesUsd }),
           ...(usdFields.positionValueUsd !== null && { position_value_usd: usdFields.positionValueUsd }),
           ...(positionStats?.daily_fee_yield !== null && positionStats?.daily_fee_yield !== undefined && { daily_fee_yield: positionStats.daily_fee_yield }),
@@ -574,11 +733,16 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
     const resolved = await resolveLiveSymbol(mint, poolAddress, 'DAMM')
     const poolStats = await fetchMeteoraDammPoolStats(poolAddress)
     const currentPrice = poolState ? sqrtPriceToNumber(poolState.sqrtPrice) : 0
+    const tokenAMint = toBase58(poolState?.tokenAMint)
+    const tokenBMint = toBase58(poolState?.tokenBMint)
+    const tokenPrices = inferUsdPrices(resolved.pair, tokenAMint, tokenBMint)
+    const sdkDeposits = await estimateDammDeposits(positionState, poolState, resolved.pair)
     const claimableFeesUsd = meteoraFields?.claimableFeesUsd ?? null
     const positionValueUsd = meteoraFields?.positionValueUsd ?? null
     const feesClaimedUsd = meteoraFields?.feesClaimedUsd ?? null
     const totalFeeEarnedUsd = meteoraFields?.totalFeeEarnedUsd ?? null
     const totalPnlUsd = meteoraFields?.totalPnlUsd ?? null
+    const deposits = meteoraFields?.deposits?.length ? meteoraFields.deposits : sdkDeposits
 
     live.push({
       id: `meteora-damm-${positionPubkey}`,
@@ -599,6 +763,8 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
       current_price: currentPrice,
       claimable_fees_usd: claimableFeesUsd,
       position_value_usd: positionValueUsd,
+      pnl_usd: totalPnlUsd,
+      deposits,
       dry_run: false,
       metadata: {
         source_of_truth: 'meteora',
@@ -606,8 +772,8 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
         position_kind: 'damm-v2',
         position_nft_account: toBase58(item.positionNftAccount),
         nft_mint: toBase58(positionState.nftMint),
-        token_a_mint: toBase58(poolState?.tokenAMint),
-        token_b_mint: toBase58(poolState?.tokenBMint),
+        token_a_mint: tokenAMint,
+        token_b_mint: tokenBMint,
         dex_pair_address: resolved.pair?.pairAddress ?? null,
         dex_price_usd: resolved.pair?.priceUsd != null ? Number(resolved.pair.priceUsd) : null,
         dex_liquidity_usd: resolved.pair?.liquidity?.usd ?? null,
@@ -621,10 +787,13 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
         unlocked_liquidity: String(positionState.unlockedLiquidity ?? '0'),
         vested_liquidity: String(positionState.vestedLiquidity ?? '0'),
         permanent_locked_liquidity: String(positionState.permanentLockedLiquidity ?? '0'),
+        deposits,
+        sol_price_usd: solUsdPrice(tokenAMint, tokenBMint, tokenPrices.tokenXUsd, tokenPrices.tokenYUsd),
         ...(claimableFeesUsd !== null && { claimable_fees_usd: claimableFeesUsd }),
         ...(positionValueUsd !== null && { position_value_usd: positionValueUsd }),
         ...(feesClaimedUsd !== null && { total_fee_usd_claimed: feesClaimedUsd }),
         ...(totalFeeEarnedUsd !== null && { total_fee_earned_usd: totalFeeEarnedUsd }),
+        ...(totalPnlUsd !== null && { pnl_usd: totalPnlUsd }),
         ...(totalPnlUsd !== null && { total_pnl_usd: totalPnlUsd }),
         ...(resolved.dexUrl && { dexscreener_url: resolved.dexUrl }),
         synced_at: new Date().toISOString(),
@@ -663,6 +832,38 @@ export async function fetchLiveMeteoraPositions(): Promise<LiveMeteoraPosition[]
   return (await fetchLiveMeteoraSnapshot()).positions
 }
 
+function firstFiniteNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const n = numberOrNull(value)
+    if (n !== null) return n
+  }
+  return null
+}
+
+function deriveOpenPnlUsd(
+  positionValueUsd: number | null,
+  claimableFeesUsd: number | null,
+  solDeposited: number,
+  metadata: Record<string, unknown>,
+): number | null {
+  if (positionValueUsd === null || solDeposited <= 0) return null
+
+  const solPriceUsd = firstFiniteNumber(metadata.sol_price_usd, metadata.current_sol_price_usd)
+  if (solPriceUsd === null || solPriceUsd <= 0) return null
+
+  const claimedUsd =
+    (firstFiniteNumber(metadata.total_fee_usd_claimed) ?? 0) +
+    (firstFiniteNumber(metadata.total_reward_usd_claimed) ?? 0) +
+    (firstFiniteNumber(metadata.fees_claimed_usd) ?? 0)
+
+  return roundMoney(
+    positionValueUsd +
+    (claimableFeesUsd ?? 0) +
+    claimedUsd -
+    solDeposited * solPriceUsd,
+  )
+}
+
 export function mergeDbAndLiveLpPositions(
   dbRows: any[],
   liveRows: LiveMeteoraPosition[],
@@ -686,6 +887,27 @@ export function mergeDbAndLiveLpPositions(
       const symbol = /^(LIVE|DAMM|ORPHAN)-/.test(dbSymbol) || dbSymbol === 'SOL'
         ? live.symbol
         : (row.symbol ?? live.symbol)
+      const metadata = {
+        ...(row.metadata ?? {}),
+        ...(live.metadata ?? {}),
+      }
+      const solDeposited = Number(row.sol_deposited ?? 0) > 0 ? row.sol_deposited : live.sol_deposited
+      const claimableFeesUsd = live.claimable_fees_usd ?? row.claimable_fees_usd
+      const positionValueUsd = live.position_value_usd ?? row.position_value_usd
+      const pnlUsd = firstFiniteNumber(
+        live.pnl_usd,
+        row.pnl_usd,
+        row.realized_pnl_usd,
+        metadata.pnl_usd,
+        metadata.total_pnl_usd,
+        metadata.position_pnl_usd,
+        metadata.realized_pnl_usd,
+      ) ?? deriveOpenPnlUsd(
+        firstFiniteNumber(positionValueUsd),
+        firstFiniteNumber(claimableFeesUsd),
+        Number(solDeposited ?? 0),
+        metadata,
+      )
       merged.push({
         ...row,
         ...live,
@@ -693,7 +915,7 @@ export function mergeDbAndLiveLpPositions(
         symbol,
         strategy_id: row.strategy_id ?? live.strategy_id,
         opened_at: row.opened_at ?? live.opened_at,
-        sol_deposited: Number(row.sol_deposited ?? 0) > 0 ? row.sol_deposited : live.sol_deposited,
+        sol_deposited: solDeposited,
         entry_price: row.entry_price ?? live.entry_price,
         entry_price_sol: row.entry_price_sol ?? live.entry_price_sol,
         entry_price_usd: row.entry_price_usd ?? live.entry_price_usd,
@@ -701,11 +923,13 @@ export function mergeDbAndLiveLpPositions(
         status: live.status,
         in_range: live.in_range,
         current_price: live.current_price || row.current_price,
-        claimable_fees_usd: live.claimable_fees_usd ?? row.claimable_fees_usd,
-        position_value_usd: live.position_value_usd ?? row.position_value_usd,
+        claimable_fees_usd: claimableFeesUsd,
+        position_value_usd: positionValueUsd,
+        pnl_usd: pnlUsd,
+        deposits: live.deposits ?? row.deposits ?? metadata.deposits,
         metadata: {
-          ...(row.metadata ?? {}),
-          ...(live.metadata ?? {}),
+          ...metadata,
+          ...(pnlUsd !== null && { pnl_usd: pnlUsd }),
         },
         _source: 'meteora-live+supabase',
       })

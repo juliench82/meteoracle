@@ -13,7 +13,9 @@ interface Position {
   pnl_pct?:        number | null   // spot only
   claimable_fees_usd?: number | null
   position_value_usd?: number | null
+  pnl_usd?:        number | null
   realized_pnl_usd?: number | null
+  deposits?:       Array<{ symbol?: string; amount?: number | null; mint?: string }> | null
   status:          string
   dry_run:         boolean
   opened_at:       string
@@ -64,9 +66,33 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
 
   function fmtUsd(val: unknown, sign = false): string {
     const n = Number(val)
-    if (!val || isNaN(n)) return '—'
-    const prefix = sign && n >= 0 ? '+' : ''
+    if (val == null || isNaN(n)) return '—'
+    const prefix = sign ? (n >= 0 ? '+' : '-') : (n < 0 ? '-' : '')
     return `${prefix}$${Math.abs(n).toFixed(2)}`
+  }
+
+  function fmtTokenAmount(val: unknown): string {
+    const n = Number(val)
+    if (!Number.isFinite(n)) return '—'
+    const abs = Math.abs(n)
+    if (abs === 0) return '0'
+    if (abs >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+    if (abs >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 4 })
+    if (abs >= 0.0001) return n.toLocaleString(undefined, { maximumFractionDigits: 6 })
+    return n.toExponential(2)
+  }
+
+  function getDeposits(pos: Position): Array<{ symbol: string; amount: number }> {
+    const meta = pos.metadata ?? {}
+    const raw = pos.deposits ?? meta.deposits
+    if (!Array.isArray(raw)) return []
+    return raw
+      .map((deposit) => {
+        const amount = Number((deposit as { amount?: unknown }).amount)
+        const symbol = String((deposit as { symbol?: unknown }).symbol ?? '').trim()
+        return { amount, symbol }
+      })
+      .filter(deposit => Number.isFinite(deposit.amount) && deposit.amount > 0 && deposit.symbol.length > 0)
   }
 
   function pnlCells(pos: Position) {
@@ -134,9 +160,13 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
       )
     }
 
-    // Open LP: claimable fees | position value | —
+    // Open LP: claimable fees | current deposits | open PnL
     const claimable = (pos.claimable_fees_usd ?? meta.claimable_fees_usd) as number | undefined
-    const value     = (pos.position_value_usd  ?? meta.position_value_usd)  as number | undefined
+    const deposits  = getDeposits(pos)
+    const pnl       = (pos.pnl_usd ?? meta.pnl_usd ?? meta.total_pnl_usd ?? meta.position_pnl_usd) as number | undefined
+    const pnlColor = pnl == null
+      ? 'text-zinc-500'
+      : pnl >= 0 ? 'text-green-400' : 'text-red-400'
     return (
       <>
         {/* Claimable fees */}
@@ -145,14 +175,25 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
             {claimable != null ? fmtUsd(claimable) : '—'}
           </span>
         </td>
-        {/* Position value */}
+        {/* Current deposits */}
         <td className="text-right px-4 py-3">
-          <span className="text-zinc-300">
-            {value != null ? fmtUsd(value) : '—'}
+          {deposits.length > 0 ? (
+            <div className="space-y-0.5">
+              {deposits.slice(0, 2).map((deposit) => (
+                <div key={`${deposit.symbol}-${deposit.amount}`} className="text-zinc-300">
+                  {fmtTokenAmount(deposit.amount)} <span className="text-zinc-500">{deposit.symbol}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <span className="text-zinc-500">—</span>
+          )}
+        </td>
+        <td className="text-right px-4 py-3">
+          <span className={pnlColor}>
+            {pnl != null ? fmtUsd(pnl, true) : '—'}
           </span>
         </td>
-        {/* PnL not available for open LP — Meteora is source of truth at close */}
-        <td className="text-right px-4 py-3 text-zinc-500">—</td>
       </>
     )
   }
@@ -197,7 +238,7 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
                 <th className="text-right px-4 py-3">Size</th>
                 <th className="text-right px-4 py-3">Entry</th>
                 <th className="text-right px-4 py-3">Fees / Claimable</th>
-                <th className="text-right px-4 py-3">IL / Value</th>
+                <th className="text-right px-4 py-3">Your Deposits</th>
                 <th className="text-right px-4 py-3">PnL</th>
                 <th className="text-right px-4 py-3">Age</th>
                 <th className="text-center px-4 py-3">Status</th>
