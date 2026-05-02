@@ -169,15 +169,63 @@ function estimateSolDeposited(positionData: any, positionInfo: any): number {
   return 0
 }
 
-function tokenDecimals(value: unknown): number {
-  const n = Number(value)
-  return Number.isFinite(n) && n >= 0 ? n : 0
+function parseDecimalCount(value: unknown): number | null {
+  if (value == null) return null
+
+  let n: number
+  if (typeof value === 'number') {
+    n = value
+  } else if (typeof value === 'bigint') {
+    n = Number(value)
+  } else if (typeof value === 'string') {
+    n = Number(value)
+  } else if (typeof (value as { toNumber?: unknown }).toNumber === 'function') {
+    try {
+      n = (value as { toNumber: () => number }).toNumber()
+    } catch {
+      return null
+    }
+  } else {
+    return null
+  }
+
+  return Number.isInteger(n) && n >= 0 && n <= 18 ? n : null
 }
 
-function uiAmount(raw: unknown, decimals: number): number {
+function tokenDecimals(token: unknown, mint?: string): number | null {
+  const tokenLike = token as { decimals?: unknown; decimal?: unknown; mint?: { decimals?: unknown; decimal?: unknown } } | null
+  const candidates = [
+    parseDecimalCount(token),
+    parseDecimalCount(tokenLike?.decimals),
+    parseDecimalCount(tokenLike?.decimal),
+    parseDecimalCount(tokenLike?.mint?.decimals),
+    parseDecimalCount(tokenLike?.mint?.decimal),
+  ]
+
+  for (const candidate of candidates) {
+    if (candidate !== null) return candidate
+  }
+
+  if (mint === SOL_MINT) return 9
+  return null
+}
+
+function uiAmount(raw: unknown, decimals: number | null): number | null {
+  if (decimals === null) return null
   const amount = toNumber(raw)
   if (!Number.isFinite(amount) || amount <= 0) return 0
   return amount / 10 ** decimals
+}
+
+function usdAmount(amount: number | null, priceUsd: number | null): number | null {
+  if (amount === null || priceUsd === null) return null
+  return amount * priceUsd
+}
+
+function sumUsd(values: Array<number | null>): number | null {
+  const valid = values.filter((value): value is number => value !== null && Number.isFinite(value))
+  if (!valid.length) return null
+  return roundUsd(valid.reduce((sum, value) => sum + value, 0))
 }
 
 function roundUsd(value: number): number | null {
@@ -220,8 +268,8 @@ function estimateDlmmUsdFields(positionData: any, positionInfo: any, pair: DexPa
 } {
   const tokenXMint = toBase58(positionInfo?.tokenX?.publicKey)
   const tokenYMint = toBase58(positionInfo?.tokenY?.publicKey)
-  const tokenXDecimals = tokenDecimals(positionInfo?.tokenX?.decimals)
-  const tokenYDecimals = tokenDecimals(positionInfo?.tokenY?.decimals)
+  const tokenXDecimals = tokenDecimals(positionInfo?.tokenX, tokenXMint)
+  const tokenYDecimals = tokenDecimals(positionInfo?.tokenY, tokenYMint)
   const { tokenXUsd, tokenYUsd } = inferUsdPrices(pair, tokenXMint, tokenYMint)
 
   const feeX = uiAmount(positionData?.feeX, tokenXDecimals)
@@ -229,14 +277,14 @@ function estimateDlmmUsdFields(positionData: any, positionInfo: any, pair: DexPa
   const totalX = uiAmount(positionData?.totalXAmount, tokenXDecimals)
   const totalY = uiAmount(positionData?.totalYAmount, tokenYDecimals)
 
-  const claimableFeesUsd = roundUsd(
-    (tokenXUsd !== null ? feeX * tokenXUsd : 0) +
-    (tokenYUsd !== null ? feeY * tokenYUsd : 0),
-  )
-  const positionValueUsd = roundUsd(
-    (tokenXUsd !== null ? totalX * tokenXUsd : 0) +
-    (tokenYUsd !== null ? totalY * tokenYUsd : 0),
-  )
+  const claimableFeesUsd = sumUsd([
+    usdAmount(feeX, tokenXUsd),
+    usdAmount(feeY, tokenYUsd),
+  ])
+  const positionValueUsd = sumUsd([
+    usdAmount(totalX, tokenXUsd),
+    usdAmount(totalY, tokenYUsd),
+  ])
 
   return { claimableFeesUsd, positionValueUsd }
 }
@@ -460,8 +508,8 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
           token_y_mint: toBase58(positionInfo?.tokenY?.publicKey),
           token_x_symbol: normalizeSymbolPart(positionInfo?.tokenX?.symbol),
           token_y_symbol: normalizeSymbolPart(positionInfo?.tokenY?.symbol),
-          token_x_decimals: tokenDecimals(positionInfo?.tokenX?.decimals),
-          token_y_decimals: tokenDecimals(positionInfo?.tokenY?.decimals),
+          token_x_decimals: tokenDecimals(positionInfo?.tokenX, toBase58(positionInfo?.tokenX?.publicKey)),
+          token_y_decimals: tokenDecimals(positionInfo?.tokenY, toBase58(positionInfo?.tokenY?.publicKey)),
           dex_pair_address: resolved.pair?.pairAddress ?? null,
           dex_price_usd: resolved.pair?.priceUsd != null ? Number(resolved.pair.priceUsd) : null,
           dex_liquidity_usd: resolved.pair?.liquidity?.usd ?? null,
