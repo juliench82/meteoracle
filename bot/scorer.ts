@@ -4,10 +4,12 @@ import type { TokenMetrics, Strategy } from '@/lib/types'
  * Composite candidate score (0–100).
  *
  * Components:
- *   - Volume/MC ratio    (40pts) — momentum signal
- *   - Rugcheck score     (25pts) — safety signal (raw: candidates.rugcheck_score)
- *   - Holder count       (20pts) — distribution signal
- *   - Token freshness    (15pts) — recency signal
+ *   - Volume/MC ratio       (25pts) - broad momentum signal
+ *   - Rugcheck score        (15pts) - safety signal (raw: candidates.rugcheck_score)
+ *   - Holder count          (15pts) - distribution signal
+ *   - Token freshness       (20pts) - recency signal
+ *   - Recent Fee/TVL        (15pts) - Meteora-native 1h/5m fee efficiency
+ *   - Recent volume / TVL   (10pts) - hot-pool efficiency + acceleration
  *
  * Freshness is tier-aware:
  *   - SHITCOIN (Evil Panda):  rewards very fresh tokens (<24h)
@@ -31,6 +33,8 @@ export interface ScoreBreakdown {
   rugScore:       number
   holderScore:    number
   freshnessScore: number
+  feeEfficiencyScore: number
+  volumeTvlScore: number
   curveBonus:     number
 }
 
@@ -41,7 +45,16 @@ export function scoreCandidate(token: TokenMetrics, strategy: Strategy): number 
 export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strategy): ScoreBreakdown {
   const zero = (reason: string): ScoreBreakdown => {
     console.log(`[scorer] ${token.symbol} DISQUALIFIED — ${reason}`)
-    return { total: 0, volMcScore: 0, rugScore: 0, holderScore: 0, freshnessScore: 0, curveBonus: 0 }
+    return {
+      total: 0,
+      volMcScore: 0,
+      rugScore: 0,
+      holderScore: 0,
+      freshnessScore: 0,
+      feeEfficiencyScore: 0,
+      volumeTvlScore: 0,
+      curveBonus: 0,
+    }
   }
 
   const isPumpFun = token.address.endsWith('pump')
@@ -64,12 +77,16 @@ export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strat
   const volMcScore   = scoreVolumeMcRatio(volMcRatio, isPumpFun)
   const holderScore  = scoreHolders(token.holderCount)
   const freshnessScore = scoreFreshness(token.ageHours, isLargeCap, isMemecoin)
+  const feeEfficiencyScore = scoreFeeEfficiency(token)
+  const volumeTvlScore = scoreRecentVolumeEfficiency(token)
 
   const base = (
-    volMcScore     * 0.40 +
-    rugScore       * 0.25 +
-    holderScore    * 0.20 +
-    freshnessScore * 0.15
+    volMcScore          * 0.25 +
+    rugScore            * 0.15 +
+    holderScore         * 0.15 +
+    freshnessScore      * 0.20 +
+    feeEfficiencyScore  * 0.15 +
+    volumeTvlScore      * 0.10
   )
 
   let curveBonus = 0
@@ -86,10 +103,20 @@ export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strat
     `[scorer] ${token.symbol} — ` +
     `volMc=${volMcScore.toFixed(0)} rug=${rugScore.toFixed(0)} ` +
     `holders=${holderScore.toFixed(0)} fresh=${freshnessScore.toFixed(0)} ` +
+    `feeEff=${feeEfficiencyScore.toFixed(0)} volTvl=${volumeTvlScore.toFixed(0)} ` +
     `bonus=${curveBonus} → ${total}`
   )
 
-  return { total, volMcScore, rugScore, holderScore, freshnessScore, curveBonus }
+  return {
+    total,
+    volMcScore,
+    rugScore,
+    holderScore,
+    freshnessScore,
+    feeEfficiencyScore,
+    volumeTvlScore,
+    curveBonus,
+  }
 }
 
 function scoreVolumeMcRatio(ratio: number, isPumpFun: boolean): number {
@@ -124,6 +151,38 @@ function scoreHolders(holderCount: number): number {
   if (holderCount >= 500)  return 45
   if (holderCount >= 200)  return 25
   return 10
+}
+
+function scoreFeeEfficiency(token: TokenMetrics): number {
+  const feeTvl1hPct = token.feeTvl1hPct ?? 0
+  const feeTvl5mPct = (token.feeTvl5mPct ?? 0) * 6
+  const feeTvl24hHourlyPct = token.feeTvl24hPct / 12
+  const recentFeePct = Math.max(feeTvl1hPct, feeTvl5mPct, feeTvl24hHourlyPct)
+
+  if (recentFeePct >= 8) return 100
+  if (recentFeePct >= 5) return 85
+  if (recentFeePct >= 3) return 65
+  if (recentFeePct >= 1.5) return 40
+  if (recentFeePct >= 0.5) return 20
+  return 0
+}
+
+function scoreRecentVolumeEfficiency(token: TokenMetrics): number {
+  const ratio = token.volumeTvl1hRatio ?? (
+    token.volume1h !== undefined && token.liquidityUsd > 0 ? token.volume1h / token.liquidityUsd : 0
+  )
+  const growth = token.volumeGrowth1h ?? 0
+
+  let base: number
+  if (ratio >= 1.0)       base = 90
+  else if (ratio >= 0.5)  base = 75
+  else if (ratio >= 0.2)  base = 55
+  else if (ratio >= 0.1)  base = 30
+  else if (ratio >= 0.05) base = 15
+  else base = 0
+
+  const growthBonus = growth >= 2.5 ? 10 : growth >= 1.5 ? 7 : growth >= 1 ? 4 : 0
+  return Math.min(100, base + growthBonus)
 }
 
 /**

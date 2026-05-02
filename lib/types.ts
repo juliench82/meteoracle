@@ -49,6 +49,8 @@ export interface TokenMetrics {
   symbol: string
   mcUsd: number
   volume24h: number
+  volume1h?: number
+  volume5m?: number
   liquidityUsd: number
   topHolderPct: number
   holderCount: number
@@ -59,6 +61,16 @@ export interface TokenMetrics {
   dexId: string
   /** 24h fees / TVL expressed as a percentage, e.g. 131.35 means 131.35% */
   feeTvl24hPct: number
+  /** 1h fees / TVL expressed as a percentage. Used by scanner v2 freshness scoring. */
+  feeTvl1hPct?: number
+  /** 5m fees / TVL expressed as a percentage. Used by scanner v2 freshness scoring. */
+  feeTvl5mPct?: number
+  /** 1h volume / TVL ratio, e.g. 0.8 means 80% of TVL traded in the last hour. */
+  volumeTvl1hRatio?: number
+  /** 5m volume annualized to 1h divided by observed 1h volume. >1 means accelerating. */
+  volumeGrowth1h?: number
+  /** Meteora-native pre-Helius momentum score used to rank deep checks. */
+  momentumScore?: number
   /** pump.fun bonding curve fill %, 0–100. undefined = not a pump.fun token or fetch failed. */
   bondingCurvePct?: number
   /** Quote token mint address of the selected pool (e.g. WSOL, USDC, USDT). */
