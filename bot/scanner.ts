@@ -20,6 +20,8 @@ import {
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
 // ── DAMM v2 Edge (additive imports — do not remove or reorder) ────────────────
+import { evaluateDammLaunch } from '@/strategies/damm-launch'
+import { createAndOpenDammLaunch, type DammLaunchParams } from './damm-launch-executor'
 import { evaluateDammEdge } from '@/strategies/damm-edge'
 import { openDammPosition } from './damm-executor'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
@@ -638,6 +640,58 @@ export async function runScanner(): Promise<ScannerResult> {
       quoteTokenMint,
       binStep,
     }
+
+    // ========== DAMM v2 LAUNCH (pool creation; isolated primary track) =========
+    // This runs before damm-edge because the launch edge is pool creation, while
+    // damm-edge only adds liquidity to an existing DAMM v2 pool.
+    if (await evaluateDammLaunch(metrics)) {
+      const dammLaunchParams: DammLaunchParams = {
+        tokenAddress,
+        poolAddress: bestPool.address,
+        solAmount: MAX_SOL_PER_POSITION,
+        symbol,
+        ageMinutes: metrics.ageHours * 60,
+        feeTvl24hPct: metrics.feeTvl24hPct,
+        liquidityUsd: metrics.liquidityUsd,
+        bondingCurvePct,
+        tokenDecimals: token.decimals,
+        priceUsd: metrics.priceUsd,
+        initialPriceSol: bestPool.current_price,
+        quoteTokenMint,
+        feeTvl1hPct,
+        feeTvl5mPct,
+        volume1h: vol1h,
+        volume5m: vol5m,
+        momentumScore,
+      }
+
+      if (openBlockedReason || openedCount >= availableOpenSlots) {
+        openSkippedCount++
+        const reason = openBlockedReason ?? 'slots_filled_this_tick'
+        console.log(`[scanner][damm-launch] ${symbol} qualifies but open skipped: ${reason}`)
+        continue
+      }
+
+      console.log(`[scanner][damm-launch] TRIGGERED - creating DAMM v2 pool for ${symbol}`)
+      const result = await createAndOpenDammLaunch(dammLaunchParams)
+      if (result.success) {
+        openedCount++
+        await sendAlert({
+          type:          'position_opened',
+          symbol,
+          strategy:      'damm-launch',
+          solDeposited:  dammLaunchParams.solAmount,
+          entryPrice:    metrics.priceUsd,
+          poolAddress:   result.poolAddress,
+          mint:          tokenAddress,
+          positionId:    result.positionPubkey,
+        })
+        continue
+      } else {
+        console.error(`[scanner][damm-launch] createAndOpenDammLaunch failed for ${symbol}: ${result.error}`)
+      }
+    }
+    // ========== END DAMM v2 LAUNCH ============================================
 
     // ========== DAMM v2 EDGE (additive hook — Meteora-origin pools only) =======
     // Fires ONLY for native Meteora pools (launchpadSource === 'meteora').
