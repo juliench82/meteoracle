@@ -15,11 +15,49 @@ import bs58 from 'bs58'
 
 let _connection: Connection | null = null
 
+function cleanEnv(value: string | undefined): string | null {
+  const trimmed = value?.trim()
+  if (!trimmed) return null
+  if (/^(YOUR_KEY|REDACTED|xxxx)/i.test(trimmed)) return null
+  return trimmed
+}
+
+function heliusRpcFromApiKey(): string | null {
+  const apiKey = cleanEnv(process.env.HELIUS_API_KEY)
+  if (!apiKey) return null
+  return `https://mainnet.helius-rpc.com/?api-key=${apiKey}`
+}
+
+function splitRpcList(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map(item => cleanEnv(item))
+    .filter((item): item is string => Boolean(item))
+}
+
+export function getRpcEndpointCandidates(options: { includePublicFallback?: boolean } = {}): string[] {
+  const endpoints = [
+    cleanEnv(process.env.RPC_URL),
+    cleanEnv(process.env.HELIUS_RPC_URL),
+    heliusRpcFromApiKey(),
+    ...splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS),
+    ...(options.includePublicFallback && process.env.DISABLE_PUBLIC_RPC_FALLBACK !== 'true'
+      ? ['https://api.mainnet-beta.solana.com']
+      : []),
+  ].filter((endpoint): endpoint is string => Boolean(endpoint))
+
+  return Array.from(new Set(endpoints))
+}
+
+export function createConnection(rpcUrl: string): Connection {
+  return new Connection(rpcUrl, 'confirmed')
+}
+
 export function getConnection(): Connection {
   if (!_connection) {
-    const url = process.env.HELIUS_RPC_URL
-    if (!url) throw new Error('HELIUS_RPC_URL is not set')
-    _connection = new Connection(url, 'confirmed')
+    const url = getRpcEndpointCandidates()[0]
+    if (!url) throw new Error('RPC_URL, HELIUS_RPC_URL, or HELIUS_API_KEY is not set')
+    _connection = createConnection(url)
   }
   return _connection
 }
@@ -46,6 +84,17 @@ export function getWallet(): Keypair {
     }
   }
   return _wallet
+}
+
+export function getWalletPublicKey(): PublicKey {
+  const raw = cleanEnv(process.env.WALLET_PUBLIC_KEY)
+  if (!raw) return getWallet().publicKey
+
+  try {
+    return new PublicKey(raw)
+  } catch {
+    throw new Error('WALLET_PUBLIC_KEY is invalid')
+  }
 }
 
 // ---------------------------------------------------------------------------

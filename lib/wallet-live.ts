@@ -1,5 +1,5 @@
 import { PublicKey } from '@solana/web3.js'
-import { getConnection, getWallet } from '@/lib/solana'
+import { getConnection, getWalletPublicKey } from '@/lib/solana'
 
 export interface WalletTokenBalance {
   mint: string
@@ -15,14 +15,14 @@ export interface WalletLiveBalances {
 
 export async function fetchWalletLiveBalances(mints: string[] = []): Promise<WalletLiveBalances> {
   const connection = getConnection()
-  const wallet = getWallet()
-  const solLamports = await connection.getBalance(wallet.publicKey, 'confirmed')
+  const walletPublicKey = getWalletPublicKey()
+  const solLamports = await connection.getBalance(walletPublicKey, 'confirmed')
   const uniqueMints = [...new Set(mints.filter(Boolean))]
 
   const tokens: WalletTokenBalance[] = []
   for (const mint of uniqueMints) {
     try {
-      const accounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
+      const accounts = await connection.getParsedTokenAccountsByOwner(walletPublicKey, {
         mint: new PublicKey(mint),
       })
       let uiAmount = 0
@@ -39,7 +39,7 @@ export async function fetchWalletLiveBalances(mints: string[] = []): Promise<Wal
   }
 
   return {
-    wallet: wallet.publicKey.toBase58(),
+    wallet: walletPublicKey.toBase58(),
     sol: solLamports / 1e9,
     tokens,
   }

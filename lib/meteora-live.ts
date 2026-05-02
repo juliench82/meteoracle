@@ -1,6 +1,6 @@
-import { PublicKey } from '@solana/web3.js'
+import { Connection, PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
-import { getConnection, getWallet } from '@/lib/solana'
+import { createConnection, getConnection, getRpcEndpointCandidates, getWalletPublicKey } from '@/lib/solana'
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112'
 const DEXSCREENER_SOLANA_PAIR_API = 'https://api.dexscreener.com/latest/dex/pairs/solana'
@@ -17,9 +17,9 @@ async function getDLMM() {
   return mod.default as typeof import('@meteora-ag/dlmm').default
 }
 
-async function getCpAmm(): Promise<any> {
+async function getCpAmm(connection: Connection = getConnection()): Promise<any> {
   const { CpAmm } = await import('@meteora-ag/cp-amm-sdk')
-  return new CpAmm(getConnection())
+  return new CpAmm(connection)
 }
 
 function toNumber(value: unknown): number {
@@ -171,13 +171,13 @@ async function fetchDexPairByToken(mint: string, poolAddress?: string): Promise<
   return pair
 }
 
-async function fetchMintDecimals(mint: string): Promise<number | null> {
+async function fetchMintDecimals(mint: string, connection: Connection = getConnection()): Promise<number | null> {
   if (!mint) return null
   if (mint === SOL_MINT) return 9
   if (_mintDecimalsCache.has(mint)) return _mintDecimalsCache.get(mint) ?? null
 
   try {
-    const account = await getConnection().getParsedAccountInfo(new PublicKey(mint), 'confirmed')
+    const account = await connection.getParsedAccountInfo(new PublicKey(mint), 'confirmed')
     const decimals = parseDecimalCount((account.value?.data as any)?.parsed?.info?.decimals)
     _mintDecimalsCache.set(mint, decimals)
     return decimals
@@ -472,6 +472,7 @@ async function estimateDammDeposits(
   positionState: any,
   poolState: any,
   pair: DexPairInfo | null | undefined,
+  connection: Connection,
 ): Promise<TokenDeposit[]> {
   if (!positionState || !poolState) return []
 
@@ -485,8 +486,8 @@ async function estimateDammDeposits(
 
     if (liquidity.isZero()) return []
 
-    const tokenADecimals = await fetchMintDecimals(tokenAMint)
-    const tokenBDecimals = await fetchMintDecimals(tokenBMint)
+    const tokenADecimals = await fetchMintDecimals(tokenAMint, connection)
+    const tokenBDecimals = await fetchMintDecimals(tokenBMint, connection)
     const amountA = mod.getAmountAFromLiquidityDelta(
       poolState.sqrtPrice,
       poolState.sqrtMaxPrice,
@@ -616,14 +617,13 @@ export interface MeteoraLiveSourceStatus {
   dammOk: boolean
 }
 
-export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
-  const connection = getConnection()
-  const wallet = getWallet()
+export async function fetchLiveDlmmPositions(connection: Connection = getConnection()): Promise<LiveDlmmPosition[]> {
+  const walletPublicKey = getWalletPublicKey()
   const DLMM = await getDLMM()
 
   const allPositions: Map<string, any> = await DLMM.getAllLbPairPositionsByUser(
     connection,
-    wallet.publicKey,
+    walletPublicKey,
   )
 
   const live: LiveDlmmPosition[] = []
@@ -725,15 +725,15 @@ export async function fetchLiveDlmmPositions(): Promise<LiveDlmmPosition[]> {
   return live
 }
 
-export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
-  const wallet = getWallet()
-  const sdk = await getCpAmm()
+export async function fetchLiveDammPositions(connection: Connection = getConnection()): Promise<LiveDammPosition[]> {
+  const walletPublicKey = getWalletPublicKey()
+  const sdk = await getCpAmm(connection)
 
   const userPositions: Array<{
     positionNftAccount: PublicKey
     position: PublicKey
     positionState: any
-  }> = await sdk.getPositionsByUser(wallet.publicKey)
+  }> = await sdk.getPositionsByUser(walletPublicKey)
 
   const live: LiveDammPosition[] = []
 
@@ -760,7 +760,7 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
     const tokenAMint = toBase58(poolState?.tokenAMint)
     const tokenBMint = toBase58(poolState?.tokenBMint)
     const tokenPrices = inferUsdPrices(resolved.pair, tokenAMint, tokenBMint)
-    const sdkDeposits = await estimateDammDeposits(positionState, poolState, resolved.pair)
+    const sdkDeposits = await estimateDammDeposits(positionState, poolState, resolved.pair, connection)
     const claimableFeesUsd = meteoraFields?.claimableFeesUsd ?? null
     const positionValueUsd = meteoraFields?.positionValueUsd ?? null
     const feesClaimedUsd = meteoraFields?.feesClaimedUsd ?? null
@@ -829,10 +829,10 @@ export async function fetchLiveDammPositions(): Promise<LiveDammPosition[]> {
   return live
 }
 
-export async function fetchLiveMeteoraSnapshot(): Promise<LiveMeteoraSnapshot> {
+async function fetchLiveMeteoraSnapshotForConnection(connection: Connection): Promise<LiveMeteoraSnapshot> {
   const [dlmm, damm] = await Promise.allSettled([
-    fetchLiveDlmmPositions(),
-    fetchLiveDammPositions(),
+    fetchLiveDlmmPositions(connection),
+    fetchLiveDammPositions(connection),
   ])
 
   if (dlmm.status === 'rejected') {
@@ -851,6 +851,53 @@ export async function fetchLiveMeteoraSnapshot(): Promise<LiveMeteoraSnapshot> {
     dammOk: damm.status === 'fulfilled',
     dlmmError: dlmm.status === 'rejected' ? errorMessage(dlmm.reason) : null,
     dammError: damm.status === 'rejected' ? errorMessage(damm.reason) : null,
+  }
+}
+
+export async function fetchLiveMeteoraSnapshot(): Promise<LiveMeteoraSnapshot> {
+  const endpoints = getRpcEndpointCandidates({ includePublicFallback: true })
+  if (endpoints.length === 0) {
+    return fetchLiveMeteoraSnapshotForConnection(getConnection())
+  }
+
+  let dlmmPositions: LiveDlmmPosition[] | null = null
+  let dammPositions: LiveDammPosition[] | null = null
+  let dlmmError: string | null = null
+  let dammError: string | null = null
+
+  for (let i = 0; i < endpoints.length; i++) {
+    const snapshot = await fetchLiveMeteoraSnapshotForConnection(createConnection(endpoints[i]))
+    if (snapshot.dlmmOk && dlmmPositions === null) {
+      dlmmPositions = snapshot.positions.filter((position): position is LiveDlmmPosition => position.position_type === 'dlmm')
+    } else if (!snapshot.dlmmOk) {
+      dlmmError = snapshot.dlmmError ?? null
+    }
+
+    if (snapshot.dammOk && dammPositions === null) {
+      dammPositions = snapshot.positions.filter((position): position is LiveDammPosition => position.position_type === 'damm-edge')
+    } else if (!snapshot.dammOk) {
+      dammError = snapshot.dammError ?? null
+    }
+
+    if (dlmmPositions !== null && dammPositions !== null) break
+
+    if ((!snapshot.dlmmOk || !snapshot.dammOk) && i < endpoints.length - 1) {
+      console.warn(
+        `[meteora-live] live fetch incomplete on RPC endpoint ${i + 1}/${endpoints.length}; trying fallback ` +
+        `(dlmm=${snapshot.dlmmOk ? 'ok' : 'failed'}, damm=${snapshot.dammOk ? 'ok' : 'failed'})`,
+      )
+    }
+  }
+
+  return {
+    positions: [
+      ...(dlmmPositions ?? []),
+      ...(dammPositions ?? []),
+    ],
+    dlmmOk: dlmmPositions !== null,
+    dammOk: dammPositions !== null,
+    dlmmError: dlmmPositions !== null ? null : dlmmError,
+    dammError: dammPositions !== null ? null : dammError,
   }
 }
 
