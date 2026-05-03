@@ -203,6 +203,23 @@ update public.lp_positions
 set token_address = coalesce(token_address, mint)
 where token_address is null and mint is not null;
 
+alter table public.lp_positions
+  drop constraint if exists lp_positions_status_check;
+
+alter table public.lp_positions
+  add constraint lp_positions_status_check
+  check (status in (
+    'active',
+    'open',
+    'dry_run',
+    'out_of_range',
+    'closed',
+    'pending_retry',
+    'pending_close',
+    'error',
+    'orphaned'
+  ));
+
 drop trigger if exists set_lp_positions_updated_at on public.lp_positions;
 create trigger set_lp_positions_updated_at
 before update on public.lp_positions
