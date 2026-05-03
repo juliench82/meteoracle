@@ -23,7 +23,9 @@ import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import { getRpcEndpointCandidates } from '@/lib/solana'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
+import { checkHolders } from '@/lib/helius'
 import { openDammPosition } from './damm-executor'
+import { getRugscore } from './rugcheck-cache'
 
 const DBC_PROGRAM_ID = new PublicKey(
   process.env.DBC_PROGRAM_ID ?? DYNAMIC_BONDING_CURVE_PROGRAM_ID.toString(),
@@ -34,6 +36,13 @@ const WATCH_MIN_PROGRESS_PCT = parseFloat(process.env.DBC_WATCH_MIN_PROGRESS_PCT
 const OPEN_PROGRESS_PCT = parseFloat(process.env.DBC_OPEN_PROGRESS_PCT ?? '100')
 const DBC_MIN_SCORE_TO_OPEN = parseFloat(process.env.DBC_MIN_SCORE_TO_OPEN ?? '55')
 const DBC_MIN_MIGRATION_QUOTE_SOL = parseFloat(process.env.DBC_MIN_MIGRATION_QUOTE_SOL ?? '5')
+const DBC_RUGCHECK_GATE_ENABLED = process.env.DBC_RUGCHECK_GATE_ENABLED !== 'false'
+const DBC_MIN_RUGCHECK_SCORE = parseFloat(process.env.DBC_MIN_RUGCHECK_SCORE ?? '65')
+const DBC_HOLDER_GATE_ENABLED = process.env.DBC_HOLDER_GATE_ENABLED !== 'false'
+const DBC_MIN_HOLDER_COUNT = parseInt(process.env.DBC_MIN_HOLDER_COUNT ?? '100', 10)
+const DBC_MAX_TOP_HOLDER_PCT = parseFloat(process.env.DBC_MAX_TOP_HOLDER_PCT ?? '35')
+const DBC_REQUIRE_TOP_HOLDER_DATA = process.env.DBC_REQUIRE_TOP_HOLDER_DATA !== 'false'
+const DBC_REQUIRE_RELIABLE_HOLDERS = process.env.DBC_REQUIRE_RELIABLE_HOLDERS === 'true'
 const DAMM_MIGRATION_SOL_PER_POSITION = parseFloat(process.env.DAMM_MIGRATION_SOL_PER_POSITION ?? '0.55')
 const AUTO_TRIGGER_MIGRATION = process.env.DBC_AUTO_TRIGGER_MIGRATION !== 'false'
 const USE_PROGRAM_SUBSCRIPTION = process.env.DBC_USE_PROGRAM_SUBSCRIPTION !== 'false'
@@ -70,7 +79,29 @@ type DbcMigrationScore = {
   rejectReason?: string
   quoteReserveSol: number
   migrationThresholdSol: number
+  rugcheckScore: number | null
+  holderCount: number | null
+  topHolderPct: number | null
+  holderDataReliable: boolean | null
+  riskPassed: boolean
+  riskReasons: string[]
   breakdown: Record<string, number>
+}
+
+type DbcRiskGate = {
+  passed: boolean
+  rejectReason?: string
+  reasons: string[]
+  rugcheckScore: number | null
+  holderCount: number | null
+  topHolderPct: number | null
+  holderDataReliable: boolean | null
+}
+
+type WatchlistMetricFields = {
+  rugcheck_score?: number | null
+  holder_count?: number | null
+  top_holder_pct?: number | null
 }
 
 let connection: Connection | null = null
@@ -174,14 +205,79 @@ function getSymbol(metadata: VirtualPoolMetadata | null, mint: PublicKey): strin
   return `DBC-${mint.toBase58().slice(0, 6)}`
 }
 
-function evaluateDbcMigrationCandidate(ctx: DbcPoolContext): DbcMigrationScore {
+function emptyRiskGate(): DbcRiskGate {
+  return {
+    passed: true,
+    reasons: [],
+    rugcheckScore: null,
+    holderCount: null,
+    topHolderPct: null,
+    holderDataReliable: null,
+  }
+}
+
+function withRiskFields(
+  score: Omit<DbcMigrationScore, 'rugcheckScore' | 'holderCount' | 'topHolderPct' | 'holderDataReliable' | 'riskPassed' | 'riskReasons'>,
+  risk: DbcRiskGate = emptyRiskGate(),
+): DbcMigrationScore {
+  return {
+    ...score,
+    rugcheckScore: risk.rugcheckScore,
+    holderCount: risk.holderCount,
+    topHolderPct: risk.topHolderPct,
+    holderDataReliable: risk.holderDataReliable,
+    riskPassed: risk.passed,
+    riskReasons: risk.reasons,
+  }
+}
+
+async function evaluateDbcRiskGate(ctx: DbcPoolContext): Promise<DbcRiskGate> {
+  const mint = ctx.virtualPool.baseMint.toBase58()
+  const risk = emptyRiskGate()
+
+  if (DBC_RUGCHECK_GATE_ENABLED) {
+    risk.rugcheckScore = await getRugscore(mint, ctx.symbol)
+    if (risk.rugcheckScore < DBC_MIN_RUGCHECK_SCORE) {
+      risk.rejectReason ??= 'rugcheck_below_threshold'
+      risk.reasons.push(`rugcheck ${risk.rugcheckScore} < ${DBC_MIN_RUGCHECK_SCORE}`)
+    }
+  }
+
+  if (DBC_HOLDER_GATE_ENABLED) {
+    const holders = await checkHolders(mint)
+    risk.holderCount = holders.holderCount
+    risk.topHolderPct = holders.topHolderPct
+    risk.holderDataReliable = holders.reliable
+
+    if (DBC_REQUIRE_RELIABLE_HOLDERS && !holders.reliable) {
+      risk.rejectReason ??= 'holder_count_not_reliable'
+      risk.reasons.push('holder count is not reliable')
+    }
+    if (DBC_MIN_HOLDER_COUNT > 0 && holders.holderCount < DBC_MIN_HOLDER_COUNT) {
+      risk.rejectReason ??= 'holder_count_below_threshold'
+      risk.reasons.push(`holders ${holders.holderCount} < ${DBC_MIN_HOLDER_COUNT}`)
+    }
+    if (DBC_REQUIRE_TOP_HOLDER_DATA && holders.topHolderPct <= 0) {
+      risk.rejectReason ??= 'top_holder_data_missing'
+      risk.reasons.push('top holder data missing')
+    } else if (holders.topHolderPct > DBC_MAX_TOP_HOLDER_PCT) {
+      risk.rejectReason ??= 'top_holder_above_threshold'
+      risk.reasons.push(`top holder ${holders.topHolderPct.toFixed(1)}% > ${DBC_MAX_TOP_HOLDER_PCT}%`)
+    }
+  }
+
+  risk.passed = risk.reasons.length === 0
+  return risk
+}
+
+async function evaluateDbcMigrationCandidate(ctx: DbcPoolContext): Promise<DbcMigrationScore> {
   const quoteMint = ctx.poolConfig.quoteMint.toBase58()
   const quoteReserveSol = solFromLamports(ctx.virtualPool.quoteReserve)
   const migrationThresholdSol = solFromLamports(ctx.poolConfig.migrationQuoteThreshold)
   const breakdown: Record<string, number> = {}
 
   if (quoteMint !== NATIVE_MINT.toBase58()) {
-    return {
+    return withRiskFields({
       score: 0,
       passed: false,
       reason: 'quote mint is not WSOL',
@@ -189,11 +285,11 @@ function evaluateDbcMigrationCandidate(ctx: DbcPoolContext): DbcMigrationScore {
       quoteReserveSol,
       migrationThresholdSol,
       breakdown,
-    }
+    })
   }
 
   if (migrationThresholdSol < DBC_MIN_MIGRATION_QUOTE_SOL) {
-    return {
+    return withRiskFields({
       score: 0,
       passed: false,
       reason: `migration quote threshold ${migrationThresholdSol.toFixed(2)} SOL < ${DBC_MIN_MIGRATION_QUOTE_SOL} SOL`,
@@ -201,7 +297,7 @@ function evaluateDbcMigrationCandidate(ctx: DbcPoolContext): DbcMigrationScore {
       quoteReserveSol,
       migrationThresholdSol,
       breakdown,
-    }
+    })
   }
 
   const progressRange = Math.max(1, OPEN_PROGRESS_PCT - WATCH_MIN_PROGRESS_PCT)
@@ -226,18 +322,28 @@ function evaluateDbcMigrationCandidate(ctx: DbcPoolContext): DbcMigrationScore {
   breakdown.dammConfig = 10
 
   const score = Object.values(breakdown).reduce((sum, value) => sum + value, 0)
-  const passed = score >= DBC_MIN_SCORE_TO_OPEN
-  return {
+  const risk = await evaluateDbcRiskGate(ctx)
+  const scorePassed = score >= DBC_MIN_SCORE_TO_OPEN
+  const passed = scorePassed && risk.passed
+  return withRiskFields({
     score,
     passed,
-    reason: passed
-      ? `score ${score} >= ${DBC_MIN_SCORE_TO_OPEN}`
-      : `score ${score} < ${DBC_MIN_SCORE_TO_OPEN}`,
-    rejectReason: passed ? undefined : 'score_below_threshold',
+    reason: !risk.passed
+      ? risk.reasons.join('; ')
+      : scorePassed
+        ? `score ${score} >= ${DBC_MIN_SCORE_TO_OPEN}; risk gates passed`
+        : `score ${score} < ${DBC_MIN_SCORE_TO_OPEN}`,
+    rejectReason: !risk.passed
+      ? risk.rejectReason
+      : scorePassed ? undefined : 'score_below_threshold',
     quoteReserveSol,
     migrationThresholdSol,
     breakdown,
-  }
+  }, risk)
+}
+
+function rejectedStatus(score: DbcMigrationScore): string {
+  return score.rejectReason === 'score_below_threshold' ? 'score_rejected' : 'risk_rejected'
 }
 
 async function getPoolMetadata(client: DynamicBondingCurveClient, virtualPoolAddress: PublicKey): Promise<VirtualPoolMetadata | null> {
@@ -296,7 +402,12 @@ async function findWatchlistRow(mint: string): Promise<WatchlistRow | null> {
   return data as WatchlistRow | null
 }
 
-async function upsertWatchlist(ctx: DbcPoolContext, status: string, extraMetadata: Record<string, unknown> = {}): Promise<WatchlistRow | null> {
+async function upsertWatchlist(
+  ctx: DbcPoolContext,
+  status: string,
+  extraMetadata: Record<string, unknown> = {},
+  metricFields: WatchlistMetricFields = {},
+): Promise<WatchlistRow | null> {
   const supabase = createServerClient()
   const mint = ctx.virtualPool.baseMint.toBase58()
   const existing = await findWatchlistRow(mint)
@@ -321,6 +432,7 @@ async function upsertWatchlist(ctx: DbcPoolContext, status: string, extraMetadat
     status,
     last_seen_at: new Date().toISOString(),
     metadata,
+    ...metricFields,
   }
 
   if (existing) {
@@ -443,13 +555,19 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
 
   if (!score.passed) {
     await updateWatchlistById(row.id, {
-      status: 'score_rejected',
+      status: rejectedStatus(score),
       metadata: {
         ...(row.metadata ?? {}),
         dbc_score: score.score,
         dbc_score_reason: score.reason,
         dbc_reject_reason: score.rejectReason,
         dbc_score_breakdown: score.breakdown,
+        dbc_risk_passed: score.riskPassed,
+        dbc_risk_reasons: score.riskReasons,
+        rugcheck_score: score.rugcheckScore,
+        holder_count: score.holderCount,
+        top_holder_pct: score.topHolderPct,
+        holder_data_reliable: score.holderDataReliable,
       },
     })
     return false
@@ -501,6 +619,10 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
       migration_quote_threshold: ctx.poolConfig.migrationQuoteThreshold.toString(),
       dbc_score: score.score,
       dbc_score_breakdown: score.breakdown,
+      rugcheck_score: score.rugcheckScore,
+      holder_count: score.holderCount,
+      top_holder_pct: score.topHolderPct,
+      holder_data_reliable: score.holderDataReliable,
     },
   })
 
@@ -536,18 +658,19 @@ async function evaluateVirtualPool(virtualPoolAddress: PublicKey, knownPool?: Vi
 
     const mint = ctx.virtualPool.baseMint.toBase58()
     const existing = await findWatchlistRow(mint)
-    const score = evaluateDbcMigrationCandidate(ctx)
-    const status = isMigrated(ctx.virtualPool)
-      ? score.passed ? 'migrated' : 'score_rejected'
-      : ctx.progressPct >= OPEN_PROGRESS_PCT
-        ? score.passed ? 'migration_ready' : 'score_rejected'
-        : ctx.progressPct >= WATCH_MIN_PROGRESS_PCT
-          ? 'near_threshold'
-          : 'watching'
 
     if (!existing && ctx.progressPct < WATCH_MIN_PROGRESS_PCT) {
       return { tracked: false, opened: false }
     }
+
+    const score = await evaluateDbcMigrationCandidate(ctx)
+    const status = isMigrated(ctx.virtualPool)
+      ? score.passed ? 'migrated' : rejectedStatus(score)
+      : ctx.progressPct >= OPEN_PROGRESS_PCT
+        ? score.passed ? 'migration_ready' : rejectedStatus(score)
+        : ctx.progressPct >= WATCH_MIN_PROGRESS_PCT
+          ? 'near_threshold'
+          : 'watching'
 
     const row = await upsertWatchlist(ctx, status, {
       dbc_score: score.score,
@@ -555,8 +678,18 @@ async function evaluateVirtualPool(virtualPoolAddress: PublicKey, knownPool?: Vi
       dbc_score_reason: score.reason,
       dbc_reject_reason: score.rejectReason,
       dbc_score_breakdown: score.breakdown,
+      dbc_risk_passed: score.riskPassed,
+      dbc_risk_reasons: score.riskReasons,
+      rugcheck_score: score.rugcheckScore,
+      holder_count: score.holderCount,
+      top_holder_pct: score.topHolderPct,
+      holder_data_reliable: score.holderDataReliable,
       quote_reserve_sol: Math.round(score.quoteReserveSol * 100) / 100,
       migration_threshold_sol: Math.round(score.migrationThresholdSol * 100) / 100,
+    }, {
+      rugcheck_score: score.rugcheckScore,
+      holder_count: score.holderCount,
+      top_holder_pct: score.topHolderPct,
     })
     if (!row) return { tracked: false, opened: false }
 
@@ -646,7 +779,9 @@ export async function startDbcGraduationWatcher(): Promise<void> {
   console.log(
     `[dbc-graduation] starting — program=${DBC_PROGRAM_ID.toBase58()} ` +
     `watch>=${WATCH_MIN_PROGRESS_PCT}% open>=${OPEN_PROGRESS_PCT}% ` +
-    `minScore=${DBC_MIN_SCORE_TO_OPEN} sol=${DAMM_MIGRATION_SOL_PER_POSITION}`,
+    `minScore=${DBC_MIN_SCORE_TO_OPEN} rug>=${DBC_MIN_RUGCHECK_SCORE} ` +
+    `holders>=${DBC_MIN_HOLDER_COUNT} topHolder<=${DBC_MAX_TOP_HOLDER_PCT}% ` +
+    `sol=${DAMM_MIGRATION_SOL_PER_POSITION}`,
   )
 
   if (USE_PROGRAM_SUBSCRIPTION) {
