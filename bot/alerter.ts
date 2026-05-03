@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { summarizeError } from '@/lib/logging'
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID
@@ -271,7 +272,7 @@ async function sendTelegram(text: string): Promise<void> {
   if (!text) return
 
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log('[alerter] Telegram not configured — message:', text)
+    console.log('[alerter] Telegram not configured — alert skipped')
     return
   }
 
@@ -287,7 +288,7 @@ async function sendTelegram(text: string): Promise<void> {
       { timeout: 5_000 }
     )
   } catch (err) {
-    console.error('[alerter] Telegram send failed:', err)
+    console.error(`[alerter] Telegram send failed: ${summarizeError(err)}`)
   }
 }
 

@@ -22,6 +22,7 @@ import {
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import { getRpcEndpointCandidates } from '@/lib/solana'
+import { isAuthError, redactSecrets, summarizeError } from '@/lib/logging'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 import { checkHolders } from '@/lib/helius'
 import { openDammPosition } from './damm-executor'
@@ -50,6 +51,7 @@ const DISCOVERY_POLL_ENABLED = process.env.DBC_DISCOVERY_POLL_ENABLED !== 'false
 const DISCOVERY_MAX_POOLS = parseInt(process.env.DBC_DISCOVERY_MAX_POOLS ?? '1000', 10)
 const DAMM_POOL_WAIT_ATTEMPTS = parseInt(process.env.DBC_DAMM_POOL_WAIT_ATTEMPTS ?? '12', 10)
 const DAMM_POOL_WAIT_MS = parseInt(process.env.DBC_DAMM_POOL_WAIT_MS ?? '2500', 10)
+const RPC_RETRY_MS = parseInt(process.env.DBC_RPC_RETRY_SEC ?? '60', 10) * 1_000
 const WATCHLIST_SOURCE = 'meteora-dbc'
 
 type WatchlistRow = {
@@ -107,6 +109,9 @@ type WatchlistMetricFields = {
 let connection: Connection | null = null
 let dbcClient: DynamicBondingCurveClient | null = null
 let cpAmm: any = null
+let selectedRpcUrl: string | null = null
+let nextRpcRetryAt = 0
+let programSubscriptionId: number | null = null
 let lastDiscoveryAt = 0
 const inFlightPools = new Set<string>()
 
@@ -115,7 +120,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function getRpcUrl(): string {
-  const url = getRpcEndpointCandidates()[0]
+  const url = selectedRpcUrl ?? getRpcEndpointCandidates({ includePublicFallback: true })[0]
   if (!url) throw new Error('[dbc-graduation] RPC_URL, HELIUS_RPC_URL, or HELIUS_API_KEY is not set')
   return url
 }
@@ -125,6 +130,94 @@ function getConnection(): Connection {
     connection = new Connection(getRpcUrl(), 'confirmed')
   }
   return connection
+}
+
+function formatRpcEndpoint(url: string): string {
+  try {
+    const parsed = new URL(url)
+    const apiKey = parsed.searchParams.has('api-key') ? '?api-key=redacted' : ''
+    return `${parsed.origin}${apiKey}`
+  } catch {
+    return redactSecrets(url)
+  }
+}
+
+function resetRpcClients(): void {
+  const oldConnection = connection
+  const oldSubscriptionId = programSubscriptionId
+
+  connection = null
+  dbcClient = null
+  cpAmm = null
+  selectedRpcUrl = null
+  programSubscriptionId = null
+
+  if (oldConnection && oldSubscriptionId !== null) {
+    void oldConnection.removeProgramAccountChangeListener(oldSubscriptionId).catch(err => {
+      console.warn(`[dbc-graduation] subscription cleanup failed: ${summarizeError(err)}`)
+    })
+  }
+}
+
+async function selectHealthyRpcUrl(): Promise<string | null> {
+  const endpoints = getRpcEndpointCandidates({ includePublicFallback: true })
+  if (endpoints.length === 0) return null
+
+  for (const endpoint of endpoints) {
+    try {
+      const probe = new Connection(endpoint, 'confirmed')
+      await probe.getVersion()
+      return endpoint
+    } catch (err) {
+      console.warn(`[dbc-graduation] RPC probe failed for ${formatRpcEndpoint(endpoint)}: ${summarizeError(err)}`)
+    }
+  }
+
+  return null
+}
+
+async function ensureRpcReady(context: string): Promise<boolean> {
+  if (connection) return true
+
+  const now = Date.now()
+  if (now < nextRpcRetryAt) return false
+
+  const healthyUrl = await selectHealthyRpcUrl()
+  if (!healthyUrl) {
+    nextRpcRetryAt = now + RPC_RETRY_MS
+    console.warn(`[dbc-graduation] no healthy RPC endpoint for ${context}; retrying in ${Math.round(RPC_RETRY_MS / 1_000)}s`)
+    return false
+  }
+
+  selectedRpcUrl = healthyUrl
+  connection = new Connection(healthyUrl, 'confirmed')
+  dbcClient = null
+  cpAmm = null
+  nextRpcRetryAt = 0
+  console.log(`[dbc-graduation] using RPC endpoint ${formatRpcEndpoint(healthyUrl)}`)
+  return true
+}
+
+function markRpcUnhealthy(err: unknown): void {
+  if (!isAuthError(err)) return
+  resetRpcClients()
+  nextRpcRetryAt = Date.now() + RPC_RETRY_MS
+}
+
+function subscribeToProgramChanges(): void {
+  if (!USE_PROGRAM_SUBSCRIPTION || programSubscriptionId !== null) return
+
+  try {
+    programSubscriptionId = getConnection().onProgramAccountChange(DBC_PROGRAM_ID, (event) => {
+      void evaluateVirtualPool(event.accountId).catch(err => {
+        console.warn(`[dbc-graduation] subscription evaluate failed: ${summarizeError(err)}`)
+      })
+    }, 'confirmed')
+    console.log('[dbc-graduation] subscribed to DBC program account changes')
+  } catch (err) {
+    console.warn(`[dbc-graduation] subscription failed: ${summarizeError(err)}`)
+    markRpcUnhealthy(err)
+  }
 }
 
 function getDbcClient(): DynamicBondingCurveClient {
@@ -583,7 +676,7 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
         })
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = summarizeError(err)
       console.warn(`[dbc-graduation] migration trigger failed for ${ctx.symbol}: ${message}`)
       await updateWatchlistById(row.id, {
         status: 'migration_trigger_failed',
@@ -697,7 +790,7 @@ async function evaluateVirtualPool(virtualPoolAddress: PublicKey, knownPool?: Vi
     const opened = shouldOpen ? await maybeOpenMigratedDammPosition(ctx, row, score) : false
     return { tracked: true, opened }
   } catch (err) {
-    console.warn(`[dbc-graduation] evaluate failed for ${key}:`, err)
+    console.warn(`[dbc-graduation] evaluate failed for ${key}: ${summarizeError(err)}`)
     return { tracked: false, opened: false }
   } finally {
     inFlightPools.delete(key)
@@ -754,6 +847,11 @@ async function discoverNearThresholdPools(): Promise<number> {
 }
 
 export async function runDbcGraduationWatcherTick(): Promise<{ checked: number; tracked: number; opened: number; discovered: number }> {
+  if (!await ensureRpcReady('tick')) {
+    return { checked: 0, tracked: 0, opened: 0, discovered: 0 }
+  }
+  subscribeToProgramChanges()
+
   const trackedPools = await fetchTrackedVirtualPools()
   let checked = 0
   let tracked = 0
@@ -784,13 +882,8 @@ export async function startDbcGraduationWatcher(): Promise<void> {
     `sol=${DAMM_MIGRATION_SOL_PER_POSITION}`,
   )
 
-  if (USE_PROGRAM_SUBSCRIPTION) {
-    getConnection().onProgramAccountChange(DBC_PROGRAM_ID, (event) => {
-      void evaluateVirtualPool(event.accountId).catch(err => {
-        console.warn('[dbc-graduation] subscription evaluate failed:', err)
-      })
-    }, 'confirmed')
-    console.log('[dbc-graduation] subscribed to DBC program account changes')
+  if (await ensureRpcReady('startup')) {
+    subscribeToProgramChanges()
   }
 
   const tick = async () => {
@@ -801,7 +894,8 @@ export async function startDbcGraduationWatcher(): Promise<void> {
         `opened=${stats.opened} discovered=${stats.discovered}`,
       )
     } catch (err) {
-      console.error('[dbc-graduation] tick failed:', err)
+      markRpcUnhealthy(err)
+      console.error(`[dbc-graduation] tick failed: ${summarizeError(err)}`)
     }
   }
 
@@ -811,7 +905,7 @@ export async function startDbcGraduationWatcher(): Promise<void> {
 
 if (process.env.DBC_GRADUATION_WATCHER_STANDALONE === 'true') {
   startDbcGraduationWatcher().catch(err => {
-    console.error('[dbc-graduation] fatal:', err)
+    console.error(`[dbc-graduation] fatal: ${summarizeError(err)}`)
     process.exit(1)
   })
 }

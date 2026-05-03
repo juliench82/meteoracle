@@ -20,6 +20,7 @@ import {
 } from './meteora-live'
 import { OPEN_LP_STATUSES } from './position-limits'
 import { getRpcEndpointCandidates } from './solana'
+import { summarizeError } from './logging'
 
 const MANAGED_DAMM_STRATEGIES = new Set(['damm-edge', 'damm-migration', 'damm-launch'])
 const MANAGED_DAMM_POSITION_TYPES = new Set(['damm-edge', 'damm-migration', 'damm-launch'])
@@ -128,7 +129,7 @@ async function fetchDammPositionState(
 
     return { currentPriceSol }
   } catch (err) {
-    console.error('[PRE-GRAD] fetchDammPositionState failed:', err)
+    console.error(`[PRE-GRAD] fetchDammPositionState failed: ${summarizeError(err)}`)
     return null
   }
 }
@@ -267,6 +268,10 @@ export async function handleDammExit(
   // post-zap USD values from the Meteora PnL API (4× retry). Use those values in
   // the alert; fall back to the pre-close snapshot only if the API returned null.
   const closeResult = await closeDammPosition(positionId, reason)
+  if (closeResult.skipped) {
+    console.warn(`[PRE-GRAD] close skipped for ${positionId}: ${closeResult.error ?? 'not closeable'}`)
+    return false
+  }
   if (!closeResult.success) {
     const message = closeResult.error ?? 'unknown close error'
     console.error(`[PRE-GRAD] closeDammPosition failed for ${positionId}: ${message}`)

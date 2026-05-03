@@ -40,6 +40,7 @@ import {
   type OpenLpScope,
 } from '@/lib/position-limits'
 import { getRpcEndpointCandidates } from '@/lib/solana'
+import { summarizeError } from '@/lib/logging'
 import { sendAlert } from './alerter'
 
 const METEORA_DAMM_API = 'https://amm-v2.meteora.ag'
@@ -57,6 +58,7 @@ const MAX_DAMM_MIGRATION_SOL_DEPLOYED = parseFloat(
   process.env.MAX_DAMM_MIGRATION_SOL_DEPLOYED ??
   String(DAMM_MIGRATION_SOL_PER_POSITION * MAX_CONCURRENT_DAMM_MIGRATION_POSITIONS),
 )
+const CLOSEABLE_DAMM_STATUSES = [...OPEN_LP_STATUSES, 'dry_run']
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
 
@@ -241,7 +243,7 @@ async function fetchDammPositionPnlWithRetry(positionPubkey: string): Promise<{
         console.warn(`[DAMM] PnL API attempt ${attempt}/${ATTEMPTS} — missing position_pnl_usd:`, JSON.stringify(json).slice(0, 200))
       }
     } catch (e) {
-      console.warn(`[DAMM] PnL API attempt ${attempt}/${ATTEMPTS} threw:`, e)
+      console.warn(`[DAMM] PnL API attempt ${attempt}/${ATTEMPTS} threw: ${summarizeError(e)}`)
     }
 
     if (attempt < ATTEMPTS) {
@@ -544,14 +546,18 @@ export async function closeDammPosition(
   error?: string
   realizedPnlUsd: number | null
   totalFeeEarnedUsd: number | null
+  skipped?: boolean
 }> {
-  console.log(`[DAMM] Closing position id=${positionId} reason=${reason}`)
-
+  let claimedForClose = false
+  let closeTxSignature: string | null = null
+  let previousStatus = 'active'
+  let previousCloseReason: string | null = null
+  let previousMetadata: Record<string, unknown> = {}
   try {
     const supabase = createServerClient()
     const { data: row, error: dbErr } = await supabase
       .from('lp_positions')
-      .select('pool_address, position_pubkey, sol_deposited, metadata, dry_run')
+      .select('pool_address, position_pubkey, sol_deposited, metadata, dry_run, status, close_reason')
       .eq('id', positionId)
       .single()
 
@@ -559,8 +565,60 @@ export async function closeDammPosition(
       throw new Error(`[DAMM] lp_position ${positionId} not found: ${dbErr?.message ?? 'null row'}`)
     }
 
+    previousStatus = String(row.status ?? 'active')
+    previousCloseReason = typeof row.close_reason === 'string' ? row.close_reason : null
+    previousMetadata = (row.metadata as Record<string, unknown>) ?? {}
+    if (!CLOSEABLE_DAMM_STATUSES.includes(previousStatus)) {
+      const message = `[DAMM] position ${positionId} status=${previousStatus}; close skipped`
+      console.warn(message)
+      return {
+        txSignature: '',
+        success: false,
+        error: message,
+        realizedPnlUsd: null,
+        totalFeeEarnedUsd: null,
+        skipped: true,
+      }
+    }
+
+    const closeStartedAt = new Date().toISOString()
+    const { data: claimedRows, error: claimErr } = await supabase
+      .from('lp_positions')
+      .update({
+        status: 'pending_close',
+        close_reason: reason,
+        metadata: {
+          ...previousMetadata,
+          close_started_at: closeStartedAt,
+          close_reason: reason,
+        },
+      })
+      .eq('id', positionId)
+      .in('status', CLOSEABLE_DAMM_STATUSES)
+      .select('id')
+
+    if (claimErr) {
+      throw new Error(`[DAMM] close claim failed for ${positionId}: ${claimErr.message}`)
+    }
+
+    if (!claimedRows || claimedRows.length === 0) {
+      const message = `[DAMM] position ${positionId} was already claimed or closed; close skipped`
+      console.warn(message)
+      return {
+        txSignature: '',
+        success: false,
+        error: message,
+        realizedPnlUsd: null,
+        totalFeeEarnedUsd: null,
+        skipped: true,
+      }
+    }
+
+    claimedForClose = true
+    console.log(`[DAMM] Closing position id=${positionId} reason=${reason}`)
+
     if (row.dry_run === true) {
-      await supabase
+      const { error: dryRunCloseErr } = await supabase
         .from('lp_positions')
         .update({
           status:       'closed',
@@ -570,6 +628,10 @@ export async function closeDammPosition(
           tx_close:     'DRY_RUN',
         })
         .eq('id', positionId)
+
+      if (dryRunCloseErr) {
+        throw new Error(`[DAMM] dry_run close DB update failed for ${positionId}: ${dryRunCloseErr.message}`)
+      }
 
       console.log(`[DAMM] dry_run row closed in DB only: ${positionId}`)
       return {
@@ -598,6 +660,7 @@ export async function closeDammPosition(
 
     const resolved = await resolveTransaction(tx)
     const signature = await sendWithPriority(resolved, [wallet], '[DAMM][close]')
+    closeTxSignature = signature
 
     // ── Realized PnL — 4× retry to survive Meteora API lag ────────────────
     const pnlData = await fetchDammPositionPnlWithRetry(row.position_pubkey)
@@ -617,7 +680,7 @@ export async function closeDammPosition(
       }),
     }
 
-    await supabase
+    const { error: closeUpdateErr } = await supabase
       .from('lp_positions')
       .update({
         status:           'closed',
@@ -631,6 +694,10 @@ export async function closeDammPosition(
       })
       .eq('id', positionId)
 
+    if (closeUpdateErr) {
+      throw new Error(`[DAMM] close DB update failed after tx ${signature}: ${closeUpdateErr.message}`)
+    }
+
     console.log(`[DAMM] ✅ Closed via Zap Out: ${signature}`)
     return {
       txSignature: signature,
@@ -639,8 +706,27 @@ export async function closeDammPosition(
       totalFeeEarnedUsd: pnlData?.total_fee_earned_usd ?? null,
     }
   } catch (e: any) {
-    const msg = e?.message ?? String(e)
+    const msg = summarizeError(e)
     console.error('[DAMM] closeDammPosition failed:', msg)
+    if (claimedForClose && !closeTxSignature) {
+      const supabase = createServerClient()
+      const { error: restoreErr } = await supabase
+        .from('lp_positions')
+        .update({
+          status: previousStatus,
+          close_reason: previousCloseReason,
+          metadata: {
+            ...previousMetadata,
+            close_failed_at: new Date().toISOString(),
+            close_error: msg,
+          },
+        })
+        .eq('id', positionId)
+
+      if (restoreErr) {
+        console.error(`[DAMM] failed to restore ${positionId} after close failure: ${restoreErr.message}`)
+      }
+    }
     return { txSignature: '', success: false, error: msg, realizedPnlUsd: null, totalFeeEarnedUsd: null }
   }
 }
