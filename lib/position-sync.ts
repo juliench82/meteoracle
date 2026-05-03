@@ -101,13 +101,17 @@ function shouldRefreshSymbol(existing: CachedPosition): boolean {
   return !symbol || symbol === 'SOL' || /^(LIVE|DAMM|ORPHAN)-/.test(symbol) || existing.strategy_id === 'meteora-live' || existing.strategy_id === 'damm-live'
 }
 
+function shouldPreserveLocalStatus(existing: CachedPosition): boolean {
+  return existing.status === 'closed' || existing.status === 'pending_close'
+}
+
 function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record<string, unknown> {
   return {
     ...(shouldRefreshSymbol(existing) && { symbol: live.symbol }),
     mint: live.mint,
     token_address: live.mint,
     pool_address: live.pool_address,
-    status: live.status,
+    ...(!shouldPreserveLocalStatus(existing) && { status: live.status }),
     in_range: live.in_range,
     current_price: live.current_price,
     ...(live.claimable_fees_usd !== null && live.claimable_fees_usd !== undefined && {
@@ -120,6 +124,7 @@ function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record
       ...(existing.metadata ?? {}),
       ...live.metadata,
       source_of_truth: 'meteora',
+      meteora_live_status: live.status,
       synced_at: new Date().toISOString(),
     },
   }
