@@ -29,7 +29,7 @@ function heliusRpcFromApiKey(): string | null {
 }
 
 export function getHeliusRpcEndpoint(): string | null {
-  return cleanEnv(process.env.HELIUS_RPC_URL) ?? heliusRpcFromApiKey()
+  return heliusRpcFromApiKey() ?? cleanEnv(process.env.HELIUS_RPC_URL)
 }
 
 function splitRpcList(value: string | undefined): string[] {
