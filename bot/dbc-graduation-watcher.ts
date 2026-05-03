@@ -7,6 +7,7 @@ import {
   PublicKey,
   Transaction,
 } from '@solana/web3.js'
+import { NATIVE_MINT } from '@solana/spl-token'
 import bs58 from 'bs58'
 import {
   DAMM_V2_MIGRATION_FEE_ADDRESS,
@@ -31,7 +32,9 @@ const WATCH_INTERVAL_MS = parseInt(process.env.DBC_GRADUATION_WATCH_INTERVAL_SEC
 const DISCOVERY_INTERVAL_MS = parseInt(process.env.DBC_DISCOVERY_INTERVAL_SEC ?? '60', 10) * 1_000
 const WATCH_MIN_PROGRESS_PCT = parseFloat(process.env.DBC_WATCH_MIN_PROGRESS_PCT ?? '90')
 const OPEN_PROGRESS_PCT = parseFloat(process.env.DBC_OPEN_PROGRESS_PCT ?? '100')
-const DAMM_MIGRATION_SOL_PER_POSITION = parseFloat(process.env.DAMM_MIGRATION_SOL_PER_POSITION ?? '1')
+const DBC_MIN_SCORE_TO_OPEN = parseFloat(process.env.DBC_MIN_SCORE_TO_OPEN ?? '55')
+const DBC_MIN_MIGRATION_QUOTE_SOL = parseFloat(process.env.DBC_MIN_MIGRATION_QUOTE_SOL ?? '5')
+const DAMM_MIGRATION_SOL_PER_POSITION = parseFloat(process.env.DAMM_MIGRATION_SOL_PER_POSITION ?? '0.55')
 const AUTO_TRIGGER_MIGRATION = process.env.DBC_AUTO_TRIGGER_MIGRATION !== 'false'
 const USE_PROGRAM_SUBSCRIPTION = process.env.DBC_USE_PROGRAM_SUBSCRIPTION !== 'false'
 const DISCOVERY_POLL_ENABLED = process.env.DBC_DISCOVERY_POLL_ENABLED !== 'false'
@@ -58,6 +61,16 @@ type DbcPoolContext = {
   dammConfig: PublicKey
   dammPool: PublicKey
   symbol: string
+}
+
+type DbcMigrationScore = {
+  score: number
+  passed: boolean
+  reason: string
+  rejectReason?: string
+  quoteReserveSol: number
+  migrationThresholdSol: number
+  breakdown: Record<string, number>
 }
 
 let connection: Connection | null = null
@@ -134,6 +147,14 @@ function getProgressPct(virtualPool: VirtualPool, poolConfig: PoolConfig): numbe
   return Math.min(100, Number(scaled) / 10_000)
 }
 
+function solFromLamports(value: unknown): number {
+  return Number(toBigIntAmount(value)) / 1_000_000_000
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
 function isMigrated(virtualPool: VirtualPool): boolean {
   return Number(virtualPool.isMigrated ?? 0) !== 0
 }
@@ -151,6 +172,72 @@ function getSymbol(metadata: VirtualPoolMetadata | null, mint: PublicKey): strin
   const name = metadata?.name?.trim()
   if (name) return name.slice(0, 24)
   return `DBC-${mint.toBase58().slice(0, 6)}`
+}
+
+function evaluateDbcMigrationCandidate(ctx: DbcPoolContext): DbcMigrationScore {
+  const quoteMint = ctx.poolConfig.quoteMint.toBase58()
+  const quoteReserveSol = solFromLamports(ctx.virtualPool.quoteReserve)
+  const migrationThresholdSol = solFromLamports(ctx.poolConfig.migrationQuoteThreshold)
+  const breakdown: Record<string, number> = {}
+
+  if (quoteMint !== NATIVE_MINT.toBase58()) {
+    return {
+      score: 0,
+      passed: false,
+      reason: 'quote mint is not WSOL',
+      rejectReason: 'quote_not_wsol',
+      quoteReserveSol,
+      migrationThresholdSol,
+      breakdown,
+    }
+  }
+
+  if (migrationThresholdSol < DBC_MIN_MIGRATION_QUOTE_SOL) {
+    return {
+      score: 0,
+      passed: false,
+      reason: `migration quote threshold ${migrationThresholdSol.toFixed(2)} SOL < ${DBC_MIN_MIGRATION_QUOTE_SOL} SOL`,
+      rejectReason: 'migration_threshold_too_small',
+      quoteReserveSol,
+      migrationThresholdSol,
+      breakdown,
+    }
+  }
+
+  const progressRange = Math.max(1, OPEN_PROGRESS_PCT - WATCH_MIN_PROGRESS_PCT)
+  breakdown.progress = Math.round(clamp((ctx.progressPct - WATCH_MIN_PROGRESS_PCT) / progressRange, 0, 1) * 35)
+  breakdown.quoteReserve =
+    quoteReserveSol >= 50 ? 25 :
+    quoteReserveSol >= 25 ? 20 :
+    quoteReserveSol >= 10 ? 15 :
+    quoteReserveSol >= 5  ? 8  : 0
+  breakdown.migrationThreshold =
+    migrationThresholdSol >= 50 ? 15 :
+    migrationThresholdSol >= 25 ? 12 :
+    migrationThresholdSol >= 10 ? 8  :
+    migrationThresholdSol >= 5  ? 4  : 0
+  breakdown.readiness =
+    isMigrated(ctx.virtualPool) || ctx.progressPct >= OPEN_PROGRESS_PCT ? 15 :
+    ctx.progressPct >= 95 ? 8 : 0
+  breakdown.metadata =
+    (ctx.metadata?.name?.trim() ? 5 : 0) +
+    (ctx.metadata?.website?.trim() ? 2 : 0) +
+    (ctx.metadata?.logo?.trim() ? 3 : 0)
+  breakdown.dammConfig = 10
+
+  const score = Object.values(breakdown).reduce((sum, value) => sum + value, 0)
+  const passed = score >= DBC_MIN_SCORE_TO_OPEN
+  return {
+    score,
+    passed,
+    reason: passed
+      ? `score ${score} >= ${DBC_MIN_SCORE_TO_OPEN}`
+      : `score ${score} < ${DBC_MIN_SCORE_TO_OPEN}`,
+    rejectReason: passed ? undefined : 'score_below_threshold',
+    quoteReserveSol,
+    migrationThresholdSol,
+    breakdown,
+  }
 }
 
 async function getPoolMetadata(client: DynamicBondingCurveClient, virtualPoolAddress: PublicKey): Promise<VirtualPoolMetadata | null> {
@@ -346,11 +433,25 @@ async function waitForDammPool(poolAddress: PublicKey): Promise<boolean> {
   return false
 }
 
-async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: WatchlistRow): Promise<boolean> {
+async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: WatchlistRow, score: DbcMigrationScore): Promise<boolean> {
   const mint = ctx.virtualPool.baseMint.toBase58()
   if (row.opened_position_id) return false
   if (await hasOpenPositionForMint(mint)) {
     await updateWatchlistById(row.id, { status: 'skipped_existing_position' })
+    return false
+  }
+
+  if (!score.passed) {
+    await updateWatchlistById(row.id, {
+      status: 'score_rejected',
+      metadata: {
+        ...(row.metadata ?? {}),
+        dbc_score: score.score,
+        dbc_score_reason: score.reason,
+        dbc_reject_reason: score.rejectReason,
+        dbc_score_breakdown: score.breakdown,
+      },
+    })
     return false
   }
 
@@ -398,6 +499,8 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
       quote_mint: ctx.poolConfig.quoteMint.toBase58(),
       quote_reserve: ctx.virtualPool.quoteReserve.toString(),
       migration_quote_threshold: ctx.poolConfig.migrationQuoteThreshold.toString(),
+      dbc_score: score.score,
+      dbc_score_breakdown: score.breakdown,
     },
   })
 
@@ -433,10 +536,11 @@ async function evaluateVirtualPool(virtualPoolAddress: PublicKey, knownPool?: Vi
 
     const mint = ctx.virtualPool.baseMint.toBase58()
     const existing = await findWatchlistRow(mint)
+    const score = evaluateDbcMigrationCandidate(ctx)
     const status = isMigrated(ctx.virtualPool)
-      ? 'migrated'
+      ? score.passed ? 'migrated' : 'score_rejected'
       : ctx.progressPct >= OPEN_PROGRESS_PCT
-        ? 'migration_ready'
+        ? score.passed ? 'migration_ready' : 'score_rejected'
         : ctx.progressPct >= WATCH_MIN_PROGRESS_PCT
           ? 'near_threshold'
           : 'watching'
@@ -445,11 +549,19 @@ async function evaluateVirtualPool(virtualPoolAddress: PublicKey, knownPool?: Vi
       return { tracked: false, opened: false }
     }
 
-    const row = await upsertWatchlist(ctx, status)
+    const row = await upsertWatchlist(ctx, status, {
+      dbc_score: score.score,
+      dbc_score_passed: score.passed,
+      dbc_score_reason: score.reason,
+      dbc_reject_reason: score.rejectReason,
+      dbc_score_breakdown: score.breakdown,
+      quote_reserve_sol: Math.round(score.quoteReserveSol * 100) / 100,
+      migration_threshold_sol: Math.round(score.migrationThresholdSol * 100) / 100,
+    })
     if (!row) return { tracked: false, opened: false }
 
-    const shouldOpen = isMigrated(ctx.virtualPool) || ctx.progressPct >= OPEN_PROGRESS_PCT
-    const opened = shouldOpen ? await maybeOpenMigratedDammPosition(ctx, row) : false
+    const shouldOpen = score.passed && (isMigrated(ctx.virtualPool) || ctx.progressPct >= OPEN_PROGRESS_PCT)
+    const opened = shouldOpen ? await maybeOpenMigratedDammPosition(ctx, row, score) : false
     return { tracked: true, opened }
   } catch (err) {
     console.warn(`[dbc-graduation] evaluate failed for ${key}:`, err)
@@ -533,7 +645,8 @@ export async function runDbcGraduationWatcherTick(): Promise<{ checked: number; 
 export async function startDbcGraduationWatcher(): Promise<void> {
   console.log(
     `[dbc-graduation] starting — program=${DBC_PROGRAM_ID.toBase58()} ` +
-    `watch>=${WATCH_MIN_PROGRESS_PCT}% open>=${OPEN_PROGRESS_PCT}% sol=${DAMM_MIGRATION_SOL_PER_POSITION}`,
+    `watch>=${WATCH_MIN_PROGRESS_PCT}% open>=${OPEN_PROGRESS_PCT}% ` +
+    `minScore=${DBC_MIN_SCORE_TO_OPEN} sol=${DAMM_MIGRATION_SOL_PER_POSITION}`,
   )
 
   if (USE_PROGRAM_SUBSCRIPTION) {
