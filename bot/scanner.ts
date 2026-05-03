@@ -140,13 +140,98 @@ interface MeteoraPool {
   is_blacklisted: boolean
 }
 
-interface PoolsResponse {
-  current_page: number; pages: number; page_size: number; total: number; data: MeteoraPool[]
-}
+type UnknownRecord = Record<string, unknown>
 
 function asNumber(value: unknown, fallback = 0): number {
   const n = typeof value === 'string' ? Number(value) : value
   return typeof n === 'number' && Number.isFinite(n) ? n : fallback
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function asRecord(value: unknown): UnknownRecord | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as UnknownRecord : null
+}
+
+function getRecordValue(record: UnknownRecord | null, keys: string[]): unknown {
+  if (!record) return undefined
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null) return record[key]
+  }
+  return undefined
+}
+
+function normalizeMeteoraToken(raw: unknown, fallbackAddress: unknown, fallbackSymbol?: unknown): MeteoraToken | null {
+  const token = asRecord(raw)
+  const address = asString(getRecordValue(token, ['address', 'mint', 'mint_address']) ?? fallbackAddress)
+  if (!address) return null
+
+  return {
+    address,
+    symbol: asString(getRecordValue(token, ['symbol', 'name']) ?? fallbackSymbol) ?? address.slice(0, 4),
+    decimals: asNumber(getRecordValue(token, ['decimals']), 0),
+    holders: asNumber(getRecordValue(token, ['holders', 'holder_count']), 0),
+    market_cap: asNumber(getRecordValue(token, ['market_cap', 'marketCap', 'fdv']), 0),
+    price: asNumber(getRecordValue(token, ['price', 'price_usd', 'priceUsd']), 0),
+  }
+}
+
+function normalizeMeteoraPool(raw: unknown): MeteoraPool | null {
+  const pool = asRecord(raw)
+  if (!pool) return null
+
+  const address = asString(getRecordValue(pool, ['address', 'pool_address', 'poolAddress']))
+  const tokenX = normalizeMeteoraToken(
+    getRecordValue(pool, ['token_x', 'tokenX']),
+    getRecordValue(pool, ['mint_x', 'token_x_mint', 'tokenXMint']),
+    getRecordValue(pool, ['token_x_symbol', 'tokenXSymbol']),
+  )
+  const tokenY = normalizeMeteoraToken(
+    getRecordValue(pool, ['token_y', 'tokenY']),
+    getRecordValue(pool, ['mint_y', 'token_y_mint', 'tokenYMint']),
+    getRecordValue(pool, ['token_y_symbol', 'tokenYSymbol']),
+  )
+  if (!address || !tokenX || !tokenY) return null
+
+  const volume = asRecord(pool.volume)
+  const fees = asRecord(pool.fees)
+  const feeTvlRatio = asRecord(pool.fee_tvl_ratio)
+  const poolConfig = asRecord(pool.pool_config)
+  const binStep = asNumber(getRecordValue(poolConfig, ['bin_step']) ?? pool.bin_step, Number.NaN)
+  const baseFeePct = asNumber(getRecordValue(poolConfig, ['base_fee_pct']) ?? pool.base_fee_percentage, Number.NaN)
+
+  return {
+    address,
+    name: asString(pool.name) ?? `${tokenX.symbol}-${tokenY.symbol}`,
+    created_at: pool.created_at as number | string | undefined,
+    pool_created_at: getRecordValue(pool, ['pool_created_at', 'createdAt']) as number | string | undefined,
+    tvl: getRecordValue(pool, ['tvl', 'liquidity']) as number | string | undefined ?? 0,
+    current_price: asNumber(getRecordValue(pool, ['current_price', 'price']), 0),
+    volume: volume as MeteoraPool['volume'],
+    volume_24h: getRecordValue(pool, ['volume_24h', 'volume24h', 'trade_volume_24h']) as number | string | undefined,
+    volume_1h: getRecordValue(pool, ['volume_1h', 'volume1h', 'trade_volume_1h']) as number | string | undefined,
+    volume_5m: getRecordValue(pool, ['volume_5m', 'volume5m', 'trade_volume_5m']) as number | string | undefined,
+    fees: fees as MeteoraPool['fees'],
+    fee_tvl_ratio: feeTvlRatio as MeteoraPool['fee_tvl_ratio'],
+    fee_tvl_ratio_24h: getRecordValue(pool, ['fee_tvl_ratio_24h', 'feeTvlRatio24h']) as number | string | undefined,
+    fee_tvl_ratio_1h: getRecordValue(pool, ['fee_tvl_ratio_1h', 'feeTvlRatio1h']) as number | string | undefined,
+    fee_tvl_ratio_5m: getRecordValue(pool, ['fee_tvl_ratio_5m', 'feeTvlRatio5m']) as number | string | undefined,
+    pool_config: {
+      ...(Number.isFinite(binStep) && { bin_step: binStep }),
+      ...(Number.isFinite(baseFeePct) && { base_fee_pct: baseFeePct }),
+    },
+    token_x: tokenX,
+    token_y: tokenY,
+    is_blacklisted: pool.is_blacklisted === true,
+  }
+}
+
+function normalizeMeteoraPoolsResponse(data: unknown): MeteoraPool[] {
+  const response = asRecord(data)
+  const rawPools = Array.isArray(data) ? data : Array.isArray(response?.data) ? response.data : []
+  return rawPools.map(normalizeMeteoraPool).filter((pool): pool is MeteoraPool => Boolean(pool))
 }
 
 function toUnixSeconds(ts: number | string): number {
@@ -894,11 +979,18 @@ async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPo
     'fee_tvl_ratio_1h[gte]': METEORA_FILTERED_FETCH.minFeeTvlRatio1h,
   }
 
-  const res = await axios.get<PoolsResponse | MeteoraPool[]>(`${baseUrl}/pools`, {
+  const res = await axios.get<unknown>(`${baseUrl}/pools`, {
     params,
     timeout: METEORA_FETCH_TIMEOUT_MS,
   })
-  return Array.isArray(res.data) ? res.data : (res.data?.data ?? [])
+  const pools = normalizeMeteoraPoolsResponse(res.data)
+  if (pools.length > 0) return pools
+
+  console.warn(`[scanner] ${baseUrl}/pools returned no usable pools; trying documented /pair/all fallback`)
+  const fallback = await axios.get<unknown>(`${baseUrl}/pair/all`, {
+    timeout: METEORA_FETCH_TIMEOUT_MS,
+  })
+  return normalizeMeteoraPoolsResponse(fallback.data)
 }
 
 async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: string }> {

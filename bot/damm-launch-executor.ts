@@ -120,7 +120,14 @@ function getLaunchConfig(mod: CpAmmModule): PublicKey {
   const configured = process.env.DAMM_LAUNCH_CONFIG_ADDRESS ?? process.env.DAMM_CONFIG_ADDRESS
   if (configured) return new PublicKey(configured)
 
-  const index = new BN(parseInt(process.env.DAMM_LAUNCH_CONFIG_INDEX ?? '0'))
+  const rawIndex = process.env.DAMM_LAUNCH_CONFIG_INDEX ?? '0'
+  const parsedIndex = Number.parseInt(rawIndex, 10)
+  if (!Number.isInteger(parsedIndex) || parsedIndex < 0) {
+    throw new Error(`[DAMM-LAUNCH] Invalid DAMM_LAUNCH_CONFIG_INDEX: ${rawIndex}`)
+  }
+
+  console.warn(`[DAMM-LAUNCH] DAMM_LAUNCH_CONFIG_ADDRESS not set; deriving config index ${parsedIndex}`)
+  const index = new BN(parsedIndex)
   return mod.deriveConfigAddress(index)
 }
 
@@ -236,7 +243,14 @@ export async function createAndOpenDammLaunch(
     const tokenAAmount = new BN(lamports)
     const tokenBAmount = new BN(0)
     const initSqrtPrice = configState.sqrtMinPrice
+    if (!initSqrtPrice.eq(configState.sqrtMinPrice)) {
+      throw new Error('[DAMM-LAUNCH] single-sided pool creation requires initSqrtPrice to equal sqrtMinPrice')
+    }
     const entryPriceSol = Number(mod.getPriceFromSqrtPrice(initSqrtPrice, 9, tokenDecimals).toString())
+    console.log(
+      `[DAMM-LAUNCH] single-sided createPool config=${config.toBase58()} pool=${pool.toBase58()} ` +
+      `tokenA=SOL tokenB=${tokenMint.toBase58()} entryPriceSol=${entryPriceSol}`,
+    )
     const liquidityDelta = sdk.preparePoolCreationSingleSide({
       tokenAAmount,
       minSqrtPrice: configState.sqrtMinPrice,
