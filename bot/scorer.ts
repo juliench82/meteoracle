@@ -42,6 +42,16 @@ export function scoreCandidate(token: TokenMetrics, strategy: Strategy): number 
   return scoreCandidateWithBreakdown(token, strategy).total
 }
 
+function envNumber(name: string, fallback: number): number {
+  const value = process.env[name]
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.5)
+const SCALP_SPIKE_MIN_FEE_TVL_1H_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_1H_PCT', 1)
+
 export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strategy): ScoreBreakdown {
   const zero = (reason: string): ScoreBreakdown => {
     console.log(`[scorer] ${token.symbol} DISQUALIFIED — ${reason}`)
@@ -59,12 +69,27 @@ export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strat
 
   const isPumpFun = token.address.endsWith('pump')
 
-  if (isPumpFun && token.ageHours < 6)
+  if (strategy.id === 'evil-panda') {
+    return scoreEvilPandaDirect(token, strategy, zero)
+  }
+
+  if (strategy.id === 'scalp-spike') {
+    const spike = getFiveMinuteVolumeSpike(token)
+    const feeTvl1hPct = token.feeTvl1hPct ?? 0
+    if (spike < SCALP_SPIKE_VOL_RATIO) {
+      return zero(`5m/1h volume spike ${spike.toFixed(2)}x < required ${SCALP_SPIKE_VOL_RATIO}x for ${strategy.id}`)
+    }
+    if (feeTvl1hPct < SCALP_SPIKE_MIN_FEE_TVL_1H_PCT) {
+      return zero(`feeTvl1hPct ${feeTvl1hPct.toFixed(2)}% < required ${SCALP_SPIKE_MIN_FEE_TVL_1H_PCT}% for ${strategy.id}`)
+    }
+  }
+
+  if (isPumpFun && token.ageHours < 6 && strategy.id !== 'scalp-spike')
     return zero(`pump.fun + age ${token.ageHours.toFixed(1)}h < 6h`)
 
   const volMcRatio = token.mcUsd > 0 ? token.volume24h / token.mcUsd : 0
 
-  if (volMcRatio > 3.0)
+  if (volMcRatio > 3.0 && strategy.id !== 'scalp-spike')
     return zero(`vol/MC ratio ${volMcRatio.toFixed(2)} > 3.0`)
 
   if (token.feeTvl24hPct < strategy.filters.minFeeTvl24hPct)
@@ -117,6 +142,61 @@ export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strat
     volumeTvlScore,
     curveBonus,
   }
+}
+
+function scoreEvilPandaDirect(
+  token: TokenMetrics,
+  strategy: Strategy,
+  zero: (reason: string) => ScoreBreakdown,
+): ScoreBreakdown {
+  const f = strategy.filters
+
+  if (token.ageHours > f.maxAgeHours)
+    return zero(`age ${token.ageHours.toFixed(1)}h > required ${f.maxAgeHours}h for ${strategy.id}`)
+  if (token.rugcheckScore < f.minRugcheckScore)
+    return zero(`rugcheckScore ${token.rugcheckScore} < required ${f.minRugcheckScore} for ${strategy.id}`)
+  if (token.topHolderPct > f.maxTopHolderPct)
+    return zero(`topHolderPct ${token.topHolderPct.toFixed(1)}% > required ${f.maxTopHolderPct}% for ${strategy.id}`)
+  if (token.volume24h < f.minVolume24h)
+    return zero(`volume24h ${token.volume24h.toFixed(0)} < required ${f.minVolume24h} for ${strategy.id}`)
+  if (token.liquidityUsd < f.minLiquidityUsd)
+    return zero(`liquidityUsd ${token.liquidityUsd.toFixed(0)} < required ${f.minLiquidityUsd} for ${strategy.id}`)
+  if (token.feeTvl24hPct < f.minFeeTvl24hPct)
+    return zero(`feeTvl24hPct ${token.feeTvl24hPct.toFixed(2)}% < required ${f.minFeeTvl24hPct}% for ${strategy.id}`)
+
+  const ageScore =
+    token.ageHours <= 0.5 ? 100 :
+    token.ageHours <= 1 ? 90 :
+    75
+  const rugScore = scoreRugcheck(token.rugcheckScore)
+  const holderScore =
+    token.topHolderPct <= 20 ? 100 :
+    token.topHolderPct <= 30 ? 85 :
+    65
+  const total = Math.round(ageScore * 0.45 + rugScore * 0.35 + holderScore * 0.20)
+
+  console.log(
+    `[scorer] ${token.symbol} — evil-panda direct ` +
+    `age=${ageScore.toFixed(0)} rug=${rugScore.toFixed(0)} holders=${holderScore.toFixed(0)} → ${total}`
+  )
+
+  return {
+    total,
+    volMcScore: 0,
+    rugScore,
+    holderScore,
+    freshnessScore: ageScore,
+    feeEfficiencyScore: 0,
+    volumeTvlScore: 0,
+    curveBonus: 0,
+  }
+}
+
+function getFiveMinuteVolumeSpike(token: TokenMetrics): number {
+  const volume5m = token.volume5m ?? 0
+  const volume1h = token.volume1h ?? 0
+  const oneHourPerFiveMinutes = volume1h / 12
+  return oneHourPerFiveMinutes > 0 ? volume5m / oneHourPerFiveMinutes : 0
 }
 
 function scoreVolumeMcRatio(ratio: number, isPumpFun: boolean): number {

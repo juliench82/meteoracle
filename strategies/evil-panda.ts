@@ -1,5 +1,12 @@
 import type { Strategy } from '@/lib/types'
 
+function envNumber(name: string, fallback: number): number {
+  const value = process.env[name]
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
 /**
  * Evil Panda Strategy
  * Wide-range (−50% / +100%) bid-ask fee farming on fresh low-cap memecoins.
@@ -34,17 +41,17 @@ export const evilPandaStrategy: Strategy = {
   enabled: true,
 
   filters: {
-    minMcUsd:             50_000,
-    maxMcUsd:         10_000_000,
-    minVolume24h:         40_000,
-    minLiquidityUsd:      20_000,
-    maxTopHolderPct:         100,
-    minHolderCount:          100,
-    maxAgeHours:             720,
-    minRugcheckScore:          0,
+    minMcUsd:             envNumber('EVIL_PANDA_MIN_MC_USD', 50_000),
+    maxMcUsd:             envNumber('EVIL_PANDA_MAX_MC_USD', 10_000_000),
+    minVolume24h:         envNumber('EVIL_PANDA_MIN_VOLUME_24H', 40_000),
+    minLiquidityUsd:      envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 20_000),
+    maxTopHolderPct:      envNumber('EVIL_PANDA_MAX_TOP_HOLDER_PCT', 35),
+    minHolderCount:       envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 100),
+    maxAgeHours:          envNumber('EVIL_PANDA_MAX_AGE_HOURS', 2),
+    minRugcheckScore:     envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 65),
     requireSocialSignal:   false,
-    minFeeTvl24hPct:          15,
-    minBinStep:               80,
+    minFeeTvl24hPct:      envNumber('EVIL_PANDA_MIN_FEE_TVL_24H_PCT', 10),
+    minBinStep:           envNumber('EVIL_PANDA_MIN_BIN_STEP', 80),
   },
 
   position: {

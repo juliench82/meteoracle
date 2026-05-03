@@ -19,8 +19,8 @@ export const STRATEGIES: Strategy[] = [
  *                  token on SOL is still treated as a shitcoin for LP purposes.
  *                  → Evil Panda (wide range, short duration)
  *
- * SCALP_SPIKE    — any token (meme or utility) age>=48h + MC>=500K experiencing
- *                  a real volume surge (vol1h >= SCALP_SPIKE_VOL_RATIO × 24h avg).
+ * SCALP_SPIKE    — any token (meme or utility) with MC>=500K experiencing a real
+ *                  5m/1h volume surge. New pools still route to Evil Panda first.
  *                  → Scalp-Spike (tight range, hard exit)
  *
  * BLUECHIP       — large-cap, long-lived, broadly-held, USDC/USDT-quoted pool.
@@ -48,20 +48,30 @@ const BLUECHIP_QUOTE_MINTS = new Set([
   '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // USDC.e (Wormhole)
 ])
 
-// Tunable via env — default 3.0× the 24h hourly average
-const SCALP_SPIKE_VOL_RATIO = parseFloat(process.env.SCALP_SPIKE_VOL_RATIO ?? '3.0')
+function envNumber(name: string, fallback: number): number {
+  const value = process.env[name]
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+// Tunable via env — default 2.5× current 5m volume versus the observed 1h per-5m average.
+const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.5)
+const SCALP_SPIKE_MIN_FEE_TVL_1H_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_1H_PCT', 1)
 
 export function classifyToken(token: {
   address:        string
   mcUsd:          number
   volume24h:      number
   volume1h?:      number
+  volume5m?:      number
   liquidityUsd:   number
   ageHours:       number
   topHolderPct:   number
   holderCount:    number
   rugcheckScore:  number
   quoteTokenMint?: string
+  feeTvl1hPct?:   number
 }): TokenClass {
   const { address, mcUsd, ageHours, topHolderPct, holderCount } = token
 
@@ -79,15 +89,22 @@ export function classifyToken(token: {
     return 'BLUECHIP'
   }
 
-  // SCALP_SPIKE: any token age>=48h + MC>=500K with a real volume surge
-  const vol1h    = token.volume1h ?? (token.volume24h / 24)
-  const avgVol1h = token.volume24h / 24
-  const volRatio = avgVol1h > 0 ? vol1h / avgVol1h : 0
+  // New pools are Evil Panda only; filters decide whether they are safe enough.
+  if (ageHours <= evilPandaStrategy.filters.maxAgeHours) {
+    return 'MEME_SHITCOIN'
+  }
+
+  // SCALP_SPIKE: any non-new token with MC>=500K and a real 5m/1h surge.
+  const vol5m = token.volume5m ?? 0
+  const vol1h = token.volume1h ?? 0
+  const avgVol5mFrom1h = vol1h / 12
+  const volRatio = avgVol5mFrom1h > 0 ? vol5m / avgVol5mFrom1h : 0
+  const feeTvl1hPct = token.feeTvl1hPct ?? 0
 
   if (
-    ageHours >= 48          &&
-    mcUsd    >= 500_000     &&
-    volRatio >= SCALP_SPIKE_VOL_RATIO
+    mcUsd >= scalpSpikeStrategy.filters.minMcUsd &&
+    volRatio >= SCALP_SPIKE_VOL_RATIO &&
+    feeTvl1hPct >= SCALP_SPIKE_MIN_FEE_TVL_1H_PCT
   ) {
     return 'SCALP_SPIKE'
   }
@@ -123,12 +140,14 @@ export function getStrategyForToken(token: {
   mcUsd:          number
   volume24h:      number
   volume1h?:      number
+  volume5m?:      number
   liquidityUsd:   number
   topHolderPct:   number
   holderCount:    number
   ageHours:       number
   rugcheckScore:  number
   quoteTokenMint?: string
+  feeTvl1hPct?:   number
   binStep?:       number
 }): Strategy | null {
   const tokenClass = classifyToken({ address: token.address ?? '', ...token })
@@ -138,8 +157,12 @@ export function getStrategyForToken(token: {
   if (!strategy.enabled) return null
 
   const f = strategy.filters
+  const passesMinMc =
+    strategy.id === 'evil-panda' && token.ageHours <= f.maxAgeHours
+      ? true
+      : token.mcUsd >= f.minMcUsd
   const passes =
-    token.mcUsd         >= f.minMcUsd        &&
+    passesMinMc                              &&
     token.mcUsd         <= f.maxMcUsd        &&
     token.volume24h     >= f.minVolume24h     &&
     token.liquidityUsd  >= f.minLiquidityUsd  &&
@@ -158,19 +181,25 @@ export function getAllMatchingStrategies(token: {
   mcUsd:          number
   volume24h:      number
   volume1h?:      number
+  volume5m?:      number
   liquidityUsd:   number
   topHolderPct:   number
   holderCount:    number
   ageHours:       number
   rugcheckScore:  number
   quoteTokenMint?: string
+  feeTvl1hPct?:   number
   binStep?:       number
 }): Strategy[] {
   return STRATEGIES.filter((s) => {
     if (!s.enabled) return false
     const f = s.filters
+    const passesMinMc =
+      s.id === 'evil-panda' && token.ageHours <= f.maxAgeHours
+        ? true
+        : token.mcUsd >= f.minMcUsd
     return (
-      token.mcUsd         >= f.minMcUsd        &&
+      passesMinMc                              &&
       token.mcUsd         <= f.maxMcUsd        &&
       token.volume24h     >= f.minVolume24h     &&
       token.liquidityUsd  >= f.minLiquidityUsd  &&
@@ -193,7 +222,8 @@ export function explainNoStrategy(t: {
   const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
     const f = s.filters
     const fails: string[] = []
-    if (t.mcUsd          < f.minMcUsd)        fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
+    const minMcWaived = s.id === 'evil-panda' && t.ageHours <= f.maxAgeHours
+    if (!minMcWaived && t.mcUsd < f.minMcUsd) fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
     if (t.mcUsd          > f.maxMcUsd)        fails.push(`mc too high`)
     if (t.volume24h      < f.minVolume24h)    fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
     if (t.liquidityUsd   < f.minLiquidityUsd) fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
