@@ -30,6 +30,18 @@ function liveSourceLabel(source: MeteoraLiveSourceStatus): 'meteora-live' | 'met
   return 'supabase-cache'
 }
 
+function isDammLp(position: { strategy_id?: string | null; position_type?: string | null }): boolean {
+  return (
+    position.strategy_id === 'damm-edge' ||
+    position.strategy_id === 'damm-live' ||
+    position.strategy_id === 'damm-migration' ||
+    position.strategy_id === 'damm-launch' ||
+    position.position_type === 'damm-edge' ||
+    position.position_type === 'damm-migration' ||
+    position.position_type === 'damm-launch'
+  )
+}
+
 function buildPortfolioSummary(openLp: any[], closedLp: any[], liveSource: MeteoraLiveSourceStatus) {
   const totalPositionValueUsd = openLp.reduce(
     (sum, position) => sum + n(position.position_value_usd ?? position.metadata?.position_value_usd),
@@ -60,7 +72,7 @@ function buildPortfolioSummary(openLp: any[], closedLp: any[], liveSource: Meteo
     source: liveSourceLabel(liveSource),
     openCount: openLp.length,
     dlmmCount: openLp.filter(position => position.position_type === 'dlmm').length,
-    dammCount: openLp.filter(position => position.position_type === 'damm-edge').length,
+    dammCount: openLp.filter(isDammLp).length,
     outOfRangeCount: openLp.filter(position => position.status === 'out_of_range').length,
     totalPositionValueUsd: Math.round(totalPositionValueUsd * 100) / 100,
     totalClaimableFeesUsd: Math.round(totalClaimableFeesUsd * 100) / 100,

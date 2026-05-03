@@ -41,7 +41,15 @@ export interface RebalanceOptions {
 }
 
 function isDammLp(pos: LpPositionRow): boolean {
-  return pos.strategy_id === 'damm-edge' || pos.strategy_id === 'damm-live' || pos.position_type === 'damm-edge'
+  return (
+    pos.strategy_id === 'damm-edge' ||
+    pos.strategy_id === 'damm-live' ||
+    pos.strategy_id === 'damm-migration' ||
+    pos.strategy_id === 'damm-launch' ||
+    pos.position_type === 'damm-edge' ||
+    pos.position_type === 'damm-migration' ||
+    pos.position_type === 'damm-launch'
+  )
 }
 
 function firstFiniteNumber(...values: unknown[]): number | null {

@@ -19,14 +19,10 @@ import {
   isMoonshotToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
-// ── DAMM v2 Edge (additive imports — do not remove or reorder) ────────────────
-import { evaluateDammLaunch } from '@/strategies/damm-launch'
-import { createAndOpenDammLaunch, type DammLaunchParams } from './damm-launch-executor'
 import { evaluateDammEdge } from '@/strategies/damm-edge'
 import { openDammPosition } from './damm-executor'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
-// ─────────────────────────────────────────────────────────────────────────────
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM    = 'https://dlmm-api.meteora.ag'
@@ -43,8 +39,15 @@ const POOL_MIN_TVL_USD         = 20_000
 const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
-const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
-const MAX_SOL_PER_POSITION     = parseFloat(process.env.MAX_SOL_PER_POSITION   ?? '0.05')
+const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
+  process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',
+)
+const MARKET_LP_SOL_PER_POSITION = parseFloat(
+  process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
+  process.env.MARKET_LP_SOL_PER_POSITION ??
+  process.env.MAX_SOL_PER_POSITION ??
+  '0.05',
+)
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
 const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
@@ -475,7 +478,7 @@ export async function runScanner(): Promise<ScannerResult> {
       opened: 0,
       openSkipped: 0,
       openSlots: 0,
-      maxOpen: MAX_CONCURRENT_POSITIONS,
+      maxOpen: MAX_CONCURRENT_MARKET_LP_POSITIONS,
       ...result,
     }
     await logScannerTick(fullResult, Date.now() - startedAt)
@@ -589,7 +592,7 @@ export async function runScanner(): Promise<ScannerResult> {
   console.log('[scanner] step 3/4 — live Meteora exposure + DB fallback check')
 
   const limitState = await withTimeout(
-    getOpenLpLimitState(),
+    getOpenLpLimitState('market'),
     METEORA_FETCH_TIMEOUT_MS,
     'live Meteora position limit state',
   )
@@ -608,11 +611,11 @@ export async function runScanner(): Promise<ScannerResult> {
         `using Supabase cache fallback for open caps`,
       )
     }
-    availableOpenSlots = Math.max(0, MAX_CONCURRENT_POSITIONS - openCount)
+    availableOpenSlots = Math.max(0, MAX_CONCURRENT_MARKET_LP_POSITIONS - openCount)
     if (availableOpenSlots === 0) {
       openBlockedReason = 'max_positions_reached'
       console.log(
-        `[scanner] max LP positions reached (${openCount}/${MAX_CONCURRENT_POSITIONS}; ` +
+        `[scanner] max market LP positions reached (${openCount}/${MAX_CONCURRENT_MARKET_LP_POSITIONS}; ` +
         `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount}) — scoring candidates only`,
       )
     }
@@ -800,59 +803,6 @@ export async function runScanner(): Promise<ScannerResult> {
       binStep,
     }
 
-    // ========== DAMM v2 LAUNCH (pool creation; isolated primary track) =========
-    // This runs before damm-edge because the launch edge is pool creation, while
-    // damm-edge only adds liquidity to an existing DAMM v2 pool.
-    if (lane === 'fresh' && await evaluateDammLaunch(metrics)) {
-      const dammLaunchParams: DammLaunchParams = {
-        tokenAddress,
-        poolAddress: bestPool.address,
-        solAmount: MAX_SOL_PER_POSITION,
-        symbol,
-        ageMinutes: metrics.ageHours * 60,
-        feeTvl24hPct: metrics.feeTvl24hPct,
-        liquidityUsd: metrics.liquidityUsd,
-        bondingCurvePct,
-        tokenDecimals: token.decimals,
-        priceUsd: metrics.priceUsd,
-        initialPriceSol: bestPool.current_price,
-        quoteTokenMint,
-        feeTvl1hPct,
-        feeTvl5mPct,
-        volume1h: vol1h,
-        volume5m: vol5m,
-        momentumScore,
-      }
-
-      if (openBlockedReason || openedCount >= availableOpenSlots) {
-        openSkippedCount++
-        const reason = openBlockedReason ?? 'slots_filled_this_tick'
-        console.log(`[scanner][damm-launch] ${symbol} qualifies but open skipped: ${reason}`)
-        continue
-      }
-
-      console.log(`[scanner][damm-launch] TRIGGERED - creating DAMM v2 pool for ${symbol}`)
-      const result = await createAndOpenDammLaunch(dammLaunchParams)
-      if (result.success) {
-        openedCount++
-        openedMintsThisTick.add(tokenAddress)
-        await sendAlert({
-          type:          'position_opened',
-          symbol,
-          strategy:      'damm-launch',
-          solDeposited:  dammLaunchParams.solAmount,
-          entryPrice:    metrics.priceUsd,
-          poolAddress:   result.poolAddress,
-          mint:          tokenAddress,
-          positionId:    result.positionPubkey,
-        })
-        continue
-      } else {
-        console.error(`[scanner][damm-launch] createAndOpenDammLaunch failed for ${symbol}: ${result.error}`)
-      }
-    }
-    // ========== END DAMM v2 LAUNCH ============================================
-
     // ========== DAMM v2 EDGE (additive hook — Meteora-origin pools only) =======
     // Fires ONLY for native Meteora pools (launchpadSource === 'meteora').
     // If the token qualifies, opens a DAMM v2 position and skips the DLMM path
@@ -1018,7 +968,7 @@ export async function runScanner(): Promise<ScannerResult> {
           type: 'position_opened',
           symbol,
           strategy: strategy.id,
-          solDeposited: MAX_SOL_PER_POSITION,
+          solDeposited: MARKET_LP_SOL_PER_POSITION,
           entryPrice: metrics.priceUsd,
           entryPriceUsd: metrics.priceUsd,
           meteoracleScore: score,
@@ -1169,7 +1119,7 @@ const standaloneScannerTick = async (): Promise<void> => {
       opened: 0,
       openSkipped: 0,
       openSlots: 0,
-      maxOpen: MAX_CONCURRENT_POSITIONS,
+      maxOpen: MAX_CONCURRENT_MARKET_LP_POSITIONS,
       openBlockedReason: 'unhandled_error',
       error: err instanceof Error ? err.message : String(err),
     }, 0)

@@ -8,6 +8,7 @@
     "start": "next start -p 3000",
     "lint": "next lint",
     "type-check": "tsc --noEmit",
+    "dbc-graduation-watcher": "tsx bot/dbc-graduation-watcher.ts",
     "worker": "tsx --tsconfig tsconfig.worker.json worker.ts",
     "worker:build": "tsc --project tsconfig.worker.json",
     "worker:start": "node -r tsconfig-paths/register dist/worker.js",
@@ -27,6 +28,7 @@
   "dependencies": {
     "@meteora-ag/cp-amm-sdk": "^1.0.0",
     "@meteora-ag/dlmm": "^1.1.12",
+    "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.7",
     "@meteora-ag/zap-sdk": "^1.2.0",
     "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.8",

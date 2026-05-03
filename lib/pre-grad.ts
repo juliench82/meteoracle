@@ -2,7 +2,7 @@
  * lib/pre-grad.ts — DAMM v2 position lifecycle handler.
  *
  * Manages the monitoring loop and exit routing for positions opened via the
- * DAMM edge tracks (strategy_id = 'damm-edge' or 'damm-launch').
+ * DAMM tracks (strategy_id = 'damm-edge', 'damm-migration', or legacy 'damm-launch').
  *
  * ISOLATION RULE: Must NOT import anything from bot/monitor.ts or bot/executor.ts.
  *
@@ -21,8 +21,8 @@ import {
 import { OPEN_LP_STATUSES } from './position-limits'
 import { getRpcEndpointCandidates } from './solana'
 
-const MANAGED_DAMM_STRATEGIES = new Set(['damm-edge', 'damm-launch'])
-const MANAGED_DAMM_POSITION_TYPES = new Set(['damm-edge', 'damm-launch'])
+const MANAGED_DAMM_STRATEGIES = new Set(['damm-edge', 'damm-migration', 'damm-launch'])
+const MANAGED_DAMM_POSITION_TYPES = new Set(['damm-edge', 'damm-migration', 'damm-launch'])
 
 function isManagedDammPosition(position: { strategy_id?: string | null; position_type?: string | null }): boolean {
   return MANAGED_DAMM_STRATEGIES.has(String(position.strategy_id ?? '')) ||
@@ -143,7 +143,7 @@ async function fetchDammPositionState(
 export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]): Promise<{ checked: number; exited: number }> {
   const supabase = createServerClient()
   const live = (livePositions ?? await fetchLiveMeteoraPositions())
-    .filter(position => position.position_type === 'damm-edge' || position.position_type === 'damm-launch')
+    .filter(position => isManagedDammPosition(position))
 
   if (live.length === 0) {
     return { checked: 0, exited: 0 }

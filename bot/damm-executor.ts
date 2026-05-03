@@ -4,7 +4,7 @@
  * - Real open:  createPositionAndAddLiquidity via @meteora-ag/cp-amm-sdk
  *   Uses single-sided SOL deposit: maxAmountToken[A|B] = lamports, other side = 0.
  *   liquidityDelta computed via sdk.getDepositQuote().
- *   Saves to lp_positions with strategy_id = 'damm-edge'.
+ *   Saves to lp_positions with strategy_id = 'damm-edge' or 'damm-migration'.
  *
  * - Real close: zapOutThroughDammV2 via @meteora-ag/zap-sdk → everything to SOL.
  *   Loads position row from Supabase by positionId before calling zap.
@@ -30,15 +30,33 @@ import {
 import { TOKEN_PROGRAM_ID, NATIVE_MINT } from '@solana/spl-token'
 import BN from 'bn.js'
 import bs58 from 'bs58'
-import type { DammPositionParams } from '@/lib/types'
+import type { DammPositionParams, DammPositionStrategyId } from '@/lib/types'
 import { getBotState } from '@/lib/botState'
 import { createServerClient } from '@/lib/supabase'
-import { assertCanOpenLpPosition } from '@/lib/position-limits'
+import {
+  OPEN_LP_STATUSES,
+  assertCanOpenLpPosition,
+  matchesOpenLpScope,
+  type OpenLpScope,
+} from '@/lib/position-limits'
 import { getRpcEndpointCandidates } from '@/lib/solana'
 import { sendAlert } from './alerter'
 
 const METEORA_DAMM_API = 'https://amm-v2.meteora.ag'
-const MAX_CONCURRENT_POSITIONS = parseInt(process.env.MAX_CONCURRENT_POSITIONS ?? '5')
+const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
+  process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',
+)
+const MAX_CONCURRENT_DAMM_MIGRATION_POSITIONS = parseInt(
+  process.env.MAX_CONCURRENT_DAMM_MIGRATION_POSITIONS ?? '1',
+)
+const MAX_MARKET_LP_SOL_DEPLOYED = parseFloat(
+  process.env.MAX_MARKET_LP_SOL_DEPLOYED ?? process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1',
+)
+const DAMM_MIGRATION_SOL_PER_POSITION = parseFloat(process.env.DAMM_MIGRATION_SOL_PER_POSITION ?? '1')
+const MAX_DAMM_MIGRATION_SOL_DEPLOYED = parseFloat(
+  process.env.MAX_DAMM_MIGRATION_SOL_DEPLOYED ??
+  String(DAMM_MIGRATION_SOL_PER_POSITION * MAX_CONCURRENT_DAMM_MIGRATION_POSITIONS),
+)
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
 
@@ -70,6 +88,53 @@ function getWallet(): Keypair {
   } catch {
     throw new Error('[DAMM] WALLET_PRIVATE_KEY is invalid — must be base58 or JSON uint8 array')
   }
+}
+
+function getDammOpenConfig(params: DammPositionParams): {
+  label: string
+  maxConcurrent: number
+  maxDeployedSol: number
+  scope: OpenLpScope
+  strategyId: DammPositionStrategyId
+  positionType: DammPositionStrategyId
+} {
+  const strategyId = params.strategyId ?? 'damm-edge'
+  const isMigration = strategyId === 'damm-migration' || params.positionType === 'damm-migration'
+  if (isMigration) {
+    return {
+      label: '[DAMM-MIGRATION]',
+      maxConcurrent: MAX_CONCURRENT_DAMM_MIGRATION_POSITIONS,
+      maxDeployedSol: MAX_DAMM_MIGRATION_SOL_DEPLOYED,
+      scope: 'damm-migration',
+      strategyId: 'damm-migration',
+      positionType: 'damm-migration',
+    }
+  }
+
+  return {
+    label: '[DAMM]',
+    maxConcurrent: MAX_CONCURRENT_MARKET_LP_POSITIONS,
+    maxDeployedSol: MAX_MARKET_LP_SOL_DEPLOYED,
+    scope: 'market',
+    strategyId: 'damm-edge',
+    positionType: 'damm-edge',
+  }
+}
+
+async function getScopedOpenSolDeployed(scope: OpenLpScope): Promise<number> {
+  const supabase = createServerClient()
+  const { data, error } = await supabase
+    .from('lp_positions')
+    .select('sol_deposited, strategy_id, position_type')
+    .in('status', OPEN_LP_STATUSES)
+
+  if (error) {
+    throw new Error(`open SOL exposure query failed: ${error.message}`)
+  }
+
+  return (data ?? [])
+    .filter(position => matchesOpenLpScope(position, scope))
+    .reduce((sum, position) => sum + Number(position.sol_deposited ?? 0), 0)
 }
 
 async function getCpAmm(): Promise<any> {
@@ -200,14 +265,15 @@ async function fetchDammPositionPnlWithRetry(positionPubkey: string): Promise<{
  *   4. Compute liquidityDelta via sdk.getDepositQuote() for single-sided deposit.
  *   5. Generate fresh position NFT Keypair.
  *   6. Call sdk.createPositionAndAddLiquidity() → build → sign → confirm.
- *   7. Persist to lp_positions with strategy_id = 'damm-edge'.
+ *   7. Persist to lp_positions with the caller's DAMM strategy id.
  *      entry_price_sol is captured from sqrtPrice at open so TP/SL have a baseline.
  *   8. Fire pre_grad_opened Telegram alert.
  */
 export async function openDammPosition(
   params: DammPositionParams,
-): Promise<{ positionPubkey: string; txSignature: string; success: boolean; error?: string }> {
-  console.log(`[DAMM] Opening position — pool=${params.poolAddress} sol=${params.solAmount}`)
+): Promise<{ positionPubkey: string; txSignature: string; success: boolean; positionId?: string; error?: string }> {
+  const openConfig = getDammOpenConfig(params)
+  console.log(`${openConfig.label} Opening position — pool=${params.poolAddress} sol=${params.solAmount}`)
 
   try {
     // 1. dry_run guard — match DLMM bot_state + BOT_DRY_RUN behavior
@@ -217,6 +283,7 @@ export async function openDammPosition(
     if (dryRun) {
       const positionId = await saveDammPosition({
         params,
+        openConfig,
         positionPubkey: 'DRY_RUN',
         signature: 'DRY_RUN',
         solDeposited: params.solAmount,
@@ -233,14 +300,21 @@ export async function openDammPosition(
       })
 
       console.log('[DAMM] dry_run=true — row persisted, alert sent, skipping real open')
-      return { positionPubkey: positionId, txSignature: 'DRY_RUN', success: true }
+      return { positionPubkey: positionId, txSignature: 'DRY_RUN', success: true, positionId }
     }
 
-    const limitState = await assertCanOpenLpPosition(MAX_CONCURRENT_POSITIONS, '[DAMM]')
+    const limitState = await assertCanOpenLpPosition(openConfig.maxConcurrent, openConfig.label, openConfig.scope)
     console.log(
-      `[DAMM] LP cap ok (${limitState.effectiveOpenCount}/${MAX_CONCURRENT_POSITIONS}; ` +
+      `${openConfig.label} ${openConfig.scope} LP cap ok (${limitState.effectiveOpenCount}/${openConfig.maxConcurrent}; ` +
       `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
     )
+    const deployedSol = await getScopedOpenSolDeployed(openConfig.scope)
+    if (deployedSol + params.solAmount > openConfig.maxDeployedSol) {
+      throw new Error(
+        `${openConfig.label} ${openConfig.scope} SOL cap hit ` +
+        `(${(deployedSol + params.solAmount).toFixed(3)}/${openConfig.maxDeployedSol} SOL)`,
+      )
+    }
 
     const sdk = await getCpAmm()
     const wallet = getWallet()
@@ -360,6 +434,7 @@ export async function openDammPosition(
     // 6. Persist — entry_price_sol written from live sqrtPrice, dry_run from bot_state
     const positionId = await saveDammPosition({
       params,
+      openConfig,
       positionPubkey,
       signature,
       solDeposited: params.solAmount,
@@ -376,7 +451,7 @@ export async function openDammPosition(
       bondingCurvePct: params.bondingCurvePct ?? 0,
     })
 
-    return { positionPubkey, txSignature: signature, success: true }
+    return { positionPubkey, txSignature: signature, success: true, positionId }
   } catch (e: any) {
     const msg = e?.message ?? String(e)
     console.error('[DAMM] openDammPosition failed:', msg)
@@ -388,6 +463,7 @@ export async function openDammPosition(
 
 async function saveDammPosition({
   params,
+  openConfig,
   positionPubkey,
   signature,
   solDeposited,
@@ -395,6 +471,7 @@ async function saveDammPosition({
   dryRun,
 }: {
   params: DammPositionParams
+  openConfig: ReturnType<typeof getDammOpenConfig>
   positionPubkey: string
   signature: string
   solDeposited: number
@@ -409,7 +486,8 @@ async function saveDammPosition({
       symbol: params.symbol,
       pool_address: params.poolAddress,
       position_pubkey: positionPubkey,
-      strategy_id: 'damm-edge',
+      strategy_id: openConfig.strategyId,
+      position_type: openConfig.positionType,
       token_amount: 0,
       sol_deposited: solDeposited,
       entry_price_usd: 0,
@@ -420,10 +498,13 @@ async function saveDammPosition({
       opened_at: new Date().toISOString(),
       tx_open: signature,
       metadata: {
+        strategy_id: openConfig.strategyId,
+        position_type: openConfig.positionType,
         age_minutes: params.ageMinutes,
         fee_tvl_24h_pct: params.feeTvl24hPct,
         liquidity_usd: params.liquidityUsd,
         ...(params.bondingCurvePct !== undefined && { bonding_curve_pct: params.bondingCurvePct }),
+        ...(params.metadata ?? {}),
       },
     })
     .select('id')

@@ -45,8 +45,16 @@ const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 const METEORA_RENT_RESERVE_SOL = 0.07
 const NATIVE_MINT_STR = NATIVE_MINT.toBase58()
 
-const MAX_SOL_PER_POSITION      = parseFloat(process.env.MAX_SOL_PER_POSITION      ?? '0.05')
-const MAX_CONCURRENT_POSITIONS  = parseInt(process.env.MAX_CONCURRENT_POSITIONS    ?? '5')
+const MARKET_LP_SOL_PER_POSITION = parseFloat(
+  process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
+  process.env.MARKET_LP_SOL_PER_POSITION ??
+  process.env.MAX_SOL_PER_POSITION ??
+  '0.05',
+)
+const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
+  process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',
+)
+const MAX_MARKET_LP_SOL_DEPLOYED = parseFloat(process.env.MAX_MARKET_LP_SOL_DEPLOYED ?? process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1')
 const WALLET_MIN_SOL_RESERVE    = parseFloat(process.env.WALLET_MIN_SOL_RESERVE    ?? '0.1')
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
@@ -417,7 +425,15 @@ export async function addLiquidityToPosition(
   }
 
   const symbol = position.symbol ?? position.mint ?? positionId
-  if (position.position_type === 'damm-edge' || position.strategy_id === 'damm-edge' || position.strategy_id === 'damm-live') {
+  if (
+    position.position_type === 'damm-edge' ||
+    position.position_type === 'damm-migration' ||
+    position.position_type === 'damm-launch' ||
+    position.strategy_id === 'damm-edge' ||
+    position.strategy_id === 'damm-migration' ||
+    position.strategy_id === 'damm-launch' ||
+    position.strategy_id === 'damm-live'
+  ) {
     return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'adding liquidity is currently supported for DLMM positions only' }
   }
   if (position.status === 'closed') {
@@ -466,7 +482,7 @@ export async function addLiquidityToPosition(
     }
   }
 
-  const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1')
+  const maxTotalDeployed = MAX_MARKET_LP_SOL_DEPLOYED
   const { data: openPositions } = await supabase
     .from('lp_positions')
     .select('sol_deposited')
@@ -602,7 +618,7 @@ export async function openPosition(
 
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
-    const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
+    const envCap = MARKET_LP_SOL_PER_POSITION
     const dryRunSolAmount = strategy.position.maxSolPerPosition
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
@@ -613,32 +629,32 @@ export async function openPosition(
   const wallet = getWallet()
 
   try {
-    const envCap = parseFloat(process.env.MAX_SOL_PER_POSITION ?? '0.05')
+    const envCap = MARKET_LP_SOL_PER_POSITION
     const solAmount = strategy.position.maxSolPerPosition
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
 
     const limitState = options.rebalanceFromPositionId
-      ? await getOpenLpLimitState()
-      : await assertCanOpenLpPosition(MAX_CONCURRENT_POSITIONS, label)
+      ? await getOpenLpLimitState('market')
+      : await assertCanOpenLpPosition(MAX_CONCURRENT_MARKET_LP_POSITIONS, label, 'market')
     const effectiveOpenCountForCap = options.rebalanceFromPositionId
       ? Math.max(0, limitState.effectiveOpenCount - 1)
       : limitState.effectiveOpenCount
     if (options.rebalanceFromPositionId) {
-      if (effectiveOpenCountForCap >= MAX_CONCURRENT_POSITIONS) {
+      if (effectiveOpenCountForCap >= MAX_CONCURRENT_MARKET_LP_POSITIONS) {
         throw new Error(
           `${label} max LP positions reached after rebalance adjustment ` +
-          `(${effectiveOpenCountForCap}/${MAX_CONCURRENT_POSITIONS}; source=${limitState.countSource}, ` +
+          `(${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS}; source=${limitState.countSource}, ` +
           `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
         )
       }
     }
     console.log(
-      `${label} LP cap ok (${effectiveOpenCountForCap}/${MAX_CONCURRENT_POSITIONS}; ` +
+      `${label} market LP cap ok (${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS}; ` +
       `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
     )
 
-    const maxTotalDeployed = parseFloat(process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1')
+    const maxTotalDeployed = MAX_MARKET_LP_SOL_DEPLOYED
     const { totalDeployed, source: exposureSource } = await getTotalDeployedSolForCap(supabase, limitState)
     if (totalDeployed + solAmount > maxTotalDeployed) {
       console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed (${exposureSource})`)

@@ -158,13 +158,15 @@ export interface DexScreenerPair {
   url?: string
 }
 
-// ── DAMM v2 Edge — isolated type definitions ────────────────────────────────────────────
-// These are ONLY used by strategies/damm-edge.ts and bot/damm-executor.ts.
+// ── DAMM v2 — isolated type definitions ────────────────────────────────────────────
+// These are used by DAMM market-edge and DBC migration entries.
 // No existing DLMM code references these types.
+
+export type DammPositionStrategyId = 'damm-edge' | 'damm-migration'
 
 /**
  * Parameters needed to open a DAMM v2 position.
- * Built by evaluateDammEdge() and consumed by openDammPosition().
+ * Built by evaluateDammEdge() or the DBC graduation watcher and consumed by openDammPosition().
  */
 export interface DammPositionParams {
   tokenAddress: string
@@ -180,6 +182,9 @@ export interface DammPositionParams {
   liquidityUsd: number
   /** pump.fun bonding curve fill % at time of decision (0–100). Optional. */
   bondingCurvePct?: number
+  strategyId?: DammPositionStrategyId
+  positionType?: DammPositionStrategyId
+  metadata?: Record<string, unknown>
 }
 
 /**

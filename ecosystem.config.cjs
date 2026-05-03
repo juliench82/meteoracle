@@ -3,9 +3,12 @@
  *
  * Processes:
  *
- * PIPELINE 1: Meteora DLMM LP (the only pipeline)
+ * PIPELINE 1: Meteora market LP
  *   lp-scanner       — polls Meteora pools every 15min, classifies token, opens LP
  *   lp-monitor-dlmm  — monitors LP range health, rebalances, exits every 60s
+ *
+ * PIPELINE 2: Meteora DBC graduation
+ *   dbc-graduation-watcher — watches DBC curves near migration and joins migrated DAMM v2 pools
  *
  * INTERFACE
  *   telegram-bot     — Telegram command interface (/tick, /positions, etc.)
@@ -74,6 +77,25 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/lp-monitor-dlmm-error.log',
       out_file:   './logs/lp-monitor-dlmm-out.log',
+      merge_logs: true,
+    },
+    {
+      name:          'dbc-graduation-watcher',
+      script:        'npx',
+      args:          'tsx bot/dbc-graduation-watcher.ts',
+      interpreter:   'none',
+      cwd:           __dirname,
+      restart_delay:  5_000,
+      max_restarts:   10,
+      env_file:      '.env.local',
+      env: {
+        NODE_ENV:                         'production',
+        DBC_GRADUATION_WATCHER_STANDALONE: 'true',
+        NODE_OPTIONS:                     '--conditions=require',
+      },
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      error_file: './logs/dbc-graduation-watcher-error.log',
+      out_file:   './logs/dbc-graduation-watcher-out.log',
       merge_logs: true,
     },
 

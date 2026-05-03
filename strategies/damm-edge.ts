@@ -40,11 +40,13 @@ const DAMM_MIN_LIQUIDITY_USD = 25_000
  */
 const DAMM_MAX_MC_USD = 5_000_000
 
-/**
- * SOL to deploy per position. Deliberately conservative — we are testing
- * the edge, not max-allocating capital. Increase only after live validation.
- */
-const DAMM_SOL_AMOUNT = 0.03
+const DAMM_SOL_AMOUNT = Number.parseFloat(
+  process.env.DAMM_EDGE_SOL_PER_POSITION ??
+  process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
+  process.env.MARKET_LP_SOL_PER_POSITION ??
+  process.env.MAX_SOL_PER_POSITION ??
+  '0.05',
+)
 
 // ─────────────────────────────────────────────────────────────────────────────
 

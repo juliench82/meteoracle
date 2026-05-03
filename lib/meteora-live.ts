@@ -1054,5 +1054,13 @@ export function mergeDbAndLiveLpPositions(
 }
 
 function isDammLike(row: { strategy_id?: string | null; position_type?: string | null }): boolean {
-  return row.strategy_id === 'damm-edge' || row.strategy_id === 'damm-live' || row.position_type === 'damm-edge'
+  return (
+    row.strategy_id === 'damm-edge' ||
+    row.strategy_id === 'damm-live' ||
+    row.strategy_id === 'damm-migration' ||
+    row.strategy_id === 'damm-launch' ||
+    row.position_type === 'damm-edge' ||
+    row.position_type === 'damm-migration' ||
+    row.position_type === 'damm-launch'
+  )
 }

@@ -162,10 +162,17 @@ export async function monitorPositions(): Promise<{
   for (const position of positions) {
     try {
       const strategyId = position.strategy_id ?? position.metadata?.strategy_id
-      if (position.position_type === 'pre_grad' || strategyId === 'damm-edge') {
+      const isDammPosition =
+        strategyId === 'damm-edge' ||
+        strategyId === 'damm-migration' ||
+        strategyId === 'damm-launch' ||
+        position.position_type === 'damm-edge' ||
+        position.position_type === 'damm-migration' ||
+        position.position_type === 'damm-launch'
+      if (position.position_type === 'pre_grad' || isDammPosition) {
         continue
       }
-      if (strategyId === 'meteora-live' || strategyId === 'damm-live' || position.position_type === 'damm-edge') {
+      if (strategyId === 'meteora-live' || strategyId === 'damm-live') {
         console.log(`[monitor] ${position.symbol} is a Meteora-live cache row — dashboard only, skipping strategy exits`)
         continue
       }

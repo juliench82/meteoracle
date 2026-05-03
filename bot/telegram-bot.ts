@@ -70,7 +70,15 @@ if (ALLOWED_USER_IDS.size === 0) {
 let lastUpdateId = 0
 
 function isDammLp(pos: { strategy_id?: string | null; position_type?: string | null }): boolean {
-  return pos.strategy_id === 'damm-edge' || pos.strategy_id === 'damm-live' || pos.position_type === 'damm-edge'
+  return (
+    pos.strategy_id === 'damm-edge' ||
+    pos.strategy_id === 'damm-live' ||
+    pos.strategy_id === 'damm-migration' ||
+    pos.strategy_id === 'damm-launch' ||
+    pos.position_type === 'damm-edge' ||
+    pos.position_type === 'damm-migration' ||
+    pos.position_type === 'damm-launch'
+  )
 }
 
 async function closeLpPositionByKind(
@@ -452,7 +460,7 @@ async function handleStatus() {
   const cacheOnlyCount = mergedOpenLp.length - liveConfirmedCount
 
   const dlmmLines = mergedOpenLp
-    .filter(p => p.strategy_id !== 'damm-edge' && p.strategy_id !== 'damm-live' && p.position_type !== 'damm-edge')
+    .filter(p => !isDammLp(p))
     .map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
@@ -462,9 +470,7 @@ async function handleStatus() {
     return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | ${mins}min${oor}${source}`
   })
 
-  const dammPositions = mergedOpenLp.filter(
-    p => p.strategy_id === 'damm-edge' || p.strategy_id === 'damm-live' || p.position_type === 'damm-edge',
-  )
+  const dammPositions = mergedOpenLp.filter(isDammLp)
   const dammLines = dammPositions.map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const bondingCurvePct = p.metadata?.bonding_curve_pct
