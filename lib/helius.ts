@@ -160,7 +160,7 @@ async function fetchDasHolderCount(
     total += accounts.length
     if (accounts.length < pageSize) break
     if (page === maxPages) {
-      console.warn(`[helius] ${mint} — hit max pages (${maxPages}), count is ${total}+`)
+      console.log(`[helius] ${mint} — hit max pages (${maxPages}), count is ${total}+`)
     }
   }
   return total > 0 ? total : null

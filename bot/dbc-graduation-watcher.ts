@@ -442,6 +442,10 @@ function rejectedStatus(score: DbcMigrationScore): string {
   return score.rejectReason === 'score_below_threshold' ? 'score_rejected' : 'risk_rejected'
 }
 
+function isInvalidAccountDiscriminator(err: unknown): boolean {
+  return summarizeError(err).toLowerCase().includes('invalid account discriminator')
+}
+
 async function getPoolMetadata(client: DynamicBondingCurveClient, virtualPoolAddress: PublicKey): Promise<VirtualPoolMetadata | null> {
   try {
     const rows = await client.state.getPoolMetadata(virtualPoolAddress)
@@ -453,7 +457,13 @@ async function getPoolMetadata(client: DynamicBondingCurveClient, virtualPoolAdd
 
 async function loadPoolContext(virtualPoolAddress: PublicKey, knownPool?: VirtualPool): Promise<DbcPoolContext | null> {
   const client = getDbcClient()
-  const virtualPool = knownPool ?? await client.state.getPool(virtualPoolAddress)
+  let virtualPool: VirtualPool | null
+  try {
+    virtualPool = knownPool ?? await client.state.getPool(virtualPoolAddress)
+  } catch (err) {
+    if (isInvalidAccountDiscriminator(err)) return null
+    throw err
+  }
   if (!virtualPool) return null
 
   const poolConfig = await client.state.getPoolConfig(virtualPool.config)
