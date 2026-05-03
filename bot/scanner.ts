@@ -33,20 +33,8 @@ const METEORA_DLMM    = 'https://dlmm-api.meteora.ag'
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
 const PRE_FILTER = {
-  minVolume24hUsd: 10_000,
   minLiquidityUsd: 20_000,
   maxLiquidityUsd: 500_000_000,
-  minFeeTvlRatio1h: 0.04,
-  maxAgeHours:     999_999,
-}
-
-const CHEAP_FILTER = {
-  minMcUsd:        50_000,
-  maxMcUsd:     500_000_000,
-  minVol24h:        10_000,
-  minLiqUsd:        20_000,
-  minFeeTvl24hPct:       3,
-  maxAgeHours:     999_999,
 }
 
 const MAX_DEEP_CHECKS          = parseInt(process.env.MAX_DEEP_CHECKS          ?? '6')
@@ -62,10 +50,7 @@ const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?
 const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
 const HARD_MAX_TOKEN_AGE_MINUTES = parseInt(process.env.HARD_MAX_TOKEN_AGE_MINUTES ?? '120')
 const FRESH_MAX_AGE_MINUTES    = parseInt(process.env.FRESH_SCANNER_MAX_AGE_MINUTES ?? `${HARD_MAX_TOKEN_AGE_MINUTES}`)
-const FRESH_MIN_VOLUME_5M_USD  = parseFloat(process.env.FRESH_MIN_VOLUME_5M_USD ?? process.env.EVIL_PANDA_MIN_VOLUME_5M_USD ?? '2000')
-const FRESH_MIN_VOLUME_1H_USD  = parseFloat(process.env.FRESH_MIN_VOLUME_1H_USD ?? process.env.EVIL_PANDA_MIN_VOLUME_1H_USD ?? '0')
-const FRESH_MIN_FEE_TVL_1H_PCT = parseFloat(process.env.FRESH_MIN_FEE_TVL_1H_PCT ?? process.env.EVIL_PANDA_MIN_FEE_TVL_1H_PCT ?? '0')
-const FRESH_MIN_FEE_TVL_5M_PCT = parseFloat(process.env.FRESH_MIN_FEE_TVL_5M_PCT ?? process.env.EVIL_PANDA_MIN_FEE_TVL_5M_PCT ?? '0')
+const FRESH_MIN_LIQUIDITY_USD  = parseFloat(process.env.FRESH_MIN_LIQUIDITY_USD ?? process.env.EVIL_PANDA_MIN_LIQUIDITY_USD ?? '20000')
 const MOMENTUM_MIN_VOLUME_5M_USD = parseFloat(process.env.MOMENTUM_MIN_VOLUME_5M_USD ?? '5000')
 const MOMENTUM_POOL_LIMIT      = parseInt(process.env.MOMENTUM_POOL_LIMIT ?? '500')
 const MOMENTUM_MIN_FEE_TVL_5M_PCT = parseFloat(process.env.MOMENTUM_MIN_FEE_TVL_5M_PCT ?? process.env.SCALP_SPIKE_MIN_FEE_TVL_5M_PCT ?? '0.1')
@@ -410,26 +395,6 @@ function getFiveMinuteVolumeSpike(pool: MeteoraPool): number {
   return oneHourPerFiveMinutes > 0 ? volume5m / oneHourPerFiveMinutes : 0
 }
 
-function passesFreshRecentVolume(pool: MeteoraPool): boolean {
-  const volume5m = getPoolVolume(pool, '5m')
-  const volume1h = getPoolVolume(pool, '1h')
-  return (
-    volume5m >= FRESH_MIN_VOLUME_5M_USD ||
-    (FRESH_MIN_VOLUME_1H_USD > 0 && volume1h >= FRESH_MIN_VOLUME_1H_USD)
-  )
-}
-
-function passesFreshRecentFee(pool: MeteoraPool): boolean {
-  const feeTvl1hPct = getFeeTvlPct(pool, '1h')
-  const feeTvl5mPct = getFeeTvlPct(pool, '5m')
-  const noFeeGate = FRESH_MIN_FEE_TVL_1H_PCT <= 0 && FRESH_MIN_FEE_TVL_5M_PCT <= 0
-  return (
-    noFeeGate ||
-    (FRESH_MIN_FEE_TVL_1H_PCT > 0 && feeTvl1hPct >= FRESH_MIN_FEE_TVL_1H_PCT) ||
-    (FRESH_MIN_FEE_TVL_5M_PCT > 0 && feeTvl5mPct >= FRESH_MIN_FEE_TVL_5M_PCT)
-  )
-}
-
 function passesMomentumSpike(pool: MeteoraPool): boolean {
   return (
     getPoolVolume(pool, '5m') >= MOMENTUM_MIN_VOLUME_5M_USD &&
@@ -547,14 +512,12 @@ export async function runScanner(): Promise<ScannerResult> {
   const freshBestMap = new Map<string, LaneSurvivor>()
   const momentumBestMap = new Map<string, LaneSurvivor>()
   let freshRejectedAge = 0
-  let freshRejectedVolume = 0
-  let freshRejectedFee = 0
+  let freshRejectedLiquidity = 0
   let momentumRejectedSpike = 0
 
   for (const pool of freshPools) {
     const token = getTradableToken(pool)
     const liqUsd = getPoolTvl(pool)
-    const mcUsd = token.market_cap ?? 0
     const ageMinutes = getPoolAgeMinutes(pool)
 
     if (ageMinutes > FRESH_MAX_AGE_MINUTES) {
@@ -562,14 +525,8 @@ export async function runScanner(): Promise<ScannerResult> {
       console.log(`[scanner] REJECT - ${pool.name ?? token.symbol} is ${ageMinutes.toFixed(1)}min old (max ${FRESH_MAX_AGE_MINUTES}min)`)
       continue
     }
-    if (mcUsd > CHEAP_FILTER.maxMcUsd) continue
-    if (liqUsd < CHEAP_FILTER.minLiqUsd) continue
-    if (!passesFreshRecentVolume(pool)) {
-      freshRejectedVolume++
-      continue
-    }
-    if (!passesFreshRecentFee(pool)) {
-      freshRejectedFee++
+    if (liqUsd < FRESH_MIN_LIQUIDITY_USD) {
+      freshRejectedLiquidity++
       continue
     }
 
@@ -595,7 +552,7 @@ export async function runScanner(): Promise<ScannerResult> {
 
   console.log(
     `[scanner] step 2/4 — fresh survivors=${freshSurvivors.length} ` +
-    `(ageRejected=${freshRejectedAge}, volRejected=${freshRejectedVolume}, feeRejected=${freshRejectedFee}); ` +
+    `(ageRejected=${freshRejectedAge}, liquidityRejected=${freshRejectedLiquidity}); ` +
     `momentum survivors=${momentumSurvivors.length} (spikeRejected=${momentumRejectedSpike})`,
   )
 
@@ -769,7 +726,14 @@ export async function runScanner(): Promise<ScannerResult> {
     let resolvedMc = mcUsd
     if (!resolvedMc || resolvedMc < 1) {
       resolvedMc = await fetchMcFromDexScreener(tokenAddress, token.price)
-      if (!resolvedMc || resolvedMc < 1) { console.log(`[scanner] ${symbol} — skip: no market_cap`); continue }
+      if (!resolvedMc || resolvedMc < 1) {
+        if (lane !== 'fresh') {
+          console.log(`[scanner] ${symbol} — skip: no market_cap`)
+          continue
+        }
+        resolvedMc = 0
+        console.log(`[scanner] ${symbol} — no market_cap yet; fresh lane will rely on liquidity + Rugcheck`)
+      }
     }
 
     let holderCount  = 0
@@ -966,8 +930,12 @@ export async function runScanner(): Promise<ScannerResult> {
     const score       = breakdown.total
     const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
-    const accepted = score >= MIN_SCORE_TO_OPEN
-    const rejectionReason = !accepted ? `score ${score} < threshold ${MIN_SCORE_TO_OPEN}` : null
+    const accepted = lane === 'fresh' ? score > 0 : score >= MIN_SCORE_TO_OPEN
+    const rejectionReason = !accepted
+      ? lane === 'fresh'
+        ? 'fresh safety check failed'
+        : `score ${score} < threshold ${MIN_SCORE_TO_OPEN}`
+      : null
 
     console.log(JSON.stringify({
       event:     'candidate_evaluated',
@@ -1034,7 +1002,7 @@ export async function runScanner(): Promise<ScannerResult> {
     console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
-    if (score >= MIN_SCORE_TO_OPEN) {
+    if (accepted) {
       if (openBlockedReason || openedCount >= availableOpenSlots) {
         openSkippedCount++
         const reason = openBlockedReason ?? 'slots_filled_this_tick'
@@ -1163,15 +1131,14 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
 
   const pools = allPools.filter((p) => {
     if (p.is_blacklisted) return false
-    const hasRecentVolume =
-      getPoolVolume(p, '24h') >= PRE_FILTER.minVolume24hUsd ||
-      getPoolVolume(p, '5m') >= Math.min(FRESH_MIN_VOLUME_5M_USD, MOMENTUM_MIN_VOLUME_5M_USD) ||
-      (FRESH_MIN_VOLUME_1H_USD > 0 && getPoolVolume(p, '1h') >= FRESH_MIN_VOLUME_1H_USD)
-    if (!hasRecentVolume) return false
-    if (getPoolTvl(p) < PRE_FILTER.minLiquidityUsd) return false
+    const isFresh = getPoolAgeMinutes(p) <= FRESH_MAX_AGE_MINUTES
+    const minLiquidityUsd = isFresh ? FRESH_MIN_LIQUIDITY_USD : PRE_FILTER.minLiquidityUsd
+    if (getPoolTvl(p) < minLiquidityUsd) return false
     if (getPoolTvl(p) > PRE_FILTER.maxLiquidityUsd) return false
     const hasQuote = QUOTE_ASSETS.has(p.token_x.address) || QUOTE_ASSETS.has(p.token_y.address)
     if (!hasQuote) return false
+    const hasMomentumVolume = getPoolVolume(p, '5m') >= MOMENTUM_MIN_VOLUME_5M_USD
+    if (!isFresh && !hasMomentumVolume) return false
     return true
   })
 

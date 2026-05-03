@@ -103,16 +103,29 @@ function getMinHolderCount(strategy: Strategy, token: StrategyToken): number {
   return strategy.filters.minHolderCount
 }
 
+function usesFreshEvilPandaFastPath(strategy: Strategy, token: StrategyToken): boolean {
+  return strategy.id === 'evil-panda' && token.ageHours <= strategy.filters.maxAgeHours
+}
+
 function getStrategyById(id: StrategyId): Strategy | null {
   return STRATEGIES.find((strategy) => strategy.id === id) ?? null
 }
 
 function passesTokenFilters(token: StrategyToken, strategy: Strategy): boolean {
   const f = strategy.filters
-  const passesMinMc =
-    strategy.id === 'evil-panda' && token.ageHours <= f.maxAgeHours
-      ? true
-      : token.mcUsd >= f.minMcUsd
+
+  if (usesFreshEvilPandaFastPath(strategy, token)) {
+    return (
+      token.liquidityUsd  >= f.minLiquidityUsd &&
+      token.ageHours      <= f.maxAgeHours     &&
+      token.rugcheckScore >= f.minRugcheckScore &&
+      (token.topHolderPct <= 0 || token.topHolderPct <= f.maxTopHolderPct)
+    ) &&
+      passesQuoteMintFilter(strategy, token.quoteTokenMint) &&
+      passesBinStepFilter(strategy, token.binStep)
+  }
+
+  const passesMinMc = token.mcUsd >= f.minMcUsd
   const passesVolume24h =
     strategy.id === 'scalp-spike' && hasScalpSpikeSignals(token)
       ? true
@@ -241,12 +254,12 @@ export function explainNoStrategy(t: {
   const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
     const f = s.filters
     const fails: string[] = []
-    const minMcWaived = s.id === 'evil-panda' && t.ageHours <= f.maxAgeHours
+    const freshEvilPanda = usesFreshEvilPandaFastPath(s, t)
     const minHolderCount = getMinHolderCount(s, t)
     const hasSpike = s.id === 'scalp-spike' && hasScalpSpikeSignals(t)
-    if (!minMcWaived && t.mcUsd < f.minMcUsd) fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
-    if (t.mcUsd          > f.maxMcUsd)        fails.push(`mc too high`)
-    if (!hasSpike && t.volume24h < f.minVolume24h) fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
+    if (!freshEvilPanda && t.mcUsd < f.minMcUsd) fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
+    if (!freshEvilPanda && t.mcUsd > f.maxMcUsd) fails.push(`mc too high`)
+    if (!freshEvilPanda && !hasSpike && t.volume24h < f.minVolume24h) fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
     if (s.id === 'scalp-spike' && !hasSpike) {
       fails.push(
         `spike=${getFiveMinuteVolumeSpike(t).toFixed(2)}x<${SCALP_SPIKE_VOL_RATIO}x ` +
@@ -254,11 +267,13 @@ export function explainNoStrategy(t: {
       )
     }
     if (t.liquidityUsd   < f.minLiquidityUsd) fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
-    if (t.topHolderPct   > f.maxTopHolderPct) fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
-    if (t.holderCount    < minHolderCount)    fails.push(`holders=${t.holderCount}<${minHolderCount}`)
+    if ((!freshEvilPanda || t.topHolderPct > 0) && t.topHolderPct > f.maxTopHolderPct) {
+      fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
+    }
+    if (!freshEvilPanda && t.holderCount < minHolderCount) fails.push(`holders=${t.holderCount}<${minHolderCount}`)
     if (t.ageHours       > f.maxAgeHours)     fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
     if (t.rugcheckScore  < f.minRugcheckScore) fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
-    if (f.minFeeTvl24hPct > 0 && t.feeTvl24hPct < f.minFeeTvl24hPct) {
+    if (!freshEvilPanda && f.minFeeTvl24hPct > 0 && t.feeTvl24hPct < f.minFeeTvl24hPct) {
       fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
     }
     if (f.minBinStep !== undefined && t.binStep !== undefined && t.binStep < f.minBinStep) {

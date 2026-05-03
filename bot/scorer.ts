@@ -24,7 +24,7 @@ import type { TokenMetrics, Strategy } from '@/lib/types'
  * Hard disqualifiers:
  *   - pump.fun mint + age < 6h      — too early, classic dump window
  *   - vol/MC ratio > 3.0            — wash trading signal
- *   - feeTvl24hPct < strategy.filters.minFeeTvl24hPct — pool not hot enough for this strategy
+ *   - feeTvl24hPct < strategy.filters.minFeeTvl24hPct — pool not hot enough for non-fresh strategies
  */
 
 export interface ScoreBreakdown {
@@ -52,10 +52,6 @@ function envNumber(name: string, fallback: number): number {
 const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.5)
 const SCALP_SPIKE_MIN_FEE_TVL_1H_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_1H_PCT', 1)
 const SCALP_SPIKE_MIN_FEE_TVL_5M_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_5M_PCT', 0.1)
-const EVIL_PANDA_MIN_VOLUME_5M_USD = envNumber('EVIL_PANDA_MIN_VOLUME_5M_USD', 2_000)
-const EVIL_PANDA_MIN_VOLUME_1H_USD = envNumber('EVIL_PANDA_MIN_VOLUME_1H_USD', 0)
-const EVIL_PANDA_MIN_FEE_TVL_1H_PCT = envNumber('EVIL_PANDA_MIN_FEE_TVL_1H_PCT', 0)
-const EVIL_PANDA_MIN_FEE_TVL_5M_PCT = envNumber('EVIL_PANDA_MIN_FEE_TVL_5M_PCT', 0)
 
 export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strategy): ScoreBreakdown {
   const zero = (reason: string): ScoreBreakdown => {
@@ -164,36 +160,10 @@ function scoreEvilPandaDirect(
     return zero(`age ${token.ageHours.toFixed(1)}h > required ${f.maxAgeHours}h for ${strategy.id}`)
   if (token.rugcheckScore < f.minRugcheckScore)
     return zero(`rugcheckScore ${token.rugcheckScore} < required ${f.minRugcheckScore} for ${strategy.id}`)
-  if (token.topHolderPct > f.maxTopHolderPct)
+  if (token.topHolderPct > 0 && token.topHolderPct > f.maxTopHolderPct)
     return zero(`topHolderPct ${token.topHolderPct.toFixed(1)}% > required ${f.maxTopHolderPct}% for ${strategy.id}`)
-  const volume5m = token.volume5m ?? 0
-  const volume1h = token.volume1h ?? 0
-  const hasRecentVolume =
-    volume5m >= EVIL_PANDA_MIN_VOLUME_5M_USD ||
-    (EVIL_PANDA_MIN_VOLUME_1H_USD > 0 && volume1h >= EVIL_PANDA_MIN_VOLUME_1H_USD)
-  if (!hasRecentVolume) {
-    return zero(
-      `recent volume ${volume5m.toFixed(0)} 5m / ${volume1h.toFixed(0)} 1h ` +
-      `< required ${EVIL_PANDA_MIN_VOLUME_5M_USD} 5m` +
-      `${EVIL_PANDA_MIN_VOLUME_1H_USD > 0 ? ` or ${EVIL_PANDA_MIN_VOLUME_1H_USD} 1h` : ''} for ${strategy.id}`,
-    )
-  }
   if (token.liquidityUsd < f.minLiquidityUsd)
     return zero(`liquidityUsd ${token.liquidityUsd.toFixed(0)} < required ${f.minLiquidityUsd} for ${strategy.id}`)
-  const feeTvl1hPct = token.feeTvl1hPct ?? 0
-  const feeTvl5mPct = token.feeTvl5mPct ?? 0
-  const passesRecentFee1h = EVIL_PANDA_MIN_FEE_TVL_1H_PCT > 0 && feeTvl1hPct >= EVIL_PANDA_MIN_FEE_TVL_1H_PCT
-  const passesRecentFee5m = EVIL_PANDA_MIN_FEE_TVL_5M_PCT > 0 && feeTvl5mPct >= EVIL_PANDA_MIN_FEE_TVL_5M_PCT
-  const hasRecentFee =
-    (EVIL_PANDA_MIN_FEE_TVL_1H_PCT <= 0 && EVIL_PANDA_MIN_FEE_TVL_5M_PCT <= 0) ||
-    passesRecentFee1h ||
-    passesRecentFee5m
-  if (!hasRecentFee) {
-    return zero(
-      `recent feeTvl ${feeTvl1hPct.toFixed(2)}% 1h / ${feeTvl5mPct.toFixed(2)}% 5m ` +
-      `< required ${EVIL_PANDA_MIN_FEE_TVL_1H_PCT}% 1h or ${EVIL_PANDA_MIN_FEE_TVL_5M_PCT}% 5m for ${strategy.id}`,
-    )
-  }
 
   const ageScore =
     token.ageHours <= 0.5 ? 100 :
