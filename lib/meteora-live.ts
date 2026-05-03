@@ -11,6 +11,7 @@ const DLMM_POSITION_STATS_CACHE_TTL_MS = 60_000
 const _pairInfoCache = new Map<string, { value: DexPairInfo | null; expiresAt: number }>()
 const _dlmmPositionStatsCache = new Map<string, { value: Record<string, number | null> | null; expiresAt: number }>()
 const _mintDecimalsCache = new Map<string, number | null>()
+const LOCAL_STATUS_OVERRIDES = new Set(['closed', 'pending_close'])
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -929,6 +930,11 @@ function firstFiniteNumber(...values: unknown[]): number | null {
   return null
 }
 
+function mergeStatus(dbStatus: unknown, liveStatus: string): string {
+  const status = String(dbStatus ?? '')
+  return LOCAL_STATUS_OVERRIDES.has(status) ? status : liveStatus
+}
+
 function deriveOpenPnlUsd(
   positionValueUsd: number | null,
   claimableFeesUsd: number | null,
@@ -1028,7 +1034,7 @@ export function mergeDbAndLiveLpPositions(
         entry_price_sol: row.entry_price_sol ?? live.entry_price_sol,
         entry_price_usd: row.entry_price_usd ?? live.entry_price_usd,
         tx_open: row.tx_open,
-        status: live.status,
+        status: mergeStatus(row.status, live.status),
         in_range: live.in_range,
         current_price: live.current_price || row.current_price,
         claimable_fees_usd: claimableFeesUsd,

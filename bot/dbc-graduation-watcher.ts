@@ -50,7 +50,7 @@ const DBC_REQUIRE_RELIABLE_HOLDERS = process.env.DBC_REQUIRE_RELIABLE_HOLDERS ==
 const DAMM_MIGRATION_SOL_PER_POSITION = parseFloat(process.env.DAMM_MIGRATION_SOL_PER_POSITION ?? '0.55')
 const AUTO_TRIGGER_MIGRATION = process.env.DBC_AUTO_TRIGGER_MIGRATION !== 'false'
 const USE_PROGRAM_SUBSCRIPTION = process.env.DBC_USE_PROGRAM_SUBSCRIPTION !== 'false'
-const DISCOVERY_POLL_ENABLED = process.env.DBC_DISCOVERY_POLL_ENABLED !== 'false'
+const DISCOVERY_POLL_ENABLED = process.env.DBC_DISCOVERY_POLL_ENABLED === 'true'
 const DISCOVERY_MAX_POOLS = parseInt(process.env.DBC_DISCOVERY_MAX_POOLS ?? '1000', 10)
 const DAMM_POOL_WAIT_ATTEMPTS = parseInt(process.env.DBC_DAMM_POOL_WAIT_ATTEMPTS ?? '12', 10)
 const DAMM_POOL_WAIT_MS = parseInt(process.env.DBC_DAMM_POOL_WAIT_MS ?? '2500', 10)
@@ -837,7 +837,14 @@ async function discoverNearThresholdPools(): Promise<number> {
 
   if (!DISCOVERY_POLL_ENABLED) return 0
 
-  const pools = await getDbcClient().state.getPools()
+  let pools: Awaited<ReturnType<DynamicBondingCurveClient['state']['getPools']>>
+  try {
+    pools = await getDbcClient().state.getPools()
+  } catch (err) {
+    console.warn(`[dbc-graduation] discovery skipped: ${summarizeError(err)}`)
+    return 0
+  }
+
   let tracked = 0
   let processed = 0
   for (const row of pools) {
