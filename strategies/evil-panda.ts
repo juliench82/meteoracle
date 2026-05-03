@@ -43,14 +43,14 @@ export const evilPandaStrategy: Strategy = {
   filters: {
     minMcUsd:             envNumber('EVIL_PANDA_MIN_MC_USD', 50_000),
     maxMcUsd:             envNumber('EVIL_PANDA_MAX_MC_USD', 10_000_000),
-    minVolume24h:         envNumber('EVIL_PANDA_MIN_VOLUME_24H', 40_000),
+    minVolume24h:         envNumber('EVIL_PANDA_MIN_VOLUME_24H', 0),
     minLiquidityUsd:      envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 20_000),
     maxTopHolderPct:      envNumber('EVIL_PANDA_MAX_TOP_HOLDER_PCT', 35),
     minHolderCount:       envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 100),
     maxAgeHours:          envNumber('EVIL_PANDA_MAX_AGE_HOURS', 2),
     minRugcheckScore:     envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 65),
     requireSocialSignal:   false,
-    minFeeTvl24hPct:      envNumber('EVIL_PANDA_MIN_FEE_TVL_24H_PCT', 10),
+    minFeeTvl24hPct:      envNumber('EVIL_PANDA_MIN_FEE_TVL_24H_PCT', 0),
     minBinStep:           envNumber('EVIL_PANDA_MIN_BIN_STEP', 80),
   },
 

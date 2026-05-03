@@ -51,6 +51,11 @@ function envNumber(name: string, fallback: number): number {
 
 const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.5)
 const SCALP_SPIKE_MIN_FEE_TVL_1H_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_1H_PCT', 1)
+const SCALP_SPIKE_MIN_FEE_TVL_5M_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_5M_PCT', 0.1)
+const EVIL_PANDA_MIN_VOLUME_5M_USD = envNumber('EVIL_PANDA_MIN_VOLUME_5M_USD', 2_000)
+const EVIL_PANDA_MIN_VOLUME_1H_USD = envNumber('EVIL_PANDA_MIN_VOLUME_1H_USD', 0)
+const EVIL_PANDA_MIN_FEE_TVL_1H_PCT = envNumber('EVIL_PANDA_MIN_FEE_TVL_1H_PCT', 0)
+const EVIL_PANDA_MIN_FEE_TVL_5M_PCT = envNumber('EVIL_PANDA_MIN_FEE_TVL_5M_PCT', 0)
 
 export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strategy): ScoreBreakdown {
   const zero = (reason: string): ScoreBreakdown => {
@@ -76,11 +81,15 @@ export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strat
   if (strategy.id === 'scalp-spike') {
     const spike = getFiveMinuteVolumeSpike(token)
     const feeTvl1hPct = token.feeTvl1hPct ?? 0
+    const feeTvl5mPct = token.feeTvl5mPct ?? 0
     if (spike < SCALP_SPIKE_VOL_RATIO) {
       return zero(`5m/1h volume spike ${spike.toFixed(2)}x < required ${SCALP_SPIKE_VOL_RATIO}x for ${strategy.id}`)
     }
     if (feeTvl1hPct < SCALP_SPIKE_MIN_FEE_TVL_1H_PCT) {
       return zero(`feeTvl1hPct ${feeTvl1hPct.toFixed(2)}% < required ${SCALP_SPIKE_MIN_FEE_TVL_1H_PCT}% for ${strategy.id}`)
+    }
+    if (feeTvl5mPct < SCALP_SPIKE_MIN_FEE_TVL_5M_PCT) {
+      return zero(`feeTvl5mPct ${feeTvl5mPct.toFixed(2)}% < required ${SCALP_SPIKE_MIN_FEE_TVL_5M_PCT}% for ${strategy.id}`)
     }
   }
 
@@ -157,12 +166,34 @@ function scoreEvilPandaDirect(
     return zero(`rugcheckScore ${token.rugcheckScore} < required ${f.minRugcheckScore} for ${strategy.id}`)
   if (token.topHolderPct > f.maxTopHolderPct)
     return zero(`topHolderPct ${token.topHolderPct.toFixed(1)}% > required ${f.maxTopHolderPct}% for ${strategy.id}`)
-  if (token.volume24h < f.minVolume24h)
-    return zero(`volume24h ${token.volume24h.toFixed(0)} < required ${f.minVolume24h} for ${strategy.id}`)
+  const volume5m = token.volume5m ?? 0
+  const volume1h = token.volume1h ?? 0
+  const hasRecentVolume =
+    volume5m >= EVIL_PANDA_MIN_VOLUME_5M_USD ||
+    (EVIL_PANDA_MIN_VOLUME_1H_USD > 0 && volume1h >= EVIL_PANDA_MIN_VOLUME_1H_USD)
+  if (!hasRecentVolume) {
+    return zero(
+      `recent volume ${volume5m.toFixed(0)} 5m / ${volume1h.toFixed(0)} 1h ` +
+      `< required ${EVIL_PANDA_MIN_VOLUME_5M_USD} 5m` +
+      `${EVIL_PANDA_MIN_VOLUME_1H_USD > 0 ? ` or ${EVIL_PANDA_MIN_VOLUME_1H_USD} 1h` : ''} for ${strategy.id}`,
+    )
+  }
   if (token.liquidityUsd < f.minLiquidityUsd)
     return zero(`liquidityUsd ${token.liquidityUsd.toFixed(0)} < required ${f.minLiquidityUsd} for ${strategy.id}`)
-  if (token.feeTvl24hPct < f.minFeeTvl24hPct)
-    return zero(`feeTvl24hPct ${token.feeTvl24hPct.toFixed(2)}% < required ${f.minFeeTvl24hPct}% for ${strategy.id}`)
+  const feeTvl1hPct = token.feeTvl1hPct ?? 0
+  const feeTvl5mPct = token.feeTvl5mPct ?? 0
+  const passesRecentFee1h = EVIL_PANDA_MIN_FEE_TVL_1H_PCT > 0 && feeTvl1hPct >= EVIL_PANDA_MIN_FEE_TVL_1H_PCT
+  const passesRecentFee5m = EVIL_PANDA_MIN_FEE_TVL_5M_PCT > 0 && feeTvl5mPct >= EVIL_PANDA_MIN_FEE_TVL_5M_PCT
+  const hasRecentFee =
+    (EVIL_PANDA_MIN_FEE_TVL_1H_PCT <= 0 && EVIL_PANDA_MIN_FEE_TVL_5M_PCT <= 0) ||
+    passesRecentFee1h ||
+    passesRecentFee5m
+  if (!hasRecentFee) {
+    return zero(
+      `recent feeTvl ${feeTvl1hPct.toFixed(2)}% 1h / ${feeTvl5mPct.toFixed(2)}% 5m ` +
+      `< required ${EVIL_PANDA_MIN_FEE_TVL_1H_PCT}% 1h or ${EVIL_PANDA_MIN_FEE_TVL_5M_PCT}% 5m for ${strategy.id}`,
+    )
+  }
 
   const ageScore =
     token.ageHours <= 0.5 ? 100 :

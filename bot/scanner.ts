@@ -6,7 +6,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
-import { STRATEGIES, getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
+import { getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
 import { scoreCandidateWithBreakdown } from './scorer'
 import { openPosition } from './executor'
 import { sendAlert } from './alerter'
@@ -61,10 +61,21 @@ const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?
 const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
 const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
 const HARD_MAX_TOKEN_AGE_MINUTES = parseInt(process.env.HARD_MAX_TOKEN_AGE_MINUTES ?? '120')
+const FRESH_MAX_AGE_MINUTES    = parseInt(process.env.FRESH_SCANNER_MAX_AGE_MINUTES ?? `${HARD_MAX_TOKEN_AGE_MINUTES}`)
+const FRESH_MIN_VOLUME_5M_USD  = parseFloat(process.env.FRESH_MIN_VOLUME_5M_USD ?? process.env.EVIL_PANDA_MIN_VOLUME_5M_USD ?? '2000')
+const FRESH_MIN_VOLUME_1H_USD  = parseFloat(process.env.FRESH_MIN_VOLUME_1H_USD ?? process.env.EVIL_PANDA_MIN_VOLUME_1H_USD ?? '0')
+const FRESH_MIN_FEE_TVL_1H_PCT = parseFloat(process.env.FRESH_MIN_FEE_TVL_1H_PCT ?? process.env.EVIL_PANDA_MIN_FEE_TVL_1H_PCT ?? '0')
+const FRESH_MIN_FEE_TVL_5M_PCT = parseFloat(process.env.FRESH_MIN_FEE_TVL_5M_PCT ?? process.env.EVIL_PANDA_MIN_FEE_TVL_5M_PCT ?? '0')
+const MOMENTUM_MIN_VOLUME_5M_USD = parseFloat(process.env.MOMENTUM_MIN_VOLUME_5M_USD ?? '5000')
+const MOMENTUM_POOL_LIMIT      = parseInt(process.env.MOMENTUM_POOL_LIMIT ?? '500')
+const MOMENTUM_MIN_FEE_TVL_5M_PCT = parseFloat(process.env.MOMENTUM_MIN_FEE_TVL_5M_PCT ?? process.env.SCALP_SPIKE_MIN_FEE_TVL_5M_PCT ?? '0.1')
+const SCALP_SPIKE_VOL_RATIO    = parseFloat(process.env.SCALP_SPIKE_VOL_RATIO ?? '2.5')
+const MAX_FRESH_DEEP_CHECKS    = parseInt(process.env.MAX_FRESH_DEEP_CHECKS ?? `${MAX_DEEP_CHECKS}`)
+const MAX_MOMENTUM_DEEP_CHECKS = parseInt(process.env.MAX_MOMENTUM_DEEP_CHECKS ?? `${MAX_DEEP_CHECKS}`)
 
 const METEORA_FILTERED_FETCH = {
   minTvlUsd: parseFloat(process.env.METEORA_MIN_TVL_USD ?? '8000'),
-  minFeeTvlRatio1h: parseFloat(process.env.METEORA_MIN_FEE_TVL_RATIO_1H ?? '0.04'),
+  minFeeTvlRatio1h: parseFloat(process.env.METEORA_MIN_FEE_TVL_RATIO_1H ?? '0'),
   minVolumeTvl1hRatio: parseFloat(process.env.METEORA_MIN_VOLUME_TVL_1H_RATIO ?? '0.20'),
   limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '800'),
 }
@@ -141,6 +152,15 @@ interface MeteoraPool {
 }
 
 type UnknownRecord = Record<string, unknown>
+type ScannerLane = 'fresh' | 'momentum'
+
+type LaneSurvivor = {
+  pool: MeteoraPool
+  mcUsd: number
+  ageHours: number
+  momentumScore: number
+  lane: ScannerLane
+}
 
 function asNumber(value: unknown, fallback = 0): number {
   const n = typeof value === 'string' ? Number(value) : value
@@ -344,7 +364,7 @@ function getQuoteTokenMint(pool: MeteoraPool): string {
     : pool.token_y.address
 }
 
-function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPool | null {
+function selectBestPool(allPools: MeteoraPool[], mintAddress: string, lane: ScannerLane = 'fresh'): MeteoraPool | null {
   const candidates = allPools.filter(p => {
     if (p.is_blacklisted) return false
     if (getPoolTvl(p) < POOL_MIN_TVL_USD) return false
@@ -358,12 +378,13 @@ function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPo
   if (candidates.length === 0) return null
   if (candidates.length === 1) return candidates[0]
 
-  const maxFeeTvl = Math.max(...candidates.map(p => getFeeTvlRatio(p, '24h')))
+  const feeWindow = lane === 'momentum' ? '5m' : '24h'
+  const maxFeeTvl = Math.max(...candidates.map(p => getFeeTvlRatio(p, feeWindow)))
   let best: MeteoraPool | null = null
   let bestScore = -Infinity
 
   for (const p of candidates) {
-    const feeTvlNorm = maxFeeTvl > 0 ? (getFeeTvlRatio(p, '24h') / maxFeeTvl) * 10 : 0
+    const feeTvlNorm = maxFeeTvl > 0 ? (getFeeTvlRatio(p, feeWindow) / maxFeeTvl) * 10 : 0
     const binStep = p.pool_config?.bin_step ?? 999
     const binStepBonus = BIN_STEP_SCORE[binStep] ?? 0
     const score = feeTvlNorm + binStepBonus + scoreMeteoraMomentum(p)
@@ -376,6 +397,64 @@ function selectBestPool(allPools: MeteoraPool[], mintAddress: string): MeteoraPo
 function survivorTokenAddress(item: { pool: MeteoraPool }): string {
   const token = QUOTE_ASSETS.has(item.pool.token_x.address) ? item.pool.token_y : item.pool.token_x
   return token.address
+}
+
+function getTradableToken(pool: MeteoraPool): MeteoraToken {
+  return QUOTE_ASSETS.has(pool.token_x.address) ? pool.token_y : pool.token_x
+}
+
+function getFiveMinuteVolumeSpike(pool: MeteoraPool): number {
+  const volume5m = getPoolVolume(pool, '5m')
+  const volume1h = getPoolVolume(pool, '1h')
+  const oneHourPerFiveMinutes = volume1h / 12
+  return oneHourPerFiveMinutes > 0 ? volume5m / oneHourPerFiveMinutes : 0
+}
+
+function passesFreshRecentVolume(pool: MeteoraPool): boolean {
+  const volume5m = getPoolVolume(pool, '5m')
+  const volume1h = getPoolVolume(pool, '1h')
+  return (
+    volume5m >= FRESH_MIN_VOLUME_5M_USD ||
+    (FRESH_MIN_VOLUME_1H_USD > 0 && volume1h >= FRESH_MIN_VOLUME_1H_USD)
+  )
+}
+
+function passesFreshRecentFee(pool: MeteoraPool): boolean {
+  const feeTvl1hPct = getFeeTvlPct(pool, '1h')
+  const feeTvl5mPct = getFeeTvlPct(pool, '5m')
+  const noFeeGate = FRESH_MIN_FEE_TVL_1H_PCT <= 0 && FRESH_MIN_FEE_TVL_5M_PCT <= 0
+  return (
+    noFeeGate ||
+    (FRESH_MIN_FEE_TVL_1H_PCT > 0 && feeTvl1hPct >= FRESH_MIN_FEE_TVL_1H_PCT) ||
+    (FRESH_MIN_FEE_TVL_5M_PCT > 0 && feeTvl5mPct >= FRESH_MIN_FEE_TVL_5M_PCT)
+  )
+}
+
+function passesMomentumSpike(pool: MeteoraPool): boolean {
+  return (
+    getPoolVolume(pool, '5m') >= MOMENTUM_MIN_VOLUME_5M_USD &&
+    getFiveMinuteVolumeSpike(pool) >= SCALP_SPIKE_VOL_RATIO &&
+    getFeeTvlPct(pool, '5m') >= MOMENTUM_MIN_FEE_TVL_5M_PCT
+  )
+}
+
+function pushBestSurvivor(
+  map: Map<string, LaneSurvivor>,
+  pool: MeteoraPool,
+  lane: ScannerLane,
+  momentumScore: number,
+): void {
+  const token = getTradableToken(pool)
+  const existing = map.get(token.address)
+  if (!existing || momentumScore > existing.momentumScore) {
+    map.set(token.address, {
+      pool,
+      mcUsd: token.market_cap ?? 0,
+      ageHours: getPoolAgeMinutes(pool) / 60,
+      momentumScore,
+      lane,
+    })
+  }
 }
 
 function findLiveOpenPosition(
@@ -452,80 +531,101 @@ export async function runScanner(): Promise<ScannerResult> {
   }
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
 
-  const freshPools = pools.filter(pool => getPoolAgeMinutes(pool) <= HARD_MAX_TOKEN_AGE_MINUTES)
+  const freshPools = pools.filter(pool => getPoolAgeMinutes(pool) <= FRESH_MAX_AGE_MINUTES)
+  const momentumPools = pools
+    .filter(pool => !pool.is_blacklisted)
+    .filter(pool => getPoolVolume(pool, '5m') >= MOMENTUM_MIN_VOLUME_5M_USD)
+    .sort((a, b) => getPoolVolume(b, '5m') - getPoolVolume(a, '5m'))
+    .slice(0, MOMENTUM_POOL_LIMIT)
+
   console.log(
-    `[scanner] early age gate: ${freshPools.length}/${pools.length} pools <= ` +
-    `${HARD_MAX_TOKEN_AGE_MINUTES}min`,
+    `[scanner] lanes — fresh=${freshPools.length}/${pools.length} <=${FRESH_MAX_AGE_MINUTES}min, ` +
+    `momentum=${momentumPools.length}/${pools.length} top vol5m>=${MOMENTUM_MIN_VOLUME_5M_USD}`,
   )
 
-  if (freshPools.length === 0) {
-    console.log('[scanner] no fresh Meteora pools - skipping cheap/deep checks')
-    return finish({ scanned: pools.length, survivors: 0, deepChecked: 0 })
-  }
-
-  console.log('[scanner] step 2/4 — cheap pre-screen')
-  const mintBestMap = new Map<string, { pool: MeteoraPool; mcUsd: number; ageHours: number; momentumScore: number }>()
-  let staleRejected = 0
+  console.log('[scanner] step 2/4 — lane pre-screen')
+  const freshBestMap = new Map<string, LaneSurvivor>()
+  const momentumBestMap = new Map<string, LaneSurvivor>()
+  let freshRejectedAge = 0
+  let freshRejectedVolume = 0
+  let freshRejectedFee = 0
+  let momentumRejectedSpike = 0
 
   for (const pool of freshPools) {
-    const token = QUOTE_ASSETS.has(pool.token_x.address) ? pool.token_y : pool.token_x
-    const vol24h = getPoolVolume(pool, '24h')
+    const token = getTradableToken(pool)
     const liqUsd = getPoolTvl(pool)
     const mcUsd = token.market_cap ?? 0
-    const feeTvl24h = getFeeTvlPct(pool, '24h')
-    const feeTvl1h = getFeeTvlRatio(pool, '1h')
-    const volumeTvl1h = getVolumeTvlRatio(pool, '1h')
-    const ageHours = getPoolAgeMinutes(pool) / 60
-    const ageMinutes = Number.isFinite(ageHours) ? ageHours * 60 : 999
+    const ageMinutes = getPoolAgeMinutes(pool)
 
-    if (ageMinutes > HARD_MAX_TOKEN_AGE_MINUTES) {
-      staleRejected++
-      console.log(`[scanner] REJECT - ${pool.name ?? token.symbol} is ${ageMinutes.toFixed(1)}min old (max ${HARD_MAX_TOKEN_AGE_MINUTES}min)`)
+    if (ageMinutes > FRESH_MAX_AGE_MINUTES) {
+      freshRejectedAge++
+      console.log(`[scanner] REJECT - ${pool.name ?? token.symbol} is ${ageMinutes.toFixed(1)}min old (max ${FRESH_MAX_AGE_MINUTES}min)`)
+      continue
+    }
+    if (mcUsd > CHEAP_FILTER.maxMcUsd) continue
+    if (liqUsd < CHEAP_FILTER.minLiqUsd) continue
+    if (!passesFreshRecentVolume(pool)) {
+      freshRejectedVolume++
+      continue
+    }
+    if (!passesFreshRecentFee(pool)) {
+      freshRejectedFee++
       continue
     }
 
-    if (mcUsd < CHEAP_FILTER.minMcUsd) continue
-    if (mcUsd > CHEAP_FILTER.maxMcUsd) continue
-    if (vol24h < CHEAP_FILTER.minVol24h) continue
-    if (liqUsd < CHEAP_FILTER.minLiqUsd) continue
-    if (feeTvl24h < CHEAP_FILTER.minFeeTvl24hPct) continue
-    if (feeTvl1h < PRE_FILTER.minFeeTvlRatio1h && volumeTvl1h < METEORA_FILTERED_FETCH.minVolumeTvl1hRatio) continue
-
-    const momentumScore = scoreMeteoraMomentum(pool)
-    const existing = mintBestMap.get(token.address)
-    if (!existing || momentumScore > existing.momentumScore) {
-      mintBestMap.set(token.address, { pool, mcUsd, ageHours, momentumScore })
-    }
+    pushBestSurvivor(freshBestMap, pool, 'fresh', scoreMeteoraMomentum(pool))
   }
 
-  const allSurvivors = Array.from(mintBestMap.values())
+  for (const pool of momentumPools) {
+    const liqUsd = getPoolTvl(pool)
+    if (liqUsd < 30_000) continue
+    if (!passesMomentumSpike(pool)) {
+      momentumRejectedSpike++
+      continue
+    }
+    pushBestSurvivor(momentumBestMap, pool, 'momentum', scoreMeteoraMomentum(pool))
+  }
+
+  const freshSurvivors = Array.from(freshBestMap.values()).sort((a, b) => b.momentumScore - a.momentumScore)
+  const momentumSurvivors = Array.from(momentumBestMap.values()).sort((a, b) => {
+    const volumeDiff = getPoolVolume(b.pool, '5m') - getPoolVolume(a.pool, '5m')
+    return volumeDiff !== 0 ? volumeDiff : b.momentumScore - a.momentumScore
+  })
+  const allSurvivors = [...freshSurvivors, ...momentumSurvivors]
+
   console.log(
-    `[scanner] step 2/4 — ${allSurvivors.length} unique fresh tokens passed cheap filter ` +
-    `(from ${freshPools.length} fresh pools; stale rejected=${staleRejected})`,
+    `[scanner] step 2/4 — fresh survivors=${freshSurvivors.length} ` +
+    `(ageRejected=${freshRejectedAge}, volRejected=${freshRejectedVolume}, feeRejected=${freshRejectedFee}); ` +
+    `momentum survivors=${momentumSurvivors.length} (spikeRejected=${momentumRejectedSpike})`,
   )
 
   if (allSurvivors.length === 0) {
-    console.log('[scanner] done — no survivors')
+    console.log('[scanner] done — no lane survivors')
     return finish({ scanned: pools.length, survivors: 0 })
   }
 
   const supabase = createServerClient()
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints(supabase)
-  const prioritySurvivors = allSurvivors.filter(item => recentlyClosedOorMints.has(survivorTokenAddress(item)))
-  const priorityMintSet = new Set(prioritySurvivors.map(survivorTokenAddress))
-  const rankedSurvivors = allSurvivors
-    .filter(item => !priorityMintSet.has(survivorTokenAddress(item)))
-    .sort((a, b) => b.momentumScore - a.momentumScore)
+  const pickLaneSurvivors = (laneSurvivors: LaneSurvivor[], maxDeepChecks: number): LaneSurvivor[] => {
+    const priority = laneSurvivors.filter(item => recentlyClosedOorMints.has(survivorTokenAddress(item)))
+    const priorityMintSet = new Set(priority.map(survivorTokenAddress))
+    const ranked = laneSurvivors.filter(item => !priorityMintSet.has(survivorTokenAddress(item)))
+    return [
+      ...priority,
+      ...ranked.slice(0, Math.max(0, maxDeepChecks - priority.length)),
+    ]
+  }
   const survivors = [
-    ...prioritySurvivors,
-    ...rankedSurvivors.slice(0, Math.max(0, MAX_DEEP_CHECKS - prioritySurvivors.length)),
+    ...pickLaneSurvivors(freshSurvivors, MAX_FRESH_DEEP_CHECKS),
+    ...pickLaneSurvivors(momentumSurvivors, MAX_MOMENTUM_DEEP_CHECKS),
   ]
 
   if (recentlyClosedOorMints.size > 0) {
-    const missed = Array.from(recentlyClosedOorMints).filter(mint => !priorityMintSet.has(mint))
+    const queuedMints = new Set(survivors.map(survivorTokenAddress))
+    const missed = Array.from(recentlyClosedOorMints).filter(mint => !queuedMints.has(mint))
     console.log(
-      `[scanner] OOR recheck priority — ${prioritySurvivors.length} token(s) queued` +
-      `${missed.length ? `, ${missed.length} did not pass cheap filter` : ''}`,
+      `[scanner] OOR recheck priority — ${recentlyClosedOorMints.size - missed.length} token(s) queued` +
+      `${missed.length ? `, ${missed.length} did not pass lane filters` : ''}`,
     )
   }
 
@@ -562,22 +662,28 @@ export async function runScanner(): Promise<ScannerResult> {
   }
 
   console.log(
-    `[scanner] step 4/4 — deep checks on ${survivors.length} top momentum survivors ` +
-    `(capped from ${allSurvivors.length}; MAX_DEEP_CHECKS=${MAX_DEEP_CHECKS})`,
+    `[scanner] step 4/4 — deep checks on ${survivors.length} lane survivors ` +
+    `(fresh cap=${MAX_FRESH_DEEP_CHECKS}, momentum cap=${MAX_MOMENTUM_DEEP_CHECKS}, total queued from ${allSurvivors.length})`,
   )
   let candidateCount = 0
   let openedCount = 0
   let openSkippedCount = 0
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
+  const openedMintsThisTick = new Set<string>()
 
-  for (const { pool: representativePool, mcUsd, ageHours } of survivors) {
+  for (const { pool: representativePool, mcUsd, ageHours, lane } of survivors) {
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
 
-    const token = QUOTE_ASSETS.has(representativePool.token_x.address) ? representativePool.token_y : representativePool.token_x
+    const token = getTradableToken(representativePool)
     const tokenAddress = token.address
     const symbol = representativePool.name ?? token.symbol
     const launchpadSource = detectLaunchpadSource(tokenAddress)
     const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address)
+
+    if (openedMintsThisTick.has(tokenAddress)) {
+      console.log(`[scanner] ${symbol} — skip ${lane} lane: position already opened earlier this tick`)
+      continue
+    }
 
     if (CANDIDATE_DEDUP_HOURS > 0) {
       const recentResult = await withTimeout(
@@ -615,7 +721,7 @@ export async function runScanner(): Promise<ScannerResult> {
       // Always fall through to normal pool selection and scoring
     }
 
-    const bestPool = selectBestPool(freshPools, tokenAddress)
+    const bestPool = selectBestPool(lane === 'fresh' ? freshPools : pools, tokenAddress, lane)
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
       continue
@@ -636,10 +742,14 @@ export async function runScanner(): Promise<ScannerResult> {
     const momentumScore = scoreMeteoraMomentum(bestPool)
 
     // New Meteora listing fast-path: log and fall through to normal scoring.
-    if (poolAgeHours < METEORA_NEW_LISTING_AGE_H && liqUsd >= METEORA_NEW_LISTING_LIQ_USD && feeTvl24hPct >= METEORA_NEW_LISTING_FEETVL) {
+    if (
+      poolAgeHours < METEORA_NEW_LISTING_AGE_H &&
+      liqUsd >= METEORA_NEW_LISTING_LIQ_USD &&
+      Math.max(feeTvl1hPct, feeTvl5mPct * 12) >= METEORA_NEW_LISTING_FEETVL
+    ) {
       console.log(
         `[scanner] ${symbol} — new Meteora listing ` +
-        `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, feeTvl=${feeTvl24hPct.toFixed(1)}%) — scoring normally`
+        `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, recentFeeTvl=${Math.max(feeTvl1hPct, feeTvl5mPct * 12).toFixed(1)}%) — scoring normally`
       )
       // fall through to normal scoring + openPosition
     }
@@ -729,7 +839,7 @@ export async function runScanner(): Promise<ScannerResult> {
     // ========== DAMM v2 LAUNCH (pool creation; isolated primary track) =========
     // This runs before damm-edge because the launch edge is pool creation, while
     // damm-edge only adds liquidity to an existing DAMM v2 pool.
-    if (await evaluateDammLaunch(metrics)) {
+    if (lane === 'fresh' && await evaluateDammLaunch(metrics)) {
       const dammLaunchParams: DammLaunchParams = {
         tokenAddress,
         poolAddress: bestPool.address,
@@ -761,6 +871,7 @@ export async function runScanner(): Promise<ScannerResult> {
       const result = await createAndOpenDammLaunch(dammLaunchParams)
       if (result.success) {
         openedCount++
+        openedMintsThisTick.add(tokenAddress)
         await sendAlert({
           type:          'position_opened',
           symbol,
@@ -783,7 +894,7 @@ export async function runScanner(): Promise<ScannerResult> {
     // If the token qualifies, opens a DAMM v2 position and skips the DLMM path
     // for this token via `continue`. All existing DLMM strategy logic below is
     // untouched — this block is pure additive code.
-    if (launchpadSource === 'meteora') {
+    if (lane === 'fresh' && launchpadSource === 'meteora') {
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
       if (dammDecision.shouldUseDamm && dammDecision.params) {
@@ -797,6 +908,7 @@ export async function runScanner(): Promise<ScannerResult> {
         const result = await openDammPosition(dammDecision.params)
         if (result.success) {
           openedCount++
+          openedMintsThisTick.add(tokenAddress)
           await sendAlert({
             type:          'position_opened',
             symbol,
@@ -815,28 +927,34 @@ export async function runScanner(): Promise<ScannerResult> {
     }
     // ========== END DAMM v2 EDGE ================================================
 
-    const tokenClass = classifyToken({
+    const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : classifyToken({
       address:        metrics.address,
       mcUsd:          metrics.mcUsd,
       volume24h:      metrics.volume24h,
       volume1h:       vol1h,
+      volume5m:       vol5m,
       liquidityUsd:   metrics.liquidityUsd,
       ageHours:       metrics.ageHours,
       topHolderPct:   metrics.topHolderPct,
       holderCount:    metrics.holderCount,
       rugcheckScore:  metrics.rugcheckScore,
       quoteTokenMint: metrics.quoteTokenMint,
+      feeTvl1hPct:    metrics.feeTvl1hPct,
+      feeTvl5mPct:    metrics.feeTvl5mPct,
+      feeTvl24hPct:   metrics.feeTvl24hPct,
     })
 
-    const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h })
+    const forcedStrategyId = lane === 'momentum' ? 'scalp-spike' : 'evil-panda'
+    const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId)
     if (!strategy) {
       const rejectionReason = explainNoStrategy(metrics)
-      console.log(`[scanner] ${symbol} — no strategy (class=${tokenClass}, quote=${quoteTokenMint}): ${rejectionReason}`)
+      console.log(`[scanner] ${symbol} — no strategy in ${lane} lane (class=${tokenClass}, quote=${quoteTokenMint}): ${rejectionReason}`)
       console.log(JSON.stringify({
         event:     'candidate_evaluated',
         mint:      tokenAddress,
         symbol,
         score:     0,
+        lane,
         launchpad: launchpadSource,
         decision:  'REJECTED',
         reason:    rejectionReason,
@@ -866,6 +984,7 @@ export async function runScanner(): Promise<ScannerResult> {
         final_score:       score,
       },
       launchpad: launchpadSource,
+      lane,
       decision:  accepted ? 'ACCEPTED' : 'REJECTED',
       reason:    rejectionReason,
     }))
@@ -878,15 +997,26 @@ export async function runScanner(): Promise<ScannerResult> {
         strategy_matched:  strategy.id,
         strategy_id:       strategy.id,
         token_class:       tokenClass,
+        scanner_lane:      lane,
+        pool_address:      metrics.poolAddress,
         mc_at_scan:        metrics.mcUsd,
         volume_24h:        metrics.volume24h,
+        volume_1h:         vol1h,
+        volume_5m:         vol5m,
+        liquidity_usd:     metrics.liquidityUsd,
+        fee_tvl_24h_pct:   feeTvl24hPct,
+        fee_tvl_1h_pct:    feeTvl1hPct,
+        fee_tvl_5m_pct:    feeTvl5mPct,
         holder_count:      metrics.holderCount,
         rugcheck_score:    metrics.rugcheckScore,
         top_holder_pct:    metrics.topHolderPct,
+        bin_step:          binStep,
         scanned_at:        new Date().toISOString(),
         score_volmc:       breakdown.volMcScore,
         score_holders:     breakdown.holderScore,
         score_freshness:   breakdown.freshnessScore,
+        score_fee_efficiency: breakdown.feeEfficiencyScore,
+        score_volume_tvl:  breakdown.volumeTvlScore,
         score_curve_bonus: breakdown.curveBonus,
         launchpad_source:  launchpadSource,
       }),
@@ -901,7 +1031,7 @@ export async function runScanner(): Promise<ScannerResult> {
     }
 
     candidateCount++
-    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (class=${tokenClass}, quote=${quoteTokenMint}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingInfo})`)
+    console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${score}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingInfo})`)
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (score >= MIN_SCORE_TO_OPEN) {
@@ -915,6 +1045,7 @@ export async function runScanner(): Promise<ScannerResult> {
       const positionId = await openPosition(metrics, strategy)
       if (positionId) {
         openedCount++
+        openedMintsThisTick.add(tokenAddress)
         await sendAlert({
           type: 'position_opened',
           symbol,
@@ -966,24 +1097,39 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
   }
 }
 
-async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPool[]> {
-  const params = {
+async function fetchMeteoraPoolsPage(baseUrl: string, sortBy: 'pool_created_at' | 'volume_5m'): Promise<MeteoraPool[]> {
+  const params: Record<string, string | number> = {
     page: 1,
     page_size: METEORA_FILTERED_FETCH.limit,
     limit: METEORA_FILTERED_FETCH.limit,
-    sort: 'pool_created_at:desc',
-    sort_by: 'pool_created_at:desc',
+    sort: `${sortBy}:desc`,
+    sort_by: `${sortBy}:desc`,
     'tvl>': METEORA_FILTERED_FETCH.minTvlUsd,
     'tvl[gte]': METEORA_FILTERED_FETCH.minTvlUsd,
-    'fee_tvl_ratio_1h>': METEORA_FILTERED_FETCH.minFeeTvlRatio1h,
-    'fee_tvl_ratio_1h[gte]': METEORA_FILTERED_FETCH.minFeeTvlRatio1h,
+  }
+  if (METEORA_FILTERED_FETCH.minFeeTvlRatio1h > 0) {
+    params['fee_tvl_ratio_1h>'] = METEORA_FILTERED_FETCH.minFeeTvlRatio1h
+    params['fee_tvl_ratio_1h[gte]'] = METEORA_FILTERED_FETCH.minFeeTvlRatio1h
   }
 
   const res = await axios.get<unknown>(`${baseUrl}/pools`, {
     params,
     timeout: METEORA_FETCH_TIMEOUT_MS,
   })
-  const pools = normalizeMeteoraPoolsResponse(res.data)
+  return normalizeMeteoraPoolsResponse(res.data)
+}
+
+async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPool[]> {
+  const pages = await Promise.allSettled([
+    fetchMeteoraPoolsPage(baseUrl, 'pool_created_at'),
+    fetchMeteoraPoolsPage(baseUrl, 'volume_5m'),
+  ])
+  const poolMap = new Map<string, MeteoraPool>()
+  for (const page of pages) {
+    if (page.status !== 'fulfilled') continue
+    for (const pool of page.value) poolMap.set(pool.address, pool)
+  }
+  const pools = Array.from(poolMap.values())
   if (pools.length > 0) return pools
 
   console.warn(`[scanner] ${baseUrl}/pools returned no usable pools; trying documented /pair/all fallback`)
@@ -1017,7 +1163,11 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
 
   const pools = allPools.filter((p) => {
     if (p.is_blacklisted) return false
-    if (getPoolVolume(p, '24h') < PRE_FILTER.minVolume24hUsd) return false
+    const hasRecentVolume =
+      getPoolVolume(p, '24h') >= PRE_FILTER.minVolume24hUsd ||
+      getPoolVolume(p, '5m') >= Math.min(FRESH_MIN_VOLUME_5M_USD, MOMENTUM_MIN_VOLUME_5M_USD) ||
+      (FRESH_MIN_VOLUME_1H_USD > 0 && getPoolVolume(p, '1h') >= FRESH_MIN_VOLUME_1H_USD)
+    if (!hasRecentVolume) return false
     if (getPoolTvl(p) < PRE_FILTER.minLiquidityUsd) return false
     if (getPoolTvl(p) > PRE_FILTER.maxLiquidityUsd) return false
     const hasQuote = QUOTE_ASSETS.has(p.token_x.address) || QUOTE_ASSETS.has(p.token_y.address)

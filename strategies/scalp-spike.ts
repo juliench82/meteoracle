@@ -39,12 +39,12 @@ export const scalpSpikeStrategy: Strategy = {
     maxMcUsd:            envNumber('SCALP_SPIKE_MAX_MC_USD', Number.MAX_SAFE_INTEGER),
     minVolume24h:        envNumber('SCALP_SPIKE_MIN_VOLUME_24H', 100_000),
     minLiquidityUsd:     envNumber('SCALP_SPIKE_MIN_LIQUIDITY_USD', 30_000),
-    maxTopHolderPct:     envNumber('SCALP_SPIKE_MAX_TOP_HOLDER_PCT', 100),
+    maxTopHolderPct:     envNumber('SCALP_SPIKE_MAX_TOP_HOLDER_PCT', 70),
     minHolderCount:      envNumber('SCALP_SPIKE_MIN_HOLDER_COUNT', 300),
     maxAgeHours:         envNumber('SCALP_SPIKE_MAX_AGE_HOURS', 999_999), // no age ceiling
     minRugcheckScore:    envNumber('SCALP_SPIKE_MIN_RUGCHECK_SCORE', 50), // slightly relaxed vs evil-panda
     requireSocialSignal:   false,
-    minFeeTvl24hPct:      envNumber('SCALP_SPIKE_MIN_FEE_TVL_24H_PCT', 8),
+    minFeeTvl24hPct:      envNumber('SCALP_SPIKE_MIN_FEE_TVL_24H_PCT', 0),
   },
 
   position: {

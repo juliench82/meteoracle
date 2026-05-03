@@ -58,21 +58,86 @@ function envNumber(name: string, fallback: number): number {
 // Tunable via env — default 2.5× current 5m volume versus the observed 1h per-5m average.
 const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.5)
 const SCALP_SPIKE_MIN_FEE_TVL_1H_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_1H_PCT', 1)
+const SCALP_SPIKE_MIN_FEE_TVL_5M_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_5M_PCT', 0.1)
+const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)
 
-export function classifyToken(token: {
-  address:        string
+type StrategyId = Strategy['id']
+
+type StrategyToken = {
+  address?:       string
   mcUsd:          number
   volume24h:      number
   volume1h?:      number
   volume5m?:      number
   liquidityUsd:   number
-  ageHours:       number
   topHolderPct:   number
   holderCount:    number
+  ageHours:       number
   rugcheckScore:  number
   quoteTokenMint?: string
   feeTvl1hPct?:   number
-}): TokenClass {
+  feeTvl5mPct?:   number
+  feeTvl24hPct?:  number
+  binStep?:       number
+}
+
+function getFiveMinuteVolumeSpike(token: StrategyToken): number {
+  const vol5m = token.volume5m ?? 0
+  const vol1h = token.volume1h ?? 0
+  const avgVol5mFrom1h = vol1h / 12
+  return avgVol5mFrom1h > 0 ? vol5m / avgVol5mFrom1h : 0
+}
+
+function hasScalpSpikeSignals(token: StrategyToken): boolean {
+  return (
+    getFiveMinuteVolumeSpike(token) >= SCALP_SPIKE_VOL_RATIO &&
+    (token.feeTvl5mPct ?? 0) >= SCALP_SPIKE_MIN_FEE_TVL_5M_PCT &&
+    (token.feeTvl1hPct ?? 0) >= SCALP_SPIKE_MIN_FEE_TVL_1H_PCT
+  )
+}
+
+function getMinHolderCount(strategy: Strategy, token: StrategyToken): number {
+  if (strategy.id === 'evil-panda' && token.ageHours < 1) {
+    return Math.min(strategy.filters.minHolderCount, EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M)
+  }
+  return strategy.filters.minHolderCount
+}
+
+function getStrategyById(id: StrategyId): Strategy | null {
+  return STRATEGIES.find((strategy) => strategy.id === id) ?? null
+}
+
+function passesTokenFilters(token: StrategyToken, strategy: Strategy): boolean {
+  const f = strategy.filters
+  const passesMinMc =
+    strategy.id === 'evil-panda' && token.ageHours <= f.maxAgeHours
+      ? true
+      : token.mcUsd >= f.minMcUsd
+  const passesVolume24h =
+    strategy.id === 'scalp-spike' && hasScalpSpikeSignals(token)
+      ? true
+      : token.volume24h >= f.minVolume24h
+  const minHolderCount = getMinHolderCount(strategy, token)
+  const passesFeeTvl24h =
+    token.feeTvl24hPct === undefined || token.feeTvl24hPct >= f.minFeeTvl24hPct
+
+  return (
+    passesMinMc                              &&
+    passesVolume24h                          &&
+    token.mcUsd         <= f.maxMcUsd        &&
+    token.liquidityUsd  >= f.minLiquidityUsd &&
+    token.topHolderPct  <= f.maxTopHolderPct &&
+    token.holderCount   >= minHolderCount    &&
+    token.ageHours      <= f.maxAgeHours     &&
+    token.rugcheckScore >= f.minRugcheckScore &&
+    passesFeeTvl24h
+  ) &&
+    passesQuoteMintFilter(strategy, token.quoteTokenMint) &&
+    passesBinStepFilter(strategy, token.binStep) &&
+    (strategy.id !== 'scalp-spike' || hasScalpSpikeSignals(token))
+}
+
+export function classifyToken(token: StrategyToken & { address: string }): TokenClass {
   const { address, mcUsd, ageHours, topHolderPct, holderCount } = token
 
   if (STABLE_MINTS.has(address)) return 'STABLE'
@@ -95,16 +160,9 @@ export function classifyToken(token: {
   }
 
   // SCALP_SPIKE: any non-new token with MC>=500K and a real 5m/1h surge.
-  const vol5m = token.volume5m ?? 0
-  const vol1h = token.volume1h ?? 0
-  const avgVol5mFrom1h = vol1h / 12
-  const volRatio = avgVol5mFrom1h > 0 ? vol5m / avgVol5mFrom1h : 0
-  const feeTvl1hPct = token.feeTvl1hPct ?? 0
-
   if (
     mcUsd >= scalpSpikeStrategy.filters.minMcUsd &&
-    volRatio >= SCALP_SPIKE_VOL_RATIO &&
-    feeTvl1hPct >= SCALP_SPIKE_MIN_FEE_TVL_1H_PCT
+    hasScalpSpikeSignals(token)
   ) {
     return 'SCALP_SPIKE'
   }
@@ -148,90 +206,61 @@ export function getStrategyForToken(token: {
   rugcheckScore:  number
   quoteTokenMint?: string
   feeTvl1hPct?:   number
+  feeTvl5mPct?:   number
+  feeTvl24hPct?:  number
   binStep?:       number
-}): Strategy | null {
+}, forcedStrategyId?: StrategyId): Strategy | null {
+  if (forcedStrategyId) {
+    const forcedStrategy = getStrategyById(forcedStrategyId)
+    if (!forcedStrategy?.enabled) return null
+    return passesTokenFilters(token, forcedStrategy) ? forcedStrategy : null
+  }
+
   const tokenClass = classifyToken({ address: token.address ?? '', ...token })
   if (tokenClass === 'UNKNOWN') return null
 
   const strategy = CLASS_STRATEGY[tokenClass]
   if (!strategy.enabled) return null
 
-  const f = strategy.filters
-  const passesMinMc =
-    strategy.id === 'evil-panda' && token.ageHours <= f.maxAgeHours
-      ? true
-      : token.mcUsd >= f.minMcUsd
-  const passes =
-    passesMinMc                              &&
-    token.mcUsd         <= f.maxMcUsd        &&
-    token.volume24h     >= f.minVolume24h     &&
-    token.liquidityUsd  >= f.minLiquidityUsd  &&
-    token.topHolderPct  <= f.maxTopHolderPct  &&
-    token.holderCount   >= f.minHolderCount   &&
-    token.ageHours      <= f.maxAgeHours      &&
-    token.rugcheckScore >= f.minRugcheckScore  &&
-    passesQuoteMintFilter(strategy, token.quoteTokenMint) &&
-    passesBinStepFilter(strategy, token.binStep)
-
-  return passes ? strategy : null
+  return passesTokenFilters(token, strategy) ? strategy : null
 }
 
-export function getAllMatchingStrategies(token: {
-  address?:       string
-  mcUsd:          number
-  volume24h:      number
-  volume1h?:      number
-  volume5m?:      number
-  liquidityUsd:   number
-  topHolderPct:   number
-  holderCount:    number
-  ageHours:       number
-  rugcheckScore:  number
-  quoteTokenMint?: string
-  feeTvl1hPct?:   number
-  binStep?:       number
-}): Strategy[] {
+export function getAllMatchingStrategies(token: StrategyToken): Strategy[] {
   return STRATEGIES.filter((s) => {
     if (!s.enabled) return false
-    const f = s.filters
-    const passesMinMc =
-      s.id === 'evil-panda' && token.ageHours <= f.maxAgeHours
-        ? true
-        : token.mcUsd >= f.minMcUsd
-    return (
-      passesMinMc                              &&
-      token.mcUsd         <= f.maxMcUsd        &&
-      token.volume24h     >= f.minVolume24h     &&
-      token.liquidityUsd  >= f.minLiquidityUsd  &&
-      token.topHolderPct  <= f.maxTopHolderPct  &&
-      token.holderCount   >= f.minHolderCount   &&
-      token.ageHours      <= f.maxAgeHours      &&
-      token.rugcheckScore >= f.minRugcheckScore  &&
-      passesQuoteMintFilter(s, token.quoteTokenMint) &&
-      passesBinStepFilter(s, token.binStep)
-    )
+    return passesTokenFilters(token, s)
   })
 }
 
 export function explainNoStrategy(t: {
-  mcUsd: number; volume24h: number; liquidityUsd: number
+  mcUsd: number; volume24h: number; volume1h?: number; volume5m?: number; liquidityUsd: number
   topHolderPct: number; holderCount: number; ageHours: number
-  rugcheckScore: number; feeTvl24hPct: number; quoteTokenMint?: string
+  rugcheckScore: number; feeTvl24hPct: number; feeTvl1hPct?: number; feeTvl5mPct?: number; quoteTokenMint?: string
   binStep?: number
 }): string {
   const perStrat = STRATEGIES.filter(s => s.enabled).map(s => {
     const f = s.filters
     const fails: string[] = []
     const minMcWaived = s.id === 'evil-panda' && t.ageHours <= f.maxAgeHours
+    const minHolderCount = getMinHolderCount(s, t)
+    const hasSpike = s.id === 'scalp-spike' && hasScalpSpikeSignals(t)
     if (!minMcWaived && t.mcUsd < f.minMcUsd) fails.push(`mc=$${t.mcUsd.toFixed(0)}<$${f.minMcUsd}`)
     if (t.mcUsd          > f.maxMcUsd)        fails.push(`mc too high`)
-    if (t.volume24h      < f.minVolume24h)    fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
+    if (!hasSpike && t.volume24h < f.minVolume24h) fails.push(`vol=$${t.volume24h.toFixed(0)}<$${f.minVolume24h}`)
+    if (s.id === 'scalp-spike' && !hasSpike) {
+      fails.push(
+        `spike=${getFiveMinuteVolumeSpike(t).toFixed(2)}x<${SCALP_SPIKE_VOL_RATIO}x ` +
+        `or fee5m=${(t.feeTvl5mPct ?? 0).toFixed(2)}%<${SCALP_SPIKE_MIN_FEE_TVL_5M_PCT}%`,
+      )
+    }
     if (t.liquidityUsd   < f.minLiquidityUsd) fails.push(`liq=$${t.liquidityUsd.toFixed(0)}<$${f.minLiquidityUsd}`)
     if (t.topHolderPct   > f.maxTopHolderPct) fails.push(`topHolder=${t.topHolderPct.toFixed(1)}%>${f.maxTopHolderPct}%`)
-    if (t.holderCount    < f.minHolderCount)  fails.push(`holders=${t.holderCount}<${f.minHolderCount}`)
+    if (t.holderCount    < minHolderCount)    fails.push(`holders=${t.holderCount}<${minHolderCount}`)
     if (t.ageHours       > f.maxAgeHours)     fails.push(`age=${t.ageHours.toFixed(1)}h>${f.maxAgeHours}h`)
     if (t.rugcheckScore  < f.minRugcheckScore) fails.push(`rug=${t.rugcheckScore}<${f.minRugcheckScore}`)
-    if (t.feeTvl24hPct   < f.minFeeTvl24hPct) fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
+    if (f.minFeeTvl24hPct > 0 && t.feeTvl24hPct < f.minFeeTvl24hPct) {
+      fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
+    }
     if (f.minBinStep !== undefined && t.binStep !== undefined && t.binStep < f.minBinStep) {
       fails.push(`binStep=${t.binStep}<${f.minBinStep}`)
     }
