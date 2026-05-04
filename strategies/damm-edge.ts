@@ -97,7 +97,8 @@ export async function evaluateDammEdge(
     }
   }
 
-  // All gates passed — build position params
+  // All gates passed — build preliminary params. scanner.ts must replace
+  // poolAddress with a verified DAMM v2 pool before calling openDammPosition().
   const params: DammPositionParams = {
     tokenAddress,
     poolAddress:  metrics.poolAddress,

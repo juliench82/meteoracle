@@ -167,6 +167,7 @@ export type DammPositionStrategyId = 'damm-edge' | 'damm-migration'
 /**
  * Parameters needed to open a DAMM v2 position.
  * Built by evaluateDammEdge() or the DBC graduation watcher and consumed by openDammPosition().
+ * For damm-edge scanner opens, poolAddress must be a verified DAMM v2 pool, not the source DLMM pool.
  */
 export interface DammPositionParams {
   tokenAddress: string

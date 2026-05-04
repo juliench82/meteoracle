@@ -20,7 +20,7 @@ import {
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
 import { evaluateDammEdge } from '@/strategies/damm-edge'
-import { openDammPosition } from './damm-executor'
+import { openDammPosition, resolveVerifiedDammV2PoolForToken } from './damm-executor'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
 
@@ -805,38 +805,65 @@ export async function runScanner(): Promise<ScannerResult> {
 
     // ========== DAMM v2 EDGE (additive hook — Meteora-origin pools only) =======
     // Fires ONLY for native Meteora pools (launchpadSource === 'meteora').
-    // If the token qualifies, opens a DAMM v2 position and skips the DLMM path
-    // for this token via `continue`. All existing DLMM strategy logic below is
+    // If the token qualifies, resolves a verified DAMM v2 pool before opening.
+    // The DLMM path is skipped only after a DAMM open actually succeeds.
+    // All existing DLMM strategy logic below is
     // untouched — this block is pure additive code.
     if (lane === 'fresh' && launchpadSource === 'meteora') {
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
       if (dammDecision.shouldUseDamm && dammDecision.params) {
         if (openBlockedReason || openedCount >= availableOpenSlots) {
-          openSkippedCount++
           const reason = openBlockedReason ?? 'slots_filled_this_tick'
-          console.log(`[scanner][damm-edge] ${symbol} qualifies but open skipped: ${reason}`)
-          continue
-        }
-        console.log(`[scanner][damm-edge] TRIGGERED — opening DAMM v2 position for ${symbol}`)
-        const result = await openDammPosition(dammDecision.params)
-        if (result.success) {
-          openedCount++
-          openedMintsThisTick.add(tokenAddress)
-          await sendAlert({
-            type:          'position_opened',
-            symbol,
-            strategy:      'damm-edge',
-            solDeposited:  dammDecision.params.solAmount,
-            entryPrice:    metrics.priceUsd,
-            positionId:    result.positionPubkey,
-          })
+          console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: ${reason}; continuing DLMM evaluation`)
         } else {
-          console.error(`[scanner][damm-edge] openDammPosition failed for ${symbol}: ${result.error}`)
+          const verifiedDammPool = await resolveVerifiedDammV2PoolForToken({
+            tokenAddress,
+            preferredPoolAddress: metrics.poolAddress,
+            quoteMint: WSOL,
+          })
+
+          if (!verifiedDammPool) {
+            console.log(`[scanner][damm-edge] ${symbol} has no verified DAMM v2 SOL pool; continuing DLMM evaluation`)
+          } else {
+            const dammParams = {
+              ...dammDecision.params,
+              poolAddress: verifiedDammPool.poolAddress,
+              metadata: {
+                ...(dammDecision.params.metadata ?? {}),
+                damm_pool_resolver_source: verifiedDammPool.source,
+                scanner_source_pool_address: metrics.poolAddress,
+                verified_damm_pool_address: verifiedDammPool.poolAddress,
+                verified_damm_token_a_mint: verifiedDammPool.tokenAMint,
+                verified_damm_token_b_mint: verifiedDammPool.tokenBMint,
+              },
+            }
+
+            console.log(
+              `[scanner][damm-edge] TRIGGERED — opening verified DAMM v2 position for ${symbol} ` +
+              `pool=${verifiedDammPool.poolAddress} source=${verifiedDammPool.source}`,
+            )
+            const result = await openDammPosition(dammParams)
+            if (result.success) {
+              openedCount++
+              openedMintsThisTick.add(tokenAddress)
+              await sendAlert({
+                type:          'position_opened',
+                symbol,
+                strategy:      'damm-edge',
+                solDeposited:  dammParams.solAmount,
+                entryPrice:    metrics.priceUsd,
+                positionId:    result.positionId ?? result.positionPubkey,
+                poolAddress:   verifiedDammPool.poolAddress,
+                mint:          tokenAddress,
+              })
+
+              continue
+            }
+
+            console.error(`[scanner][damm-edge] openDammPosition failed for ${symbol}: ${result.error}; continuing DLMM evaluation`)
+          }
         }
-        // Skip DLMM path for this token regardless of open success.
-        // We do not want the same token evaluated by both tracks.
-        continue
       }
     }
     // ========== END DAMM v2 EDGE ================================================

@@ -45,6 +45,7 @@ import { summarizeError } from '@/lib/logging'
 import { sendAlert } from './alerter'
 
 const METEORA_DAMM_API = 'https://amm-v2.meteora.ag'
+const METEORA_DAMM_V2_DATAPI = 'https://damm-v2.datapi.meteora.ag'
 const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
   process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',
 )
@@ -59,7 +60,45 @@ const MAX_DAMM_MIGRATION_SOL_DEPLOYED = parseFloat(
   process.env.MAX_DAMM_MIGRATION_SOL_DEPLOYED ??
   String(DAMM_MIGRATION_SOL_PER_POSITION * MAX_CONCURRENT_DAMM_MIGRATION_POSITIONS),
 )
+const DAMM_POOL_RESOLVE_TIMEOUT_MS = parseInt(process.env.DAMM_POOL_RESOLVE_TIMEOUT_MS ?? '6000', 10)
+const DAMM_POOL_RESOLVE_PAGE_SIZE = Math.min(
+  1000,
+  Math.max(1, parseInt(process.env.DAMM_POOL_RESOLVE_PAGE_SIZE ?? '20', 10)),
+)
+const DAMM_POOL_RESOLVE_CANDIDATE_LIMIT = Math.min(
+  20,
+  Math.max(1, parseInt(process.env.DAMM_POOL_RESOLVE_CANDIDATE_LIMIT ?? '8', 10)),
+)
 const CLOSEABLE_DAMM_STATUSES = [...OPEN_LP_STATUSES, 'dry_run']
+const WSOL_MINT = NATIVE_MINT.toBase58()
+
+type DammPoolCandidateSource = 'provided' | 'datapi'
+
+type DammPoolCandidate = {
+  address: string
+  source: DammPoolCandidateSource
+  tvlUsd?: number
+}
+
+type VerifiedDammPool = {
+  poolAddress: string
+  source: DammPoolCandidateSource
+  tokenAMint: string
+  tokenBMint: string
+}
+
+type DammV2PoolApiToken = {
+  address?: unknown
+  symbol?: unknown
+}
+
+type DammV2PoolApiPool = {
+  address?: unknown
+  token_x?: DammV2PoolApiToken
+  token_y?: DammV2PoolApiToken
+  tvl?: unknown
+  is_blacklisted?: unknown
+}
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
 
@@ -146,6 +185,155 @@ async function getCpAmm(): Promise<any> {
     _cpAmm = new CpAmm(getConnection())
   }
   return _cpAmm
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function asNumber(value: unknown): number | undefined {
+  const parsed = typeof value === 'string' ? Number(value) : value
+  return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : undefined
+}
+
+function normalizeMint(value: unknown): string | null {
+  return asString(value)
+}
+
+function getApiPoolTokenAddresses(pool: DammV2PoolApiPool): [string | null, string | null] {
+  return [
+    normalizeMint(pool.token_x?.address),
+    normalizeMint(pool.token_y?.address),
+  ]
+}
+
+function apiPoolMatchesTokenPair(pool: DammV2PoolApiPool, tokenAddress: string, quoteMint: string): boolean {
+  if (pool.is_blacklisted === true) return false
+  const [tokenX, tokenY] = getApiPoolTokenAddresses(pool)
+  const mints = [tokenX, tokenY]
+  return mints.includes(tokenAddress) && mints.includes(quoteMint)
+}
+
+function poolStateMatchesTokenPair(poolState: any, tokenAddress: string, quoteMint: string): {
+  matches: boolean
+  tokenAMint?: string
+  tokenBMint?: string
+} {
+  const tokenAMint = poolState?.tokenAMint?.toBase58?.()
+  const tokenBMint = poolState?.tokenBMint?.toBase58?.()
+  const mints = [tokenAMint, tokenBMint]
+  return {
+    matches: Boolean(tokenAMint && tokenBMint && mints.includes(tokenAddress) && mints.includes(quoteMint)),
+    tokenAMint,
+    tokenBMint,
+  }
+}
+
+async function fetchDammPoolJson(url: URL): Promise<unknown> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), DAMM_POOL_RESOLVE_TIMEOUT_MS)
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return res.json()
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function fetchDammPoolCandidatesFromDataApi(
+  tokenAddress: string,
+  quoteMint: string,
+): Promise<DammPoolCandidate[]> {
+  const url = new URL('/pools', METEORA_DAMM_V2_DATAPI)
+  url.searchParams.set('query', tokenAddress)
+  url.searchParams.set('page_size', String(DAMM_POOL_RESOLVE_PAGE_SIZE))
+  url.searchParams.set('sort_by', 'tvl:desc')
+  url.searchParams.set('filter_by', 'is_blacklisted=false')
+
+  try {
+    const json = await fetchDammPoolJson(url)
+    const data = json && typeof json === 'object' && Array.isArray((json as { data?: unknown }).data)
+      ? (json as { data: unknown[] }).data
+      : []
+
+    return data
+      .filter((entry): entry is DammV2PoolApiPool => Boolean(entry && typeof entry === 'object'))
+      .filter(pool => apiPoolMatchesTokenPair(pool, tokenAddress, quoteMint))
+      .map(pool => ({
+        address: asString(pool.address) ?? '',
+        source: 'datapi' as const,
+        tvlUsd: asNumber(pool.tvl),
+      }))
+      .filter(candidate => Boolean(candidate.address))
+      .sort((a, b) => (b.tvlUsd ?? 0) - (a.tvlUsd ?? 0))
+      .slice(0, DAMM_POOL_RESOLVE_CANDIDATE_LIMIT)
+  } catch (err: any) {
+    console.warn(`[DAMM] DAMM v2 pool lookup failed for ${tokenAddress}: ${err?.message ?? String(err)}`)
+    return []
+  }
+}
+
+/**
+ * Resolve a token to an existing, verified DAMM v2 WSOL pool.
+ *
+ * The scanner may discover a DLMM pool first. This helper treats that address
+ * only as a candidate, then proves the final pool through the DAMM v2 program
+ * before openDammPosition receives it.
+ */
+export async function resolveVerifiedDammV2PoolForToken({
+  tokenAddress,
+  preferredPoolAddress,
+  quoteMint = WSOL_MINT,
+}: {
+  tokenAddress: string
+  preferredPoolAddress?: string
+  quoteMint?: string
+}): Promise<VerifiedDammPool | null> {
+  const token = new PublicKey(tokenAddress).toBase58()
+  const quote = new PublicKey(quoteMint).toBase58()
+  const candidates: DammPoolCandidate[] = []
+
+  if (preferredPoolAddress) {
+    candidates.push({ address: preferredPoolAddress, source: 'provided' })
+  }
+  candidates.push(...await fetchDammPoolCandidatesFromDataApi(token, quote))
+
+  const uniqueCandidates = Array.from(
+    new Map(candidates.map(candidate => [candidate.address, candidate])).values(),
+  )
+
+  const sdk = await getCpAmm()
+  for (const candidate of uniqueCandidates) {
+    try {
+      const pool = new PublicKey(candidate.address)
+      const poolState = await sdk.fetchPoolState(pool)
+      const match = poolStateMatchesTokenPair(poolState, token, quote)
+      if (!match.matches || !match.tokenAMint || !match.tokenBMint) {
+        console.warn(
+          `[DAMM] rejected pool candidate ${candidate.address}: ` +
+          `expected ${token}/${quote}, got ${match.tokenAMint ?? 'unknown'}/${match.tokenBMint ?? 'unknown'}`,
+        )
+        continue
+      }
+
+      return {
+        poolAddress: candidate.address,
+        source: candidate.source,
+        tokenAMint: match.tokenAMint,
+        tokenBMint: match.tokenBMint,
+      }
+    } catch (err: any) {
+      console.warn(
+        `[DAMM] rejected pool candidate ${candidate.address}: ${err?.message ?? String(err)}`,
+      )
+    }
+  }
+
+  return null
 }
 
 async function getZap(): Promise<any> {
