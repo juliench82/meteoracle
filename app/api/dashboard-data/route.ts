@@ -35,10 +35,8 @@ function isDammLp(position: { strategy_id?: string | null; position_type?: strin
     position.strategy_id === 'damm-edge' ||
     position.strategy_id === 'damm-live' ||
     position.strategy_id === 'damm-migration' ||
-    position.strategy_id === 'damm-launch' ||
     position.position_type === 'damm-edge' ||
-    position.position_type === 'damm-migration' ||
-    position.position_type === 'damm-launch'
+    position.position_type === 'damm-migration'
   )
 }
 

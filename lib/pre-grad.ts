@@ -2,7 +2,7 @@
  * lib/pre-grad.ts — DAMM v2 position lifecycle handler.
  *
  * Manages the monitoring loop and exit routing for positions opened via the
- * DAMM tracks (strategy_id = 'damm-edge', 'damm-migration', or legacy 'damm-launch').
+ * DAMM tracks (strategy_id = 'damm-edge' or 'damm-migration').
  *
  * ISOLATION RULE: Must NOT import anything from bot/monitor.ts or bot/executor.ts.
  *
@@ -27,8 +27,8 @@ import {
   type DammSolPrice,
 } from './damm-price'
 
-const MANAGED_DAMM_STRATEGIES = new Set(['damm-edge', 'damm-migration', 'damm-launch'])
-const MANAGED_DAMM_POSITION_TYPES = new Set(['damm-edge', 'damm-migration', 'damm-launch'])
+const MANAGED_DAMM_STRATEGIES = new Set(['damm-edge', 'damm-migration'])
+const MANAGED_DAMM_POSITION_TYPES = new Set(['damm-edge', 'damm-migration'])
 
 type DammPositionState = DammSolPrice & {
   currentPriceSol: number
@@ -37,10 +37,6 @@ type DammPositionState = DammSolPrice & {
 function isManagedDammPosition(position: { strategy_id?: string | null; position_type?: string | null }): boolean {
   return MANAGED_DAMM_STRATEGIES.has(String(position.strategy_id ?? '')) ||
     MANAGED_DAMM_POSITION_TYPES.has(String(position.position_type ?? ''))
-}
-
-function managedDammTrack(position: { strategy_id?: string | null; position_type?: string | null }): string {
-  return String(position.strategy_id ?? position.position_type ?? '')
 }
 
 function metadataRecord(value: unknown): Record<string, unknown> {
@@ -65,15 +61,6 @@ function getDammExitEntryPriceSol(
   onChain: DammPositionState,
 ): { value: number; source: string } | null {
   const metadata = metadataRecord(position.metadata)
-  const track = managedDammTrack(position)
-
-  if (track === 'damm-launch') {
-    const scannerInitialPrice = finitePositive(metadata.scanner_initial_price_sol)
-    return scannerInitialPrice !== null
-      ? { value: scannerInitialPrice, source: 'metadata.scanner_initial_price_sol' }
-      : null
-  }
-
   const entryPrice = finitePositive(position.entry_price_sol)
   if (entryPrice === null) return null
 

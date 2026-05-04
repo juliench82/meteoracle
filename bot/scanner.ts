@@ -72,7 +72,6 @@ const METEORA_FILTERED_FETCH = {
 const METEORA_NEW_LISTING_AGE_H   = 0.25
 const METEORA_NEW_LISTING_LIQ_USD = 25_000
 const METEORA_NEW_LISTING_FEETVL  = 8   // %
-const DAMM_EDGE_ENABLED           = process.env.DAMM_EDGE_ENABLED === 'true'
 
 const WSOL = 'So11111111111111111111111111111111111111112'
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -809,7 +808,7 @@ export async function runScanner(): Promise<ScannerResult> {
     // If the token qualifies, opens a DAMM v2 position and skips the DLMM path
     // for this token via `continue`. All existing DLMM strategy logic below is
     // untouched — this block is pure additive code.
-    if (DAMM_EDGE_ENABLED && lane === 'fresh' && launchpadSource === 'meteora') {
+    if (lane === 'fresh' && launchpadSource === 'meteora') {
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
       if (dammDecision.shouldUseDamm && dammDecision.params) {

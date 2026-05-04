@@ -45,10 +45,8 @@ function isDammLp(pos: LpPositionRow): boolean {
     pos.strategy_id === 'damm-edge' ||
     pos.strategy_id === 'damm-live' ||
     pos.strategy_id === 'damm-migration' ||
-    pos.strategy_id === 'damm-launch' ||
     pos.position_type === 'damm-edge' ||
-    pos.position_type === 'damm-migration' ||
-    pos.position_type === 'damm-launch'
+    pos.position_type === 'damm-migration'
   )
 }
 

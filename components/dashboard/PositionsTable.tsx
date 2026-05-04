@@ -7,7 +7,6 @@ const STRATEGY_LABELS: Record<string, string> = {
   'stable-farm': 'Stable Farm',
   'damm-edge': 'DAMM Edge',
   'damm-migration': 'DAMM Migration',
-  'damm-launch': 'DAMM Launch',
   'damm-live': 'DAMM Live',
   'meteora-live': 'Meteora Live',
 }

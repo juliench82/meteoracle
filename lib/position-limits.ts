@@ -20,9 +20,7 @@ export interface OpenLpLimitState {
 function isDammMigrationPosition(position: { strategy_id?: string | null; position_type?: string | null }): boolean {
   return (
     position.strategy_id === 'damm-migration' ||
-    position.position_type === 'damm-migration' ||
-    position.strategy_id === 'damm-launch' ||
-    position.position_type === 'damm-launch'
+    position.position_type === 'damm-migration'
   )
 }
 

@@ -165,10 +165,8 @@ export async function monitorPositions(): Promise<{
       const isDammPosition =
         strategyId === 'damm-edge' ||
         strategyId === 'damm-migration' ||
-        strategyId === 'damm-launch' ||
         position.position_type === 'damm-edge' ||
-        position.position_type === 'damm-migration' ||
-        position.position_type === 'damm-launch'
+        position.position_type === 'damm-migration'
       if (position.position_type === 'pre_grad' || isDammPosition) {
         continue
       }

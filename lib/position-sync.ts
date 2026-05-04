@@ -161,10 +161,8 @@ function isDammCached(row: CachedPosition): boolean {
     row.strategy_id === 'damm-edge' ||
     row.strategy_id === 'damm-live' ||
     row.strategy_id === 'damm-migration' ||
-    row.strategy_id === 'damm-launch' ||
     row.position_type === 'damm-edge' ||
-    row.position_type === 'damm-migration' ||
-    row.position_type === 'damm-launch'
+    row.position_type === 'damm-migration'
   )
 }
 

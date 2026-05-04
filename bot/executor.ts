@@ -428,10 +428,8 @@ export async function addLiquidityToPosition(
   if (
     position.position_type === 'damm-edge' ||
     position.position_type === 'damm-migration' ||
-    position.position_type === 'damm-launch' ||
     position.strategy_id === 'damm-edge' ||
     position.strategy_id === 'damm-migration' ||
-    position.strategy_id === 'damm-launch' ||
     position.strategy_id === 'damm-live'
   ) {
     return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'adding liquidity is currently supported for DLMM positions only' }
