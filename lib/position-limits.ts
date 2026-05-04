@@ -8,6 +8,7 @@ export type OpenLpScope = 'all' | 'market' | 'damm-migration'
 export interface OpenLpLimitState {
   effectiveOpenCount: number
   liveOpenCount: number
+  liveScopedOpenCount: number
   cachedOpenCount: number
   liveFetchOk: boolean
   dlmmOk: boolean
@@ -34,6 +35,23 @@ export function matchesOpenLpScope(
   return scope === 'damm-migration' ? isMigration : !isMigration
 }
 
+function isLiveDammPosition(position: LiveMeteoraPosition): boolean {
+  return position.position_type === 'damm-edge' || position.strategy_id === 'damm-live'
+}
+
+function liveOpenCountForScope(positions: LiveMeteoraPosition[], scope: OpenLpScope): number {
+  const live = positions.filter(position => !position.dry_run)
+  if (scope === 'all') return live.length
+
+  // Meteora live data cannot know our local strategy_id before Supabase sync.
+  // For migration safety, any live DAMM v2 position occupies the migration slot.
+  if (scope === 'damm-migration') {
+    return live.filter(isLiveDammPosition).length
+  }
+
+  return live.filter(position => !isLiveDammPosition(position)).length
+}
+
 export async function getOpenLpLimitState(scope: OpenLpScope = 'all'): Promise<OpenLpLimitState> {
   const supabase = createServerClient()
   const [snapshot, cached] = await Promise.all([
@@ -54,13 +72,16 @@ export async function getOpenLpLimitState(scope: OpenLpScope = 'all'): Promise<O
   }
 
   const liveOpenCount = snapshot.positions.filter(position => !position.dry_run).length
+  const liveScopedOpenCount = liveOpenCountForScope(snapshot.positions, scope)
   const cachedRows = cached.error ? [] : cached.data ?? []
   const cachedOpenCount = cachedRows.filter(position => matchesOpenLpScope(position, scope)).length
-  const countSource = scope === 'all' && liveFetchOk ? 'meteora-live' : 'supabase-cache'
+  const effectiveOpenCount = liveFetchOk ? Math.max(liveScopedOpenCount, cachedOpenCount) : cachedOpenCount
+  const countSource = liveFetchOk && liveScopedOpenCount >= cachedOpenCount ? 'meteora-live' : 'supabase-cache'
 
   return {
-    effectiveOpenCount: countSource === 'meteora-live' ? liveOpenCount : cachedOpenCount,
+    effectiveOpenCount,
     liveOpenCount,
+    liveScopedOpenCount,
     cachedOpenCount,
     liveFetchOk,
     dlmmOk: snapshot.dlmmOk,

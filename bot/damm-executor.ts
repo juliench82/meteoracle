@@ -308,7 +308,8 @@ export async function openDammPosition(
     const limitState = await assertCanOpenLpPosition(openConfig.maxConcurrent, openConfig.label, openConfig.scope)
     console.log(
       `${openConfig.label} ${openConfig.scope} LP cap ok (${limitState.effectiveOpenCount}/${openConfig.maxConcurrent}; ` +
-      `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+      `source=${limitState.countSource}, live=${limitState.liveOpenCount}, ` +
+      `liveScoped=${limitState.liveScopedOpenCount}, cached=${limitState.cachedOpenCount})`,
     )
     const deployedSol = await getScopedOpenSolDeployed(openConfig.scope)
     if (deployedSol + params.solAmount > openConfig.maxDeployedSol) {

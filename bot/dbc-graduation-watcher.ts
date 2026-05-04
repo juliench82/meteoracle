@@ -48,7 +48,8 @@ const DBC_MAX_TOP_HOLDER_PCT = parseFloat(process.env.DBC_MAX_TOP_HOLDER_PCT ?? 
 const DBC_REQUIRE_TOP_HOLDER_DATA = process.env.DBC_REQUIRE_TOP_HOLDER_DATA !== 'false'
 const DBC_REQUIRE_RELIABLE_HOLDERS = process.env.DBC_REQUIRE_RELIABLE_HOLDERS === 'true'
 const DAMM_MIGRATION_SOL_PER_POSITION = parseFloat(process.env.DAMM_MIGRATION_SOL_PER_POSITION ?? '0.55')
-const AUTO_TRIGGER_MIGRATION = process.env.DBC_AUTO_TRIGGER_MIGRATION !== 'false'
+const AUTO_TRIGGER_MIGRATION = process.env.DBC_AUTO_TRIGGER_MIGRATION === 'true'
+const OPEN_MIGRATED_POSITION_ENABLED = process.env.DBC_OPEN_MIGRATED_POSITION_ENABLED === 'true'
 const USE_PROGRAM_SUBSCRIPTION = process.env.DBC_USE_PROGRAM_SUBSCRIPTION !== 'false'
 const DISCOVERY_POLL_ENABLED = process.env.DBC_DISCOVERY_POLL_ENABLED === 'true'
 const DISCOVERY_MAX_POOLS = parseInt(process.env.DBC_DISCOVERY_MAX_POOLS ?? '1000', 10)
@@ -117,6 +118,7 @@ let nextRpcRetryAt = 0
 let programSubscriptionId: number | null = null
 let lastDiscoveryAt = 0
 const inFlightPools = new Set<string>()
+const inFlightMints = new Set<string>()
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -653,105 +655,122 @@ async function waitForDammPool(poolAddress: PublicKey): Promise<boolean> {
 
 async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: WatchlistRow, score: DbcMigrationScore): Promise<boolean> {
   const mint = ctx.virtualPool.baseMint.toBase58()
-  if (row.opened_position_id) return false
-  if (await hasOpenPositionForMint(mint)) {
-    await updateWatchlistById(row.id, { status: 'skipped_existing_position' })
+  if (!OPEN_MIGRATED_POSITION_ENABLED) {
+    await updateWatchlistById(row.id, { status: 'migration_open_disabled' })
     return false
   }
+  if (row.opened_position_id) return false
+  if (row.status === 'opening' || row.status === 'opened') return false
+  if (inFlightMints.has(mint)) return false
+  inFlightMints.add(mint)
 
-  if (!score.passed) {
+  try {
+    if (await hasOpenPositionForMint(mint)) {
+      await updateWatchlistById(row.id, { status: 'skipped_existing_position' })
+      return false
+    }
+
+    if (!score.passed) {
+      await updateWatchlistById(row.id, {
+        status: rejectedStatus(score),
+        metadata: {
+          ...(row.metadata ?? {}),
+          dbc_score: score.score,
+          dbc_score_reason: score.reason,
+          dbc_reject_reason: score.rejectReason,
+          dbc_score_breakdown: score.breakdown,
+          dbc_risk_passed: score.riskPassed,
+          dbc_risk_reasons: score.riskReasons,
+          rugcheck_score: score.rugcheckScore,
+          holder_count: score.holderCount,
+          top_holder_pct: score.topHolderPct,
+          holder_data_reliable: score.holderDataReliable,
+        },
+      })
+      return false
+    }
+
+    if (!isMigrated(ctx.virtualPool) && ctx.progressPct >= OPEN_PROGRESS_PCT) {
+      try {
+        const signature = await triggerDammV2Migration(ctx)
+        if (signature) {
+          await updateWatchlistById(row.id, {
+            status: 'migrating',
+            metadata: { ...(row.metadata ?? {}), migration_tx: signature },
+          })
+        }
+      } catch (err) {
+        const message = summarizeError(err)
+        console.warn(`[dbc-graduation] migration trigger failed for ${ctx.symbol}: ${message}`)
+        await updateWatchlistById(row.id, {
+          status: 'migration_trigger_failed',
+          metadata: { ...(row.metadata ?? {}), migration_error: message },
+        })
+        if (!message.toLowerCase().includes('already')) return false
+      }
+    }
+
+    const poolReady = await waitForDammPool(ctx.dammPool)
+    if (!poolReady) {
+      await updateWatchlistById(row.id, { status: ctx.progressPct >= OPEN_PROGRESS_PCT ? 'migration_ready' : 'near_threshold' })
+      return false
+    }
+
     await updateWatchlistById(row.id, {
-      status: rejectedStatus(score),
+      status: 'opening',
+      metadata: { ...(row.metadata ?? {}), opening_started_at: new Date().toISOString() },
+    })
+
+    const result = await openDammPosition({
+      tokenAddress: mint,
+      poolAddress: ctx.dammPool.toBase58(),
+      solAmount: DAMM_MIGRATION_SOL_PER_POSITION,
+      symbol: ctx.symbol,
+      ageMinutes: 0,
+      feeTvl24hPct: 0,
+      liquidityUsd: 0,
+      bondingCurvePct: ctx.progressPct,
+      strategyId: 'damm-migration',
+      positionType: 'damm-migration',
       metadata: {
-        ...(row.metadata ?? {}),
+        source: WATCHLIST_SOURCE,
+        virtual_pool: ctx.virtualPoolAddress.toBase58(),
+        damm_config: ctx.dammConfig.toBase58(),
+        quote_mint: ctx.poolConfig.quoteMint.toBase58(),
+        quote_reserve: ctx.virtualPool.quoteReserve.toString(),
+        migration_quote_threshold: ctx.poolConfig.migrationQuoteThreshold.toString(),
         dbc_score: score.score,
-        dbc_score_reason: score.reason,
-        dbc_reject_reason: score.rejectReason,
         dbc_score_breakdown: score.breakdown,
-        dbc_risk_passed: score.riskPassed,
-        dbc_risk_reasons: score.riskReasons,
         rugcheck_score: score.rugcheckScore,
         holder_count: score.holderCount,
         top_holder_pct: score.topHolderPct,
         holder_data_reliable: score.holderDataReliable,
       },
     })
-    return false
-  }
 
-  if (!isMigrated(ctx.virtualPool) && ctx.progressPct >= OPEN_PROGRESS_PCT) {
-    try {
-      const signature = await triggerDammV2Migration(ctx)
-      if (signature) {
-        await updateWatchlistById(row.id, {
-          status: 'migrating',
-          metadata: { ...(row.metadata ?? {}), migration_tx: signature },
-        })
-      }
-    } catch (err) {
-      const message = summarizeError(err)
-      console.warn(`[dbc-graduation] migration trigger failed for ${ctx.symbol}: ${message}`)
+    if (!result.success) {
       await updateWatchlistById(row.id, {
-        status: 'migration_trigger_failed',
-        metadata: { ...(row.metadata ?? {}), migration_error: message },
+        status: 'open_failed',
+        metadata: { ...(row.metadata ?? {}), open_error: result.error ?? 'unknown' },
       })
-      if (!message.toLowerCase().includes('already')) return false
+      return false
     }
-  }
 
-  const poolReady = await waitForDammPool(ctx.dammPool)
-  if (!poolReady) {
-    await updateWatchlistById(row.id, { status: ctx.progressPct >= OPEN_PROGRESS_PCT ? 'migration_ready' : 'near_threshold' })
-    return false
-  }
-
-  const result = await openDammPosition({
-    tokenAddress: mint,
-    poolAddress: ctx.dammPool.toBase58(),
-    solAmount: DAMM_MIGRATION_SOL_PER_POSITION,
-    symbol: ctx.symbol,
-    ageMinutes: 0,
-    feeTvl24hPct: 0,
-    liquidityUsd: 0,
-    bondingCurvePct: ctx.progressPct,
-    strategyId: 'damm-migration',
-    positionType: 'damm-migration',
-    metadata: {
-      source: WATCHLIST_SOURCE,
-      virtual_pool: ctx.virtualPoolAddress.toBase58(),
-      damm_config: ctx.dammConfig.toBase58(),
-      quote_mint: ctx.poolConfig.quoteMint.toBase58(),
-      quote_reserve: ctx.virtualPool.quoteReserve.toString(),
-      migration_quote_threshold: ctx.poolConfig.migrationQuoteThreshold.toString(),
-      dbc_score: score.score,
-      dbc_score_breakdown: score.breakdown,
-      rugcheck_score: score.rugcheckScore,
-      holder_count: score.holderCount,
-      top_holder_pct: score.topHolderPct,
-      holder_data_reliable: score.holderDataReliable,
-    },
-  })
-
-  if (!result.success) {
     await updateWatchlistById(row.id, {
-      status: 'open_failed',
-      metadata: { ...(row.metadata ?? {}), open_error: result.error ?? 'unknown' },
+      status: 'opened',
+      graduated_at: new Date().toISOString(),
+      opened_position_id: result.positionId ?? null,
+      metadata: {
+        ...(row.metadata ?? {}),
+        open_tx: result.txSignature,
+        opened_position_pubkey: result.positionPubkey,
+        damm_pool: ctx.dammPool.toBase58(),
+      },
     })
-    return false
+    return true
+  } finally {
+    inFlightMints.delete(mint)
   }
-
-  await updateWatchlistById(row.id, {
-    status: 'opened',
-    graduated_at: new Date().toISOString(),
-    opened_position_id: result.positionId ?? null,
-    metadata: {
-      ...(row.metadata ?? {}),
-      open_tx: result.txSignature,
-      opened_position_pubkey: result.positionPubkey,
-      damm_pool: ctx.dammPool.toBase58(),
-    },
-  })
-  return true
 }
 
 async function evaluateVirtualPool(virtualPoolAddress: PublicKey, knownPool?: VirtualPool): Promise<{ tracked: boolean; opened: boolean }> {
@@ -816,7 +835,7 @@ async function fetchTrackedVirtualPools(): Promise<PublicKey[]> {
     .from('pre_grad_watchlist')
     .select('metadata')
     .eq('launchpad_source', WATCHLIST_SOURCE)
-    .in('status', ['watching', 'near_threshold', 'migration_ready', 'migrating', 'migration_trigger_failed', 'open_failed'])
+    .in('status', ['watching', 'near_threshold', 'migration_ready', 'migrating', 'migration_trigger_failed'])
     .limit(100)
 
   if (error) {
