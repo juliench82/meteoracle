@@ -42,12 +42,16 @@ const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?
 const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
   process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',
 )
+const MAX_CONCURRENT_DAMM_POSITIONS = parseInt(process.env.MAX_CONCURRENT_DAMM_POSITIONS ?? '2', 10)
 const MARKET_LP_SOL_PER_POSITION = parseFloat(
   process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
   process.env.MARKET_LP_SOL_PER_POSITION ??
   process.env.MAX_SOL_PER_POSITION ??
   '0.05',
 )
+const SCALP_SPIKE_ENABLED = process.env.SCALP_SPIKE_ENABLED === 'true'
+const EVIL_PANDA_ENABLED = process.env.EVIL_PANDA_ENABLED === 'true'
+const DAMM_EDGE_ENABLED = process.env.DAMM_EDGE_ENABLED === 'true'
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
 const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
@@ -436,6 +440,18 @@ function findLiveOpenPosition(
   ) ?? null
 }
 
+function getDisabledStrategyReason(strategyId: string): string | null {
+  if (strategyId === 'scalp-spike' && !SCALP_SPIKE_ENABLED) return 'SCALP_SPIKE_ENABLED is not true'
+  if (strategyId === 'evil-panda' && !EVIL_PANDA_ENABLED) return 'EVIL_PANDA_ENABLED is not true'
+  return null
+}
+
+function getOpenDammEdgeCount(limitState: OpenLpLimitState | null): number {
+  return limitState?.livePositions.filter(position =>
+    position.position_type === 'damm-edge' || position.strategy_id === 'damm-edge',
+  ).length ?? 0
+}
+
 async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createServerClient>): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
 
@@ -627,6 +643,7 @@ export async function runScanner(): Promise<ScannerResult> {
   )
   let candidateCount = 0
   let openedCount = 0
+  let openedDammCountThisTick = 0
   let openSkippedCount = 0
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
   const openedMintsThisTick = new Set<string>()
@@ -813,55 +830,66 @@ export async function runScanner(): Promise<ScannerResult> {
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
       if (dammDecision.shouldUseDamm && dammDecision.params) {
-        if (openBlockedReason || openedCount >= availableOpenSlots) {
+        if (!DAMM_EDGE_ENABLED) {
+          console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM_EDGE_ENABLED is not true; continuing DLMM evaluation`)
+        } else if (openBlockedReason || openedCount >= availableOpenSlots) {
           const reason = openBlockedReason ?? 'slots_filled_this_tick'
           console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: ${reason}; continuing DLMM evaluation`)
         } else {
-          const verifiedDammPool = await resolveVerifiedDammV2PoolForToken({
-            tokenAddress,
-            preferredPoolAddress: metrics.poolAddress,
-            quoteMint: WSOL,
-          })
-
-          if (!verifiedDammPool) {
-            console.log(`[scanner][damm-edge] ${symbol} has no verified DAMM v2 SOL pool; continuing DLMM evaluation`)
-          } else {
-            const dammParams = {
-              ...dammDecision.params,
-              poolAddress: verifiedDammPool.poolAddress,
-              metadata: {
-                ...(dammDecision.params.metadata ?? {}),
-                damm_pool_resolver_source: verifiedDammPool.source,
-                scanner_source_pool_address: metrics.poolAddress,
-                verified_damm_pool_address: verifiedDammPool.poolAddress,
-                verified_damm_token_a_mint: verifiedDammPool.tokenAMint,
-                verified_damm_token_b_mint: verifiedDammPool.tokenBMint,
-              },
-            }
-
+          const openDammCount = getOpenDammEdgeCount(limitState) + openedDammCountThisTick
+          if (openDammCount >= MAX_CONCURRENT_DAMM_POSITIONS) {
             console.log(
-              `[scanner][damm-edge] TRIGGERED — opening verified DAMM v2 position for ${symbol} ` +
-              `pool=${verifiedDammPool.poolAddress} source=${verifiedDammPool.source}`,
+              `[scanner][damm-edge] max DAMM positions reached ` +
+              `(${openDammCount}/${MAX_CONCURRENT_DAMM_POSITIONS}) — continuing DLMM evaluation`,
             )
-            const result = await openDammPosition(dammParams)
-            if (result.success) {
-              openedCount++
-              openedMintsThisTick.add(tokenAddress)
-              await sendAlert({
-                type:          'position_opened',
-                symbol,
-                strategy:      'damm-edge',
-                solDeposited:  dammParams.solAmount,
-                entryPrice:    metrics.priceUsd,
-                positionId:    result.positionId ?? result.positionPubkey,
-                poolAddress:   verifiedDammPool.poolAddress,
-                mint:          tokenAddress,
-              })
+          } else {
+            const verifiedDammPool = await resolveVerifiedDammV2PoolForToken({
+              tokenAddress,
+              preferredPoolAddress: metrics.poolAddress,
+              quoteMint: WSOL,
+            })
 
-              continue
+            if (!verifiedDammPool) {
+              console.log(`[scanner][damm-edge] ${symbol} has no verified DAMM v2 SOL pool; continuing DLMM evaluation`)
+            } else {
+              const dammParams = {
+                ...dammDecision.params,
+                poolAddress: verifiedDammPool.poolAddress,
+                metadata: {
+                  ...(dammDecision.params.metadata ?? {}),
+                  damm_pool_resolver_source: verifiedDammPool.source,
+                  scanner_source_pool_address: metrics.poolAddress,
+                  verified_damm_pool_address: verifiedDammPool.poolAddress,
+                  verified_damm_token_a_mint: verifiedDammPool.tokenAMint,
+                  verified_damm_token_b_mint: verifiedDammPool.tokenBMint,
+                },
+              }
+
+              console.log(
+                `[scanner][damm-edge] TRIGGERED — opening verified DAMM v2 position for ${symbol} ` +
+                `pool=${verifiedDammPool.poolAddress} source=${verifiedDammPool.source}`,
+              )
+              const result = await openDammPosition(dammParams)
+              if (result.success) {
+                openedCount++
+                openedDammCountThisTick++
+                openedMintsThisTick.add(tokenAddress)
+                await sendAlert({
+                  type:          'position_opened',
+                  symbol,
+                  strategy:      'damm-edge',
+                  solDeposited:  dammParams.solAmount,
+                  entryPrice:    metrics.priceUsd,
+                  positionId:    result.positionId ?? result.positionPubkey,
+                  poolAddress:   verifiedDammPool.poolAddress,
+                  mint:          tokenAddress,
+                })
+
+                continue
+              }
+
+              console.error(`[scanner][damm-edge] openDammPosition failed for ${symbol}: ${result.error}; continuing DLMM evaluation`)
             }
-
-            console.error(`[scanner][damm-edge] openDammPosition failed for ${symbol}: ${result.error}; continuing DLMM evaluation`)
           }
         }
       }
@@ -980,6 +1008,13 @@ export async function runScanner(): Promise<ScannerResult> {
     await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
     if (accepted) {
+      const disabledReason = getDisabledStrategyReason(strategy.id)
+      if (disabledReason) {
+        openSkippedCount++
+        console.log(`[scanner] ${symbol} qualifies for ${strategy.id} but open skipped: ${disabledReason}`)
+        continue
+      }
+
       if (openBlockedReason || openedCount >= availableOpenSlots) {
         openSkippedCount++
         const reason = openBlockedReason ?? 'slots_filled_this_tick'

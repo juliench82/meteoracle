@@ -27,8 +27,10 @@ import {
   type DammSolPrice,
 } from './damm-price'
 
-const MANAGED_DAMM_STRATEGIES = new Set(['damm-edge', 'damm-migration'])
-const MANAGED_DAMM_POSITION_TYPES = new Set(['damm-edge', 'damm-migration'])
+const MANAGED_DAMM_IDS = ['pre_grad', 'pre-grad', 'damm-edge', 'damm-migration', 'damm-launch']
+const MANAGED_DAMM_DB_POSITION_TYPES = ['pre_grad', 'pre-grad', 'damm-edge', 'damm-migration', 'damm-launch']
+const MANAGED_DAMM_STRATEGIES = new Set(MANAGED_DAMM_IDS)
+const MANAGED_DAMM_POSITION_TYPES = new Set(MANAGED_DAMM_IDS)
 
 type DammPositionState = DammSolPrice & {
   currentPriceSol: number
@@ -203,6 +205,8 @@ export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]):
     .from('lp_positions')
     .select('*')
     .in('position_pubkey', livePubkeys)
+    .in('status', OPEN_LP_STATUSES)
+    .in('position_type', MANAGED_DAMM_DB_POSITION_TYPES)
 
   if (error) {
     console.error('[PRE-GRAD] DB metadata query error:', error.message)

@@ -202,7 +202,7 @@ function passesQuoteMintFilter(strategy: Strategy, quoteTokenMint?: string): boo
 function passesBinStepFilter(strategy: Strategy, binStep?: number): boolean {
   const min = strategy.filters.minBinStep
   if (min === undefined) return true
-  if (binStep === undefined) return true  // unknown bin step — allow through
+  if (binStep === undefined) return false
   return binStep >= min
 }
 
@@ -276,8 +276,12 @@ export function explainNoStrategy(t: {
     if (!freshEvilPanda && f.minFeeTvl24hPct > 0 && t.feeTvl24hPct < f.minFeeTvl24hPct) {
       fails.push(`feeTvl=${t.feeTvl24hPct.toFixed(2)}%<${f.minFeeTvl24hPct}%`)
     }
-    if (f.minBinStep !== undefined && t.binStep !== undefined && t.binStep < f.minBinStep) {
-      fails.push(`binStep=${t.binStep}<${f.minBinStep}`)
+    if (f.minBinStep !== undefined) {
+      if (t.binStep === undefined) {
+        fails.push(`binStep=unknown<${f.minBinStep}`)
+      } else if (t.binStep < f.minBinStep) {
+        fails.push(`binStep=${t.binStep}<${f.minBinStep}`)
+      }
     }
     if (f.requiredQuoteMints && f.requiredQuoteMints.length > 0) {
       if (!t.quoteTokenMint || !f.requiredQuoteMints.includes(t.quoteTokenMint)) {

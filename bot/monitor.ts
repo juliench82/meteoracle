@@ -409,7 +409,12 @@ async function checkPosition(
     return
   }
 
-  if (inRange && SMART_REBALANCE_IN_RANGE) {
+  if (
+    inRange &&
+    SMART_REBALANCE_IN_RANGE &&
+    strategy.id !== 'scalp-spike' &&
+    strategy.id !== 'damm-edge'
+  ) {
     const rangeWidth = rangeUpper - rangeLower
     const positionInRange = rangeWidth > 0
       ? ((currentPriceSol - rangeLower) / rangeWidth) * 100

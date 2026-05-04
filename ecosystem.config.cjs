@@ -52,6 +52,10 @@ module.exports = {
       env: {
         NODE_ENV:              'production',
         LP_SCANNER_STANDALONE: 'true',
+        SCALP_SPIKE_ENABLED:   'true',
+        EVIL_PANDA_ENABLED:    'true',
+        DAMM_EDGE_ENABLED:     'true',
+        MAX_CONCURRENT_DAMM_POSITIONS: '2',
         NODE_OPTIONS:          '--conditions=require',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
@@ -72,6 +76,7 @@ module.exports = {
         NODE_ENV:              'production',
         LP_MONITOR_STANDALONE: 'true',
         LP_MONITOR_INTERVAL_SEC: '60',
+        SCALP_SPIKE_OOR_MINUTES: '10',
         NODE_OPTIONS:          '--conditions=require',
       },
       log_date_format: 'YYYY-MM-DD HH:mm:ss',

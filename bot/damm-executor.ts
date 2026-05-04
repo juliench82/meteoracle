@@ -456,11 +456,41 @@ async function fetchDammPositionPnlWithRetry(positionPubkey: string): Promise<{
  */
 export async function openDammPosition(
   params: DammPositionParams,
-): Promise<{ positionPubkey: string; txSignature: string; success: boolean; positionId?: string; error?: string }> {
+): Promise<{ positionPubkey: string; txSignature: string; success: boolean; positionId?: string; error?: string; skipped?: boolean }> {
   const openConfig = getDammOpenConfig(params)
   console.log(`${openConfig.label} Opening position — pool=${params.poolAddress} sol=${params.solAmount}`)
 
   try {
+    const pool = new PublicKey(params.poolAddress)
+    const sdk = await getCpAmm()
+    let poolState: any | null = null
+
+    try {
+      poolState = await sdk.fetchPoolState(pool)
+    } catch (err) {
+      console.error(
+        `[DAMM] Pool does not exist — hard abort, refusing to create: ${params.poolAddress} (${summarizeError(err)})`,
+      )
+      return {
+        positionPubkey: '',
+        txSignature: '',
+        success: false,
+        error: 'pool_not_found',
+        skipped: true,
+      }
+    }
+
+    if (!poolState) {
+      console.error('[DAMM] Pool does not exist — hard abort, refusing to create:', params.poolAddress)
+      return {
+        positionPubkey: '',
+        txSignature: '',
+        success: false,
+        error: 'pool_not_found',
+        skipped: true,
+      }
+    }
+
     // 1. dry_run guard — match DLMM bot_state + BOT_DRY_RUN behavior
     const dryRun = await getBotDryRun()
     console.log(`[DAMM] dry_run=${dryRun}`)
@@ -502,14 +532,8 @@ export async function openDammPosition(
       )
     }
 
-    const sdk = await getCpAmm()
     const wallet = getWallet()
-    const pool = new PublicKey(params.poolAddress)
     const positionNftKp = Keypair.generate()
-
-    // 2. Fetch pool state
-    const poolState = await sdk.fetchPoolState(pool)
-    if (!poolState) throw new Error('[DAMM] Pool not found or paused')
 
     const {
       tokenAMint,
