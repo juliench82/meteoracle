@@ -81,6 +81,7 @@ function insertBody(live: LiveMeteoraPosition): Record<string, unknown> {
     token_amount: live.token_amount,
     claimable_fees_usd: live.claimable_fees_usd ?? 0,
     position_value_usd: live.position_value_usd ?? 0,
+    pnl_usd: live.pnl_usd ?? 0,
     status: live.status,
     in_range: live.in_range,
     dry_run: false,
@@ -119,6 +120,9 @@ function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record
     }),
     ...(live.position_value_usd !== null && live.position_value_usd !== undefined && {
       position_value_usd: Math.round(live.position_value_usd * 100) / 100,
+    }),
+    ...(live.pnl_usd !== null && live.pnl_usd !== undefined && {
+      pnl_usd: Math.round(live.pnl_usd * 100) / 100,
     }),
     metadata: {
       ...(existing.metadata ?? {}),

@@ -27,8 +27,8 @@ function envNumber(name: string, fallback: number): number {
  * 750+ bins for this range width and always hit the OOM/bin-cap guard.
  *
  * Exit logic:
- * - stopLoss    : −50% price
- * - takeProfit  : +40% price
+ * - stopLoss    : −30% Meteora PnL
+ * - takeProfit  : +40% Meteora PnL
  * - OOR         : 15 min out of range (give price a short recovery window)
  * - maxDuration : 72h (3 days) hard stop
  */
@@ -63,7 +63,7 @@ export const evilPandaStrategy: Strategy = {
   },
 
   exits: {
-    stopLossPct:              -50,
+    stopLossPct:              -30,
     takeProfitPct:             40,
     outOfRangeMinutes:         15,
     maxDurationHours:          72,

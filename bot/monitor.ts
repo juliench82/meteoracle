@@ -32,8 +32,53 @@ const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
 let tickCount = 0
 
 function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null
   const n = Number(value)
   return Number.isFinite(n) ? n : null
+}
+
+function roundMoney(value: number): number | null {
+  return Number.isFinite(value) ? Math.round(value * 100) / 100 : null
+}
+
+function roundPct(value: number): number | null {
+  return Number.isFinite(value) ? Math.round(value * 100) / 100 : null
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const n = nullableNumber(value)
+    if (n !== null) return n
+  }
+  return null
+}
+
+function resolveMeteoraPnlPct(position: Record<string, any>, pnlUsd: number | null, deployedSol: number): number | null {
+  const metadata = position.metadata ?? {}
+  const explicitPct = firstNumber(
+    position.pnl_pct,
+    metadata.pnl_pct,
+    metadata.position_pnl_pct,
+    metadata.position_pnl_percentage,
+    metadata.pnl_percentage,
+    metadata.total_pnl_pct,
+    metadata.total_pnl_percentage,
+  )
+  if (explicitPct !== null) return explicitPct
+
+  if (pnlUsd === null || deployedSol <= 0) return null
+  const costBasisUsd = firstNumber(
+    metadata.meteora_total_deposit_usd,
+    metadata.total_deposit_usd,
+    metadata.deposit_usd,
+    metadata.cost_basis_usd,
+  ) ?? (() => {
+    const solPriceUsd = firstNumber(metadata.sol_price_usd, metadata.current_sol_price_usd)
+    return solPriceUsd !== null && solPriceUsd > 0 ? deployedSol * solPriceUsd : null
+  })()
+
+  if (costBasisUsd === null || costBasisUsd <= 0) return null
+  return roundPct((pnlUsd / costBasisUsd) * 100)
 }
 
 async function sbSelect<T>(table: string, params: string): Promise<T[]> {
@@ -244,24 +289,25 @@ async function checkPosition(
     ? Math.round((2 * Math.sqrt(k) / (1 + k) - 1) * 10000) / 100
     : 0
 
-  const pnlSol = entryPriceSol > 0
-    ? Math.round((position.sol_deposited * (pricePct / 100) + claimableFeesSolEquivalent) * 1e6) / 1e6
-    : Math.round(claimableFeesSolEquivalent * 1e6) / 1e6
-
-  // USD values derived from entry price ratio (best available without live oracle)
-  const solPriceUsd = entryPriceSol > 0 && entryPriceUsd > 0
-    ? entryPriceUsd / entryPriceSol
-    : 0
-  const derivedClaimableFeesUsd = solPriceUsd > 0
-    ? Math.round(claimableFeesSolEquivalent * solPriceUsd * 100) / 100
-    : null
-  const derivedPositionValueUsd = solPriceUsd > 0
-    ? Math.round((position.sol_deposited + pnlSol) * solPriceUsd * 100) / 100
+  const liveSolPriceUsd = firstNumber(position.metadata?.sol_price_usd, position.metadata?.current_sol_price_usd)
+  const derivedClaimableFeesUsd = liveSolPriceUsd !== null
+    ? roundMoney(claimableFeesSolEquivalent * liveSolPriceUsd)
     : null
   const liveClaimableFeesUsd = nullableNumber(position.claimable_fees_usd ?? position.metadata?.claimable_fees_usd)
   const livePositionValueUsd = nullableNumber(position.position_value_usd ?? position.metadata?.position_value_usd)
+  const livePnlUsd = firstNumber(
+    position.pnl_usd,
+    position.metadata?.pnl_usd,
+    position.metadata?.position_pnl_usd,
+    position.metadata?.total_pnl_usd,
+  )
   const claimableFeesUsd = liveClaimableFeesUsd ?? derivedClaimableFeesUsd
-  const positionValueUsd = livePositionValueUsd ?? derivedPositionValueUsd
+  const positionValueUsd = livePositionValueUsd
+  const deployedSol = position.sol_deposited || 0
+  const pnlPct = resolveMeteoraPnlPct(position, livePnlUsd, deployedSol)
+  const pnlSol = livePnlUsd !== null && liveSolPriceUsd !== null && liveSolPriceUsd > 0
+    ? Math.round((livePnlUsd / liveSolPriceUsd) * 1e6) / 1e6
+    : null
 
   const wasInRange = position.status !== 'out_of_range' && position.in_range !== false
   const justWentOOR = !inRange && wasInRange
@@ -281,11 +327,20 @@ async function checkPosition(
       current_price:     currentPriceSol,
       in_range:          inRange,
       il_pct:            ilPct,
-      pnl_sol:           pnlSol,
+      ...(pnlSol !== null ? { pnl_sol: pnlSol } : {}),
       status:            inRange ? 'active' : 'out_of_range',
       oor_since_at:      oorSinceAt,
       ...(claimableFeesUsd !== null  ? { claimable_fees_usd:  claimableFeesUsd }  : {}),
       ...(positionValueUsd !== null  ? { position_value_usd:  positionValueUsd }  : {}),
+      ...(livePnlUsd !== null        ? { pnl_usd:             livePnlUsd }        : {}),
+      ...(pnlPct !== null || livePnlUsd !== null ? {
+        metadata: {
+          ...(position.metadata ?? {}),
+          ...(livePnlUsd !== null && { pnl_usd: livePnlUsd, position_pnl_usd: livePnlUsd }),
+          ...(pnlPct !== null && { pnl_pct: pnlPct, position_pnl_pct: pnlPct }),
+          exit_signal_basis: 'meteora_pnl',
+        },
+      } : {}),
     })
   } catch (err) {
     console.error(`${label} DB update failed:`, err)
@@ -309,12 +364,13 @@ async function checkPosition(
     ? (now - new Date(oorSinceAt).getTime()) / 60_000
     : 0
 
-  const deployedSol = position.sol_deposited || 0
   const feeYieldPct = deployedSol > 0 ? (claimableFeesSolEquivalent / deployedSol) * 100 : 0
 
   console.log(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
-    ` pnl=${pnlSol.toFixed(6)} fees=${feeYieldPct.toFixed(1)}%deployed` +
+    ` pnlUsd=${livePnlUsd !== null ? `$${livePnlUsd.toFixed(2)}` : 'n/a'}` +
+    ` pnlPct=${pnlPct !== null ? `${pnlPct.toFixed(2)}%` : 'n/a'}` +
+    ` priceMove=${pricePct.toFixed(1)}% fees=${feeYieldPct.toFixed(1)}%deployed` +
     ` claimable=$${claimableFeesUsd ?? 'n/a'} posValue=$${positionValueUsd ?? 'n/a'}` +
     ` age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`
   )
@@ -325,12 +381,14 @@ async function checkPosition(
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
     const roundedOor = Math.round(oorSince)
     closeReason = `out_of_range_${roundedOor}min`
-  } else if (entryPriceSol > 0 && pricePct <= strategy.exits.stopLossPct) {
-    closeReason = `stoploss_${pricePct.toFixed(1)}pct`
-  } else if (entryPriceSol > 0 && pricePct >= strategy.exits.takeProfitPct) {
-    closeReason = `takeprofit_${pricePct.toFixed(1)}pct`
+  } else if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
+    closeReason = `stoploss_pnl_${pnlPct.toFixed(1)}pct`
+  } else if (pnlPct !== null && pnlPct >= strategy.exits.takeProfitPct) {
+    closeReason = `takeprofit_pnl_${pnlPct.toFixed(1)}pct`
   } else if (ageHours >= strategy.exits.maxDurationHours) {
     closeReason = `max_duration_${Math.round(ageHours)}h`
+  } else if (pnlPct === null) {
+    console.warn(`${label} Meteora PnL unavailable — skipping stop-loss/take-profit exits this tick`)
   }
 
   if (closeReason) {

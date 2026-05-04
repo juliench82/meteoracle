@@ -450,7 +450,7 @@ async function handleStatus() {
 
   const { data: openLp } = await supabase
     .from('lp_positions')
-    .select('id, symbol, sol_deposited, opened_at, status, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, metadata')
+    .select('id, symbol, sol_deposited, opened_at, status, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, pnl_usd, metadata')
     .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
 
   const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp, liveSource)
@@ -465,7 +465,10 @@ async function handleStatus() {
     const source = isLiveConfirmedPosition(p) ? ' | Meteora live' : ' | Supabase cache only'
     const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
     const value = p.position_value_usd ?? p.metadata?.position_value_usd
-    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | ${mins}min${oor}${source}`
+    const pnl = p.pnl_usd ?? p.metadata?.pnl_usd ?? p.metadata?.position_pnl_usd
+    const pnlPct = p.pnl_pct ?? p.metadata?.pnl_pct ?? p.metadata?.position_pnl_pct
+    const pnlText = pnl != null ? ` | pnl ${fmtUsd(pnl)}${pnlPct != null ? ` (${Number(pnlPct).toFixed(1)}%)` : ''}` : ''
+    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | value ${fmtUsd(value)} | fees ${fmtUsd(fees)}${pnlText} | ${mins}min${oor}${source}`
   })
 
   const dammPositions = mergedOpenLp.filter(isDammLp)
@@ -520,7 +523,7 @@ async function handlePositions() {
   }
   const { data } = await supabase
     .from('lp_positions')
-    .select('id, symbol, status, sol_deposited, pool_address, opened_at, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, current_price, metadata')
+    .select('id, symbol, status, sol_deposited, pool_address, opened_at, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, pnl_usd, current_price, metadata')
     .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
     .order('opened_at', { ascending: false })
 
@@ -549,6 +552,9 @@ async function handlePositions() {
     const source = isLiveConfirmedPosition(p) ? 'Meteora live' : 'Supabase cache only'
     const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
     const value = p.position_value_usd ?? p.metadata?.position_value_usd
+    const pnl = p.pnl_usd ?? p.metadata?.pnl_usd ?? p.metadata?.position_pnl_usd
+    const pnlPct = p.pnl_pct ?? p.metadata?.pnl_pct ?? p.metadata?.position_pnl_pct
+    const pnlText = pnl != null ? ` | pnl ${fmtUsd(pnl)}${pnlPct != null ? ` (${Number(pnlPct).toFixed(1)}%)` : ''}` : ''
     const poolStats = p.metadata?.volume_24h_usd ? ` | vol24h ${fmtUsd(p.metadata.volume_24h_usd)}` : ''
     const actionLines = liveOnly
       ? [`  Run \`/orphans\` to create a manageable cache row`]
@@ -562,7 +568,7 @@ async function handlePositions() {
         ]
     lines.push(
       `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h | ${source}`,
-      `  value ${fmtUsd(value)} | fees ${fmtUsd(fees)} | price ${fmtPrice(p.current_price)}${poolStats}`,
+      `  value ${fmtUsd(value)} | fees ${fmtUsd(fees)}${pnlText} | price ${fmtPrice(p.current_price)}${poolStats}`,
       ...actionLines
     )
   }

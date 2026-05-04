@@ -13,6 +13,16 @@ const _pairInfoCache = new Map<string, { value: DexPairInfo | null; expiresAt: n
 const _dlmmPositionStatsCache = new Map<string, { value: Record<string, number | null> | null; expiresAt: number }>()
 const _mintDecimalsCache = new Map<string, number | null>()
 const LOCAL_STATUS_OVERRIDES = new Set(['closed', 'pending_close'])
+const PNL_PCT_KEYS = [
+  'position_pnl_pct',
+  'position_pnl_percentage',
+  'pnl_pct',
+  'pnl_percentage',
+  'total_pnl_pct',
+  'total_pnl_percentage',
+  'pnlPercent',
+  'pnlPercentage',
+]
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -320,6 +330,19 @@ function roundMoney(value: number): number | null {
   return Math.round(value * 100) / 100
 }
 
+function roundPct(value: number): number | null {
+  if (!Number.isFinite(value)) return null
+  return Math.round(value * 100) / 100
+}
+
+function getFirstFiniteRecordNumber(record: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = numberOrNull(record[key])
+    if (value !== null) return value
+  }
+  return null
+}
+
 function inferUsdPrices(pair: DexPairInfo | null | undefined, tokenXMint: string, tokenYMint: string): {
   tokenXUsd: number | null
   tokenYUsd: number | null
@@ -389,6 +412,41 @@ function estimateDlmmUsdFields(positionData: any, positionInfo: any, pair: DexPa
     deposits,
     solPriceUsd: solUsdPrice(tokenXMint, tokenYMint, tokenXUsd, tokenYUsd),
   }
+}
+
+function deriveLiveDlmmPnlUsd(
+  solDeposited: number,
+  usdFields: {
+    claimableFeesUsd: number | null
+    positionValueUsd: number | null
+    solPriceUsd: number | null
+  },
+): number | null {
+  if (solDeposited <= 0 || usdFields.positionValueUsd === null || usdFields.solPriceUsd === null) return null
+  const costBasisUsd = solDeposited * usdFields.solPriceUsd
+  if (costBasisUsd <= 0) return null
+  return roundMoney(
+    usdFields.positionValueUsd +
+    (usdFields.claimableFeesUsd ?? 0) -
+    costBasisUsd,
+  )
+}
+
+function deriveOpenPnlPct(
+  pnlUsd: number | null,
+  solDeposited: number,
+  usdFields: {
+    claimableFeesUsd: number | null
+    positionValueUsd: number | null
+    solPriceUsd: number | null
+  },
+): number | null {
+  if (solDeposited <= 0 || usdFields.solPriceUsd === null) return null
+  const costBasisUsd = solDeposited * usdFields.solPriceUsd
+  if (costBasisUsd <= 0) return null
+  const resolvedPnlUsd = pnlUsd ?? deriveLiveDlmmPnlUsd(solDeposited, usdFields)
+  if (resolvedPnlUsd === null) return null
+  return roundPct((resolvedPnlUsd / costBasisUsd) * 100)
 }
 
 function openedAtFromPosition(positionData: any): string {
@@ -530,6 +588,7 @@ async function fetchMeteoraDlmmPositionStats(positionPubkey: string): Promise<Re
       total_fee_usd_claimed: Number(data.total_fee_usd_claimed ?? NaN),
       total_reward_usd_claimed: Number(data.total_reward_usd_claimed ?? NaN),
       position_pnl_usd: Number(data.position_pnl_usd ?? data.pnl_usd ?? data.total_pnl_usd ?? NaN),
+      position_pnl_pct: getFirstFiniteRecordNumber(data, PNL_PCT_KEYS) ?? Number.NaN,
     }
     const normalized = Object.fromEntries(
       Object.entries(stats).map(([key, value]) => [key, Number.isFinite(value) ? value : null]),
@@ -582,6 +641,7 @@ export interface LiveDlmmPosition {
   claimable_fees_usd?: number | null
   position_value_usd?: number | null
   pnl_usd?: number | null
+  pnl_pct?: number | null
   deposits?: TokenDeposit[]
   dry_run: boolean
   metadata: Record<string, unknown>
@@ -646,6 +706,13 @@ export async function fetchLiveDlmmPositions(connection: Connection = getConnect
       const positionData = pos.positionData ?? {}
       const positionStats = await fetchMeteoraDlmmPositionStats(positionPubkey)
       const usdFields = estimateDlmmUsdFields(positionData, positionInfo, resolved.pair)
+      const solDeposited = estimateSolDeposited(positionData, positionInfo)
+      const positionPnlUsd = positionStats?.position_pnl_usd ?? deriveLiveDlmmPnlUsd(solDeposited, usdFields)
+      const positionPnlPct = positionStats?.position_pnl_pct ?? deriveOpenPnlPct(
+        positionPnlUsd,
+        solDeposited,
+        usdFields,
+      )
       const lowerBinId = Number(positionData.lowerBinId ?? 0)
       const upperBinId = Number(positionData.upperBinId ?? 0)
       const inRange = activeBinId !== null
@@ -663,7 +730,7 @@ export async function fetchLiveDlmmPositions(connection: Connection = getConnect
         status: inRange ? 'active' : 'out_of_range',
         in_range: inRange,
         opened_at: openedAtFromPosition(positionData),
-        sol_deposited: estimateSolDeposited(positionData, positionInfo),
+        sol_deposited: solDeposited,
         token_amount: 0,
         entry_price: 0,
         entry_price_sol: 0,
@@ -671,7 +738,8 @@ export async function fetchLiveDlmmPositions(connection: Connection = getConnect
         current_price: currentPrice,
         claimable_fees_usd: usdFields.claimableFeesUsd,
         position_value_usd: usdFields.positionValueUsd,
-        pnl_usd: positionStats?.position_pnl_usd ?? null,
+        pnl_usd: positionPnlUsd,
+        pnl_pct: positionPnlPct,
         deposits: usdFields.deposits,
         dry_run: false,
         metadata: {
@@ -705,8 +773,10 @@ export async function fetchLiveDlmmPositions(connection: Connection = getConnect
           ...(positionStats?.fee_apy_24h !== null && positionStats?.fee_apy_24h !== undefined && { fee_apy_24h: positionStats.fee_apy_24h }),
           ...(positionStats?.total_fee_usd_claimed !== null && positionStats?.total_fee_usd_claimed !== undefined && { total_fee_usd_claimed: positionStats.total_fee_usd_claimed }),
           ...(positionStats?.total_reward_usd_claimed !== null && positionStats?.total_reward_usd_claimed !== undefined && { total_reward_usd_claimed: positionStats.total_reward_usd_claimed }),
-          ...(positionStats?.position_pnl_usd !== null && positionStats?.position_pnl_usd !== undefined && { position_pnl_usd: positionStats.position_pnl_usd }),
-          ...(positionStats?.position_pnl_usd !== null && positionStats?.position_pnl_usd !== undefined && { pnl_usd: positionStats.position_pnl_usd }),
+          ...(positionPnlUsd !== null && positionPnlUsd !== undefined && { position_pnl_usd: positionPnlUsd }),
+          ...(positionPnlUsd !== null && positionPnlUsd !== undefined && { pnl_usd: positionPnlUsd }),
+          ...(positionPnlPct !== null && positionPnlPct !== undefined && { position_pnl_pct: positionPnlPct }),
+          ...(positionPnlPct !== null && positionPnlPct !== undefined && { pnl_pct: positionPnlPct }),
           ...(resolved.dexUrl && { dexscreener_url: resolved.dexUrl }),
           version: pos.version ?? null,
           synced_at: new Date().toISOString(),
@@ -945,7 +1015,7 @@ function deriveOpenPnlUsd(
   const entrySolPriceUsd = entryPriceUsd !== null && entryPriceSol !== null && entryPriceUsd > 0 && entryPriceSol > 0
     ? entryPriceUsd / entryPriceSol
     : null
-  const solPriceUsd = firstFiniteNumber(metadata.entry_sol_price_usd, entrySolPriceUsd, metadata.sol_price_usd, metadata.current_sol_price_usd)
+  const solPriceUsd = firstFiniteNumber(metadata.sol_price_usd, metadata.current_sol_price_usd, metadata.entry_sol_price_usd, entrySolPriceUsd)
   if (solPriceUsd === null || solPriceUsd <= 0) return null
 
   const manualAddSol = firstFiniteNumber(metadata.manual_add_sol_total) ?? 0
@@ -1019,6 +1089,14 @@ export function mergeDbAndLiveLpPositions(
         firstFiniteNumber(row.entry_price_usd, live.entry_price_usd),
         firstFiniteNumber(row.entry_price_sol, live.entry_price_sol),
       )
+      const pnlPct = firstFiniteNumber(
+        live.pnl_pct,
+        row.pnl_pct,
+        metadata.pnl_pct,
+        metadata.position_pnl_pct,
+        metadata.position_pnl_percentage,
+        metadata.pnl_percentage,
+      )
       merged.push({
         ...row,
         ...live,
@@ -1037,10 +1115,12 @@ export function mergeDbAndLiveLpPositions(
         claimable_fees_usd: claimableFeesUsd,
         position_value_usd: positionValueUsd,
         pnl_usd: pnlUsd,
+        pnl_pct: pnlPct,
         deposits: live.deposits ?? row.deposits ?? metadata.deposits,
         metadata: {
           ...metadata,
           ...(pnlUsd !== null && { pnl_usd: pnlUsd }),
+          ...(pnlPct !== null && { pnl_pct: pnlPct, position_pnl_pct: pnlPct }),
         },
         _source: 'meteora-live+supabase',
       })
