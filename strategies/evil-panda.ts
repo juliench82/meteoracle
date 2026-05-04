@@ -7,6 +7,14 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+export const EVIL_PANDA_SCANNER_SCORE_WEIGHTS = {
+  freshness:    envNumber('EVIL_PANDA_SCORE_WEIGHT_FRESHNESS', 0.20),
+  rugcheck:     envNumber('EVIL_PANDA_SCORE_WEIGHT_RUGCHECK', 0.20),
+  holders:      envNumber('EVIL_PANDA_SCORE_WEIGHT_HOLDERS', 0.10),
+  feeTvl1h:     envNumber('EVIL_PANDA_SCORE_WEIGHT_FEE_TVL_1H', 0.30),
+  volumeTvl1h:  envNumber('EVIL_PANDA_SCORE_WEIGHT_VOLUME_TVL_1H', 0.20),
+}
+
 /**
  * Evil Panda Strategy
  * Wide-range (−50% / +100%) bid-ask fee farming on fresh low-cap memecoins.

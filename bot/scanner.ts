@@ -20,6 +20,8 @@ import {
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
 import { evaluateDammEdge } from '@/strategies/damm-edge'
+import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
+import { scalpSpikeStrategy, SCALP_SPIKE_MOMENTUM_REGAIN } from '@/strategies/scalp-spike'
 import { openDammPosition, resolveVerifiedDammV2PoolForToken } from './damm-executor'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
@@ -56,7 +58,11 @@ const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?
 const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
 const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
 const HARD_MAX_TOKEN_AGE_MINUTES = parseInt(process.env.HARD_MAX_TOKEN_AGE_MINUTES ?? '120')
-const FRESH_MAX_AGE_MINUTES    = parseInt(process.env.FRESH_SCANNER_MAX_AGE_MINUTES ?? `${HARD_MAX_TOKEN_AGE_MINUTES}`)
+const SCANNER_EARLY_MAX_AGE_MINUTES = parseInt(process.env.SCANNER_EARLY_MAX_AGE_MINUTES ?? '90', 10)
+const FRESH_MAX_AGE_MINUTES    = Math.min(
+  parseInt(process.env.FRESH_SCANNER_MAX_AGE_MINUTES ?? `${HARD_MAX_TOKEN_AGE_MINUTES}`),
+  SCANNER_EARLY_MAX_AGE_MINUTES,
+)
 const FRESH_MIN_LIQUIDITY_USD  = parseFloat(process.env.FRESH_MIN_LIQUIDITY_USD ?? process.env.EVIL_PANDA_MIN_LIQUIDITY_USD ?? '20000')
 const MOMENTUM_MIN_VOLUME_5M_USD = parseFloat(process.env.MOMENTUM_MIN_VOLUME_5M_USD ?? '5000')
 const MOMENTUM_POOL_LIMIT      = parseInt(process.env.MOMENTUM_POOL_LIMIT ?? '500')
@@ -67,7 +73,7 @@ const MAX_MOMENTUM_DEEP_CHECKS = parseInt(process.env.MAX_MOMENTUM_DEEP_CHECKS ?
 
 const METEORA_FILTERED_FETCH = {
   minTvlUsd: parseFloat(process.env.METEORA_MIN_TVL_USD ?? '8000'),
-  minFeeTvlRatio1h: parseFloat(process.env.METEORA_MIN_FEE_TVL_RATIO_1H ?? '0'),
+  minFeeTvlRatio1h: parseFloat(process.env.METEORA_MIN_FEE_TVL_RATIO_1H ?? '0.001'),
   minVolumeTvl1hRatio: parseFloat(process.env.METEORA_MIN_VOLUME_TVL_1H_RATIO ?? '0.20'),
   limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '800'),
 }
@@ -302,13 +308,13 @@ function scoreMeteoraMomentum(pool: MeteoraPool): number {
   const volumeGrowth = getRecentVolumeGrowth(pool)
 
   const ageScore =
-    ageMinutes <= 30 ? 35 :
-    ageMinutes <= 60 ? 28 :
-    ageMinutes <= 90 ? 18 :
-    ageMinutes <= 120 ? 8 :
+    ageMinutes <= 30 ? 20 :
+    ageMinutes <= 60 ? 16 :
+    ageMinutes <= 90 ? 10 :
+    ageMinutes <= 120 ? 4 :
     0
-  const feeScore = Math.min(35, feeTvl1h * 350 + feeTvl5m * 700)
-  const volumeScore = Math.min(20, volumeTvl1h * 40)
+  const feeScore = Math.min(45, feeTvl1h * 650 + feeTvl5m * 500)
+  const volumeScore = Math.min(25, volumeTvl1h * 60)
   const growthScore =
     volumeGrowth >= 2.5 ? 10 :
     volumeGrowth >= 1.5 ? 7 :
@@ -402,12 +408,51 @@ function getFiveMinuteVolumeSpike(pool: MeteoraPool): number {
   return oneHourPerFiveMinutes > 0 ? volume5m / oneHourPerFiveMinutes : 0
 }
 
+function getOneHourVolumeVs24hAverage(pool: MeteoraPool): number {
+  const volume24hAvg = getPoolVolume(pool, '24h') / 24
+  if (volume24hAvg <= 0) return getPoolVolume(pool, '1h') > 0 ? Number.POSITIVE_INFINITY : 0
+  return getPoolVolume(pool, '1h') / volume24hAvg
+}
+
+function getOneHourFeeTvlVs24hAverage(pool: MeteoraPool): number {
+  const feeTvl24hAvg = getFeeTvlPct(pool, '24h') / 24
+  if (feeTvl24hAvg <= 0) return getFeeTvlPct(pool, '1h') > 0 ? Number.POSITIVE_INFINITY : 0
+  return getFeeTvlPct(pool, '1h') / feeTvl24hAvg
+}
+
+function passesMomentumRegain(pool: MeteoraPool): boolean {
+  const ageHours = getPoolAgeMinutes(pool) / 60
+  if (
+    ageHours < SCALP_SPIKE_MOMENTUM_REGAIN.minAgeHours ||
+    ageHours > SCALP_SPIKE_MOMENTUM_REGAIN.maxAgeHours
+  ) {
+    return false
+  }
+
+  const volumeRegain =
+    getPoolVolume(pool, '1h') >= SCALP_SPIKE_MOMENTUM_REGAIN.minVolume1hUsd &&
+    getOneHourVolumeVs24hAverage(pool) >= SCALP_SPIKE_MOMENTUM_REGAIN.minVolume1hTo24hAvgRatio
+  const feeRegain =
+    getFeeTvlPct(pool, '1h') >= SCALP_SPIKE_MOMENTUM_REGAIN.minFeeTvl1hPct &&
+    getOneHourFeeTvlVs24hAverage(pool) >= SCALP_SPIKE_MOMENTUM_REGAIN.minFeeTvl1hTo24hAvgRatio
+
+  return volumeRegain || feeRegain
+}
+
 function passesMomentumSpike(pool: MeteoraPool): boolean {
   return (
     getPoolVolume(pool, '5m') >= MOMENTUM_MIN_VOLUME_5M_USD &&
     getFiveMinuteVolumeSpike(pool) >= SCALP_SPIKE_VOL_RATIO &&
     getFeeTvlPct(pool, '5m') >= MOMENTUM_MIN_FEE_TVL_5M_PCT
   )
+}
+
+function passesMomentumLane(pool: MeteoraPool): boolean {
+  return passesMomentumSpike(pool) || passesMomentumRegain(pool)
+}
+
+function poolSortTimestamp(pool: MeteoraPool): number {
+  return getPoolCreatedAt(pool) ?? 0
 }
 
 function pushBestSurvivor(
@@ -450,6 +495,117 @@ function getOpenDammEdgeCount(limitState: OpenLpLimitState | null): number {
   return limitState?.livePositions.filter(position =>
     position.position_type === 'damm-edge' || position.strategy_id === 'damm-edge',
   ).length ?? 0
+}
+
+function scoreFeeTvl1hPct(pct: number): number {
+  if (pct >= 8) return 100
+  if (pct >= 5) return 85
+  if (pct >= 3) return 65
+  if (pct >= 1.5) return 40
+  if (pct >= 0.5) return 20
+  return 0
+}
+
+function scoreVolumeTvl1hRatio(ratio: number): number {
+  if (ratio >= 1.5) return 100
+  if (ratio >= 1.0) return 90
+  if (ratio >= 0.5) return 75
+  if (ratio >= 0.2) return 55
+  if (ratio >= 0.1) return 30
+  return 0
+}
+
+function scoreHolderCount(holderCount: number): number {
+  if (holderCount >= 5000) return 100
+  if (holderCount >= 2000) return 80
+  if (holderCount >= 1000) return 65
+  if (holderCount >= 500) return 45
+  if (holderCount >= 200) return 25
+  return 10
+}
+
+function getMomentumRegainBreakdown(
+  metrics: TokenMetrics,
+): ReturnType<typeof scoreCandidateWithBreakdown> {
+  const rugScore = Math.max(0, Math.min(100, metrics.rugcheckScore))
+  const holderScore = scoreHolderCount(metrics.holderCount)
+  const feeEfficiencyScore = scoreFeeTvl1hPct(metrics.feeTvl1hPct ?? 0)
+  const volumeTvlScore = scoreVolumeTvl1hRatio(metrics.volumeTvl1hRatio ?? 0)
+  const freshnessScore =
+    metrics.ageHours <= 6 ? 100 :
+    metrics.ageHours <= 12 ? 85 :
+    metrics.ageHours <= 24 ? 70 :
+    55
+  const total = Math.round(
+    Math.min(
+      100,
+      feeEfficiencyScore * 0.35 +
+      volumeTvlScore * 0.35 +
+      rugScore * 0.15 +
+      holderScore * 0.10 +
+      freshnessScore * 0.05,
+    ),
+  )
+
+  return {
+    total,
+    volMcScore: 0,
+    rugScore,
+    holderScore,
+    freshnessScore,
+    feeEfficiencyScore,
+    volumeTvlScore,
+    curveBonus: 0,
+  }
+}
+
+function getScannerAdjustedScore(
+  metrics: TokenMetrics,
+  strategyId: string,
+  breakdown: ReturnType<typeof scoreCandidateWithBreakdown>,
+): number {
+  if (strategyId !== 'evil-panda') return breakdown.total
+
+  const weights = EVIL_PANDA_SCANNER_SCORE_WEIGHTS
+  const totalWeight =
+    weights.freshness +
+    weights.rugcheck +
+    weights.holders +
+    weights.feeTvl1h +
+    weights.volumeTvl1h
+
+  if (totalWeight <= 0) return breakdown.total
+
+  const feeTvl1hScore = scoreFeeTvl1hPct(metrics.feeTvl1hPct ?? 0)
+  const volumeTvl1hScore = scoreVolumeTvl1hRatio(metrics.volumeTvl1hRatio ?? 0)
+  const weighted =
+    (breakdown.freshnessScore * weights.freshness +
+      breakdown.rugScore * weights.rugcheck +
+      breakdown.holderScore * weights.holders +
+      feeTvl1hScore * weights.feeTvl1h +
+      volumeTvl1hScore * weights.volumeTvl1h) / totalWeight
+
+  const total = Math.round(Math.min(100, Math.max(0, weighted + breakdown.curveBonus)))
+  console.log(
+    `[scanner] ${metrics.symbol} — evil-panda weighted score ` +
+    `fee1h=${feeTvl1hScore} volTvl1h=${volumeTvl1hScore} raw=${breakdown.total} → ${total}`,
+  )
+  return total
+}
+
+function passesMomentumRegainStrategyFilters(metrics: TokenMetrics): boolean {
+  const f = scalpSpikeStrategy.filters
+  return (
+    scalpSpikeStrategy.enabled &&
+    metrics.mcUsd >= f.minMcUsd &&
+    metrics.mcUsd <= f.maxMcUsd &&
+    metrics.liquidityUsd >= f.minLiquidityUsd &&
+    metrics.topHolderPct <= f.maxTopHolderPct &&
+    metrics.holderCount >= f.minHolderCount &&
+    metrics.ageHours <= f.maxAgeHours &&
+    metrics.rugcheckScore >= f.minRugcheckScore &&
+    metrics.feeTvl24hPct >= f.minFeeTvl24hPct
+  )
 }
 
 async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createServerClient>): Promise<Set<string>> {
@@ -508,23 +664,33 @@ export async function runScanner(): Promise<ScannerResult> {
   }
 
   console.log('[scanner] step 1/4 — fetching Meteora pools')
-  const { pools, error: fetchError } = await fetchMeteoraPools()
+  const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools()
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
     return finish({ error: fetchError, openBlockedReason: 'pool_fetch_failed' })
   }
+
+  const earlyAgePools = fetchedPools.filter(pool => getPoolAgeMinutes(pool) <= SCANNER_EARLY_MAX_AGE_MINUTES)
+  const momentumRegainPools = fetchedPools.filter(passesMomentumRegain)
+  const pools = Array.from(
+    new Map([...earlyAgePools, ...momentumRegainPools].map(pool => [pool.address, pool])).values(),
+  )
   console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
+  console.log(
+    `[scanner] early age gate — kept ${earlyAgePools.length}/${fetchedPools.length} ` +
+    `<=${SCANNER_EARLY_MAX_AGE_MINUTES}min + ${momentumRegainPools.length} momentum-regain exception(s)`,
+  )
 
   const freshPools = pools.filter(pool => getPoolAgeMinutes(pool) <= FRESH_MAX_AGE_MINUTES)
   const momentumPools = pools
     .filter(pool => !pool.is_blacklisted)
-    .filter(pool => getPoolVolume(pool, '5m') >= MOMENTUM_MIN_VOLUME_5M_USD)
-    .sort((a, b) => getPoolVolume(b, '5m') - getPoolVolume(a, '5m'))
+    .filter(passesMomentumLane)
+    .sort((a, b) => scoreMeteoraMomentum(b) - scoreMeteoraMomentum(a))
     .slice(0, MOMENTUM_POOL_LIMIT)
 
   console.log(
     `[scanner] lanes — fresh=${freshPools.length}/${pools.length} <=${FRESH_MAX_AGE_MINUTES}min, ` +
-    `momentum=${momentumPools.length}/${pools.length} top vol5m>=${MOMENTUM_MIN_VOLUME_5M_USD}`,
+    `momentum=${momentumPools.length}/${pools.length} spike/regain candidates`,
   )
 
   console.log('[scanner] step 2/4 — lane pre-screen')
@@ -555,7 +721,7 @@ export async function runScanner(): Promise<ScannerResult> {
   for (const pool of momentumPools) {
     const liqUsd = getPoolTvl(pool)
     if (liqUsd < 30_000) continue
-    if (!passesMomentumSpike(pool)) {
+    if (!passesMomentumLane(pool)) {
       momentumRejectedSpike++
       continue
     }
@@ -698,7 +864,7 @@ export async function runScanner(): Promise<ScannerResult> {
       // Always fall through to normal pool selection and scoring
     }
 
-    const bestPool = selectBestPool(lane === 'fresh' ? freshPools : pools, tokenAddress, lane)
+    const bestPool = selectBestPool(lane === 'fresh' ? freshPools : momentumPools, tokenAddress, lane)
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
       continue
@@ -914,7 +1080,10 @@ export async function runScanner(): Promise<ScannerResult> {
     })
 
     const forcedStrategyId = lane === 'momentum' ? 'scalp-spike' : 'evil-panda'
-    const strategy = getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId)
+    const momentumRegain = lane === 'momentum' && passesMomentumRegain(bestPool)
+    const strategy =
+      getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
+      (momentumRegain && passesMomentumRegainStrategyFilters(metrics) ? scalpSpikeStrategy : null)
     if (!strategy) {
       const rejectionReason = explainNoStrategy(metrics)
       console.log(`[scanner] ${symbol} — no strategy in ${lane} lane (class=${tokenClass}, quote=${quoteTokenMint}): ${rejectionReason}`)
@@ -931,8 +1100,18 @@ export async function runScanner(): Promise<ScannerResult> {
       continue
     }
 
-    const breakdown   = scoreCandidateWithBreakdown(metrics, strategy)
-    const score       = breakdown.total
+    if (strategy.id === 'scalp-spike' && momentumRegain) {
+      console.log(
+        `[scanner] ${symbol} — scalp-spike momentum-regain ` +
+        `vol1h/24hAvg=${getOneHourVolumeVs24hAverage(bestPool).toFixed(2)}x ` +
+        `fee1h/24hAvg=${getOneHourFeeTvlVs24hAverage(bestPool).toFixed(2)}x`,
+      )
+    }
+
+    const breakdown = strategy.id === 'scalp-spike' && momentumRegain
+      ? getMomentumRegainBreakdown(metrics)
+      : scoreCandidateWithBreakdown(metrics, strategy)
+    const score       = getScannerAdjustedScore(metrics, strategy.id, breakdown)
     const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
     const accepted = lane === 'fresh' ? score > 0 : score >= MIN_SCORE_TO_OPEN
@@ -1077,7 +1256,7 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
   }
 }
 
-async function fetchMeteoraPoolsPage(baseUrl: string, sortBy: 'pool_created_at' | 'volume_5m'): Promise<MeteoraPool[]> {
+async function fetchMeteoraPoolsPage(baseUrl: string, sortBy: 'pool_created_at' | 'volume_5m' | 'volume_1h'): Promise<MeteoraPool[]> {
   const params: Record<string, string | number> = {
     page: 1,
     page_size: METEORA_FILTERED_FETCH.limit,
@@ -1090,6 +1269,7 @@ async function fetchMeteoraPoolsPage(baseUrl: string, sortBy: 'pool_created_at' 
   if (METEORA_FILTERED_FETCH.minFeeTvlRatio1h > 0) {
     params['fee_tvl_ratio_1h>'] = METEORA_FILTERED_FETCH.minFeeTvlRatio1h
     params['fee_tvl_ratio_1h[gte]'] = METEORA_FILTERED_FETCH.minFeeTvlRatio1h
+    params['min_fee_tvl_ratio_1h'] = METEORA_FILTERED_FETCH.minFeeTvlRatio1h
   }
 
   const res = await axios.get<unknown>(`${baseUrl}/pools`, {
@@ -1100,16 +1280,26 @@ async function fetchMeteoraPoolsPage(baseUrl: string, sortBy: 'pool_created_at' 
 }
 
 async function fetchMeteoraPoolsFromEndpoint(baseUrl: string): Promise<MeteoraPool[]> {
-  const pages = await Promise.allSettled([
-    fetchMeteoraPoolsPage(baseUrl, 'pool_created_at'),
+  const poolMap = new Map<string, MeteoraPool>()
+  let newestPools: MeteoraPool[] = []
+  try {
+    newestPools = await fetchMeteoraPoolsPage(baseUrl, 'pool_created_at')
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(`[scanner] ${baseUrl}/pools newest-first fetch failed: ${message}`)
+  }
+  for (const pool of newestPools) poolMap.set(pool.address, pool)
+
+  const momentumPages = await Promise.allSettled([
+    fetchMeteoraPoolsPage(baseUrl, 'volume_1h'),
     fetchMeteoraPoolsPage(baseUrl, 'volume_5m'),
   ])
-  const poolMap = new Map<string, MeteoraPool>()
-  for (const page of pages) {
+  for (const page of momentumPages) {
     if (page.status !== 'fulfilled') continue
     for (const pool of page.value) poolMap.set(pool.address, pool)
   }
   const pools = Array.from(poolMap.values())
+    .sort((a, b) => poolSortTimestamp(b) - poolSortTimestamp(a))
   if (pools.length > 0) return pools
 
   console.warn(`[scanner] ${baseUrl}/pools returned no usable pools; trying documented /pair/all fallback`)
@@ -1144,19 +1334,25 @@ async function fetchMeteoraPools(): Promise<{ pools: MeteoraPool[]; error?: stri
   const pools = allPools.filter((p) => {
     if (p.is_blacklisted) return false
     const isFresh = getPoolAgeMinutes(p) <= FRESH_MAX_AGE_MINUTES
+    const isRegain = passesMomentumRegain(p)
     const minLiquidityUsd = isFresh ? FRESH_MIN_LIQUIDITY_USD : PRE_FILTER.minLiquidityUsd
     if (getPoolTvl(p) < minLiquidityUsd) return false
     if (getPoolTvl(p) > PRE_FILTER.maxLiquidityUsd) return false
     const hasQuote = QUOTE_ASSETS.has(p.token_x.address) || QUOTE_ASSETS.has(p.token_y.address)
     if (!hasQuote) return false
+    const hasFeeTvl = getFeeTvlRatio(p, '1h') >= METEORA_FILTERED_FETCH.minFeeTvlRatio1h
+    const hasVolumeTvl = getVolumeTvlRatio(p, '1h') >= METEORA_FILTERED_FETCH.minVolumeTvl1hRatio
+    if (!isRegain && !hasFeeTvl && !hasVolumeTvl) return false
     const hasMomentumVolume = getPoolVolume(p, '5m') >= MOMENTUM_MIN_VOLUME_5M_USD
-    if (!isFresh && !hasMomentumVolume) return false
+    if (!isFresh && !hasMomentumVolume && !isRegain) return false
     return true
   })
 
   console.log(
     `[scanner] ${allPools.length} filtered Meteora pools fetched; ${pools.length} passed JS pre-filter ` +
-    `(minTvl=$${METEORA_FILTERED_FETCH.minTvlUsd}, minFeeTvl1h=${(METEORA_FILTERED_FETCH.minFeeTvlRatio1h * 100).toFixed(1)}%)`,
+    `(minTvl=$${METEORA_FILTERED_FETCH.minTvlUsd}, ` +
+    `minFeeTvl1h=${(METEORA_FILTERED_FETCH.minFeeTvlRatio1h * 100).toFixed(1)}%, ` +
+    `minVolTvl1h=${METEORA_FILTERED_FETCH.minVolumeTvl1hRatio.toFixed(2)})`,
   )
   return { pools }
 }
