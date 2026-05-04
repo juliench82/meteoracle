@@ -1,6 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
 import { createConnection, getConnection, getRpcEndpointCandidates, getWalletPublicKey } from '@/lib/solana'
+import { getDammSolPriceFromPoolState } from '@/lib/damm-price'
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112'
 const DEXSCREENER_SOLANA_PAIR_API = 'https://api.dexscreener.com/latest/dex/pairs/solana'
@@ -396,17 +397,6 @@ function openedAtFromPosition(positionData: any): string {
   return new Date().toISOString()
 }
 
-function sqrtPriceToNumber(sqrtPrice: unknown): number {
-  const raw = Number(
-    typeof (sqrtPrice as { toString?: unknown })?.toString === 'function'
-      ? (sqrtPrice as { toString: () => string }).toString()
-      : sqrtPrice,
-  )
-  if (!Number.isFinite(raw) || raw <= 0) return 0
-  const ratio = raw / 2 ** 64
-  return ratio * ratio
-}
-
 function resolveDammMint(poolState: any): string {
   const tokenA = toBase58(poolState?.tokenAMint)
   const tokenB = toBase58(poolState?.tokenBMint)
@@ -760,7 +750,8 @@ export async function fetchLiveDammPositions(connection: Connection = getConnect
     const mint = resolveDammMint(poolState) || poolAddress
     const resolved = await resolveLiveSymbol(mint, poolAddress, 'DAMM')
     const poolStats = await fetchMeteoraDammPoolStats(poolAddress)
-    const currentPrice = poolState ? sqrtPriceToNumber(poolState.sqrtPrice) : 0
+    const dammPrice = poolState ? await getDammSolPriceFromPoolState(connection, poolState) : null
+    const currentPrice = dammPrice?.solPerToken ?? 0
     const tokenAMint = toBase58(poolState?.tokenAMint)
     const tokenBMint = toBase58(poolState?.tokenBMint)
     const tokenPrices = inferUsdPrices(resolved.pair, tokenAMint, tokenBMint)
@@ -802,6 +793,12 @@ export async function fetchLiveDammPositions(connection: Connection = getConnect
         nft_mint: toBase58(positionState.nftMint),
         token_a_mint: tokenAMint,
         token_b_mint: tokenBMint,
+        ...(dammPrice && {
+          current_price_basis: 'sol_per_token',
+          raw_pool_price: dammPrice.poolPrice,
+          token_a_decimals: dammPrice.tokenADecimals,
+          token_b_decimals: dammPrice.tokenBDecimals,
+        }),
         dex_pair_address: resolved.pair?.pairAddress ?? null,
         dex_price_usd: resolved.pair?.priceUsd != null ? Number(resolved.pair.priceUsd) : null,
         dex_liquidity_usd: resolved.pair?.liquidity?.usd ?? null,

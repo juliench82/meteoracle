@@ -33,6 +33,7 @@ import bs58 from 'bs58'
 import type { DammPositionParams, DammPositionStrategyId } from '@/lib/types'
 import { getBotState } from '@/lib/botState'
 import { createServerClient } from '@/lib/supabase'
+import { getDammSolPriceFromPoolState, type DammSolPrice } from '@/lib/damm-price'
 import {
   OPEN_LP_STATUSES,
   assertCanOpenLpPosition,
@@ -197,12 +198,6 @@ async function sendWithPriority(
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
-/** Convert Q64.64 sqrtPrice BN → SOL-denominated price ratio. */
-function sqrtPriceToSol(sqrtPrice: BN): number {
-  const ratio = Number(sqrtPrice.toString()) / 2 ** 64
-  return ratio * ratio
-}
-
 /** Read dry_run through the shared bot state helper, matching DLMM behavior. */
 async function getBotDryRun(): Promise<boolean> {
   const botState = await getBotState()
@@ -268,7 +263,7 @@ async function fetchDammPositionPnlWithRetry(positionPubkey: string): Promise<{
  *   5. Generate fresh position NFT Keypair.
  *   6. Call sdk.createPositionAndAddLiquidity() → build → sign → confirm.
  *   7. Persist to lp_positions with the caller's DAMM strategy id.
- *      entry_price_sol is captured from sqrtPrice at open so TP/SL have a baseline.
+ *      entry_price_sol is captured as normalized SOL/token at open so TP/SL have a baseline.
  *   8. Fire pre_grad_opened Telegram alert.
  */
 export async function openDammPosition(
@@ -340,8 +335,10 @@ export async function openDammPosition(
       tokenBFlag,
     } = poolState
 
-    // Capture entry price from sqrtPrice at the moment of open
-    const entryPriceSol = sqrtPriceToSol(sqrtPrice)
+    // Capture normalized SOL/token entry price from sqrtPrice at the moment of open.
+    const entryPrice = await getDammSolPriceFromPoolState(getConnection(), poolState)
+    if (!entryPrice) throw new Error('[DAMM] Could not derive SOL/token entry price from pool state')
+    const entryPriceSol = entryPrice.solPerToken
 
     // 3. Token programs — tokenFlag: 0 = SPL, 1 = Token2022
     const { TOKEN_2022_PROGRAM_ID } = await import('@solana/spl-token')
@@ -434,7 +431,7 @@ export async function openDammPosition(
 
     console.log(`[DAMM] ✅ Opened: pos=${positionPubkey} sig=${signature}`)
 
-    // 6. Persist — entry_price_sol written from live sqrtPrice, dry_run from bot_state
+    // 6. Persist — entry_price_sol written as normalized SOL/token, dry_run from bot_state
     const positionId = await saveDammPosition({
       params,
       openConfig,
@@ -442,6 +439,7 @@ export async function openDammPosition(
       signature,
       solDeposited: params.solAmount,
       entryPriceSol,
+      entryPrice,
       dryRun,
     })
 
@@ -471,6 +469,7 @@ async function saveDammPosition({
   signature,
   solDeposited,
   entryPriceSol,
+  entryPrice,
   dryRun,
 }: {
   params: DammPositionParams
@@ -479,6 +478,7 @@ async function saveDammPosition({
   signature: string
   solDeposited: number
   entryPriceSol: number
+  entryPrice?: DammSolPrice
   dryRun: boolean
 }): Promise<string> {
   const supabase = createServerClient()
@@ -506,6 +506,15 @@ async function saveDammPosition({
         age_minutes: params.ageMinutes,
         fee_tvl_24h_pct: params.feeTvl24hPct,
         liquidity_usd: params.liquidityUsd,
+        ...(entryPrice && {
+          entry_price_basis: 'sol_per_token',
+          entry_price_source: 'damm-v2-sqrt-price-normalized',
+          raw_entry_pool_price: entryPrice.poolPrice,
+          token_a_mint: entryPrice.tokenAMint,
+          token_b_mint: entryPrice.tokenBMint,
+          token_a_decimals: entryPrice.tokenADecimals,
+          token_b_decimals: entryPrice.tokenBDecimals,
+        }),
         ...(params.bondingCurvePct !== undefined && { bonding_curve_pct: params.bondingCurvePct }),
         ...(params.metadata ?? {}),
       },
@@ -743,9 +752,10 @@ export async function getDammPoolConfig(poolAddress: string): Promise<{
     const sdk = await getCpAmm()
     const pool = await sdk.fetchPoolState(new PublicKey(poolAddress))
     if (!pool) return { isValid: false }
+    const price = await getDammSolPriceFromPoolState(getConnection(), pool)
     return {
       isValid: true,
-      currentPrice: sqrtPriceToSol(pool.sqrtPrice),
+      currentPrice: price?.solPerToken,
       feePct: pool.poolFees?.baseFactor ? Number(pool.poolFees.baseFactor) / 100 : undefined,
     }
   } catch {

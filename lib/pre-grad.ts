@@ -21,13 +21,71 @@ import {
 import { OPEN_LP_STATUSES } from './position-limits'
 import { getRpcEndpointCandidates } from './solana'
 import { summarizeError } from './logging'
+import {
+  getDammSolPriceFromPoolState,
+  normalizeRawPoolPriceToSolPerToken,
+  type DammSolPrice,
+} from './damm-price'
 
 const MANAGED_DAMM_STRATEGIES = new Set(['damm-edge', 'damm-migration', 'damm-launch'])
 const MANAGED_DAMM_POSITION_TYPES = new Set(['damm-edge', 'damm-migration', 'damm-launch'])
 
+type DammPositionState = DammSolPrice & {
+  currentPriceSol: number
+}
+
 function isManagedDammPosition(position: { strategy_id?: string | null; position_type?: string | null }): boolean {
   return MANAGED_DAMM_STRATEGIES.has(String(position.strategy_id ?? '')) ||
     MANAGED_DAMM_POSITION_TYPES.has(String(position.position_type ?? ''))
+}
+
+function managedDammTrack(position: { strategy_id?: string | null; position_type?: string | null }): string {
+  return String(position.strategy_id ?? position.position_type ?? '')
+}
+
+function metadataRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function finitePositive(value: unknown): number | null {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+function getDammExitEntryPriceSol(
+  position: {
+    id?: string
+    strategy_id?: string | null
+    position_type?: string | null
+    entry_price_sol?: unknown
+    metadata?: Record<string, unknown> | null
+  },
+  onChain: DammPositionState,
+): { value: number; source: string } | null {
+  const metadata = metadataRecord(position.metadata)
+  const track = managedDammTrack(position)
+
+  if (track === 'damm-launch') {
+    const scannerInitialPrice = finitePositive(metadata.scanner_initial_price_sol)
+    return scannerInitialPrice !== null
+      ? { value: scannerInitialPrice, source: 'metadata.scanner_initial_price_sol' }
+      : null
+  }
+
+  const entryPrice = finitePositive(position.entry_price_sol)
+  if (entryPrice === null) return null
+
+  const entryBasis = String(metadata.entry_price_basis ?? metadata.price_basis ?? '')
+  if (entryBasis === 'sol_per_token' || entryBasis === 'sol-per-token') {
+    return { value: entryPrice, source: 'entry_price_sol' }
+  }
+
+  const normalizedEntryPrice = normalizeRawPoolPriceToSolPerToken(entryPrice, onChain)
+  return normalizedEntryPrice !== null
+    ? { value: normalizedEntryPrice, source: 'entry_price_sol(raw-normalized)' }
+    : null
 }
 
 function getRpcUrl(): string {
@@ -113,7 +171,7 @@ async function fetchMeteoraPosFields(positionPubkey: string): Promise<{
  */
 async function fetchDammPositionState(
   poolAddress: string,
-): Promise<{ currentPriceSol: number } | null> {
+): Promise<DammPositionState | null> {
   try {
     const { Connection, PublicKey } = await import('@solana/web3.js')
     const { CpAmm } = await import('@meteora-ag/cp-amm-sdk')
@@ -124,10 +182,10 @@ async function fetchDammPositionState(
     const poolState = await sdk.fetchPoolState(new PublicKey(poolAddress))
     if (!poolState) return null
 
-    const sqrtPrice = Number(poolState.sqrtPrice.toString()) / 2 ** 64
-    const currentPriceSol = sqrtPrice * sqrtPrice
+    const price = await getDammSolPriceFromPoolState(connection, poolState)
+    if (!price) return null
 
-    return { currentPriceSol }
+    return { ...price, currentPriceSol: price.solPerToken }
   } catch (err) {
     console.error(`[PRE-GRAD] fetchDammPositionState failed: ${summarizeError(err)}`)
     return null
@@ -206,6 +264,12 @@ export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]):
             // Live USD fields from Meteora — what the UI should display
             ...(claimableFeesUsd !== null && { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 }),
             ...(positionValueUsd !== null && { position_value_usd: Math.round(positionValueUsd * 100) / 100 }),
+            current_price_basis: 'sol_per_token',
+            raw_pool_price: onChain.poolPrice,
+            token_a_mint: onChain.tokenAMint,
+            token_b_mint: onChain.tokenBMint,
+            token_a_decimals: onChain.tokenADecimals,
+            token_b_decimals: onChain.tokenBDecimals,
             // Pool-level context
             ...(poolStats && {
               volume_24h_usd:   Math.round(poolStats.volume24hUsd),
@@ -219,16 +283,20 @@ export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]):
       console.warn(`[PRE-GRAD] RPC miss for ${pos.id} — skipping TP/SL this tick`)
     }
 
-    // ── Exit triggers — price-based signals use on-chain price ratio ─────────
-    // We use the on-chain price ratio for signal precision (not USD display).
+    // ── Exit triggers — price-based signals use normalized SOL/token price ───
+    // We use the on-chain price for signal precision (not USD display).
     let reason = ''
     if (ageHours > 72) {
       reason = 'max-duration'
-    } else if (onChain && Number(pos.entry_price_sol ?? 0) > 0) {
-      const entryPrice = Number(pos.entry_price_sol)
-      const pricePct = ((onChain.currentPriceSol - entryPrice) / entryPrice) * 100
-      if (pricePct <= -30) reason = 'stop-loss'
-      else if (pricePct >= 40) reason = 'take-profit'
+    } else if (onChain) {
+      const entryPrice = getDammExitEntryPriceSol(pos, onChain)
+      if (!entryPrice) {
+        console.warn(`[PRE-GRAD] ${pos.id} has no comparable DAMM entry price — skipping TP/SL this tick`)
+      } else {
+        const pricePct = ((onChain.currentPriceSol - entryPrice.value) / entryPrice.value) * 100
+        if (pricePct <= -30) reason = 'stop-loss'
+        else if (pricePct >= 40) reason = 'take-profit'
+      }
     }
 
     if (reason) {
