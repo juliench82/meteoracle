@@ -59,6 +59,7 @@ const MAX_DAMM_MIGRATION_SOL_DEPLOYED = parseFloat(
   process.env.MAX_DAMM_MIGRATION_SOL_DEPLOYED ??
   String(DAMM_MIGRATION_SOL_PER_POSITION * MAX_CONCURRENT_DAMM_MIGRATION_POSITIONS),
 )
+const DAMM_POSITION_OPENS_ENABLED = process.env.DAMM_POSITION_OPENS_ENABLED === 'true'
 const CLOSEABLE_DAMM_STATUSES = [...OPEN_LP_STATUSES, 'dry_run']
 
 // ── Lazy singleton helpers ─────────────────────────────────────────────────────
@@ -273,6 +274,12 @@ export async function openDammPosition(
   console.log(`${openConfig.label} Opening position — pool=${params.poolAddress} sol=${params.solAmount}`)
 
   try {
+    if (!DAMM_POSITION_OPENS_ENABLED) {
+      const message = `${openConfig.label} DAMM position opens disabled by DAMM_POSITION_OPENS_ENABLED=false`
+      console.warn(message)
+      return { positionPubkey: '', txSignature: '', success: false, error: message }
+    }
+
     // 1. dry_run guard — match DLMM bot_state + BOT_DRY_RUN behavior
     const dryRun = await getBotDryRun()
     console.log(`[DAMM] dry_run=${dryRun}`)
