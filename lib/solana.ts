@@ -52,12 +52,36 @@ export function getRpcEndpointCandidates(options: { includePublicFallback?: bool
   return Array.from(new Set(endpoints))
 }
 
+/**
+ * Warn loudly at startup if the public Solana RPC fallback is active.
+ * In production DISABLE_PUBLIC_RPC_FALLBACK=true should be set.
+ * This fires once per process so it doesn't spam logs.
+ */
+let _publicFallbackWarned = false
+export function warnIfPublicFallbackActive(): void {
+  if (_publicFallbackWarned) return
+  _publicFallbackWarned = true
+  if (process.env.DISABLE_PUBLIC_RPC_FALLBACK === 'true') return
+  const hasDedicated =
+    Boolean(cleanEnv(process.env.RPC_URL)) ||
+    Boolean(getHeliusRpcEndpoint()) ||
+    splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS).length > 0
+  if (!hasDedicated) {
+    console.error(
+      '[solana] CRITICAL: no dedicated RPC endpoint configured — falling back to ' +
+      'api.mainnet-beta.solana.com. Set RPC_URL or HELIUS_API_KEY and add ' +
+      'DISABLE_PUBLIC_RPC_FALLBACK=true to prevent rate-limited stalls in production.',
+    )
+  }
+}
+
 export function createConnection(rpcUrl: string): Connection {
   return new Connection(rpcUrl, 'confirmed')
 }
 
 export function getConnection(): Connection {
   if (!_connection) {
+    warnIfPublicFallbackActive()
     const url = getRpcEndpointCandidates()[0]
     if (!url) throw new Error('RPC_URL, HELIUS_RPC_URL, or HELIUS_API_KEY is not set')
     _connection = createConnection(url)
@@ -76,7 +100,6 @@ export function getWallet(): Keypair {
     const raw = process.env.WALLET_PRIVATE_KEY
     if (!raw) throw new Error('WALLET_PRIVATE_KEY is not set')
     try {
-      // Support both base58 string and JSON array formats
       if (raw.startsWith('[')) {
         _wallet = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)))
       } else {
@@ -118,7 +141,7 @@ export async function getPriorityFee(accountKeys: string[]): Promise<number> {
       }),
     })
     const data = await res.json()
-    return data?.result?.priorityFeeEstimate ?? 50_000 // default 50k microlamports
+    return data?.result?.priorityFeeEstimate ?? 50_000
   } catch {
     return 50_000
   }

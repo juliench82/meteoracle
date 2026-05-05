@@ -62,6 +62,19 @@ const DAMM_POOL_WAIT_MS = parseInt(process.env.DBC_DAMM_POOL_WAIT_MS ?? '2500', 
 const RPC_RETRY_MS = parseInt(process.env.DBC_RPC_RETRY_SEC ?? '60', 10) * 1_000
 const WATCHLIST_SOURCE = 'meteora-dbc'
 
+// Option B: delete stale terminal rows on every upsert to keep the table lean.
+// Rows older than this with a terminal status are deleted inline.
+const WATCHLIST_STALE_TERMINAL_TTL_MS =
+  parseInt(process.env.WATCHLIST_STALE_TERMINAL_TTL_HOURS ?? '48', 10) * 60 * 60 * 1_000
+const TERMINAL_STATUSES = [
+  'score_rejected',
+  'risk_rejected',
+  'skipped_existing_position',
+  'migration_open_disabled',
+  'skipped_circuit_breaker',
+  'open_failed',
+] as const
+
 type WatchlistRow = {
   id: string
   mint: string
@@ -515,6 +528,23 @@ async function findWatchlistRow(mint: string): Promise<WatchlistRow | null> {
   return data as WatchlistRow | null
 }
 
+/**
+ * Option B: inline stale-row cleanup.
+ * Deletes terminal-status rows older than WATCHLIST_STALE_TERMINAL_TTL_MS on every upsert call.
+ * Keeps the working set lean without a separate cron job.
+ */
+async function pruneStaleTerminalRows(supabase: ReturnType<typeof createServerClient>): Promise<void> {
+  const cutoff = new Date(Date.now() - WATCHLIST_STALE_TERMINAL_TTL_MS).toISOString()
+  const { error } = await supabase
+    .from('pre_grad_watchlist')
+    .delete()
+    .in('status', TERMINAL_STATUSES)
+    .lt('last_seen_at', cutoff)
+  if (error) {
+    console.warn(`[dbc-graduation] stale row pruning failed: ${error.message}`)
+  }
+}
+
 async function upsertWatchlist(
   ctx: DbcPoolContext,
   status: string,
@@ -522,6 +552,12 @@ async function upsertWatchlist(
   metricFields: WatchlistMetricFields = {},
 ): Promise<WatchlistRow | null> {
   const supabase = createServerClient()
+
+  // Fire-and-forget pruning — runs on every upsert, non-blocking on failure
+  pruneStaleTerminalRows(supabase).catch(err =>
+    console.warn(`[dbc-graduation] pruneStaleTerminalRows error: ${err}`)
+  )
+
   const mint = ctx.virtualPool.baseMint.toBase58()
   const existing = await findWatchlistRow(mint)
   const metadata = {

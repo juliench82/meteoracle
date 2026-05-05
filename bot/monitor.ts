@@ -29,6 +29,11 @@ const SMART_REBALANCE_THRESHOLD_PCT = 30
 const SMART_REBALANCE_IN_RANGE = process.env.LP_SMART_REBALANCE_IN_RANGE === 'true'
 const MONITOR_EXITS_ENABLED = process.env.MONITOR_EXITS_ENABLED !== 'false' &&
   process.env.LP_MONITOR_ENABLED !== 'false'
+
+// How many consecutive syncAllMeteoraPositions failures before we fire a Telegram alert.
+const SYNC_FAIL_ALERT_THRESHOLD = parseInt(process.env.MONITOR_SYNC_FAIL_ALERT_THRESHOLD ?? '3')
+let _consecutiveSyncFailures = 0
+
 const DAMM_EDGE_EXIT_STRATEGY: Strategy = {
   id: 'damm-edge',
   name: 'DAMM Edge',
@@ -63,7 +68,6 @@ const DAMM_EDGE_EXIT_STRATEGY: Strategy = {
   },
 }
 
-// Reconcile the wallet against Meteora every tick by default. Supabase is a cache.
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
 let tickCount = 0
 const PNL_UNAVAILABLE_ALERT_TICKS = 3
@@ -260,18 +264,36 @@ export async function monitorPositions(): Promise<{
     console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
     try {
       reconcile = await detectAllOrphanedPositions()
+      _consecutiveSyncFailures = 0
       console.log(
         `[monitor] Meteora reconcile — live=${reconcile.live} updated=${reconcile.updated} inserted=${reconcile.inserted} ` +
         `(DLMM ${reconcile.dlmmLive}, DAMM ${reconcile.dammLive})`,
       )
     } catch (err) {
+      _consecutiveSyncFailures++
       console.warn('[monitor] Meteora position reconcile failed (non-fatal):', err)
+      if (_consecutiveSyncFailures >= SYNC_FAIL_ALERT_THRESHOLD) {
+        await sendAlert({
+          type: 'sync_failure_alert',
+          reason: `meteora_sync_failed_${_consecutiveSyncFailures}x`,
+          error: String(err),
+        }).catch(() => {})
+      }
     }
   } else {
     try {
       reconcile = await syncAllMeteoraPositions()
+      _consecutiveSyncFailures = 0
     } catch (err) {
+      _consecutiveSyncFailures++
       console.warn('[monitor] Meteora live sync failed — skipping position exits this tick:', err)
+      if (_consecutiveSyncFailures >= SYNC_FAIL_ALERT_THRESHOLD) {
+        await sendAlert({
+          type: 'sync_failure_alert',
+          reason: `meteora_sync_failed_${_consecutiveSyncFailures}x`,
+          error: String(err),
+        }).catch(() => {})
+      }
       return stats
     }
   }
@@ -282,9 +304,20 @@ export async function monitorPositions(): Promise<{
   }
 
   if (!reconcile.dlmmOk && !reconcile.dammOk) {
+    _consecutiveSyncFailures++
     console.warn('[monitor] Meteora live fetch failed for DLMM and DAMM — skipping position exits this tick')
+    if (_consecutiveSyncFailures >= SYNC_FAIL_ALERT_THRESHOLD) {
+      await sendAlert({
+        type: 'sync_failure_alert',
+        reason: `meteora_dlmm_and_damm_failed_${_consecutiveSyncFailures}x`,
+        error: 'Both DLMM and DAMM live fetch failed',
+      }).catch(() => {})
+    }
     return stats
   }
+
+  // At least one endpoint recovered — reset counter
+  _consecutiveSyncFailures = 0
 
   try {
     if (reconcile.dammOk) {
