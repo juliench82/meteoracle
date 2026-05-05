@@ -36,6 +36,7 @@ const DBC_PROGRAM_ID = new PublicKey(
   process.env.DBC_PROGRAM_ID ?? DYNAMIC_BONDING_CURVE_PROGRAM_ID.toString(),
 )
 const WATCH_INTERVAL_MS = parseInt(process.env.DBC_GRADUATION_WATCH_INTERVAL_SEC ?? '10', 10) * 1_000
+const DBC_GRADUATION_WATCHER_ENABLED = process.env.DBC_GRADUATION_WATCHER_ENABLED !== 'false'
 const DISCOVERY_INTERVAL_MS = parseInt(process.env.DBC_DISCOVERY_INTERVAL_SEC ?? '60', 10) * 1_000
 const WATCH_MIN_PROGRESS_PCT = parseFloat(process.env.DBC_WATCH_MIN_PROGRESS_PCT ?? '90')
 const OPEN_PROGRESS_PCT = parseFloat(process.env.DBC_OPEN_PROGRESS_PCT ?? '100')
@@ -51,6 +52,7 @@ const DBC_REQUIRE_RELIABLE_HOLDERS = process.env.DBC_REQUIRE_RELIABLE_HOLDERS ==
 const DAMM_MIGRATION_SOL_PER_POSITION = parseFloat(process.env.DAMM_MIGRATION_SOL_PER_POSITION ?? '0.55')
 const AUTO_TRIGGER_MIGRATION = process.env.DBC_AUTO_TRIGGER_MIGRATION === 'true'
 const OPEN_MIGRATED_POSITION_ENABLED = process.env.DBC_OPEN_MIGRATED_POSITION_ENABLED === 'true'
+const DAMM_MIGRATION_ENABLED = process.env.DAMM_MIGRATION_ENABLED !== 'false'
 const MAX_CONCURRENT_DAMM_MIGRATION = parseInt(process.env.MAX_CONCURRENT_DAMM_MIGRATION ?? '2', 10)
 const USE_PROGRAM_SUBSCRIPTION = process.env.DBC_USE_PROGRAM_SUBSCRIPTION !== 'false'
 const DISCOVERY_POLL_ENABLED = process.env.DBC_DISCOVERY_POLL_ENABLED === 'true'
@@ -637,6 +639,7 @@ async function sendWithPriority(tx: Transaction, signers: Keypair[], label: stri
 }
 
 async function triggerDammV2Migration(ctx: DbcPoolContext): Promise<string | null> {
+  if (!DAMM_MIGRATION_ENABLED) return null
   if (!AUTO_TRIGGER_MIGRATION) return null
   if (await getBotDryRun()) {
     console.log(`[dbc-graduation] dry run: migration trigger skipped for ${ctx.symbol}`)
@@ -673,7 +676,7 @@ async function waitForDammPool(poolAddress: PublicKey): Promise<boolean> {
 
 async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: WatchlistRow, score: DbcMigrationScore): Promise<boolean> {
   const mint = ctx.virtualPool.baseMint.toBase58()
-  if (!OPEN_MIGRATED_POSITION_ENABLED) {
+  if (!DAMM_MIGRATION_ENABLED || !OPEN_MIGRATED_POSITION_ENABLED) {
     await updateWatchlistById(row.id, { status: 'migration_open_disabled' })
     return false
   }
@@ -933,6 +936,11 @@ async function discoverNearThresholdPools(): Promise<number> {
 }
 
 export async function runDbcGraduationWatcherTick(): Promise<{ checked: number; tracked: number; opened: number; discovered: number }> {
+  if (!DBC_GRADUATION_WATCHER_ENABLED) {
+    console.log('[dbc-graduation] watcher disabled — DBC_GRADUATION_WATCHER_ENABLED=false')
+    return { checked: 0, tracked: 0, opened: 0, discovered: 0 }
+  }
+
   if (!await ensureRpcReady('tick')) {
     return { checked: 0, tracked: 0, opened: 0, discovered: 0 }
   }
@@ -960,6 +968,11 @@ export async function runDbcGraduationWatcherTick(): Promise<{ checked: number; 
 }
 
 export async function startDbcGraduationWatcher(): Promise<void> {
+  if (!DBC_GRADUATION_WATCHER_ENABLED) {
+    console.log('[dbc-graduation] disabled — DBC_GRADUATION_WATCHER_ENABLED=false')
+    return
+  }
+
   console.log(
     `[dbc-graduation] starting — program=${DBC_PROGRAM_ID.toBase58()} ` +
     `watch>=${WATCH_MIN_PROGRESS_PCT}% open>=${OPEN_PROGRESS_PCT}% ` +

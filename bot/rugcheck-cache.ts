@@ -6,7 +6,14 @@
 
 import { checkRugscore as _checkRugscore } from '@/lib/rugcheck'
 
+function envInt(name: string, fallback: number): number {
+  const parsed = parseInt(process.env[name] ?? '', 10)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
 const CACHE_TTL_MS = 8 * 60 * 1_000  // 8 minutes
+const CACHE_MAX_ENTRIES = Math.max(50, envInt('RUGCHECK_CACHE_MAX_ENTRIES', 1000))
+const CACHE_SWEEP_INTERVAL_MS = Math.max(60_000, envInt('RUGCHECK_CACHE_SWEEP_INTERVAL_MS', 300_000))
 const OUTLIER_DELTA = 25              // flag if new score deviates >25pts from cached
 
 interface CacheEntry {
@@ -15,9 +22,28 @@ interface CacheEntry {
 }
 
 const _cache = new Map<string, CacheEntry>()
+let lastSweepAt = 0
+
+function pruneCache(now: number): void {
+  if (now - lastSweepAt < CACHE_SWEEP_INTERVAL_MS && _cache.size <= CACHE_MAX_ENTRIES) return
+  lastSweepAt = now
+
+  for (const [mint, entry] of _cache) {
+    if (now - entry.fetchedAt >= CACHE_TTL_MS) {
+      _cache.delete(mint)
+    }
+  }
+
+  while (_cache.size > CACHE_MAX_ENTRIES) {
+    const oldest = _cache.keys().next().value
+    if (!oldest) break
+    _cache.delete(oldest)
+  }
+}
 
 export async function getRugscore(mint: string, symbol: string): Promise<number> {
   const now = Date.now()
+  pruneCache(now)
   const cached = _cache.get(mint)
 
   if (cached && now - cached.fetchedAt < CACHE_TTL_MS) {
@@ -49,6 +75,7 @@ export async function getRugscore(mint: string, symbol: string): Promise<number>
   }
 
   _cache.set(mint, { score, fetchedAt: now })
+  pruneCache(now)
   return score
 }
 

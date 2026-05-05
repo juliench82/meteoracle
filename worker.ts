@@ -14,6 +14,9 @@ const SCANNER_INTERVAL_MS = parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') 
 
 const BOT_ENABLED = process.env.BOT_ENABLED === 'true'
 const DRY_RUN     = process.env.BOT_DRY_RUN === 'true'
+const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
+const LP_SCANNER_ENABLED = process.env.LP_SCANNER_ENABLED !== 'false' &&
+  process.env.SCANNER_ENABLED !== 'false'
 
 function log(msg: string) {
   console.log(`[worker][${new Date().toISOString()}] ${msg}`)
@@ -21,6 +24,7 @@ function log(msg: string) {
 
 async function tickMonitor() {
   if (!BOT_ENABLED) { log('monitor skipped — BOT_ENABLED=false'); return }
+  if (!LP_MONITOR_ENABLED) { log('monitor skipped — LP_MONITOR_ENABLED=false'); return }
   try {
     log('monitor tick start')
     const stats = await monitorPositions()
@@ -32,6 +36,7 @@ async function tickMonitor() {
 
 async function tickScanner() {
   if (!BOT_ENABLED) { log('scanner skipped — BOT_ENABLED=false'); return }
+  if (!LP_SCANNER_ENABLED) { log('scanner skipped — LP_SCANNER_ENABLED=false'); return }
   try {
     log('scanner tick start')
     const stats = await runScanner()
@@ -51,6 +56,8 @@ async function main() {
   log(`Meteoracle worker starting`)
   log(`BOT_ENABLED : ${BOT_ENABLED}`)
   log(`BOT_DRY_RUN : ${DRY_RUN}`)
+  log(`LP_MONITOR  : ${LP_MONITOR_ENABLED}`)
+  log(`LP_SCANNER  : ${LP_SCANNER_ENABLED}`)
   log(`Monitor     : every ${MONITOR_INTERVAL_MS / 60_000} min`)
   log(`Scanner     : every ${SCANNER_INTERVAL_MS / 60_000} min`)
   log(`────────────────────────────────────────`)

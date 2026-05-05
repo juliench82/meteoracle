@@ -26,6 +26,8 @@ async function getDLMM() {
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
 const SMART_REBALANCE_THRESHOLD_PCT = 30
 const SMART_REBALANCE_IN_RANGE = process.env.LP_SMART_REBALANCE_IN_RANGE === 'true'
+const MONITOR_EXITS_ENABLED = process.env.MONITOR_EXITS_ENABLED !== 'false' &&
+  process.env.LP_MONITOR_ENABLED !== 'false'
 
 // Reconcile the wallet against Meteora every tick by default. Supabase is a cache.
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
@@ -39,6 +41,52 @@ type PositionStateRead = {
   currentPriceSol: number
   claimableFeesSolEquivalent: number
   externallyClosed: boolean
+}
+
+type PositionMetadata = {
+  strategy_id?: string | null
+  entry_price_sol?: unknown
+  bin_range_down?: unknown
+  bin_range_up?: unknown
+  sol_price_usd?: unknown
+  current_sol_price_usd?: unknown
+  pnl_pct?: unknown
+  position_pnl_pct?: unknown
+  position_pnl_percentage?: unknown
+  pnl_percentage?: unknown
+  total_pnl_pct?: unknown
+  total_pnl_percentage?: unknown
+  pnl_usd?: unknown
+  position_pnl_usd?: unknown
+  total_pnl_usd?: unknown
+  meteora_total_deposit_usd?: unknown
+  total_deposit_usd?: unknown
+  deposit_usd?: unknown
+  cost_basis_usd?: unknown
+  claimable_fees_usd?: unknown
+  position_value_usd?: unknown
+  [key: string]: unknown
+}
+
+type LpPositionRow = {
+  id: string
+  symbol: string
+  pool_address: string
+  position_pubkey: string
+  status: string
+  opened_at: string
+  strategy_id?: string | null
+  position_type?: string | null
+  metadata?: PositionMetadata | null
+  in_range?: boolean | null
+  oor_since_at?: string | null
+  entry_price_sol?: unknown
+  pnl_pct?: unknown
+  pnl_usd?: unknown
+  claimable_fees_usd?: unknown
+  position_value_usd?: unknown
+  sol_deposited?: unknown
+  null_pnl_ticks?: unknown
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -63,7 +111,21 @@ function firstNumber(...values: unknown[]): number | null {
   return null
 }
 
-function resolveMeteoraPnlPct(position: Record<string, any>, pnlUsd: number | null, deployedSol: number): number | null {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isLpPositionRow(value: unknown): value is LpPositionRow {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' &&
+    typeof value.symbol === 'string' &&
+    typeof value.pool_address === 'string' &&
+    typeof value.position_pubkey === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.opened_at === 'string'
+}
+
+function resolveMeteoraPnlPct(position: LpPositionRow, pnlUsd: number | null, deployedSol: number): number | null {
   const metadata = position.metadata ?? {}
   const explicitPct = firstNumber(
     position.pnl_pct,
@@ -120,13 +182,14 @@ async function sbInsert(table: string, body: Record<string, unknown>): Promise<v
   if (!res.ok) throw new Error(`sbInsert ${table} ${res.status}: ${await res.text()}`)
 }
 
-async function fetchCachedRowsForLivePositions(livePositions: LiveMeteoraPosition[]): Promise<any[]> {
+async function fetchCachedRowsForLivePositions(livePositions: LiveMeteoraPosition[]): Promise<LpPositionRow[]> {
   const pubkeys = livePositions
     .map(position => position.position_pubkey)
     .filter((pubkey): pubkey is string => Boolean(pubkey))
 
   if (pubkeys.length === 0) return []
-  return sbSelect('lp_positions', `position_pubkey=in.(${pubkeys.join(',')})&select=*`)
+  const rows = await sbSelect<unknown>('lp_positions', `position_pubkey=in.(${pubkeys.join(',')})&select=*`)
+  return rows.filter(isLpPositionRow)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +207,10 @@ export async function monitorPositions(): Promise<{
   }
 
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
+  if (!MONITOR_EXITS_ENABLED) {
+    console.log('[monitor] exits disabled — MONITOR_EXITS_ENABLED=false')
+    return stats
+  }
 
   tickCount++
   let reconcile: MeteoraPositionSyncResult | null = null
@@ -200,7 +267,7 @@ export async function monitorPositions(): Promise<{
   }
 
   console.log(`[monitor] joining ${liveDlmmPositions.length} live DLMM position(s) with Supabase metadata`)
-  let cachedRows: any[]
+  let cachedRows: LpPositionRow[]
   try {
     cachedRows = await fetchCachedRowsForLivePositions(liveDlmmPositions)
   } catch (err) {
@@ -209,6 +276,7 @@ export async function monitorPositions(): Promise<{
   }
 
   const positions = mergeDbAndLiveLpPositions(cachedRows, liveDlmmPositions, { dlmmOk: true, dammOk: reconcile.dammOk })
+    .filter(isLpPositionRow)
     .filter(position => OPEN_LP_STATUSES.includes(position.status))
 
   if (!positions.length) { console.log('[monitor] no monitorable live DLMM positions'); return stats }
@@ -253,7 +321,7 @@ export async function monitorPositions(): Promise<{
 }
 
 async function checkPosition(
-  position: Record<string, any>,
+  position: LpPositionRow,
   strategy: Strategy,
   stats: { checked: number; closed: number; claimed: number; rebalanced: number }
 ): Promise<void> {
@@ -294,8 +362,7 @@ async function checkPosition(
     return
   }
 
-  const entryPriceSol: number = position.entry_price_sol ?? position.metadata?.entry_price_sol ?? 0
-  const entryPriceUsd: number = position.entry_price_usd ?? 0
+  const entryPriceSol = firstNumber(position.entry_price_sol, position.metadata?.entry_price_sol) ?? 0
 
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
@@ -320,7 +387,7 @@ async function checkPosition(
   )
   const claimableFeesUsd = liveClaimableFeesUsd ?? derivedClaimableFeesUsd
   const positionValueUsd = livePositionValueUsd
-  const deployedSol = position.sol_deposited || 0
+  const deployedSol = firstNumber(position.sol_deposited) ?? 0
   const pnlPct = resolveMeteoraPnlPct(position, livePnlUsd, deployedSol)
   const previousNullPnlTicks = Math.max(0, Math.trunc(nullableNumber(position.null_pnl_ticks) ?? 0))
   const currentNullPnlTicks = pnlPct === null ? previousNullPnlTicks + 1 : 0
@@ -334,11 +401,13 @@ async function checkPosition(
     ? new Date().toISOString()
     : (!inRange ? (position.oor_since_at ?? new Date().toISOString()) : null)
 
-  const rangeLower = position.metadata?.bin_range_down
-    ? entryPriceSol * (1 + position.metadata.bin_range_down / 100)
+  const binRangeDown = firstNumber(position.metadata?.bin_range_down)
+  const binRangeUp = firstNumber(position.metadata?.bin_range_up)
+  const rangeLower = binRangeDown !== null
+    ? entryPriceSol * (1 + binRangeDown / 100)
     : 0
-  const rangeUpper = position.metadata?.bin_range_up
-    ? entryPriceSol * (1 + position.metadata.bin_range_up / 100)
+  const rangeUpper = binRangeUp !== null
+    ? entryPriceSol * (1 + binRangeUp / 100)
     : 0
 
   try {
