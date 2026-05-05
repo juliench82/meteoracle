@@ -121,6 +121,7 @@ let programSubscriptionId: number | null = null
 let lastDiscoveryAt = 0
 const inFlightPools = new Set<string>()
 const inFlightMints = new Set<string>()
+let openingMigrationCount = 0
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -734,15 +735,16 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
     }
 
     const openMigrationCount = await getOpenDammMigrationCount()
-    if (openMigrationCount >= MAX_CONCURRENT_DAMM_MIGRATION) {
+    if (openMigrationCount + openingMigrationCount >= MAX_CONCURRENT_DAMM_MIGRATION) {
       console.log(
-        `[DBC] max concurrent damm-migration positions reached (${openMigrationCount}/${MAX_CONCURRENT_DAMM_MIGRATION}) — skipping`,
+        `[DBC] max concurrent damm-migration positions reached (${openMigrationCount + openingMigrationCount}/${MAX_CONCURRENT_DAMM_MIGRATION}) — skipping`,
       )
       await updateWatchlistById(row.id, {
         status: 'skipped_migration_cap',
         metadata: {
           ...(row.metadata ?? {}),
           open_migration_count: openMigrationCount,
+          opening_migration_count: openingMigrationCount,
           max_concurrent_damm_migration: MAX_CONCURRENT_DAMM_MIGRATION,
         },
       })
@@ -760,38 +762,44 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
       metadata: { ...(row.metadata ?? {}), opening_started_at: new Date().toISOString() },
     })
 
-    const result = await openDammPosition({
-      tokenAddress: mint,
-      poolAddress: ctx.dammPool.toBase58(),
-      solAmount: DAMM_MIGRATION_SOL_PER_POSITION,
-      symbol: ctx.symbol,
-      ageMinutes: 0,
-      feeTvl24hPct: 0,
-      liquidityUsd: 0,
-      bondingCurvePct: ctx.progressPct,
-      strategyId: 'damm-migration',
-      positionType: 'damm-migration',
-      metadata: {
-        source: WATCHLIST_SOURCE,
-        virtual_pool: ctx.virtualPoolAddress.toBase58(),
-        damm_config: ctx.dammConfig.toBase58(),
-        quote_mint: ctx.poolConfig.quoteMint.toBase58(),
-        quote_reserve: ctx.virtualPool.quoteReserve.toString(),
-        migration_quote_threshold: ctx.poolConfig.migrationQuoteThreshold.toString(),
-        dbc_score: score.score,
-        dbc_score_breakdown: score.breakdown,
-        rugcheck_score: score.rugcheckScore,
-        holder_count: score.holderCount,
-        top_holder_pct: score.topHolderPct,
-        holder_data_reliable: score.holderDataReliable,
-      },
-    })
+    openingMigrationCount++
+    let result: Awaited<ReturnType<typeof openDammPosition>>
+    try {
+      result = await openDammPosition({
+        tokenAddress: mint,
+        poolAddress: ctx.dammPool.toBase58(),
+        solAmount: DAMM_MIGRATION_SOL_PER_POSITION,
+        symbol: ctx.symbol,
+        ageMinutes: 0,
+        feeTvl24hPct: 0,
+        liquidityUsd: 0,
+        bondingCurvePct: ctx.progressPct,
+        strategyId: 'damm-migration',
+        positionType: 'damm-migration',
+        metadata: {
+          source: WATCHLIST_SOURCE,
+          virtual_pool: ctx.virtualPoolAddress.toBase58(),
+          damm_config: ctx.dammConfig.toBase58(),
+          quote_mint: ctx.poolConfig.quoteMint.toBase58(),
+          quote_reserve: ctx.virtualPool.quoteReserve.toString(),
+          migration_quote_threshold: ctx.poolConfig.migrationQuoteThreshold.toString(),
+          dbc_score: score.score,
+          dbc_score_breakdown: score.breakdown,
+          rugcheck_score: score.rugcheckScore,
+          holder_count: score.holderCount,
+          top_holder_pct: score.topHolderPct,
+          holder_data_reliable: score.holderDataReliable,
+        },
+      })
+    } finally {
+      openingMigrationCount = Math.max(0, openingMigrationCount - 1)
+    }
 
     if (!result.success) {
       await updateWatchlistById(row.id, {
         status: 'open_failed',
         metadata: { ...(row.metadata ?? {}), open_error: result.error ?? 'unknown' },
-      })
+      },
       return false
     }
 
