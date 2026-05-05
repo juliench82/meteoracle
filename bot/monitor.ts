@@ -7,6 +7,7 @@ import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { getBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
+import { closeDammPosition } from '@/bot/damm-executor'
 import { rebalanceDlmmPosition } from '@/bot/rebalance'
 import { checkDammPositions } from '@/lib/pre-grad'
 import { sendAlert } from '@/bot/alerter'
@@ -28,6 +29,39 @@ const SMART_REBALANCE_THRESHOLD_PCT = 30
 const SMART_REBALANCE_IN_RANGE = process.env.LP_SMART_REBALANCE_IN_RANGE === 'true'
 const MONITOR_EXITS_ENABLED = process.env.MONITOR_EXITS_ENABLED !== 'false' &&
   process.env.LP_MONITOR_ENABLED !== 'false'
+const DAMM_EDGE_EXIT_STRATEGY: Strategy = {
+  id: 'damm-edge',
+  name: 'DAMM Edge',
+  description: 'DAMM v2 market-edge exit policy.',
+  enabled: true,
+  filters: {
+    minMcUsd: 0,
+    maxMcUsd: Number.MAX_SAFE_INTEGER,
+    minVolume24h: 0,
+    minLiquidityUsd: 0,
+    maxTopHolderPct: 100,
+    minHolderCount: 0,
+    maxAgeHours: Number.MAX_SAFE_INTEGER,
+    minRugcheckScore: 0,
+    requireSocialSignal: false,
+    minFeeTvl24hPct: 0,
+  },
+  position: {
+    binStep: 0,
+    rangeDownPct: 0,
+    rangeUpPct: 0,
+    distributionType: 'spot',
+    solBias: 1,
+  },
+  exits: {
+    stopLossPct: -30,
+    takeProfitPct: 40,
+    outOfRangeMinutes: 0,
+    maxDurationHours: 72,
+    claimFeesBeforeClose: true,
+    minFeesToClaim: 0,
+  },
+}
 
 // Reconcile the wallet against Meteora every tick by default. Supabase is a cache.
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
@@ -87,6 +121,13 @@ type LpPositionRow = {
   position_value_usd?: unknown
   sol_deposited?: unknown
   null_pnl_ticks?: unknown
+}
+
+type DammPositionSnapshotRow = {
+  pnl_pct: number | null
+  position_value_usd: number | null
+  opened_at: string
+  metadata: PositionMetadata | null
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -256,41 +297,42 @@ export async function monitorPositions(): Promise<{
     console.warn('[monitor] DAMM v2 check failed (non-fatal):', err)
   }
 
-  const liveDlmmPositions = reconcile.positions.filter(position => position.position_type === 'dlmm')
   if (!reconcile.dlmmOk) {
     console.warn('[monitor] DLMM live fetch failed — skipping DLMM exits this tick')
-    return stats
   }
-  if (!liveDlmmPositions.length) {
-    console.log('[monitor] no live DLMM positions')
+
+  const liveStrategyPositions = reconcile.positions.filter(position =>
+    position.position_type === 'dlmm' ||
+    position.position_type === 'damm-edge'
+  )
+  if (!liveStrategyPositions.length) {
+    console.log('[monitor] no live strategy positions')
     return stats
   }
 
-  console.log(`[monitor] joining ${liveDlmmPositions.length} live DLMM position(s) with Supabase metadata`)
+  console.log(`[monitor] joining ${liveStrategyPositions.length} live strategy position(s) with Supabase metadata`)
   let cachedRows: LpPositionRow[]
   try {
-    cachedRows = await fetchCachedRowsForLivePositions(liveDlmmPositions)
+    cachedRows = await fetchCachedRowsForLivePositions(liveStrategyPositions)
   } catch (err) {
     console.warn('[monitor] lp_positions metadata fetch error — skipping strategy exits:', err)
     return stats
   }
 
-  const positions = mergeDbAndLiveLpPositions(cachedRows, liveDlmmPositions, { dlmmOk: true, dammOk: reconcile.dammOk })
+  const positions = mergeDbAndLiveLpPositions(cachedRows, liveStrategyPositions, { dlmmOk: reconcile.dlmmOk, dammOk: reconcile.dammOk })
     .filter(isLpPositionRow)
     .filter(position => OPEN_LP_STATUSES.includes(position.status))
 
-  if (!positions.length) { console.log('[monitor] no monitorable live DLMM positions'); return stats }
-  console.log(`[monitor] checking ${positions.length} live-first DLMM position(s)`)
+  if (!positions.length) { console.log('[monitor] no monitorable live strategy positions'); return stats }
+  console.log(`[monitor] checking ${positions.length} live-first strategy position(s)`)
 
   for (const position of positions) {
     try {
       const strategyId = position.strategy_id ?? position.metadata?.strategy_id
-      const isDammPosition =
-        strategyId === 'damm-edge' ||
+      const isDammMigration =
         strategyId === 'damm-migration' ||
-        position.position_type === 'damm-edge' ||
         position.position_type === 'damm-migration'
-      if (position.position_type === 'pre_grad' || isDammPosition) {
+      if (position.position_type === 'pre_grad' || isDammMigration) {
         continue
       }
       if (strategyId === 'meteora-live' || strategyId === 'damm-live') {
@@ -300,7 +342,10 @@ export async function monitorPositions(): Promise<{
 
       stats.checked++
 
-      const strategy = STRATEGIES.find((s) => s.id === strategyId)
+      const isDammEdge = strategyId === 'damm-edge' || position.position_type === 'damm-edge'
+      const strategy = isDammEdge
+        ? DAMM_EDGE_EXIT_STRATEGY
+        : STRATEGIES.find((s) => s.id === strategyId)
       if (!strategy) {
         console.warn(`[monitor] no strategy found for position ${position.id} (strategy_id=${strategyId})`)
         continue
@@ -320,11 +365,66 @@ export async function monitorPositions(): Promise<{
   return stats
 }
 
+async function checkDammEdgePosition(
+  position: LpPositionRow,
+  strategy: Strategy,
+  stats: { checked: number; closed: number; claimed: number; rebalanced: number },
+): Promise<void> {
+  const label = `[monitor][${position.symbol}][damm-edge]`
+  const { pnlPct, ageHours, positionValueUsd } = await fetchDammPositionState(position.id)
+
+  console.log(
+    `${label} pnlPct=${pnlPct !== null ? `${pnlPct.toFixed(2)}%` : 'n/a'} ` +
+    `age=${ageHours.toFixed(1)}h posValue=$${positionValueUsd ?? 'n/a'}`,
+  )
+
+  let closeReason: string | null = null
+
+  if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
+    closeReason = `stoploss_pnl_${pnlPct.toFixed(1)}pct`
+  } else if (pnlPct !== null && pnlPct >= strategy.exits.takeProfitPct) {
+    closeReason = `takeprofit_pnl_${pnlPct.toFixed(1)}pct`
+  } else if (ageHours >= strategy.exits.maxDurationHours) {
+    closeReason = `max_duration_${Math.round(ageHours)}h`
+  } else if (pnlPct === null) {
+    console.warn(`${label} PnL unavailable — stop-loss/take-profit skipped this tick`)
+  }
+
+  if (!closeReason) return
+
+  console.log(`${label} EXIT triggered → ${closeReason}`)
+  const closeResult = await closeDammPosition(position.id, closeReason)
+  const closed = closeResult.success && !closeResult.skipped
+  if (closed) {
+    stats.closed++
+    await sendAlert({
+      type: 'position_closed',
+      symbol: position.symbol,
+      strategy: 'damm-edge',
+      reason: closeReason,
+      ilPct: 0,
+      ageHours: Math.round(ageHours * 10) / 10,
+    })
+  } else {
+    console.warn(`${label} close skipped or failed: ${closeResult.error ?? 'unknown error'}`)
+  }
+}
+
 async function checkPosition(
   position: LpPositionRow,
   strategy: Strategy,
   stats: { checked: number; closed: number; claimed: number; rebalanced: number }
 ): Promise<void> {
+  const strategyId = position.strategy_id ?? position.metadata?.strategy_id
+  const isDammEdge =
+    strategyId === 'damm-edge' ||
+    position.position_type === 'damm-edge'
+
+  if (isDammEdge) {
+    await checkDammEdgePosition(position, strategy, stats)
+    return
+  }
+
   const label = `[monitor][${position.symbol}][${strategy.id}]`
   const now = Date.now()
 
@@ -581,6 +681,32 @@ async function fetchPositionState(
     console.error(`[fetchPositionState] error for pool ${poolAddress}:`, err)
     return { ok: false, inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: false }
   }
+}
+
+async function fetchDammPositionState(
+  positionId: string,
+): Promise<{ pnlPct: number | null; ageHours: number; positionValueUsd: number | null }> {
+  const rows = await sbSelect<DammPositionSnapshotRow>(
+    'lp_positions',
+    `id=eq.${positionId}&select=pnl_pct,position_value_usd,opened_at,metadata`,
+  )
+
+  if (!rows.length) return { pnlPct: null, ageHours: 0, positionValueUsd: null }
+
+  const row = rows[0]
+  const metadata = row.metadata ?? {}
+  const pnlPct = nullableNumber(
+    row.pnl_pct ??
+    metadata.pnl_pct ??
+    metadata.position_pnl_pct
+  )
+  const openedAt = new Date(row.opened_at).getTime()
+  const ageHours = Number.isFinite(openedAt)
+    ? (Date.now() - openedAt) / 3_600_000
+    : 0
+  const positionValueUsd = nullableNumber(row.position_value_usd)
+
+  return { pnlPct, ageHours, positionValueUsd }
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────────────────
