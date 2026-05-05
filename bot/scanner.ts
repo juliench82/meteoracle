@@ -54,7 +54,6 @@ const MARKET_LP_SOL_PER_POSITION = parseFloat(
 )
 const SCALP_SPIKE_ENABLED = process.env.SCALP_SPIKE_ENABLED === 'true'
 const EVIL_PANDA_ENABLED = process.env.EVIL_PANDA_ENABLED === 'true'
-const DAMM_EDGE_ENABLED = process.env.DAMM_EDGE_ENABLED === 'true'
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
 const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
 const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
@@ -1031,13 +1030,11 @@ export async function runScanner(): Promise<ScannerResult> {
     // The DLMM path is skipped only after a DAMM open actually succeeds.
     // All existing DLMM strategy logic below is
     // untouched — this block is pure additive code.
-    if (lane === 'fresh' && launchpadSource === 'meteora') {
+    if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED === 'true') {
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
       if (dammDecision.shouldUseDamm && dammDecision.params) {
-        if (!DAMM_EDGE_ENABLED) {
-          console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM_EDGE_ENABLED is not true; continuing DLMM evaluation`)
-        } else if (openBlockedReason || openedCount >= availableOpenSlots) {
+        if (openBlockedReason || openedCount >= availableOpenSlots) {
           const reason = openBlockedReason ?? 'slots_filled_this_tick'
           console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: ${reason}; continuing DLMM evaluation`)
         } else if (!await isOpenAllowedToday()) {
@@ -1101,6 +1098,8 @@ export async function runScanner(): Promise<ScannerResult> {
           }
         }
       }
+    } else if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED !== 'true') {
+      console.log(`[scanner][damm-edge] ${symbol} DAMM edge path disabled (DAMM_EDGE_ENABLED !== true); continuing DLMM evaluation`)
     }
     // ========== END DAMM v2 EDGE ================================================
 
