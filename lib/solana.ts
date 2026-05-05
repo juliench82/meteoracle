@@ -8,6 +8,7 @@ import {
   ComputeBudgetProgram,
 } from '@solana/web3.js'
 import bs58 from 'bs58'
+import { sendAlert } from '@/bot/alerter'
 
 // ---------------------------------------------------------------------------
 // Connection
@@ -67,11 +68,12 @@ export function warnIfPublicFallbackActive(): void {
     Boolean(getHeliusRpcEndpoint()) ||
     splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS).length > 0
   if (!hasDedicated) {
-    console.error(
+    const msg =
       '[solana] CRITICAL: no dedicated RPC endpoint configured — falling back to ' +
       'api.mainnet-beta.solana.com. Set RPC_URL or HELIUS_API_KEY and add ' +
-      'DISABLE_PUBLIC_RPC_FALLBACK=true to prevent rate-limited stalls in production.',
-    )
+      'DISABLE_PUBLIC_RPC_FALLBACK=true to prevent rate-limited stalls in production.'
+    console.error(msg)
+    sendAlert({ type: 'error', message: msg }).catch(() => {})
   }
 }
 

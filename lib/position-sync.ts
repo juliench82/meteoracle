@@ -1,5 +1,6 @@
 import { fetchLiveMeteoraSnapshot, type LiveMeteoraPosition } from '@/lib/meteora-live'
 import { getSupabaseRestHeaders, getSupabaseUrl } from '@/lib/supabase'
+import { sendAlert } from '@/bot/alerter'
 
 interface CachedPosition {
   id: string
@@ -28,6 +29,8 @@ export interface MeteoraPositionSyncResult {
   insertedPositions: LiveMeteoraPosition[]
   positions: LiveMeteoraPosition[]
 }
+
+let _syncFailCount = 0
 
 async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<string, CachedPosition[]>> {
   if (positionPubkeys.length === 0) return new Map()
@@ -213,65 +216,79 @@ async function markCachedPositionExternallyClosed(row: CachedPosition): Promise<
 }
 
 export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResult> {
-  const snapshot = await fetchLiveMeteoraSnapshot()
-  const livePositions = snapshot.positions
-  const liveWithPubkeys = livePositions.filter(p => p.position_pubkey && p.position_pubkey !== 'DRY_RUN')
-  const [cachedByPubkey, openCachedRows] = await Promise.all([
-    fetchCachedPositions(liveWithPubkeys.map(p => p.position_pubkey)),
-    fetchOpenCachedPositions(),
-  ])
-  const livePubkeys = new Set(liveWithPubkeys.map(p => p.position_pubkey))
+  try {
+    const snapshot = await fetchLiveMeteoraSnapshot()
+    const livePositions = snapshot.positions
+    const liveWithPubkeys = livePositions.filter(p => p.position_pubkey && p.position_pubkey !== 'DRY_RUN')
+    const [cachedByPubkey, openCachedRows] = await Promise.all([
+      fetchCachedPositions(liveWithPubkeys.map(p => p.position_pubkey)),
+      fetchOpenCachedPositions(),
+    ])
+    const livePubkeys = new Set(liveWithPubkeys.map(p => p.position_pubkey))
 
-  const insertedPositions: LiveMeteoraPosition[] = []
-  let updated = 0
-  let externallyClosed = 0
+    const insertedPositions: LiveMeteoraPosition[] = []
+    let updated = 0
+    let externallyClosed = 0
 
-  for (const live of liveWithPubkeys) {
-    const cachedRows = cachedByPubkey.get(live.position_pubkey) ?? []
+    for (const live of liveWithPubkeys) {
+      const cachedRows = cachedByPubkey.get(live.position_pubkey) ?? []
 
-    if (cachedRows.length === 0) {
-      await insertCachedPosition(live)
-      insertedPositions.push(live)
-      continue
+      if (cachedRows.length === 0) {
+        await insertCachedPosition(live)
+        insertedPositions.push(live)
+        continue
+      }
+
+      for (const cached of cachedRows) {
+        await updateCachedPosition(live, cached)
+        updated++
+      }
     }
 
-    for (const cached of cachedRows) {
-      await updateCachedPosition(live, cached)
-      updated++
+    for (const cached of openCachedRows) {
+      if (!shouldMarkExternallyClosed(cached, livePubkeys, snapshot)) continue
+      await markCachedPositionExternallyClosed(cached)
+      externallyClosed++
     }
-  }
 
-  for (const cached of openCachedRows) {
-    if (!shouldMarkExternallyClosed(cached, livePubkeys, snapshot)) continue
-    await markCachedPositionExternallyClosed(cached)
-    externallyClosed++
-  }
+    const dlmmLive = livePositions.filter(p => p.position_type === 'dlmm').length
+    const dammLive = livePositions.filter(p => p.position_type === 'damm-edge').length
+    const dlmmInserted = insertedPositions.filter(p => p.position_type === 'dlmm').length
+    const dammInserted = insertedPositions.filter(p => p.position_type === 'damm-edge').length
 
-  const dlmmLive = livePositions.filter(p => p.position_type === 'dlmm').length
-  const dammLive = livePositions.filter(p => p.position_type === 'damm-edge').length
-  const dlmmInserted = insertedPositions.filter(p => p.position_type === 'dlmm').length
-  const dammInserted = insertedPositions.filter(p => p.position_type === 'damm-edge').length
+    console.log(
+      `[position-sync] Meteora sync done live=${livePositions.length} updated=${updated} inserted=${insertedPositions.length} closed=${externallyClosed} ` +
+      `(source dlmm=${snapshot.dlmmOk ? 'ok' : 'failed'}, damm=${snapshot.dammOk ? 'ok' : 'failed'}) ` +
+      `(dlmm live=${dlmmLive} inserted=${dlmmInserted}, damm live=${dammLive} inserted=${dammInserted})`,
+    )
 
-  console.log(
-    `[position-sync] Meteora sync done live=${livePositions.length} updated=${updated} inserted=${insertedPositions.length} closed=${externallyClosed} ` +
-    `(source dlmm=${snapshot.dlmmOk ? 'ok' : 'failed'}, damm=${snapshot.dammOk ? 'ok' : 'failed'}) ` +
-    `(dlmm live=${dlmmLive} inserted=${dlmmInserted}, damm live=${dammLive} inserted=${dammInserted})`,
-  )
+    _syncFailCount = 0
 
-  return {
-    live: livePositions.length,
-    inserted: insertedPositions.length,
-    updated,
-    dlmmOk: snapshot.dlmmOk,
-    dammOk: snapshot.dammOk,
-    dlmmError: snapshot.dlmmError,
-    dammError: snapshot.dammError,
-    dlmmLive,
-    dammLive,
-    dlmmInserted,
-    dammInserted,
-    externallyClosed,
-    insertedPositions,
-    positions: livePositions,
+    return {
+      live: livePositions.length,
+      inserted: insertedPositions.length,
+      updated,
+      dlmmOk: snapshot.dlmmOk,
+      dammOk: snapshot.dammOk,
+      dlmmError: snapshot.dlmmError,
+      dammError: snapshot.dammError,
+      dlmmLive,
+      dammLive,
+      dlmmInserted,
+      dammInserted,
+      externallyClosed,
+      insertedPositions,
+      positions: livePositions,
+    }
+  } catch (err) {
+    _syncFailCount++
+    const msg = `[position-sync] sync failed (${_syncFailCount}× consecutive): ${
+      err instanceof Error ? err.message : String(err)
+    }`
+    console.warn(msg)
+    if (_syncFailCount >= 3) {
+      await sendAlert({ type: 'error', message: msg }).catch(() => {})
+    }
+    throw err
   }
 }

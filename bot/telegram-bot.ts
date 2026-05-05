@@ -146,9 +146,7 @@ async function resolveAddTarget(args: string[]): Promise<{
   solAmount: number | null
   error?: string
 }> {
-  await syncAllMeteoraPositions().catch(err =>
-    console.warn('[telegram-bot] /add pre-sync failed:', err)
-  )
+  await syncAllMeteoraPositions().catch(() => {})
 
   const supabase = createServerClient()
   const { data: positions, error } = await supabase
@@ -288,9 +286,7 @@ function formatMonitorSummary(result: Awaited<ReturnType<typeof monitorPositions
 async function handleStop() {
   await reply('🛑 *EMERGENCY STOP initiated...*')
   await setBotState({ enabled: false })
-  await syncAllMeteoraPositions().catch(err =>
-    console.warn('[telegram-bot] pre-stop Meteora sync failed:', err)
-  )
+  await syncAllMeteoraPositions().catch(() => {})
 
   const supabase = createServerClient()
   const { data: positions } = await supabase
@@ -357,9 +353,7 @@ async function handleClose(positionId: string) {
     let { data: pos, error } = await supabase
       .from('lp_positions').select('id, symbol, status, strategy_id, position_type').eq('id', positionId).single()
     if (error || !pos) {
-      await syncAllMeteoraPositions().catch(err =>
-        console.warn('[telegram-bot] close retry sync failed:', err)
-      )
+      await syncAllMeteoraPositions().catch(() => {})
       const retry = await supabase
         .from('lp_positions').select('id, symbol, status, strategy_id, position_type').eq('id', positionId).single()
       pos = retry.data
@@ -561,67 +555,20 @@ async function handlePositions() {
     lines.push(`Cache-only rows are Supabase snapshots and may be stale until Meteora live fetch recovers.`, '')
   }
   for (const p of positions) {
-    const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 3_600_000 * 10) / 10
-    const liveOnly = p._source === 'meteora-live'
-    const source = isLiveConfirmedPosition(p) ? 'Meteora live' : 'Supabase cache only'
+    const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
+    const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
+    const source = isLiveConfirmedPosition(p) ? ' | live' : ' | cache'
     const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
     const value = p.position_value_usd ?? p.metadata?.position_value_usd
     const pnl = p.pnl_usd ?? p.metadata?.pnl_usd ?? p.metadata?.position_pnl_usd
     const pnlPct = p.pnl_pct ?? p.metadata?.pnl_pct ?? p.metadata?.position_pnl_pct
     const pnlText = pnl != null ? ` | pnl ${fmtUsd(pnl)}${pnlPct != null ? ` (${Number(pnlPct).toFixed(1)}%)` : ''}` : ''
-    const poolStats = p.metadata?.volume_24h_usd ? ` | vol24h ${fmtUsd(p.metadata.volume_24h_usd)}` : ''
-    const actionLines = liveOnly
-      ? [`  Run \`/orphans\` to create a manageable cache row`]
-      : [
-          `  ID: \`${p.id}\``,
-          `  \`/close ${p.id}\``,
-          ...(!isDammLp(p) ? [
-            `  \`/rebalance ${p.id}\``,
-            `  \`/add ${p.id} 0.05\``,
-          ] : []),
-        ]
+    const priceText = p.current_price ? ` | price ${fmtPrice(p.current_price)}` : ''
     lines.push(
-      `• ${String(p.id).slice(0, 8)} ${p.symbol} — ${p.status} | ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${age}h | ${source}`,
-      `  value ${fmtUsd(value)} | fees ${fmtUsd(fees)}${pnlText} | price ${fmtPrice(p.current_price)}${poolStats}`,
-      ...actionLines
-    )
-  }
-  await reply(lines.join('\n'))
-}
-
-async function handleCandidates() {
-  const supabase = createServerClient()
-
-  const { data, error } = await supabase
-    .from('candidates')
-    .select('symbol, score, strategy_id, token_class, mc_at_scan, volume_24h, rugcheck_score, scanned_at, launchpad_source')
-    .gte('scanned_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-    .order('score', { ascending: false })
-    .limit(15)
-
-  if (error) {
-    await reply(`❌ Failed to fetch candidates: ${error.message}`)
-    return
-  }
-
-  if (!data || data.length === 0) {
-    await reply('🔍 No candidates found in the last 24h.')
-    return
-  }
-
-  const lines = [`🔍 *Top Candidates — last 24h (${data.length})*`, ``]
-  for (const c of data) {
-    const age = Math.round((Date.now() - new Date(c.scanned_at).getTime()) / 60_000)
-    const mc  = c.mc_at_scan >= 1_000_000
-      ? `$${(c.mc_at_scan / 1_000_000).toFixed(1)}M`
-      : `$${(c.mc_at_scan / 1_000).toFixed(0)}k`
-    const vol = c.volume_24h >= 1_000_000
-      ? `$${(c.volume_24h / 1_000_000).toFixed(1)}M`
-      : `$${(c.volume_24h / 1_000).toFixed(0)}k`
-    const source = c.launchpad_source ? ` [${c.launchpad_source}]` : ''
-    lines.push(
-      `• *${c.symbol}*${source} — score *${c.score}* | ${c.strategy_id}`,
-      `  MC: ${mc} | vol: ${vol} | rug: ${c.rugcheck_score ?? '?'} | ${age}min ago`
+      `• *${p.symbol}* (${p.strategy_id ?? 'unknown'})${oor}`,
+      `  \`${p.id}\``,
+      `  ${(p.sol_deposited ?? 0).toFixed(3)} SOL | value ${fmtUsd(value)} | fees ${fmtUsd(fees)}${pnlText}${priceText} | ${age}min${source}`,
+      ``,
     )
   }
 
@@ -629,100 +576,133 @@ async function handleCandidates() {
 }
 
 async function handleTick() {
-  await reply('⏳ *Running monitor, then scanner...*')
+  const [scanResult, monitorResult] = await Promise.allSettled([
+    withTickTimeout(() => runScanner().then(formatScannerSummary), 'scanner'),
+    withTickTimeout(() => monitorPositions().then(formatMonitorSummary), 'monitor'),
+  ])
 
-  const monitorResult = await withTickTimeout(() => monitorPositions().then(formatMonitorSummary), 'monitor')
-  const scannerResult = await withTickTimeout(() => runScanner().then(formatScannerSummary), 'scanner')
+  const scanLine = scanResult.status === 'fulfilled' ? scanResult.value : `❌ scanner error: ${scanResult.reason}`
+  const monitorLine = monitorResult.status === 'fulfilled' ? monitorResult.value : `❌ monitor error: ${monitorResult.reason}`
 
-  await reply(['*Tick complete:*', `• ${monitorResult}`, `• ${scannerResult}`].join('\n'))
+  await reply([scanLine, monitorLine].join('\n'))
 }
 
 async function handleOrphans() {
-  await reply('⏳ *Reconciling wallet positions from Meteora...*')
+  await reply('🔍 Running orphan detector...')
   try {
     const result = await detectAllOrphanedPositions()
-    await reply(
-      `✅ Meteora reconcile complete.\n` +
-      `Live: ${result.live} (${result.dlmmLive} DLMM / ${result.dammLive} DAMM)\n` +
-      `Updated cache rows: ${result.updated}\n` +
-      `Marked externally closed: ${result.externallyClosed}\n` +
-      `Inserted missing cache rows: ${result.inserted}`,
-    )
+    await reply([
+      `👻 *Orphan detection complete*`,
+      `Detected: ${result.detected}`,
+      `Inserted: ${result.inserted}`,
+      `Errors: ${result.errors}`,
+    ].join('\n'))
   } catch (err) {
-    await reply(`❌ Meteora reconcile error: ${err instanceof Error ? err.message : String(err)}`)
+    await reply(`❌ Orphan detection failed: ${err instanceof Error ? err.message : String(err)}`)
   }
+}
+
+async function handleCandidates() {
+  const supabase = createServerClient()
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const { data, error } = await supabase
+    .from('scan_candidates')
+    .select('symbol, score, strategy_id, created_at, metadata')
+    .gte('created_at', since)
+    .order('score', { ascending: false })
+    .limit(10)
+
+  if (error) {
+    await reply(`❌ Could not load candidates: ${error.message}`)
+    return
+  }
+
+  if (!data || data.length === 0) {
+    await reply('📭 No candidates found in the last 24h.')
+    return
+  }
+
+  const lines = [`📋 *Top Candidates (last 24h)*`, ``]
+  for (const c of data) {
+    const age = Math.round((Date.now() - new Date(c.created_at).getTime()) / 60_000)
+    lines.push(`• *${c.symbol}* — score ${c.score} | ${c.strategy_id} | ${age}min ago`)
+  }
+
+  await reply(lines.join('\n'))
 }
 
 async function handleHelp() {
   await reply([
-    `*Meteoracle Bot Commands*`,
+    `🤖 *Meteoracle Bot Commands*`,
     ``,
-    `/stop — emergency stop (closes all LP positions, stops workers)`,
-    `/restart — resume all worker services`,
-    `/dry — switch to dry-run mode`,
-    `/live — switch to live trading`,
-    `/status — snapshot: bot state + DLMM + DAMM v2 positions`,
-    `/positions — list live-confirmed and cached LP rows`,
-    `/close <id> — force-close an LP position`,
-    `/add <id> <SOL> — add SOL liquidity to a DLMM position`,
-    `/rebalance <id> — close + reopen a DLMM position centered at current price`,
-    `/tick — manually trigger scanner + monitor`,
-    `/orphans — manually run orphan detector`,
-    `/candidates — top candidates from last 24h sorted by score`,
+    `/stop — EMERGENCY: close all positions + stop workers`,
+    `/restart — resume workers`,
+    `/dry — enable dry-run mode`,
+    `/live — enable live trading`,
+    `/close <id> — force-close LP position`,
+    `/add <id> <SOL> — add liquidity`,
+    `/rebalance <id> — close + reopen centered`,
+    `/positions — list open LP positions`,
+    `/status — full snapshot`,
+    `/tick — manual scanner + monitor run`,
+    `/orphans — run orphan detector`,
+    `/candidates — top candidates (24h)`,
     `/help — this message`,
   ].join('\n'))
 }
 
-async function processUpdate(update: TelegramUpdate): Promise<void> {
-  const text = update.message?.text?.trim() ?? ''
-  const chatId = update.message?.chat?.id
-  const fromId = update.message?.from?.id
+async function handleUpdate(update: TelegramUpdate): Promise<void> {
+  const msg = update.message
+  if (!msg?.text) return
 
-  if (!text) return
-  if (!isTelegramCommandAllowed(fromId, chatId, ALLOWED_USER_IDS)) {
-    console.warn(`[telegram-bot] ignored unauthorized command from user=${fromId ?? 'unknown'} chat=${chatId ?? 'unknown'}`)
-    return
-  }
+  const chatId = msg.chat.id
+  const userId = msg.from?.id
 
+  if (!isTelegramCommandAllowed(userId, chatId)) return
+
+  const text = msg.text.trim()
   const [rawCmd, ...args] = text.split(/\s+/)
-  const cmd = rawCmd.toLowerCase().replace(/^\//, '')
+  const cmd = rawCmd?.toLowerCase()
 
-  console.log(`[telegram-bot] command: /${cmd}${args.length ? ' ' + args.join(' ') : ''}`)
+  if (cmd === '/stop') return handleStop()
+  if (cmd === '/restart') return handleRestart()
+  if (cmd === '/dry') return handleDry()
+  if (cmd === '/live') return handleLive()
+  if (cmd === '/close') return handleClose(args[0] ?? '')
+  if (cmd === '/add') return handleAdd(args)
+  if (cmd === '/rebalance') return handleRebalance(args[0] ?? '')
+  if (cmd === '/positions') return handlePositions()
+  if (cmd === '/status') return handleStatus()
+  if (cmd === '/tick') return handleTick()
+  if (cmd === '/orphans') return handleOrphans()
+  if (cmd === '/candidates') return handleCandidates()
+  if (cmd === '/help') return handleHelp()
+}
 
-  switch (cmd) {
-    case 'stop': await handleStop(); break
-    case 'restart': await handleRestart(); break
-    case 'dry': await handleDry(); break
-    case 'live': await handleLive(); break
-    case 'close': await handleClose(args[0] ?? ''); break
-    case 'add': await handleAdd(args); break
-    case 'rebalance': await handleRebalance(args[0] ?? ''); break
-    case 'status': await handleStatus(); break
-    case 'positions': await handlePositions(); break
-    case 'candidates': await handleCandidates(); break
-    case 'tick': await handleTick(); break
-    case 'orphans': await handleOrphans(); break
-    case 'help': await handleHelp(); break
-    default:
-      await reply(`❌ Unknown command: /${cmd}. Send /help for the list.`)
+async function poll(): Promise<void> {
+  const updates = await getUpdates()
+  for (const update of updates) {
+    if (update.update_id > lastUpdateId) {
+      lastUpdateId = update.update_id
+      handleUpdate(update).catch(err =>
+        console.error('[telegram-bot] unhandled error in handleUpdate:', err)
+      )
+    }
   }
 }
 
 async function main(): Promise<void> {
-  console.log('[telegram-bot] starting long-poll loop...')
+  console.log('[telegram-bot] starting...')
   await drainPendingUpdates()
-
+  console.log('[telegram-bot] polling started')
+  // eslint-disable-next-line no-constant-condition
   while (true) {
-    const updates = await getUpdates()
-    for (const update of updates) {
-      lastUpdateId = update.update_id
-      await processUpdate(update)
-    }
-    await new Promise(r => setTimeout(r, POLL_MS))
+    await poll()
+    await new Promise(resolve => setTimeout(resolve, POLL_MS))
   }
 }
 
 main().catch(err => {
-  console.error('[telegram-bot] fatal:', err)
+  console.error('[telegram-bot] fatal error:', err)
   process.exit(1)
 })
