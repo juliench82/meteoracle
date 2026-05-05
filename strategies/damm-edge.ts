@@ -45,7 +45,7 @@ const DAMM_SOL_AMOUNT = Number.parseFloat(
   process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
   process.env.MARKET_LP_SOL_PER_POSITION ??
   process.env.MAX_SOL_PER_POSITION ??
-  '0.05',
+  '0.1',
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

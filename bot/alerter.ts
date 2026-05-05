@@ -74,6 +74,8 @@ type AlertPayload =
   | { type: 'low_balance_warning'; currentSol: number; minSol: number }
   | { type: 'high_il_warning'; symbol: string; ilPct: number; claimableFeesUsd?: number; netPnlSol: number }
   | { type: 'pnl_unavailable_warning'; symbol: string; strategy: string; positionId: string; reason: string; ageHours: number }
+  | { type: 'sync_failure_alert'; reason: string; error: string }
+  | { type: 'rpc_fallback_warning'; reason: string; message: string }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -263,6 +265,21 @@ function formatMessage(payload: AlertPayload): string {
         `Reason: ${payload.reason}`,
         `Age: ${payload.ageHours}h`,
         `Stop-loss/take-profit protection is degraded.`,
+      ].join('\n')
+
+    case 'sync_failure_alert':
+      return [
+        `⚠️ *Meteora Sync Failure*`,
+        `Reason: ${payload.reason}`,
+        `Error: ${payload.error}`,
+        `Position exits are paused until live sync recovers.`,
+      ].join('\n')
+
+    case 'rpc_fallback_warning':
+      return [
+        `⚠️ *RPC Fallback Active*`,
+        `Reason: ${payload.reason}`,
+        payload.message,
       ].join('\n')
 
     case 'error':

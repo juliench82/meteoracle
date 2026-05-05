@@ -591,12 +591,20 @@ async function handleOrphans() {
   await reply('🔍 Running orphan detector...')
   try {
     const result = await detectAllOrphanedPositions()
+    const errors = [
+      result.dlmmError ? `DLMM: ${result.dlmmError}` : null,
+      result.dammError ? `DAMM: ${result.dammError}` : null,
+    ].filter(Boolean)
     await reply([
       `👻 *Orphan detection complete*`,
-      `Detected: ${result.detected}`,
+      `Live: ${result.live}`,
       `Inserted: ${result.inserted}`,
-      `Errors: ${result.errors}`,
-    ].join('\n'))
+      `Updated: ${result.updated}`,
+      `Externally closed: ${result.externallyClosed}`,
+      `DLMM: ${result.dlmmLive} live / ${result.dlmmInserted} inserted`,
+      `DAMM: ${result.dammLive} live / ${result.dammInserted} inserted`,
+      errors.length > 0 ? `Errors: ${errors.join(' | ')}` : null,
+    ].filter(Boolean).join('\n'))
   } catch (err) {
     await reply(`❌ Orphan detection failed: ${err instanceof Error ? err.message : String(err)}`)
   }

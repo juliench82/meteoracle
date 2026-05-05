@@ -49,7 +49,7 @@ const MARKET_LP_SOL_PER_POSITION = parseFloat(
   process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
   process.env.MARKET_LP_SOL_PER_POSITION ??
   process.env.MAX_SOL_PER_POSITION ??
-  '0.05',
+  '0.1',
 )
 const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
   process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',

@@ -67,7 +67,7 @@ const MARKET_LP_SOL_PER_POSITION = parseFloat(
   process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
   process.env.MARKET_LP_SOL_PER_POSITION ??
   process.env.MAX_SOL_PER_POSITION ??
-  '0.05',
+  '0.1',
 )
 const SCALP_SPIKE_ENABLED = process.env.SCALP_SPIKE_ENABLED === 'true'
 const EVIL_PANDA_ENABLED = process.env.EVIL_PANDA_ENABLED === 'true'
