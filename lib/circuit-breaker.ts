@@ -21,9 +21,8 @@ function firstNumber(...values: unknown[]): number | null {
 }
 
 function getTodayMidnightIso(): string {
-  const now = new Date()
-  const localMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  return localMidnight.toISOString()
+  const iso = new Date().toISOString()
+  return `${iso.slice(0, 10)}T00:00:00.000Z`
 }
 
 function resolveLossSol(row: Record<string, unknown>): number {
