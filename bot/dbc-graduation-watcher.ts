@@ -922,12 +922,12 @@ async function discoverNearThresholdPools(): Promise<number> {
   }
 
   let tracked = 0
-  let processed = 0
-  for (const row of pools) {
-    if (processed >= DISCOVERY_MAX_POOLS) break
-    processed++
-    const result = await evaluateVirtualPool(row.publicKey, row.account)
-    if (result.tracked) tracked++
+  const BATCH_SIZE = 20
+  const maxPools = Math.min(pools.length, DISCOVERY_MAX_POOLS)
+  for (let i = 0; i < maxPools; i += BATCH_SIZE) {
+    const batch = pools.slice(i, i + BATCH_SIZE)
+    const results = await Promise.all(batch.map(row => evaluateVirtualPool(row.publicKey, row.account)))
+    tracked += results.filter(result => result.tracked).length
   }
   return tracked
 }
