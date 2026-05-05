@@ -30,6 +30,9 @@ const SMART_REBALANCE_IN_RANGE = process.env.LP_SMART_REBALANCE_IN_RANGE === 'tr
 // Reconcile the wallet against Meteora every tick by default. Supabase is a cache.
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
 let tickCount = 0
+const nullPnlTickCount = new Map<string, number>()
+const PNL_UNAVAILABLE_ALERT_TICKS = 3
+const PNL_UNAVAILABLE_FORCE_EXIT_TICKS = 10
 
 function nullableNumber(value: unknown): number | null {
   if (value === null || value === undefined) return null
@@ -365,6 +368,13 @@ async function checkPosition(
     : 0
 
   const feeYieldPct = deployedSol > 0 ? (claimableFeesSolEquivalent / deployedSol) * 100 : 0
+  const previousNullPnlTicks = nullPnlTickCount.get(position.id) ?? 0
+  const currentNullPnlTicks = pnlPct === null ? previousNullPnlTicks + 1 : 0
+  if (currentNullPnlTicks > 0) {
+    nullPnlTickCount.set(position.id, currentNullPnlTicks)
+  } else if (previousNullPnlTicks > 0) {
+    nullPnlTickCount.delete(position.id)
+  }
 
   console.log(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
@@ -381,6 +391,8 @@ async function checkPosition(
   if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
     const roundedOor = Math.round(oorSince)
     closeReason = `out_of_range_${roundedOor}min`
+  } else if (currentNullPnlTicks >= PNL_UNAVAILABLE_FORCE_EXIT_TICKS) {
+    closeReason = `pnl_unavailable_${PNL_UNAVAILABLE_FORCE_EXIT_TICKS}ticks`
   } else if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
     closeReason = `stoploss_pnl_${pnlPct.toFixed(1)}pct`
   } else if (pnlPct !== null && pnlPct >= strategy.exits.takeProfitPct) {
@@ -388,13 +400,28 @@ async function checkPosition(
   } else if (ageHours >= strategy.exits.maxDurationHours) {
     closeReason = `max_duration_${Math.round(ageHours)}h`
   } else if (pnlPct === null) {
-    console.warn(`${label} Meteora PnL unavailable — skipping stop-loss/take-profit exits this tick`)
+    if (currentNullPnlTicks >= PNL_UNAVAILABLE_ALERT_TICKS) {
+      if (currentNullPnlTicks === PNL_UNAVAILABLE_ALERT_TICKS || currentNullPnlTicks % PNL_UNAVAILABLE_ALERT_TICKS === 0) {
+        await sendAlert({
+          type: 'pnl_unavailable_warning',
+          symbol: position.symbol,
+          strategy: strategy.id,
+          positionId: position.id,
+          reason: `meteora_pnl_unavailable_${currentNullPnlTicks}ticks`,
+          ageHours: Math.round(ageHours * 10) / 10,
+        })
+      }
+      console.warn(`${label} Meteora PnL unavailable ${currentNullPnlTicks} consecutive ticks`)
+    } else {
+      console.warn(`${label} Meteora PnL unavailable — skipping stop-loss/take-profit exits this tick`)
+    }
   }
 
   if (closeReason) {
     console.log(`${label} EXIT triggered → ${closeReason}`)
     const closed = await closePosition(position.id, closeReason)
     if (closed) {
+      nullPnlTickCount.delete(position.id)
       stats.closed++
       await sendAlert({
         type: 'position_closed',

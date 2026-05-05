@@ -73,6 +73,7 @@ type AlertPayload =
   | { type: 'pre_grad_graduated'; symbol: string; finalFees?: number; positionId?: string; bondingCurvePct?: number }
   | { type: 'low_balance_warning'; currentSol: number; minSol: number }
   | { type: 'high_il_warning'; symbol: string; ilPct: number; claimableFeesUsd?: number; netPnlSol: number }
+  | { type: 'pnl_unavailable_warning'; symbol: string; strategy: string; positionId: string; reason: string; ageHours: number }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -249,6 +250,16 @@ function formatMessage(payload: AlertPayload): string {
         `Claimable Fees: ${payload.claimableFeesUsd != null ? `$${payload.claimableFeesUsd.toFixed(2)}` : 'N/A'}`,
         `Net PNL: ${payload.netPnlSol} SOL`,
         `Consider closing manually if IL keeps growing.`,
+      ].join('\n')
+
+    case 'pnl_unavailable_warning':
+      return [
+        `⚠️ *PnL Feed Unavailable* ${payload.symbol}`,
+        `Strategy: ${payload.strategy}`,
+        `Position: \`${payload.positionId}\``,
+        `Reason: ${payload.reason}`,
+        `Age: ${payload.ageHours}h`,
+        `Stop-loss/take-profit protection is degraded.`,
       ].join('\n')
 
     case 'error':
