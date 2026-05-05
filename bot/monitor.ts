@@ -4,8 +4,8 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true })
 
 import { PublicKey } from '@solana/web3.js'
-import { getConnection, getWallet } from '@/lib/solana'
-import { getBotState } from '@/lib/botState'
+import { getConnection, getWallet, warnIfPublicFallbackActive } from '@/lib/solana'
+import { getBotState, incrementSyncFailCount, resetSyncFailCount } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
 import { closeDammPosition } from '@/bot/damm-executor'
 import { rebalanceDlmmPosition } from '@/bot/rebalance'
@@ -31,8 +31,8 @@ const MONITOR_EXITS_ENABLED = process.env.MONITOR_EXITS_ENABLED !== 'false' &&
   process.env.LP_MONITOR_ENABLED !== 'false'
 
 // How many consecutive syncAllMeteoraPositions failures before we fire a Telegram alert.
+// Counter is now persisted in bot_state.sync_fail_count so it survives process restarts.
 const SYNC_FAIL_ALERT_THRESHOLD = parseInt(process.env.MONITOR_SYNC_FAIL_ALERT_THRESHOLD ?? '3')
-let _consecutiveSyncFailures = 0
 
 const DAMM_EDGE_EXIT_STRATEGY: Strategy = {
   id: 'damm-edge',
@@ -264,18 +264,18 @@ export async function monitorPositions(): Promise<{
     console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
     try {
       reconcile = await detectAllOrphanedPositions()
-      _consecutiveSyncFailures = 0
+      await resetSyncFailCount()
       console.log(
         `[monitor] Meteora reconcile — live=${reconcile.live} updated=${reconcile.updated} inserted=${reconcile.inserted} ` +
         `(DLMM ${reconcile.dlmmLive}, DAMM ${reconcile.dammLive})`,
       )
     } catch (err) {
-      _consecutiveSyncFailures++
+      const failCount = await incrementSyncFailCount()
       console.warn('[monitor] Meteora position reconcile failed (non-fatal):', err)
-      if (_consecutiveSyncFailures >= SYNC_FAIL_ALERT_THRESHOLD) {
+      if (failCount >= SYNC_FAIL_ALERT_THRESHOLD) {
         await sendAlert({
           type: 'sync_failure_alert',
-          reason: `meteora_sync_failed_${_consecutiveSyncFailures}x`,
+          reason: `meteora_sync_failed_${failCount}x`,
           error: String(err),
         }).catch(() => {})
       }
@@ -283,14 +283,14 @@ export async function monitorPositions(): Promise<{
   } else {
     try {
       reconcile = await syncAllMeteoraPositions()
-      _consecutiveSyncFailures = 0
+      await resetSyncFailCount()
     } catch (err) {
-      _consecutiveSyncFailures++
+      const failCount = await incrementSyncFailCount()
       console.warn('[monitor] Meteora live sync failed — skipping position exits this tick:', err)
-      if (_consecutiveSyncFailures >= SYNC_FAIL_ALERT_THRESHOLD) {
+      if (failCount >= SYNC_FAIL_ALERT_THRESHOLD) {
         await sendAlert({
           type: 'sync_failure_alert',
-          reason: `meteora_sync_failed_${_consecutiveSyncFailures}x`,
+          reason: `meteora_sync_failed_${failCount}x`,
           error: String(err),
         }).catch(() => {})
       }
@@ -304,12 +304,12 @@ export async function monitorPositions(): Promise<{
   }
 
   if (!reconcile.dlmmOk && !reconcile.dammOk) {
-    _consecutiveSyncFailures++
+    const failCount = await incrementSyncFailCount()
     console.warn('[monitor] Meteora live fetch failed for DLMM and DAMM — skipping position exits this tick')
-    if (_consecutiveSyncFailures >= SYNC_FAIL_ALERT_THRESHOLD) {
+    if (failCount >= SYNC_FAIL_ALERT_THRESHOLD) {
       await sendAlert({
         type: 'sync_failure_alert',
-        reason: `meteora_dlmm_and_damm_failed_${_consecutiveSyncFailures}x`,
+        reason: `meteora_dlmm_and_damm_failed_${failCount}x`,
         error: 'Both DLMM and DAMM live fetch failed',
       }).catch(() => {})
     }
@@ -317,7 +317,7 @@ export async function monitorPositions(): Promise<{
   }
 
   // At least one endpoint recovered — reset counter
-  _consecutiveSyncFailures = 0
+  await resetSyncFailCount()
 
   try {
     if (reconcile.dammOk) {
@@ -519,6 +519,16 @@ async function checkPosition(
 
   if (currentPriceSol === 0) {
     console.warn(`${label} price read returned 0 — RPC fallback hit, skipping tick`)
+    sbInsert('bot_logs', {
+      level: 'warn',
+      event: 'monitor_rpc_price_zero',
+      payload: {
+        positionId: position.id,
+        symbol: position.symbol,
+        poolAddress: position.pool_address,
+        reason: 'price_zero_rpc_degraded',
+      },
+    }).catch(() => {})
     return
   }
 
@@ -774,6 +784,27 @@ async function fetchDammPositionState(
 
 async function main() {
   console.log(`[monitor] starting — interval=${MONITOR_INTERVAL_MS / 1000}s`)
+
+  // Alert via Telegram if no dedicated RPC is configured (public fallback active).
+  // warnIfPublicFallbackActive() logs to console; we additionally fire a Telegram
+  // alert so it surfaces in the operator's chat rather than being buried in logs.
+  if (
+    process.env.DISABLE_PUBLIC_RPC_FALLBACK !== 'true' &&
+    !process.env.RPC_URL?.trim() &&
+    !process.env.HELIUS_API_KEY?.trim() &&
+    !process.env.HELIUS_RPC_URL?.trim() &&
+    !process.env.SOLANA_RPC_FALLBACK_URLS?.trim()
+  ) {
+    warnIfPublicFallbackActive()
+    sendAlert({
+      type: 'rpc_fallback_warning',
+      reason: 'no_dedicated_rpc_configured',
+      message:
+        'No dedicated RPC endpoint is set. Bot is using api.mainnet-beta.solana.com — ' +
+        'set RPC_URL or HELIUS_API_KEY and add DISABLE_PUBLIC_RPC_FALLBACK=true.',
+    }).catch(() => {})
+  }
+
   await monitorPositions()
   setInterval(async () => {
     try {

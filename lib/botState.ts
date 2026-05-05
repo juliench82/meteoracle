@@ -1,10 +1,11 @@
 import { createServerClient } from './supabase'
 
 export interface BotState {
-  enabled:      boolean
-  dry_run:      boolean
-  is_running:   boolean
-  running_since: string | null
+  enabled:         boolean
+  dry_run:         boolean
+  is_running:      boolean
+  running_since:   string | null
+  sync_fail_count: number
 }
 
 /** Lock TTL: if a tick started more than 90s ago and is still flagged running,
@@ -21,24 +22,25 @@ export async function getBotState(): Promise<BotState> {
     const supabase = createServerClient()
     const { data, error } = await supabase
       .from('bot_state')
-      .select('enabled, dry_run, is_running, running_since')
+      .select('enabled, dry_run, is_running, running_since, sync_fail_count')
       .eq('id', 1)
       .single()
 
     if (error || !data) {
       console.error('[botState] read failed, failing closed:', error?.message)
-      return { enabled: false, dry_run: true, is_running: false, running_since: null }
+      return { enabled: false, dry_run: true, is_running: false, running_since: null, sync_fail_count: 0 }
     }
 
     return {
-      enabled:      data.enabled,
-      dry_run:      data.dry_run,
-      is_running:   data.is_running ?? false,
-      running_since: data.running_since ?? null,
+      enabled:         data.enabled,
+      dry_run:         data.dry_run,
+      is_running:      data.is_running ?? false,
+      running_since:   data.running_since ?? null,
+      sync_fail_count: typeof data.sync_fail_count === 'number' ? data.sync_fail_count : 0,
     }
   } catch (error) {
     console.error('[botState] Supabase error, failing closed:', error)
-    return { enabled: false, dry_run: true, is_running: false, running_since: null }
+    return { enabled: false, dry_run: true, is_running: false, running_since: null, sync_fail_count: 0 }
   }
 }
 
@@ -56,6 +58,35 @@ export async function setBotState(patch: Partial<BotState>): Promise<void> {
   if (error) {
     console.error('[botState] write failed:', error.message)
     throw new Error(`Failed to update bot_state: ${error.message}`)
+  }
+}
+
+/**
+ * Increment the persistent sync failure counter.
+ * Returns the new value.
+ * Non-throwing — a DB error here must never kill the monitor tick.
+ */
+export async function incrementSyncFailCount(): Promise<number> {
+  try {
+    const state = await getBotState()
+    const next = state.sync_fail_count + 1
+    await setBotState({ sync_fail_count: next })
+    return next
+  } catch (err) {
+    console.warn('[botState] incrementSyncFailCount failed (non-fatal):', err)
+    return 0
+  }
+}
+
+/**
+ * Reset the persistent sync failure counter to 0.
+ * Non-throwing.
+ */
+export async function resetSyncFailCount(): Promise<void> {
+  try {
+    await setBotState({ sync_fail_count: 0 })
+  } catch (err) {
+    console.warn('[botState] resetSyncFailCount failed (non-fatal):', err)
   }
 }
 
