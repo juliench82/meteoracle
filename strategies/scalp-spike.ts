@@ -66,7 +66,7 @@ export const scalpSpikeStrategy: Strategy = {
 
   exits: {
     stopLossPct:           -25,
-    takeProfitPct:         100,
+    takeProfitPct:         envNumber('SCALP_SPIKE_TAKE_PROFIT_PCT', 25),
     outOfRangeMinutes:     envNumber('SCALP_SPIKE_OOR_MINUTES', 10),
     maxDurationHours:        8,             // tighter than before — IL risk on utility tokens
     claimFeesBeforeClose:  true,
