@@ -30,7 +30,6 @@ const SMART_REBALANCE_IN_RANGE = process.env.LP_SMART_REBALANCE_IN_RANGE === 'tr
 // Reconcile the wallet against Meteora every tick by default. Supabase is a cache.
 const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
 let tickCount = 0
-const nullPnlTickCount = new Map<string, number>()
 const PNL_UNAVAILABLE_ALERT_TICKS = 3
 const PNL_UNAVAILABLE_FORCE_EXIT_TICKS = 10
 
@@ -308,6 +307,8 @@ async function checkPosition(
   const positionValueUsd = livePositionValueUsd
   const deployedSol = position.sol_deposited || 0
   const pnlPct = resolveMeteoraPnlPct(position, livePnlUsd, deployedSol)
+  const previousNullPnlTicks = Math.max(0, Math.trunc(nullableNumber(position.null_pnl_ticks) ?? 0))
+  const currentNullPnlTicks = pnlPct === null ? previousNullPnlTicks + 1 : 0
   const pnlSol = livePnlUsd !== null && liveSolPriceUsd !== null && liveSolPriceUsd > 0
     ? Math.round((livePnlUsd / liveSolPriceUsd) * 1e6) / 1e6
     : null
@@ -336,6 +337,7 @@ async function checkPosition(
       ...(claimableFeesUsd !== null  ? { claimable_fees_usd:  claimableFeesUsd }  : {}),
       ...(positionValueUsd !== null  ? { position_value_usd:  positionValueUsd }  : {}),
       ...(livePnlUsd !== null        ? { pnl_usd:             livePnlUsd }        : {}),
+      null_pnl_ticks: currentNullPnlTicks,
       ...(pnlPct !== null || livePnlUsd !== null ? {
         metadata: {
           ...(position.metadata ?? {}),
@@ -368,13 +370,6 @@ async function checkPosition(
     : 0
 
   const feeYieldPct = deployedSol > 0 ? (claimableFeesSolEquivalent / deployedSol) * 100 : 0
-  const previousNullPnlTicks = nullPnlTickCount.get(position.id) ?? 0
-  const currentNullPnlTicks = pnlPct === null ? previousNullPnlTicks + 1 : 0
-  if (currentNullPnlTicks > 0) {
-    nullPnlTickCount.set(position.id, currentNullPnlTicks)
-  } else if (previousNullPnlTicks > 0) {
-    nullPnlTickCount.delete(position.id)
-  }
 
   console.log(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
@@ -421,7 +416,6 @@ async function checkPosition(
     console.log(`${label} EXIT triggered → ${closeReason}`)
     const closed = await closePosition(position.id, closeReason)
     if (closed) {
-      nullPnlTickCount.delete(position.id)
       stats.closed++
       await sendAlert({
         type: 'position_closed',
