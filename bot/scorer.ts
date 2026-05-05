@@ -237,7 +237,8 @@ function scoreHolders(holderCount: number): number {
 function scoreFeeEfficiency(token: TokenMetrics): number {
   const feeTvl1hPct = token.feeTvl1hPct ?? 0
   const feeTvl5mPct = (token.feeTvl5mPct ?? 0) * 6
-  const feeTvl24hHourlyPct = token.feeTvl24hPct / 12
+  // Divide by 24 (not 12) to correctly convert 24h fee% to an hourly baseline
+  const feeTvl24hHourlyPct = token.feeTvl24hPct / 24
   const recentFeePct = Math.max(feeTvl1hPct, feeTvl5mPct, feeTvl24hHourlyPct)
 
   if (recentFeePct >= 8) return 100

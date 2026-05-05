@@ -29,13 +29,15 @@ export function isTelegramUserAllowed(
   return allowedUsers.has(String(userId))
 }
 
+/**
+ * A command is allowed only when the SENDER's user ID is in the allow list.
+ * We intentionally do NOT fall back to chatId — that would allow any member
+ * of an allowed group chat to execute privileged bot commands.
+ */
 export function isTelegramCommandAllowed(
   senderUserId: number | string | null | undefined,
-  chatId: number | string | null | undefined,
+  _chatId: number | string | null | undefined,
   allowedUsers: Set<string> = getTelegramAllowedUsers(),
 ): boolean {
-  return (
-    isTelegramUserAllowed(senderUserId, allowedUsers) ||
-    isTelegramUserAllowed(chatId, allowedUsers)
-  )
+  return isTelegramUserAllowed(senderUserId, allowedUsers)
 }
