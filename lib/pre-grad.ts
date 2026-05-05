@@ -136,7 +136,7 @@ async function fetchDammPoolStats(poolAddress: string): Promise<{
  *
  * Meteora is the source of truth for both numbers — no local computation.
  *
- * Endpoint: GET https://amm-v2.meteora.ag/position/{position_pubkey}
+ * Endpoint: GET https://damm-v2.datapi.meteora.ag/position/{position_pubkey}
  * Fields:
  *   fee_pending_usd    — claimable fees, mirrors Meteora UI
  *   position_value_usd — current value of token amounts at current price
@@ -150,12 +150,21 @@ async function fetchMeteoraPosFields(positionPubkey: string): Promise<{
   pnlPct: number | null
   costBasisUsd: number | null
 } | null> {
+  const endpoints = [
+    `https://damm-v2.datapi.meteora.ag/position/${positionPubkey}`,
+    `https://amm-v2.meteora.ag/position/${positionPubkey}`,
+  ]
   try {
-    const res = await fetch(`https://amm-v2.meteora.ag/position/${positionPubkey}`, {
-      signal: AbortSignal.timeout(5_000),
-    })
-    if (!res.ok) return null
-    const data = await res.json()
+    let data: any = null
+    for (const endpoint of endpoints) {
+      const res = await fetch(endpoint, {
+        signal: AbortSignal.timeout(3_000),
+      })
+      if (!res.ok) continue
+      data = await res.json()
+      break
+    }
+    if (!data) return null
 
     const claimableFeesUsd =
       data.fee_pending_usd ?? data.total_fee_usd ?? data.claimable_fee_usd ?? null
@@ -320,6 +329,9 @@ export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]):
 
     const claimableFeesUsd = meteoraPos?.claimableFeesUsd ?? null
     const positionValueUsd = meteoraPos?.positionValueUsd ?? null
+    if (!meteoraPos) {
+      console.warn(`[PRE-GRAD] Meteora DAMM position fetch miss for ${pos.id} (${pos.position_pubkey}) — TP/SL may fall back to price movement`)
+    }
     const pnlPct = resolveDammPnlPct(
       pos,
       meteoraPos?.pnlPct ?? null,
