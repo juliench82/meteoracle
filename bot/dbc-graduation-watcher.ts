@@ -25,6 +25,7 @@ import {
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import { getRpcEndpointCandidates } from '@/lib/solana'
+import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import { isAuthError, redactSecrets, summarizeError } from '@/lib/logging'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 import { checkHolders } from '@/lib/helius'
@@ -745,6 +746,12 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
           max_concurrent_damm_migration: MAX_CONCURRENT_DAMM_MIGRATION,
         },
       })
+      return false
+    }
+
+    if (await isDailyLossLimitHit()) {
+      console.warn('[DBC] daily loss circuit breaker active — skipping migration open')
+      await updateWatchlistById(row.id, { status: 'skipped_circuit_breaker' })
       return false
     }
 
