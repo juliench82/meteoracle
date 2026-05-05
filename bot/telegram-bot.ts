@@ -101,6 +101,14 @@ function fmtPrice(value: unknown): string {
   return n >= 1 ? n.toFixed(4) : n.toPrecision(6)
 }
 
+function formatMinutesAgo(iso: string | null | undefined): string {
+  if (!iso) return 'n/a'
+  const ts = new Date(iso).getTime()
+  if (!Number.isFinite(ts) || ts <= 0) return 'n/a'
+  const minutes = Math.max(0, Math.round((Date.now() - ts) / 60_000))
+  return `${minutes} min ago`
+}
+
 function isLiveConfirmedPosition(pos: { _source?: string | null }): boolean {
   return Boolean(pos._source?.includes('meteora'))
 }
@@ -452,6 +460,11 @@ async function handleStatus() {
     .from('lp_positions')
     .select('id, symbol, sol_deposited, opened_at, status, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, pnl_usd, metadata')
     .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
+  const { data: scannerHealth } = await supabase
+    .from('bot_health')
+    .select('last_scan_at')
+    .eq('service', 'scanner')
+    .maybeSingle()
 
   const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp, liveSource)
   const liveConfirmedCount = mergedOpenLp.filter(isLiveConfirmedPosition).length
@@ -489,6 +502,7 @@ async function handleStatus() {
     `State: ${state.enabled ? '🟢 Running' : '🛑 Stopped'}`,
     `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
     `Wallet: ${wallet ? wallet.sol.toFixed(4) : 'n/a'} SOL`,
+    `Scanner tick: ${formatMinutesAgo(scannerHealth?.last_scan_at)}`,
     `Meteora live: ${liveLp.length} total (${liveDlmmCount} DLMM / ${liveDammCount} DAMM)`,
     ...(warning ? [warning] : []),
     `Supabase cache: ${(openLp ?? []).length} open rows`,

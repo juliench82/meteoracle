@@ -357,6 +357,32 @@ async function logScannerTick(result: ScannerResult, durationMs: number, source 
   }
 }
 
+async function updateScannerHealth(result: ScannerResult): Promise<void> {
+  try {
+    const nowIso = new Date().toISOString()
+    const payload: Record<string, unknown> = {
+      service: 'scanner',
+      last_scan_at: nowIso,
+      metadata: {
+        openBlockedReason: result.openBlockedReason ?? null,
+        error: result.error ?? null,
+      },
+    }
+    const upsertResult = await withTimeout(
+      createServerClient()
+        .from('bot_health')
+        .upsert(payload, { onConflict: 'service' }),
+      SUPABASE_TIMEOUT_MS,
+      'bot_health upsert scanner',
+    )
+    if (upsertResult && 'error' in upsertResult && upsertResult.error) {
+      console.warn('[scanner] bot_health upsert failed:', upsertResult.error.message)
+    }
+  } catch (err) {
+    console.warn('[scanner] bot_health upsert failed:', err)
+  }
+}
+
 function getQuoteTokenMint(pool: MeteoraPool): string {
   return QUOTE_ASSETS.has(pool.token_x.address)
     ? pool.token_x.address
@@ -655,6 +681,7 @@ export async function runScanner(): Promise<ScannerResult> {
       ...result,
     }
     await logScannerTick(fullResult, Date.now() - startedAt)
+    await updateScannerHealth(fullResult)
     return fullResult
   }
 
