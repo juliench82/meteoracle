@@ -25,6 +25,7 @@ import { scalpSpikeStrategy, SCALP_SPIKE_MOMENTUM_REGAIN } from '@/strategies/sc
 import { openDammPosition, resolveVerifiedDammV2PoolForToken } from './damm-executor'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
+import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 
 const METEORA_DATAPI  = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM    = 'https://dlmm-api.meteora.ag'
@@ -811,8 +812,19 @@ export async function runScanner(): Promise<ScannerResult> {
   let openedCount = 0
   let openedDammCountThisTick = 0
   let openSkippedCount = 0
+  let dailyLossLimitHit: boolean | null = null
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
   const openedMintsThisTick = new Set<string>()
+  const isOpenAllowedToday = async (): Promise<boolean> => {
+    if (dailyLossLimitHit === null) {
+      dailyLossLimitHit = await isDailyLossLimitHit()
+    }
+    if (dailyLossLimitHit) {
+      console.warn('[scanner] daily loss limit hit — no new positions')
+      return false
+    }
+    return true
+  }
 
   for (const { pool: representativePool, mcUsd, ageHours, lane } of survivors) {
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
@@ -1001,6 +1013,9 @@ export async function runScanner(): Promise<ScannerResult> {
         } else if (openBlockedReason || openedCount >= availableOpenSlots) {
           const reason = openBlockedReason ?? 'slots_filled_this_tick'
           console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: ${reason}; continuing DLMM evaluation`)
+        } else if (!await isOpenAllowedToday()) {
+          openSkippedCount++
+          console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: daily loss circuit breaker`)
         } else {
           const openDammCount = getOpenDammEdgeCount(limitState) + openedDammCountThisTick
           if (openDammCount >= MAX_CONCURRENT_DAMM_POSITIONS) {
@@ -1198,6 +1213,12 @@ export async function runScanner(): Promise<ScannerResult> {
         openSkippedCount++
         const reason = openBlockedReason ?? 'slots_filled_this_tick'
         console.log(`[scanner] ${symbol} qualifies but open skipped: ${reason}`)
+        continue
+      }
+
+      if (!await isOpenAllowedToday()) {
+        openSkippedCount++
+        console.log(`[scanner] ${symbol} qualifies but open skipped: daily loss circuit breaker`)
         continue
       }
 
