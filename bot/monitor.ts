@@ -33,6 +33,14 @@ let tickCount = 0
 const PNL_UNAVAILABLE_ALERT_TICKS = 3
 const PNL_UNAVAILABLE_FORCE_EXIT_TICKS = 10
 
+type PositionStateRead = {
+  ok: boolean
+  inRange: boolean
+  currentPriceSol: number
+  claimableFeesSolEquivalent: number
+  externallyClosed: boolean
+}
+
 function nullableNumber(value: unknown): number | null {
   if (value === null || value === undefined) return null
   const n = Number(value)
@@ -252,10 +260,17 @@ async function checkPosition(
   const label = `[monitor][${position.symbol}][${strategy.id}]`
   const now = Date.now()
 
-  const { inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed } = await fetchPositionState(
+  const state = await fetchPositionState(
     position.pool_address,
     position.position_pubkey
   )
+
+  if (!state.ok) {
+    console.warn(`${label} position state read failed — skipping exit checks this tick`)
+    return
+  }
+
+  const { inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed } = state
 
   if (externallyClosed) {
     console.warn(`${label} position missing on-chain — marking closed in DB`)
@@ -469,7 +484,7 @@ async function checkPosition(
 async function fetchPositionState(
   poolAddress: string,
   positionPubKey: string
-): Promise<{ inRange: boolean; currentPriceSol: number; claimableFeesSolEquivalent: number; externallyClosed: boolean }> {
+): Promise<PositionStateRead> {
   const connection = getConnection()
   const DLMM = await getDLMM()
 
@@ -482,7 +497,7 @@ async function fetchPositionState(
     const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
     const pos = userPositions.find(p => p.publicKey.toBase58() === positionPubKey)
 
-    if (!pos) return { inRange: false, currentPriceSol, claimableFeesSolEquivalent: 0, externallyClosed: true }
+    if (!pos) return { ok: true, inRange: false, currentPriceSol, claimableFeesSolEquivalent: 0, externallyClosed: true }
 
     const posData = pos.positionData
     const activeBinId = activeBin.binId
@@ -492,10 +507,10 @@ async function fetchPositionState(
     const feeY = Number(posData.feeY ?? 0) / 1e9
     const claimableFeesSolEquivalent = feeX + feeY
 
-    return { inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed: false }
+    return { ok: true, inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed: false }
   } catch (err) {
     console.error(`[fetchPositionState] error for pool ${poolAddress}:`, err)
-    return { inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: false }
+    return { ok: false, inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: false }
   }
 }
 

@@ -200,26 +200,31 @@ function resolveDammPnlPct(
   onChainPnlUsd: number | null,
   positionValueUsd: number | null,
   onChainCostBasisUsd: number | null,
+  allowCachedPnlFallback: boolean,
 ): number | null {
   const metadata = metadataRecord(pos.metadata)
   const explicitPct = firstNumber(
     onChainPnlPct,
-    pos.pnl_pct,
-    metadata.pnl_pct,
-    metadata.position_pnl_pct,
-    metadata.position_pnl_percentage,
-    metadata.pnl_percentage,
-    metadata.total_pnl_pct,
-    metadata.total_pnl_percentage,
+    ...(allowCachedPnlFallback ? [
+      pos.pnl_pct,
+      metadata.pnl_pct,
+      metadata.position_pnl_pct,
+      metadata.position_pnl_percentage,
+      metadata.pnl_percentage,
+      metadata.total_pnl_pct,
+      metadata.total_pnl_percentage,
+    ] : []),
   )
   if (explicitPct !== null) return explicitPct
 
   const pnlUsd = firstNumber(
     onChainPnlUsd,
-    pos.pnl_usd,
-    metadata.pnl_usd,
-    metadata.position_pnl_usd,
-    metadata.total_pnl_usd,
+    ...(allowCachedPnlFallback ? [
+      pos.pnl_usd,
+      metadata.pnl_usd,
+      metadata.position_pnl_usd,
+      metadata.total_pnl_usd,
+    ] : []),
   )
 
   const costBasisUsd = firstNumber(
@@ -338,6 +343,7 @@ export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]):
       meteoraPos?.pnlUsd ?? null,
       positionValueUsd,
       meteoraPos?.costBasisUsd ?? null,
+      meteoraPos !== null,
     )
 
     // ── Metadata update: store Meteora-sourced USD fields ────────────────────

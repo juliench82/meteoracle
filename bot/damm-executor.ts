@@ -38,6 +38,7 @@ import {
   OPEN_LP_STATUSES,
   assertCanOpenLpPosition,
   matchesOpenLpScope,
+  type OpenLpLimitState,
   type OpenLpScope,
 } from '@/lib/position-limits'
 import { getRpcEndpointCandidates } from '@/lib/solana'
@@ -177,6 +178,36 @@ async function getScopedOpenSolDeployed(scope: OpenLpScope): Promise<number> {
   return (data ?? [])
     .filter(position => matchesOpenLpScope(position, scope))
     .reduce((sum, position) => sum + Number(position.sol_deposited ?? 0), 0)
+}
+
+async function findCachedOpenLpForMint(tokenAddress: string): Promise<string | null> {
+  const supabase = createServerClient()
+  const { data, error } = await supabase
+    .from('lp_positions')
+    .select('id, position_pubkey, pool_address, strategy_id, position_type, status')
+    .eq('mint', tokenAddress)
+    .in('status', OPEN_LP_STATUSES)
+    .limit(1)
+
+  if (error) {
+    throw new Error(`[DAMM] open idempotency query failed for ${tokenAddress}: ${error.message}`)
+  }
+
+  const existing = data?.[0]
+  if (!existing) return null
+  return `cached_open_position id=${existing.id} position=${existing.position_pubkey ?? 'unknown'}`
+}
+
+function findLiveOpenLpForMintOrPool(
+  limitState: OpenLpLimitState,
+  tokenAddress: string,
+  poolAddress: string,
+): string | null {
+  const existing = limitState.livePositions.find(position =>
+    position.mint === tokenAddress || position.pool_address === poolAddress,
+  )
+  if (!existing) return null
+  return `live_open_position position=${existing.position_pubkey} pool=${existing.pool_address}`
 }
 
 async function getCpAmm(): Promise<any> {
@@ -495,6 +526,18 @@ export async function openDammPosition(
     const dryRun = await getBotDryRun()
     console.log(`[DAMM] dry_run=${dryRun}`)
 
+    const cachedDuplicate = await findCachedOpenLpForMint(params.tokenAddress)
+    if (cachedDuplicate) {
+      console.warn(`[DAMM] duplicate open blocked for ${params.symbol} (${params.tokenAddress}): ${cachedDuplicate}`)
+      return {
+        positionPubkey: '',
+        txSignature: '',
+        success: false,
+        error: 'duplicate_open_position',
+        skipped: true,
+      }
+    }
+
     if (dryRun) {
       const positionId = await saveDammPosition({
         params,
@@ -519,6 +562,18 @@ export async function openDammPosition(
     }
 
     const limitState = await assertCanOpenLpPosition(openConfig.maxConcurrent, openConfig.label, openConfig.scope)
+    const liveDuplicate = findLiveOpenLpForMintOrPool(limitState, params.tokenAddress, params.poolAddress)
+    if (liveDuplicate) {
+      console.warn(`[DAMM] duplicate live open blocked for ${params.symbol} (${params.tokenAddress}): ${liveDuplicate}`)
+      return {
+        positionPubkey: '',
+        txSignature: '',
+        success: false,
+        error: 'duplicate_live_open_position',
+        skipped: true,
+      }
+    }
+
     console.log(
       `${openConfig.label} ${openConfig.scope} LP cap ok (${limitState.effectiveOpenCount}/${openConfig.maxConcurrent}; ` +
       `source=${limitState.countSource}, live=${limitState.liveOpenCount}, ` +

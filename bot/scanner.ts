@@ -14,7 +14,6 @@ import { checkHolders } from '@/lib/helius'
 import { getRugscore, getRugcheckCacheSize } from './rugcheck-cache'
 import {
   fetchBondingCurve,
-  fetchPumpFunBondingCurve,
   isPumpFunToken,
   isMoonshotToken,
 } from '@/lib/pumpfun'
@@ -55,6 +54,16 @@ const MARKET_LP_SOL_PER_POSITION = parseFloat(
 const SCALP_SPIKE_ENABLED = process.env.SCALP_SPIKE_ENABLED === 'true'
 const EVIL_PANDA_ENABLED = process.env.EVIL_PANDA_ENABLED === 'true'
 const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
+const DEFAULT_SCANNER_TICK_TIMEOUT_MS = Math.max(60_000, SCAN_INTERVAL_MS - 30_000)
+const CONFIGURED_SCANNER_TICK_TIMEOUT_MS = parseInt(
+  process.env.LP_SCANNER_TICK_TIMEOUT_MS ??
+  process.env.SCANNER_TICK_TIMEOUT_MS ??
+  String(DEFAULT_SCANNER_TICK_TIMEOUT_MS),
+  10,
+)
+const SCANNER_TICK_TIMEOUT_MS = Number.isFinite(CONFIGURED_SCANNER_TICK_TIMEOUT_MS)
+  ? Math.max(60_000, CONFIGURED_SCANNER_TICK_TIMEOUT_MS)
+  : DEFAULT_SCANNER_TICK_TIMEOUT_MS
 const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
 const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
 const HARD_MAX_TOKEN_AGE_MINUTES = parseInt(process.env.HARD_MAX_TOKEN_AGE_MINUTES ?? '120')
@@ -92,8 +101,13 @@ const SUPABASE_TIMEOUT_MS      = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
-const _bondingCurveCache = new Map<string, { pct: number; ts: number }>()
+const _bondingCurveCache = new Map<string, { pct: number; complete: boolean | null; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
+
+type CachedBondingCurve = {
+  progressPct: number
+  complete: boolean | null
+}
 
 // Thresholds for high-curve detection (logged, falls through to normal scoring)
 const PUMPFUN_HIGHCURVE_THRESHOLD  = 95
@@ -381,6 +395,26 @@ async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'interval'
   }
 }
 
+async function getCachedPumpFunBondingCurve(
+  tokenAddress: string,
+  heliusRpcUrl: string,
+): Promise<CachedBondingCurve | null> {
+  const cached = _bondingCurveCache.get(tokenAddress)
+  if (cached && Date.now() - cached.ts < BONDING_CACHE_TTL_MS) {
+    return { progressPct: cached.pct, complete: cached.complete }
+  }
+
+  const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
+  if (!curve) return null
+
+  _bondingCurveCache.set(tokenAddress, {
+    pct: curve.progressPct,
+    complete: curve.complete,
+    ts: Date.now(),
+  })
+  return { progressPct: curve.progressPct, complete: curve.complete }
+}
+
 function getQuoteTokenMint(pool: MeteoraPool): string {
   return QUOTE_ASSETS.has(pool.token_x.address)
     ? pool.token_x.address
@@ -664,20 +698,62 @@ async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createSer
   )
 }
 
+let scannerRunPromise: Promise<ScannerResult> | null = null
+let scannerRunStartedAt = 0
+
+function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
+  return {
+    scanned: 0,
+    survivors: 0,
+    deepChecked: 0,
+    candidates: 0,
+    opened: 0,
+    openSkipped: 0,
+    openSlots: 0,
+    maxOpen: MAX_CONCURRENT_MARKET_LP_POSITIONS,
+    ...result,
+  }
+}
+
 export async function runScanner(): Promise<ScannerResult> {
+  if (scannerRunPromise) {
+    const ageMs = Date.now() - scannerRunStartedAt
+    console.warn(`[scanner] previous tick still running (${Math.round(ageMs / 1000)}s) — skipping overlapping tick`)
+    return emptyScannerResult({
+      openBlockedReason: ageMs > SCANNER_TICK_TIMEOUT_MS ? 'scanner_tick_watchdog_active' : 'scanner_tick_in_flight',
+    })
+  }
+
+  scannerRunStartedAt = Date.now()
+  const run = runScannerOnce().finally(() => {
+    if (scannerRunPromise === run) {
+      scannerRunPromise = null
+      scannerRunStartedAt = 0
+    }
+  })
+  scannerRunPromise = run
+
+  const timeout = new Promise<ScannerResult>((resolve) => {
+    const timer = setTimeout(() => {
+      const durationMs = Date.now() - scannerRunStartedAt
+      const result = emptyScannerResult({
+        openBlockedReason: 'scanner_tick_timeout',
+        error: `scanner tick exceeded ${SCANNER_TICK_TIMEOUT_MS}ms watchdog`,
+      })
+      console.error(`[scanner] watchdog timeout after ${Math.round(durationMs / 1000)}s — leaving in-flight guard active until the tick settles`)
+      void logScannerTick(result, durationMs, 'scanner-watchdog').finally(() => resolve(result))
+    }, SCANNER_TICK_TIMEOUT_MS)
+
+    run.finally(() => clearTimeout(timer)).catch(() => {})
+  })
+
+  return Promise.race([run, timeout])
+}
+
+async function runScannerOnce(): Promise<ScannerResult> {
   const startedAt = Date.now()
   const finish = async (result: Partial<ScannerResult>): Promise<ScannerResult> => {
-    const fullResult: ScannerResult = {
-      scanned: 0,
-      survivors: 0,
-      deepChecked: 0,
-      candidates: 0,
-      opened: 0,
-      openSkipped: 0,
-      openSlots: 0,
-      maxOpen: MAX_CONCURRENT_MARKET_LP_POSITIONS,
-      ...result,
-    }
+    const fullResult = emptyScannerResult(result)
     await logScannerTick(fullResult, Date.now() - startedAt)
     return fullResult
   }
@@ -890,7 +966,7 @@ export async function runScanner(): Promise<ScannerResult> {
     // Pump.fun high-curve detection: log progress, then fall through to normal scoring.
     // The scorer awards +8 curveBonus at 70-95% and +4 at 95-99%.
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
-      const curve = await fetchPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
+      const curve = await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
       const progress = curve?.progressPct ?? 0
       if (progress >= PUMPFUN_HIGHCURVE_THRESHOLD && curve?.complete === false) {
         console.log(`[scanner] ${symbol} — pump.fun high-curve ${progress.toFixed(1)}% — scoring normally (+curveBonus)`)
@@ -982,17 +1058,10 @@ export async function runScanner(): Promise<ScannerResult> {
 
     let bondingCurvePct: number | undefined = undefined
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
-      const cached = _bondingCurveCache.get(tokenAddress)
-      if (cached && Date.now() - cached.ts < BONDING_CACHE_TTL_MS) {
-        bondingCurvePct = cached.pct
-        console.log(`[pumpfun] ${symbol} bonding curve (cached): ${bondingCurvePct.toFixed(1)}%`)
-      } else {
-        const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
-        bondingCurvePct = curve?.progressPct ?? undefined
-        if (bondingCurvePct !== undefined) {
-          _bondingCurveCache.set(tokenAddress, { pct: bondingCurvePct, ts: Date.now() })
-          console.log(`[pumpfun] ${symbol} bonding curve: ${bondingCurvePct.toFixed(1)}% (complete=${curve?.complete})`)
-        }
+      const curve = await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
+      bondingCurvePct = curve?.progressPct ?? undefined
+      if (bondingCurvePct !== undefined) {
+        console.log(`[pumpfun] ${symbol} bonding curve: ${bondingCurvePct.toFixed(1)}% (complete=${curve?.complete ?? 'unknown'})`)
       }
     }
 
@@ -1048,7 +1117,6 @@ export async function runScanner(): Promise<ScannerResult> {
           } else {
             const verifiedDammPool = await resolveVerifiedDammV2PoolForToken({
               tokenAddress,
-              preferredPoolAddress: metrics.poolAddress,
               quoteMint: WSOL,
             })
 
@@ -1076,6 +1144,7 @@ export async function runScanner(): Promise<ScannerResult> {
               if (result.success) {
                 openedCount++
                 openedDammCountThisTick++
+                dailyLossLimitHit = null
                 openedMintsThisTick.add(tokenAddress)
                 await sendAlert({
                   type:          'position_opened',
@@ -1249,6 +1318,7 @@ export async function runScanner(): Promise<ScannerResult> {
       const positionId = await openPosition(metrics, strategy)
       if (positionId) {
         openedCount++
+        dailyLossLimitHit = null
         openedMintsThisTick.add(tokenAddress)
         await sendAlert({
           type: 'position_opened',
