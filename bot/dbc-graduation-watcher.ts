@@ -50,6 +50,7 @@ const DBC_REQUIRE_RELIABLE_HOLDERS = process.env.DBC_REQUIRE_RELIABLE_HOLDERS ==
 const DAMM_MIGRATION_SOL_PER_POSITION = parseFloat(process.env.DAMM_MIGRATION_SOL_PER_POSITION ?? '0.55')
 const AUTO_TRIGGER_MIGRATION = process.env.DBC_AUTO_TRIGGER_MIGRATION === 'true'
 const OPEN_MIGRATED_POSITION_ENABLED = process.env.DBC_OPEN_MIGRATED_POSITION_ENABLED === 'true'
+const MAX_CONCURRENT_DAMM_MIGRATION = parseInt(process.env.MAX_CONCURRENT_DAMM_MIGRATION ?? '2', 10)
 const USE_PROGRAM_SUBSCRIPTION = process.env.DBC_USE_PROGRAM_SUBSCRIPTION !== 'false'
 const DISCOVERY_POLL_ENABLED = process.env.DBC_DISCOVERY_POLL_ENABLED === 'true'
 const DISCOVERY_MAX_POOLS = parseInt(process.env.DBC_DISCOVERY_MAX_POOLS ?? '1000', 10)
@@ -594,6 +595,21 @@ async function hasOpenPositionForMint(mint: string): Promise<boolean> {
   return Boolean(data?.length)
 }
 
+async function getOpenDammMigrationCount(): Promise<number> {
+  const supabase = createServerClient()
+  const { count, error } = await supabase
+    .from('lp_positions')
+    .select('id', { count: 'exact', head: true })
+    .eq('position_type', 'damm-migration')
+    .in('status', ['active', 'out_of_range'])
+
+  if (error) {
+    console.warn(`[dbc-graduation] open damm-migration count failed: ${error.message}`)
+    return Number.POSITIVE_INFINITY
+  }
+  return count ?? 0
+}
+
 async function sendWithPriority(tx: Transaction, signers: Keypair[], label: string): Promise<string> {
   const rpc = getConnection()
   const { blockhash, lastValidBlockHeight } = await rpc.getLatestBlockhash('confirmed')
@@ -713,6 +729,22 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
     const poolReady = await waitForDammPool(ctx.dammPool)
     if (!poolReady) {
       await updateWatchlistById(row.id, { status: ctx.progressPct >= OPEN_PROGRESS_PCT ? 'migration_ready' : 'near_threshold' })
+      return false
+    }
+
+    const openMigrationCount = await getOpenDammMigrationCount()
+    if (openMigrationCount >= MAX_CONCURRENT_DAMM_MIGRATION) {
+      console.log(
+        `[DBC] max concurrent damm-migration positions reached (${openMigrationCount}/${MAX_CONCURRENT_DAMM_MIGRATION}) — skipping`,
+      )
+      await updateWatchlistById(row.id, {
+        status: 'skipped_migration_cap',
+        metadata: {
+          ...(row.metadata ?? {}),
+          open_migration_count: openMigrationCount,
+          max_concurrent_damm_migration: MAX_CONCURRENT_DAMM_MIGRATION,
+        },
+      })
       return false
     }
 
