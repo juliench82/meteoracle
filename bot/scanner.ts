@@ -356,15 +356,14 @@ async function logScannerTick(result: ScannerResult, durationMs: number, source 
   }
 }
 
-async function updateScannerHealth(result: ScannerResult): Promise<void> {
+async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'interval'): Promise<void> {
   try {
     const nowIso = new Date().toISOString()
     const payload: Record<string, unknown> = {
       service: 'scanner',
       last_scan_at: nowIso,
       metadata: {
-        openBlockedReason: result.openBlockedReason ?? null,
-        error: result.error ?? null,
+        source,
       },
     }
     const upsertResult = await withTimeout(
@@ -680,7 +679,6 @@ export async function runScanner(): Promise<ScannerResult> {
       ...result,
     }
     await logScannerTick(fullResult, Date.now() - startedAt)
-    await updateScannerHealth(fullResult)
     return fullResult
   }
 
@@ -1434,5 +1432,7 @@ const standaloneScannerTick = async (): Promise<void> => {
 if (require.main === module || process.env.LP_SCANNER_STANDALONE === 'true') {
   const label = '[lp-scanner]'
   console.log(`${label} starting — poll every ${SCAN_INTERVAL_MS / 1000}s`)
+  void writeScannerHeartbeat('startup')
+  setInterval(() => { void writeScannerHeartbeat('interval') }, 30_000)
   standaloneScannerTick().then(() => setInterval(standaloneScannerTick, SCAN_INTERVAL_MS))
 }
