@@ -345,28 +345,39 @@ export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]):
       meteoraPos?.costBasisUsd ?? null,
       meteoraPos !== null,
     )
+    const pnlPctSnapshot = pnlPct !== null ? roundPct(pnlPct) : null
+    const pnlUsdSnapshot = meteoraPos?.pnlUsd != null
+      ? Math.round(meteoraPos.pnlUsd * 100) / 100
+      : null
 
     // ── Metadata update: store Meteora-sourced USD fields ────────────────────
     // We always update metadata when we have new data, regardless of exit.
     // pnl_sol and il_pct are intentionally NOT written — Meteora is source of truth.
-    if (onChain) {
+    if (onChain || meteoraPos || poolStats) {
       await supabase
         .from('lp_positions')
         .update({
-          current_price: onChain.currentPriceSol,
+          ...(onChain && { current_price: onChain.currentPriceSol }),
           ...(claimableFeesUsd !== null && { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 }),
           ...(positionValueUsd !== null && { position_value_usd: Math.round(positionValueUsd * 100) / 100 }),
+          pnl_pct: pnlPctSnapshot,
+          ...(pnlUsdSnapshot !== null && { pnl_usd: pnlUsdSnapshot }),
           metadata: {
             ...(pos.metadata ?? {}),
             // Live USD fields from Meteora — what the UI should display
             ...(claimableFeesUsd !== null && { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 }),
             ...(positionValueUsd !== null && { position_value_usd: Math.round(positionValueUsd * 100) / 100 }),
-            current_price_basis: 'sol_per_token',
-            raw_pool_price: onChain.poolPrice,
-            token_a_mint: onChain.tokenAMint,
-            token_b_mint: onChain.tokenBMint,
-            token_a_decimals: onChain.tokenADecimals,
-            token_b_decimals: onChain.tokenBDecimals,
+            pnl_pct: pnlPctSnapshot,
+            position_pnl_pct: pnlPctSnapshot,
+            ...(pnlUsdSnapshot !== null && { pnl_usd: pnlUsdSnapshot, position_pnl_usd: pnlUsdSnapshot }),
+            ...(onChain && {
+              current_price_basis: 'sol_per_token',
+              raw_pool_price: onChain.poolPrice,
+              token_a_mint: onChain.tokenAMint,
+              token_b_mint: onChain.tokenBMint,
+              token_a_decimals: onChain.tokenADecimals,
+              token_b_decimals: onChain.tokenBDecimals,
+            }),
             // Pool-level context
             ...(poolStats && {
               volume_24h_usd:   Math.round(poolStats.volume24hUsd),

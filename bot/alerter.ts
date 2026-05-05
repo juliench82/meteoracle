@@ -28,7 +28,7 @@ type AlertPayload =
       strategy: string
       reason: string
       claimableFeesUsd?: number
-      ilPct: number
+      ilPct: number | null
       ageHours: number
       netPnlSol?: number
     }
@@ -120,11 +120,14 @@ function formatMessage(payload: AlertPayload): string {
     case 'position_closed': {
       const netPnl = payload.netPnlSol ?? 0
       const netSign = netPnl >= 0 ? '+' : ''
+      const ilPct = payload.ilPct !== null && Number.isFinite(payload.ilPct)
+        ? `${payload.ilPct.toFixed(2)}%`
+        : 'N/A'
       return [
         `🔴 *SELL* ${payload.symbol}`,
         `Reason: ${payload.reason}`,
         `Claimable Fees: *${payload.claimableFeesUsd != null ? `$${payload.claimableFeesUsd.toFixed(2)}` : 'N/A'}*`,
-        `IL: ${payload.ilPct.toFixed(2)}% | Net PNL: ${netSign}${netPnl} SOL`,
+        `IL: ${ilPct} | Net PNL: ${netSign}${netPnl} SOL`,
         `Held for: ${payload.ageHours}h`,
         `Strategy: ${payload.strategy}`,
       ].join('\n')

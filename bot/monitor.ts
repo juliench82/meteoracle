@@ -128,6 +128,7 @@ type DammPositionSnapshotRow = {
   position_value_usd: number | null
   opened_at: string
   metadata: PositionMetadata | null
+  null_pnl_ticks: number | null
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -371,23 +372,49 @@ async function checkDammEdgePosition(
   stats: { checked: number; closed: number; claimed: number; rebalanced: number },
 ): Promise<void> {
   const label = `[monitor][${position.symbol}][damm-edge]`
-  const { pnlPct, ageHours, positionValueUsd } = await fetchDammPositionState(position.id)
+  const { pnlPct, ageHours, positionValueUsd, previousNullPnlTicks } = await fetchDammPositionState(position.id)
+  const currentNullPnlTicks = pnlPct === null ? previousNullPnlTicks + 1 : 0
+
+  try {
+    await sbUpdate('lp_positions', `id=eq.${position.id}`, {
+      null_pnl_ticks: currentNullPnlTicks,
+    })
+  } catch (err) {
+    console.error(`${label} null_pnl_ticks update failed:`, err)
+  }
 
   console.log(
     `${label} pnlPct=${pnlPct !== null ? `${pnlPct.toFixed(2)}%` : 'n/a'} ` +
-    `age=${ageHours.toFixed(1)}h posValue=$${positionValueUsd ?? 'n/a'}`,
+    `age=${ageHours.toFixed(1)}h posValue=$${positionValueUsd ?? 'n/a'} ` +
+    `nullPnlTicks=${currentNullPnlTicks}`,
   )
 
   let closeReason: string | null = null
 
-  if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
+  if (currentNullPnlTicks >= PNL_UNAVAILABLE_FORCE_EXIT_TICKS) {
+    closeReason = `pnl_unavailable_${PNL_UNAVAILABLE_FORCE_EXIT_TICKS}ticks`
+  } else if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
     closeReason = `stoploss_pnl_${pnlPct.toFixed(1)}pct`
   } else if (pnlPct !== null && pnlPct >= strategy.exits.takeProfitPct) {
     closeReason = `takeprofit_pnl_${pnlPct.toFixed(1)}pct`
   } else if (ageHours >= strategy.exits.maxDurationHours) {
     closeReason = `max_duration_${Math.round(ageHours)}h`
   } else if (pnlPct === null) {
-    console.warn(`${label} PnL unavailable — stop-loss/take-profit skipped this tick`)
+    if (currentNullPnlTicks >= PNL_UNAVAILABLE_ALERT_TICKS) {
+      if (currentNullPnlTicks === PNL_UNAVAILABLE_ALERT_TICKS || currentNullPnlTicks % PNL_UNAVAILABLE_ALERT_TICKS === 0) {
+        await sendAlert({
+          type: 'pnl_unavailable_warning',
+          symbol: position.symbol,
+          strategy: strategy.id,
+          positionId: position.id,
+          reason: `damm_pnl_unavailable_${currentNullPnlTicks}ticks`,
+          ageHours: Math.round(ageHours * 10) / 10,
+        })
+      }
+      console.warn(`${label} DAMM PnL unavailable ${currentNullPnlTicks} consecutive ticks`)
+    } else {
+      console.warn(`${label} DAMM PnL unavailable — stop-loss/take-profit skipped this tick`)
+    }
   }
 
   if (!closeReason) return
@@ -402,7 +429,7 @@ async function checkDammEdgePosition(
       symbol: position.symbol,
       strategy: 'damm-edge',
       reason: closeReason,
-      ilPct: 0,
+      ilPct: null,
       ageHours: Math.round(ageHours * 10) / 10,
     })
   } else {
@@ -685,13 +712,13 @@ async function fetchPositionState(
 
 async function fetchDammPositionState(
   positionId: string,
-): Promise<{ pnlPct: number | null; ageHours: number; positionValueUsd: number | null }> {
+): Promise<{ pnlPct: number | null; ageHours: number; positionValueUsd: number | null; previousNullPnlTicks: number }> {
   const rows = await sbSelect<DammPositionSnapshotRow>(
     'lp_positions',
-    `id=eq.${positionId}&select=pnl_pct,position_value_usd,opened_at,metadata`,
+    `id=eq.${positionId}&select=pnl_pct,position_value_usd,opened_at,metadata,null_pnl_ticks`,
   )
 
-  if (!rows.length) return { pnlPct: null, ageHours: 0, positionValueUsd: null }
+  if (!rows.length) return { pnlPct: null, ageHours: 0, positionValueUsd: null, previousNullPnlTicks: 0 }
 
   const row = rows[0]
   const metadata = row.metadata ?? {}
@@ -705,8 +732,9 @@ async function fetchDammPositionState(
     ? (Date.now() - openedAt) / 3_600_000
     : 0
   const positionValueUsd = nullableNumber(row.position_value_usd)
+  const previousNullPnlTicks = Math.max(0, Math.trunc(nullableNumber(row.null_pnl_ticks) ?? 0))
 
-  return { pnlPct, ageHours, positionValueUsd }
+  return { pnlPct, ageHours, positionValueUsd, previousNullPnlTicks }
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────────────────
