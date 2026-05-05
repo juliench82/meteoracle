@@ -799,7 +799,7 @@ async function maybeOpenMigratedDammPosition(ctx: DbcPoolContext, row: Watchlist
       await updateWatchlistById(row.id, {
         status: 'open_failed',
         metadata: { ...(row.metadata ?? {}), open_error: result.error ?? 'unknown' },
-      },
+      })
       return false
     }
 
