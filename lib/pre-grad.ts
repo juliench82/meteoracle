@@ -52,6 +52,24 @@ function finitePositive(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? n : null
 }
 
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const n = nullableNumber(value)
+    if (n !== null) return n
+  }
+  return null
+}
+
+function roundPct(value: number): number | null {
+  return Number.isFinite(value) ? Math.round(value * 100) / 100 : null
+}
+
 function getDammExitEntryPriceSol(
   position: {
     id?: string
@@ -128,6 +146,9 @@ async function fetchDammPoolStats(poolAddress: string): Promise<{
 async function fetchMeteoraPosFields(positionPubkey: string): Promise<{
   claimableFeesUsd: number | null
   positionValueUsd: number | null
+  pnlUsd: number | null
+  pnlPct: number | null
+  costBasisUsd: number | null
 } | null> {
   try {
     const res = await fetch(`https://amm-v2.meteora.ag/position/${positionPubkey}`, {
@@ -142,13 +163,73 @@ async function fetchMeteoraPosFields(positionPubkey: string): Promise<{
     const positionValueUsd =
       data.position_value_usd ?? data.total_value_usd ?? data.value_usd ?? null
 
+    const pnlUsd =
+      data.pnl_usd ?? data.position_pnl_usd ?? data.total_pnl_usd ?? null
+
+    const pnlPct =
+      data.pnl_pct ?? data.position_pnl_pct ?? data.total_pnl_pct ??
+      data.pnl_percentage ?? data.position_pnl_percentage ?? data.total_pnl_percentage ?? null
+
+    const costBasisUsd =
+      data.cost_basis_usd ?? data.total_deposit_usd ?? data.deposit_usd ?? data.position_cost_usd ?? null
+
     return {
       claimableFeesUsd: claimableFeesUsd !== null ? Number(claimableFeesUsd) : null,
       positionValueUsd: positionValueUsd !== null ? Number(positionValueUsd) : null,
+      pnlUsd: pnlUsd !== null ? Number(pnlUsd) : null,
+      pnlPct: pnlPct !== null ? Number(pnlPct) : null,
+      costBasisUsd: costBasisUsd !== null ? Number(costBasisUsd) : null,
     }
   } catch {
     return null
   }
+}
+
+function resolveDammPnlPct(
+  pos: Record<string, any>,
+  onChainPnlPct: number | null,
+  onChainPnlUsd: number | null,
+  positionValueUsd: number | null,
+  onChainCostBasisUsd: number | null,
+): number | null {
+  const metadata = metadataRecord(pos.metadata)
+  const explicitPct = firstNumber(
+    onChainPnlPct,
+    pos.pnl_pct,
+    metadata.pnl_pct,
+    metadata.position_pnl_pct,
+    metadata.position_pnl_percentage,
+    metadata.pnl_percentage,
+    metadata.total_pnl_pct,
+    metadata.total_pnl_percentage,
+  )
+  if (explicitPct !== null) return explicitPct
+
+  const pnlUsd = firstNumber(
+    onChainPnlUsd,
+    pos.pnl_usd,
+    metadata.pnl_usd,
+    metadata.position_pnl_usd,
+    metadata.total_pnl_usd,
+  )
+
+  const costBasisUsd = firstNumber(
+    onChainCostBasisUsd,
+    metadata.meteora_total_deposit_usd,
+    metadata.total_deposit_usd,
+    metadata.deposit_usd,
+    metadata.cost_basis_usd,
+  )
+
+  if (pnlUsd !== null && costBasisUsd !== null && costBasisUsd > 0) {
+    return roundPct((pnlUsd / costBasisUsd) * 100)
+  }
+
+  if (positionValueUsd !== null && costBasisUsd !== null && costBasisUsd > 0) {
+    return roundPct(((positionValueUsd - costBasisUsd) / costBasisUsd) * 100)
+  }
+
+  return null
 }
 
 // ── On-chain state fetch ──────────────────────────────────────────────────────
@@ -239,6 +320,13 @@ export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]):
 
     const claimableFeesUsd = meteoraPos?.claimableFeesUsd ?? null
     const positionValueUsd = meteoraPos?.positionValueUsd ?? null
+    const pnlPct = resolveDammPnlPct(
+      pos,
+      meteoraPos?.pnlPct ?? null,
+      meteoraPos?.pnlUsd ?? null,
+      positionValueUsd,
+      meteoraPos?.costBasisUsd ?? null,
+    )
 
     // ── Metadata update: store Meteora-sourced USD fields ────────────────────
     // We always update metadata when we have new data, regardless of exit.
@@ -285,8 +373,13 @@ export async function checkDammPositions(livePositions?: LiveMeteoraPosition[]):
         console.warn(`[PRE-GRAD] ${pos.id} has no comparable DAMM entry price — skipping TP/SL this tick`)
       } else {
         const pricePct = ((onChain.currentPriceSol - entryPrice.value) / entryPrice.value) * 100
-        if (pricePct <= -30) reason = 'stop-loss'
-        else if (pricePct >= 40) reason = 'take-profit'
+        if (pnlPct !== null) {
+          if (pnlPct <= -30) reason = 'stop-loss'
+          else if (pnlPct >= 40) reason = 'take-profit'
+        } else {
+          if (pricePct <= -30) reason = 'stop-loss'
+          else if (pricePct >= 40) reason = 'take-profit'
+        }
       }
     }
 
