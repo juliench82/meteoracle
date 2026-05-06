@@ -30,7 +30,7 @@ function heliusRpcFromApiKey(): string | null {
 }
 
 export function getHeliusRpcEndpoint(): string | null {
-  return cleanEnv(process.env.HELIUS_RPC_URL) ?? heliusRpcFromApiKey()
+  return heliusRpcFromApiKey() ?? cleanEnv(process.env.HELIUS_RPC_URL)
 }
 
 function splitRpcList(value: string | undefined): string[] {
@@ -43,8 +43,7 @@ function splitRpcList(value: string | undefined): string[] {
 export function getRpcEndpointCandidates(options: { includePublicFallback?: boolean } = {}): string[] {
   const endpoints = [
     cleanEnv(process.env.RPC_URL),
-    cleanEnv(process.env.HELIUS_RPC_URL),
-    heliusRpcFromApiKey(),
+    getHeliusRpcEndpoint(),
     ...splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS),
     ...(options.includePublicFallback && process.env.DISABLE_PUBLIC_RPC_FALLBACK !== 'true'
       ? ['https://api.mainnet-beta.solana.com']
