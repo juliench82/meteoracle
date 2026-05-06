@@ -9,6 +9,8 @@ interface CachedPosition {
   strategy_id: string | null
   position_type: string | null
   status: string | null
+  closed_at: string | null
+  close_reason: string | null
   dry_run: boolean | null
   metadata: Record<string, unknown> | null
 }
@@ -31,12 +33,14 @@ export interface MeteoraPositionSyncResult {
 }
 
 let _syncFailCount = 0
+const CLOSED_LIVE_REOPEN_GRACE_MS =
+  parseInt(process.env.METEORA_CLOSED_LIVE_REOPEN_GRACE_SEC ?? '180', 10) * 1_000
 
 async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<string, CachedPosition[]>> {
   if (positionPubkeys.length === 0) return new Map()
 
   const filter = `position_pubkey=in.(${positionPubkeys.join(',')})`
-  const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,dry_run,metadata'
+  const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,closed_at,close_reason,dry_run,metadata'
   const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions?${filter}&${select}`, {
     headers: getSupabaseRestHeaders('representation'),
     signal: AbortSignal.timeout(10_000),
@@ -56,7 +60,7 @@ async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<stri
 }
 
 async function fetchOpenCachedPositions(): Promise<CachedPosition[]> {
-  const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,dry_run,metadata'
+  const select = 'select=id,symbol,position_pubkey,strategy_id,position_type,status,closed_at,close_reason,dry_run,metadata'
   const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions?status=in.(active,open,out_of_range,orphaned)&${select}`, {
     headers: getSupabaseRestHeaders('representation'),
     signal: AbortSignal.timeout(10_000),
@@ -105,17 +109,30 @@ function shouldRefreshSymbol(existing: CachedPosition): boolean {
   return !symbol || symbol === 'SOL' || /^(LIVE|DAMM|ORPHAN)-/.test(symbol) || existing.strategy_id === 'meteora-live' || existing.strategy_id === 'damm-live'
 }
 
+function closedRecently(existing: CachedPosition): boolean {
+  const closedAt = Date.parse(existing.closed_at ?? '')
+  return Number.isFinite(closedAt) && Date.now() - closedAt < CLOSED_LIVE_REOPEN_GRACE_MS
+}
+
 function shouldPreserveLocalStatus(existing: CachedPosition): boolean {
-  return existing.status === 'closed' || existing.status === 'pending_close'
+  if (existing.status === 'pending_close') return true
+  return existing.status === 'closed' && closedRecently(existing)
 }
 
 function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record<string, unknown> {
+  const preserveLocalStatus = shouldPreserveLocalStatus(existing)
+  const reviveClosedLive = existing.status === 'closed' && !preserveLocalStatus
+
   return {
     ...(shouldRefreshSymbol(existing) && { symbol: live.symbol }),
     mint: live.mint,
     token_address: live.mint,
     pool_address: live.pool_address,
-    ...(!shouldPreserveLocalStatus(existing) && { status: live.status }),
+    ...(!preserveLocalStatus && { status: live.status }),
+    ...(reviveClosedLive && {
+      closed_at: null,
+      close_reason: null,
+    }),
     in_range: live.in_range,
     current_price: live.current_price,
     ...(live.claimable_fees_usd !== null && live.claimable_fees_usd !== undefined && {
@@ -133,6 +150,11 @@ function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record
       source_of_truth: 'meteora',
       meteora_live_status: live.status,
       synced_at: new Date().toISOString(),
+      ...(reviveClosedLive && {
+        live_reopen_detected_at: new Date().toISOString(),
+        previous_closed_at: existing.closed_at,
+        previous_close_reason: existing.close_reason,
+      }),
     },
   }
 }

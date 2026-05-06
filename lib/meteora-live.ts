@@ -12,7 +12,8 @@ const DLMM_POSITION_STATS_CACHE_TTL_MS = 60_000
 const _pairInfoCache = new Map<string, { value: DexPairInfo | null; expiresAt: number }>()
 const _dlmmPositionStatsCache = new Map<string, { value: Record<string, number | null> | null; expiresAt: number }>()
 const _mintDecimalsCache = new Map<string, number | null>()
-const LOCAL_STATUS_OVERRIDES = new Set(['closed', 'pending_close'])
+const CLOSED_LIVE_REOPEN_GRACE_MS =
+  parseInt(process.env.METEORA_CLOSED_LIVE_REOPEN_GRACE_SEC ?? '180', 10) * 1_000
 const PNL_PCT_KEYS = [
   'position_pnl_pct',
   'position_pnl_percentage',
@@ -997,9 +998,16 @@ function firstFiniteNumber(...values: unknown[]): number | null {
   return null
 }
 
-function mergeStatus(dbStatus: unknown, liveStatus: string): string {
-  const status = String(dbStatus ?? '')
-  return LOCAL_STATUS_OVERRIDES.has(status) ? status : liveStatus
+function closedRecently(closedAt: unknown): boolean {
+  const timestamp = Date.parse(String(closedAt ?? ''))
+  return Number.isFinite(timestamp) && Date.now() - timestamp < CLOSED_LIVE_REOPEN_GRACE_MS
+}
+
+function mergeStatus(row: Record<string, unknown>, liveStatus: string): string {
+  const status = String(row.status ?? '')
+  if (status === 'pending_close') return status
+  if (status === 'closed' && closedRecently(row.closed_at)) return status
+  return liveStatus
 }
 
 function deriveOpenPnlUsd(
@@ -1109,7 +1117,7 @@ export function mergeDbAndLiveLpPositions(
         entry_price_sol: row.entry_price_sol ?? live.entry_price_sol,
         entry_price_usd: row.entry_price_usd ?? live.entry_price_usd,
         tx_open: row.tx_open,
-        status: mergeStatus(row.status, live.status),
+        status: mergeStatus(row, live.status),
         in_range: live.in_range,
         current_price: live.current_price || row.current_price,
         claimable_fees_usd: claimableFeesUsd,
