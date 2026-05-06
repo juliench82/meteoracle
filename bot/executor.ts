@@ -241,7 +241,26 @@ async function zapOutDlmmFallback(
     return false
   }
 
-  console.log(`${label} DLMM zap fallback — zapOutThroughDlmm ${amountIn.toString()} lamports of ${inputMint.toBase58().slice(0, 8)}…`)
+  const swapForY = inputMint.toBase58() === tokenX.toBase58()
+  let minimumSwapAmountOut: BN
+  try {
+    const binArrays = await dlmmPool.getBinArrayForSwap(swapForY)
+    const quote = dlmmPool.swapQuote(
+      amountIn,
+      swapForY,
+      new BN(DLMM_ZAP_SWAP_SLIPPAGE_BPS),
+      binArrays,
+    )
+    minimumSwapAmountOut = quote.minOutAmount
+  } catch (quoteErr) {
+    console.warn(`${label} DLMM zap fallback skipped — quote failed:`, quoteErr)
+    return false
+  }
+
+  console.log(
+    `${label} DLMM zap fallback — zapOutThroughDlmm ${amountIn.toString()} lamports ` +
+    `of ${inputMint.toBase58().slice(0, 8)}… minOut=${minimumSwapAmountOut.toString()}`,
+  )
 
   const zap = await getZap()
   const tx: Transaction = await (zap as any).zapOutThroughDlmm({
@@ -252,12 +271,13 @@ async function zapOutDlmmFallback(
     inputTokenProgram,
     outputTokenProgram,
     amountIn,
-    minimumSwapAmountOut: new BN(0),
+    minimumSwapAmountOut,
     maxSwapAmount: amountIn,
     percentageToZapOut: 100,
   })
 
-  const sig = await sendLegacyTx(tx, [wallet], `${label}[zap-dlmm]`)
+  const priorityFee = await getPriorityFee([lbPairAddress, wallet.publicKey.toBase58()])
+  const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), [wallet], `${label}[zap-dlmm]`)
   console.log(`${label} DLMM zap fallback ✔ sig: ${sig}`)
   return true
 }
