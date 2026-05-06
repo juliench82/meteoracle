@@ -14,6 +14,7 @@ import bs58 from 'bs58'
 import {
   DAMM_V2_MIGRATION_FEE_ADDRESS,
   DYNAMIC_BONDING_CURVE_PROGRAM_ID,
+  DynamicBondingCurveIdl,
   DynamicBondingCurveClient,
   MigrationOption,
   deriveDammV2PoolAddress,
@@ -28,7 +29,7 @@ import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import { isAuthError, redactSecrets, summarizeError } from '@/lib/logging'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 import { checkHolders } from '@/lib/helius'
-import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
+import { heliusRpcFetch, isHeliusRpcEndpoint, refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { openDammPosition } from './damm-executor'
 import { getRugscore } from './rugcheck-cache'
 
@@ -57,6 +58,7 @@ const MAX_CONCURRENT_DAMM_MIGRATION = parseInt(process.env.MAX_CONCURRENT_DAMM_M
 const USE_PROGRAM_SUBSCRIPTION = process.env.DBC_USE_PROGRAM_SUBSCRIPTION !== 'false'
 const DISCOVERY_POLL_ENABLED = process.env.DBC_DISCOVERY_POLL_ENABLED === 'true'
 const DISCOVERY_MAX_POOLS = parseInt(process.env.DBC_DISCOVERY_MAX_POOLS ?? '1000', 10)
+const DISCOVERY_PAGE_LIMIT = Math.max(1, Math.min(DISCOVERY_MAX_POOLS, 250))
 const DAMM_POOL_WAIT_ATTEMPTS = parseInt(process.env.DBC_DAMM_POOL_WAIT_ATTEMPTS ?? '12', 10)
 const DAMM_POOL_WAIT_MS = parseInt(process.env.DBC_DAMM_POOL_WAIT_MS ?? '2500', 10)
 const RPC_RETRY_MS = parseInt(process.env.DBC_RPC_RETRY_SEC ?? '60', 10) * 1_000
@@ -75,6 +77,14 @@ const TERMINAL_STATUSES = [
   'open_failed',
 ] as const
 
+const VIRTUAL_POOL_ACCOUNT_DISCRIMINATOR = DynamicBondingCurveIdl.accounts.find(
+  account => account.name === 'VirtualPool',
+)?.discriminator
+if (!VIRTUAL_POOL_ACCOUNT_DISCRIMINATOR) {
+  throw new Error('[dbc-graduation] VirtualPool account discriminator not found in DBC IDL')
+}
+const VIRTUAL_POOL_ACCOUNT_DISCRIMINATOR_B58 = bs58.encode(Buffer.from(VIRTUAL_POOL_ACCOUNT_DISCRIMINATOR))
+
 type WatchlistRow = {
   id: string
   mint: string
@@ -82,6 +92,35 @@ type WatchlistRow = {
   status: string
   opened_position_id: string | null
   metadata: Record<string, unknown> | null
+}
+
+type ProgramAccount<T> = {
+  publicKey: PublicKey
+  account: T
+}
+
+type GetProgramAccountsV2Account = {
+  pubkey: string
+  account: {
+    data: [string, string] | string
+  }
+}
+
+type GetProgramAccountsV2Payload = {
+  accounts?: GetProgramAccountsV2Account[]
+  paginationKey?: string | null
+  totalResults?: number | null
+}
+
+type GetProgramAccountsV2Response = {
+  result?: GetProgramAccountsV2Payload | { value?: GetProgramAccountsV2Payload }
+  error?: { code?: number; message?: string }
+}
+
+function hasWrappedV2Payload(
+  result: GetProgramAccountsV2Response['result'],
+): result is { value?: GetProgramAccountsV2Payload } {
+  return Boolean(result && 'value' in result)
 }
 
 type DbcPoolContext = {
@@ -943,6 +982,91 @@ function envWatchPoolAddresses(): PublicKey[] {
     .map(value => new PublicKey(value))
 }
 
+function decodeVirtualPoolAccount(data: [string, string] | string): VirtualPool {
+  const encoded = Array.isArray(data) ? data[0] : data
+  const buffer = Buffer.from(encoded, 'base64')
+  return getDbcClient().state.getProgram().coder.accounts.decode('virtualPool', buffer) as VirtualPool
+}
+
+async function fetchVirtualPoolsV2Page(
+  paginationKey: string | null,
+): Promise<GetProgramAccountsV2Payload> {
+  const rpcUrl = getRpcUrl()
+  const res = await heliusRpcFetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'dbc-discovery',
+      method: 'getProgramAccountsV2',
+      params: [
+        DBC_PROGRAM_ID.toBase58(),
+        {
+          commitment: 'confirmed',
+          encoding: 'base64',
+          limit: DISCOVERY_PAGE_LIMIT,
+          filters: [
+            { memcmp: { offset: 0, bytes: VIRTUAL_POOL_ACCOUNT_DISCRIMINATOR_B58 } },
+          ],
+          ...(paginationKey ? { paginationKey } : {}),
+        },
+      ],
+    }),
+  })
+
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`getProgramAccountsV2 failed: ${res.status} ${text.slice(0, 300)}`)
+  }
+
+  const parsed = JSON.parse(text) as GetProgramAccountsV2Response
+  if (parsed.error) {
+    throw new Error(`getProgramAccountsV2 failed: ${parsed.error.code ?? 'rpc'} ${parsed.error.message ?? 'unknown error'}`)
+  }
+
+  const result = parsed.result
+  const payload = hasWrappedV2Payload(result) ? result.value : result
+  return payload ?? { accounts: [], paginationKey: null, totalResults: null }
+}
+
+async function fetchDiscoveryVirtualPools(): Promise<ProgramAccount<VirtualPool>[]> {
+  const rpcUrl = getRpcUrl()
+  if (!isHeliusRpcEndpoint(rpcUrl)) {
+    return getDbcClient().state.getPools()
+  }
+
+  const pools: ProgramAccount<VirtualPool>[] = []
+  let paginationKey: string | null = null
+  let page = 0
+
+  do {
+    page++
+    const payload = await fetchVirtualPoolsV2Page(paginationKey)
+    const accounts = payload.accounts ?? []
+
+    for (const row of accounts) {
+      try {
+        pools.push({
+          publicKey: new PublicKey(row.pubkey),
+          account: decodeVirtualPoolAccount(row.account.data),
+        })
+      } catch (err) {
+        console.warn(`[dbc-graduation] skipped undecodable DBC virtual pool ${row.pubkey}: ${summarizeError(err)}`)
+      }
+
+      if (pools.length >= DISCOVERY_MAX_POOLS) break
+    }
+
+    paginationKey = payload.paginationKey ?? null
+  } while (paginationKey && pools.length < DISCOVERY_MAX_POOLS)
+
+  console.log(
+    `[dbc-graduation] discovery fetched ${pools.length} virtual pool(s) ` +
+    `via getProgramAccountsV2 pageLimit=${DISCOVERY_PAGE_LIMIT} pages=${page}`,
+  )
+  return pools
+}
+
 async function discoverNearThresholdPools(): Promise<number> {
   const explicit = envWatchPoolAddresses()
   if (explicit.length > 0) {
@@ -954,7 +1078,7 @@ async function discoverNearThresholdPools(): Promise<number> {
 
   let pools: Awaited<ReturnType<DynamicBondingCurveClient['state']['getPools']>>
   try {
-    pools = await getDbcClient().state.getPools()
+    pools = await fetchDiscoveryVirtualPools()
   } catch (err) {
     console.warn(`[dbc-graduation] discovery skipped: ${summarizeError(err)}`)
     return 0
