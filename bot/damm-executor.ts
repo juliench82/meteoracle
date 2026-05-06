@@ -41,7 +41,7 @@ import {
   type OpenLpLimitState,
   type OpenLpScope,
 } from '@/lib/position-limits'
-import { getRpcEndpointCandidates } from '@/lib/solana'
+import { createConnection, getRpcEndpointCandidates } from '@/lib/solana'
 import { summarizeError } from '@/lib/logging'
 import { sendAlert } from './alerter'
 
@@ -115,7 +115,7 @@ function getRpcUrl(): string {
 
 function getConnection(): Connection {
   if (!_connection) {
-    _connection = new Connection(getRpcUrl(), 'confirmed')
+    _connection = createConnection(getRpcUrl())
   }
   return _connection
 }

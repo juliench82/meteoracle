@@ -24,6 +24,7 @@ import { scalpSpikeStrategy } from '@/strategies/scalp-spike'
 import { openDammPosition, resolveVerifiedDammV2PoolForToken } from '../damm-executor'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
+import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import {
   WSOL,
@@ -459,6 +460,8 @@ async function runScannerOnce(): Promise<ScannerResult> {
     console.log('[scanner] bot is stopped — skipping tick')
     return finish({ openBlockedReason: 'bot_stopped' })
   }
+
+  await refreshRpcProviderCooldown('helius')
 
   console.log('[scanner] step 1/4 — fetching Meteora pools')
   const laneConfig = {

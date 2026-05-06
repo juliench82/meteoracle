@@ -1,5 +1,6 @@
 import {
   Connection,
+  type ConnectionConfig,
   Keypair,
   PublicKey,
   TransactionInstruction,
@@ -9,6 +10,7 @@ import {
 } from '@solana/web3.js'
 import bs58 from 'bs58'
 import { sendAlert } from '@/bot/alerter'
+import { heliusRpcFetch, isHeliusRpcEndpoint } from '@/lib/rpc-rate-limit'
 
 // ---------------------------------------------------------------------------
 // Connection
@@ -78,7 +80,16 @@ export function warnIfPublicFallbackActive(): void {
 }
 
 export function createConnection(rpcUrl: string): Connection {
-  return new Connection(rpcUrl, 'confirmed')
+  if (!isHeliusRpcEndpoint(rpcUrl)) {
+    return new Connection(rpcUrl, 'confirmed')
+  }
+
+  const config: ConnectionConfig = {
+    commitment: 'confirmed',
+    disableRetryOnRateLimit: true,
+    fetch: heliusRpcFetch,
+  }
+  return new Connection(rpcUrl, config)
 }
 
 export function getConnection(): Connection {
@@ -132,7 +143,8 @@ export function getWalletPublicKey(): PublicKey {
 export async function getPriorityFee(accountKeys: string[]): Promise<number> {
   try {
     const connection = getConnection()
-    const res = await fetch(connection.rpcEndpoint, {
+    const rpcFetch = isHeliusRpcEndpoint(connection.rpcEndpoint) ? heliusRpcFetch : fetch
+    const res = await rpcFetch(connection.rpcEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

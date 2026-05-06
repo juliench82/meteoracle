@@ -24,11 +24,12 @@ import {
 } from '@meteora-ag/dynamic-bonding-curve-sdk'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
-import { getRpcEndpointCandidates } from '@/lib/solana'
+import { createConnection, getRpcEndpointCandidates } from '@/lib/solana'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import { isAuthError, redactSecrets, summarizeError } from '@/lib/logging'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 import { checkHolders } from '@/lib/helius'
+import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { openDammPosition } from './damm-executor'
 import { getRugscore } from './rugcheck-cache'
 
@@ -150,7 +151,7 @@ function getRpcUrl(): string {
 
 function getConnection(): Connection {
   if (!connection) {
-    connection = new Connection(getRpcUrl(), 'confirmed')
+    connection = createConnection(getRpcUrl())
   }
   return connection
 }
@@ -188,7 +189,7 @@ async function selectHealthyRpcUrl(): Promise<string | null> {
 
   for (const endpoint of endpoints) {
     try {
-      const probe = new Connection(endpoint, 'confirmed')
+      const probe = createConnection(endpoint)
       await probe.getVersion()
       return endpoint
     } catch (err) {
@@ -213,7 +214,7 @@ async function ensureRpcReady(context: string): Promise<boolean> {
   }
 
   selectedRpcUrl = healthyUrl
-  connection = new Connection(healthyUrl, 'confirmed')
+  connection = createConnection(healthyUrl)
   dbcClient = null
   cpAmm = null
   nextRpcRetryAt = 0
@@ -977,6 +978,8 @@ export async function runDbcGraduationWatcherTick(): Promise<{ checked: number; 
     return { checked: 0, tracked: 0, opened: 0, discovered: 0 }
   }
 
+  await refreshRpcProviderCooldown('helius')
+
   if (!await ensureRpcReady('tick')) {
     return { checked: 0, tracked: 0, opened: 0, discovered: 0 }
   }
@@ -1016,6 +1019,8 @@ export async function startDbcGraduationWatcher(): Promise<void> {
     `holders>=${DBC_MIN_HOLDER_COUNT} topHolder<=${DBC_MAX_TOP_HOLDER_PCT}% ` +
     `sol=${DAMM_MIGRATION_SOL_PER_POSITION}`,
   )
+
+  await refreshRpcProviderCooldown('helius')
 
   if (await ensureRpcReady('startup')) {
     subscribeToProgramChanges()

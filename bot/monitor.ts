@@ -17,6 +17,7 @@ import { mergeDbAndLiveLpPositions, type LiveMeteoraPosition } from '@/lib/meteo
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 import { syncAllMeteoraPositions, type MeteoraPositionSyncResult } from '@/lib/position-sync'
 import { getSupabaseRestHeaders, getSupabaseUrl } from '@/lib/supabase'
+import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import type { Strategy } from '@/lib/types'
 
 async function getDLMM() {
@@ -251,6 +252,8 @@ export async function monitorPositions(): Promise<{
     console.log('[monitor] bot is stopped — skipping tick')
     return { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
   }
+
+  await refreshRpcProviderCooldown('helius')
 
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
   if (!MONITOR_EXITS_ENABLED) {

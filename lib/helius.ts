@@ -1,5 +1,9 @@
-import axios from 'axios'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
+import {
+  getHeliusMaxAttempts,
+  heliusAxiosPost,
+  isRpcProviderCooldownError,
+} from '@/lib/rpc-rate-limit'
 
 const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1') // default 1 page = 1000 holders
 
@@ -18,18 +22,8 @@ export interface HolderData {
   reliable:     boolean
 }
 
-// ── Global serial gate ────────────────────────────────────────────────────────
-// All Helius calls (DAS + RPC) share ONE queue. This prevents the burst where
-// 3 concurrent calls per token × N queued tokens = instant 429 storm.
-// Min spacing: 400ms → max ~2.5 req/s, safely under the 3 req/s shared limit.
-const MIN_CALL_SPACING_MS = 400
-let _lastCallTs = 0
-
-async function acquireGlobalSlot(): Promise<void> {
-  const now = Date.now()
-  const wait = Math.max(0, _lastCallTs + MIN_CALL_SPACING_MS - now)
-  if (wait > 0) await new Promise(r => setTimeout(r, wait))
-  _lastCallTs = Date.now()
+type JsonRpcResponse<T> = {
+  result?: T
 }
 
 // ── Inflight dedup ────────────────────────────────────────────────────────────
@@ -129,10 +123,10 @@ async function fetchDasHolderCount(
   let total = 0
   for (let page = 1; page <= maxPages; page++) {
     let res
-    for (let attempt = 0; attempt < 3; attempt++) {
+    const attempts = getHeliusMaxAttempts()
+    for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        await acquireGlobalSlot()
-        res = await axios.post(
+        res = await heliusAxiosPost<JsonRpcResponse<{ token_accounts?: unknown[] }>>(
           heliusRpcUrl,
           {
             jsonrpc: '2.0', id: `das-${page}`, method: 'getTokenAccounts',
@@ -143,10 +137,13 @@ async function fetchDasHolderCount(
         break
       } catch (err: unknown) {
         const status = (err as { response?: { status?: number } })?.response?.status
+        if (isRpcProviderCooldownError(err)) {
+          console.warn(`[helius] getTokenAccounts page ${page} skipped during cooldown`)
+          return null
+        }
         if (status === 429) {
-          const delay = Math.min(500 * 2 ** attempt + Math.random() * 400, 8_000)
-          console.warn(`[helius] 429 on getTokenAccounts page ${page}, retry ${attempt + 1} in ${Math.round(delay)}ms`)
-          await new Promise(r => setTimeout(r, delay))
+          console.warn(`[helius] 429 on getTokenAccounts page ${page}; provider cooldown recorded`)
+          return null
         } else {
           throw err
         }
@@ -166,27 +163,30 @@ async function fetchDasHolderCount(
   return total > 0 ? total : null
 }
 
-async function rpcCall(heliusRpcUrl: string, method: string, params: unknown[], retries = 3): Promise<unknown> {
-  for (let i = 0; i < retries; i++) {
-    await acquireGlobalSlot()
+async function rpcCall(heliusRpcUrl: string, method: string, params: unknown[], attempts = getHeliusMaxAttempts()): Promise<unknown> {
+  for (let i = 1; i <= attempts; i++) {
     try {
-      const res = await axios.post(
+      const res = await heliusAxiosPost<JsonRpcResponse<unknown>>(
         heliusRpcUrl,
         { jsonrpc: '2.0', id: 1, method, params },
         { timeout: 8_000 },
+        method,
       )
       return res.data?.result
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status
+      if (isRpcProviderCooldownError(err)) {
+        console.warn(`[helius] ${method} skipped during cooldown`)
+        return null
+      }
       if (status === 429) {
-        const delay = Math.min(500 * 2 ** i + Math.random() * 400, 8_000)
-        console.warn(`[helius] 429 on ${method}, retry ${i + 1} in ${Math.round(delay)}ms`)
-        await new Promise(r => setTimeout(r, delay))
+        console.warn(`[helius] 429 on ${method}; provider cooldown recorded`)
+        return null
       } else {
         throw err
       }
     }
   }
-  console.warn(`[helius] ${method} exhausted ${retries} retries, returning null`)
+  console.warn(`[helius] ${method} exhausted ${attempts} attempt(s), returning null`)
   return null
 }

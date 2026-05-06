@@ -19,7 +19,7 @@ import {
   type LiveMeteoraPosition,
 } from './meteora-live'
 import { OPEN_LP_STATUSES } from './position-limits'
-import { getRpcEndpointCandidates } from './solana'
+import { createConnection, getRpcEndpointCandidates } from './solana'
 import { summarizeError } from './logging'
 import {
   getDammSolPriceFromPoolState,
@@ -257,10 +257,10 @@ async function fetchDammPositionState(
   poolAddress: string,
 ): Promise<DammPositionState | null> {
   try {
-    const { Connection, PublicKey } = await import('@solana/web3.js')
+    const { PublicKey } = await import('@solana/web3.js')
     const { CpAmm } = await import('@meteora-ag/cp-amm-sdk')
 
-    const connection = new Connection(getRpcUrl(), 'confirmed')
+    const connection = createConnection(getRpcUrl())
     const sdk = new CpAmm(connection)
 
     const poolState = await sdk.fetchPoolState(new PublicKey(poolAddress))

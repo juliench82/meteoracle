@@ -12,12 +12,20 @@
  *   offset 48: complete              bool
  */
 
-import axios from 'axios'
+import {
+  getHeliusMaxAttempts,
+  heliusAxiosPost,
+  isRpcProviderCooldownError,
+} from '@/lib/rpc-rate-limit'
 
 const PUMP_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
 
 const INITIAL_VIRTUAL_SOL_LAMPORTS    = 30_000_000_000
 const GRADUATION_VIRTUAL_SOL_LAMPORTS = 115_000_000_000
+
+type JsonRpcResponse<T> = {
+  result?: T
+}
 
 export interface BondingCurveData {
   mintAddress: string
@@ -49,7 +57,7 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 export async function fetchBondingCurve(
   mintAddress: string,
   heliusRpcUrl: string,
-  retries = 3,
+  retries = getHeliusMaxAttempts(),
   delayMs = 800
 ): Promise<BondingCurveData | null> {
   const bondingCurveAddress = await getBondingCurvePda(mintAddress)
@@ -59,7 +67,9 @@ export async function fetchBondingCurve(
       // Small delay to avoid 429 after checkHolders which also hits Helius
       if (attempt > 1) await sleep(delayMs * attempt)
 
-      const resp = await axios.post(
+      const resp = await heliusAxiosPost<JsonRpcResponse<{
+        value?: { data?: [string, string] | string[] }
+      }>>(
         heliusRpcUrl,
         {
           jsonrpc: '2.0',
@@ -67,7 +77,8 @@ export async function fetchBondingCurve(
           method: 'getAccountInfo',
           params: [bondingCurveAddress, { encoding: 'base64' }],
         },
-        { timeout: 8_000 }
+        { timeout: 8_000 },
+        'pumpfun-getAccountInfo',
       )
 
       const value = resp.data?.result?.value
@@ -102,10 +113,13 @@ export async function fetchBondingCurve(
       }
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status
-      if (status === 429 && attempt < retries) {
-        console.warn(`[pumpfun] 429 for ${mintAddress}, retry ${attempt}/${retries} in ${delayMs * (attempt + 1)}ms`)
-        await sleep(delayMs * (attempt + 1))
-        continue
+      if (isRpcProviderCooldownError(err)) {
+        console.warn(`[pumpfun] fetchBondingCurve skipped for ${mintAddress}: Helius cooldown active`)
+        return null
+      }
+      if (status === 429) {
+        console.warn(`[pumpfun] 429 for ${mintAddress}; provider cooldown recorded`)
+        return null
       }
       console.error(`[pumpfun] fetchBondingCurve failed for ${mintAddress} (attempt ${attempt}):`,
         err instanceof Error ? err.message : err)
