@@ -72,6 +72,10 @@ const ORPHAN_CHECK_EVERY_N = parseInt(process.env.ORPHAN_CHECK_EVERY_N ?? '1')
 let tickCount = 0
 const PNL_UNAVAILABLE_ALERT_TICKS = 3
 const PNL_UNAVAILABLE_FORCE_EXIT_TICKS = 10
+const LIVE_CACHE_EXIT_STRATEGY_ID = (process.env.MONITOR_LIVE_CACHE_EXIT_STRATEGY_ID ?? '').trim()
+const LIVE_CACHE_ALERT_INTERVAL_MS =
+  parseInt(process.env.MONITOR_LIVE_CACHE_ALERT_INTERVAL_MIN ?? '15', 10) * 60_000
+const _unmanagedLiveAlertAt = new Map<string, number>()
 
 type PositionStateRead = {
   ok: boolean
@@ -133,6 +137,53 @@ type DammPositionSnapshotRow = {
   opened_at: string
   metadata: PositionMetadata | null
   null_pnl_ticks: number | null
+}
+
+function isLiveCacheStrategy(strategyId: string | null | undefined): boolean {
+  return strategyId === 'meteora-live' || strategyId === 'damm-live'
+}
+
+function resolveLiveCacheExitStrategy(position: LpPositionRow): Strategy | null {
+  if (!LIVE_CACHE_EXIT_STRATEGY_ID) return null
+
+  if (position.position_type === 'damm-edge' || position.strategy_id === 'damm-live') {
+    return LIVE_CACHE_EXIT_STRATEGY_ID === 'damm-edge' ? DAMM_EDGE_EXIT_STRATEGY : null
+  }
+
+  return STRATEGIES.find(strategy => strategy.id === LIVE_CACHE_EXIT_STRATEGY_ID) ?? null
+}
+
+function shouldAlertUnmanagedLivePosition(positionId: string): boolean {
+  const lastAlertAt = _unmanagedLiveAlertAt.get(positionId) ?? 0
+  if (Date.now() - lastAlertAt < LIVE_CACHE_ALERT_INTERVAL_MS) return false
+  _unmanagedLiveAlertAt.set(positionId, Date.now())
+  return true
+}
+
+async function reportUnmanagedLivePosition(position: LpPositionRow, strategyId: string | null | undefined): Promise<void> {
+  const configuredStrategy = LIVE_CACHE_EXIT_STRATEGY_ID || 'unset'
+  const message =
+    `[monitor] ${position.symbol} is a live Meteora cache row without an exit policy ` +
+    `(strategy_id=${strategyId ?? 'unknown'}). Set MONITOR_LIVE_CACHE_EXIT_STRATEGY_ID to a real strategy id ` +
+    `or close/adopt position ${position.id} manually. Current setting: ${configuredStrategy}`
+
+  console.warn(message)
+  await sbInsert('bot_logs', {
+    level: 'warn',
+    event: 'unmanaged_live_meteora_position',
+    payload: {
+      positionId: position.id,
+      symbol: position.symbol,
+      strategyId: strategyId ?? null,
+      positionPubkey: position.position_pubkey,
+      poolAddress: position.pool_address,
+      configuredStrategy,
+    },
+  }).catch(() => {})
+  await sendAlert({
+    type: 'error',
+    message,
+  }).catch(() => {})
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -371,21 +422,33 @@ export async function monitorPositions(): Promise<{
       if (position.position_type === 'pre_grad' || isDammMigration) {
         continue
       }
-      if (strategyId === 'meteora-live' || strategyId === 'damm-live') {
-        console.log(`[monitor] ${position.symbol} is a Meteora-live cache row — dashboard only, skipping strategy exits`)
-        continue
+      let strategy: Strategy | null
+      if (isLiveCacheStrategy(strategyId)) {
+        strategy = resolveLiveCacheExitStrategy(position)
+        if (!strategy) {
+          if (shouldAlertUnmanagedLivePosition(position.id)) {
+            await reportUnmanagedLivePosition(position, strategyId)
+          } else {
+            console.log(`[monitor] ${position.symbol} remains unmanaged live cache row — alert throttled`)
+          }
+          continue
+        }
+        console.warn(
+          `[monitor] ${position.symbol} live cache row adopted for exit checks with ${strategy.id} ` +
+          `(strategy_id=${strategyId})`,
+        )
+      } else {
+        const isDammEdge = strategyId === 'damm-edge' || position.position_type === 'damm-edge'
+        strategy = isDammEdge
+          ? DAMM_EDGE_EXIT_STRATEGY
+          : STRATEGIES.find((s) => s.id === strategyId) ?? null
       }
 
-      stats.checked++
-
-      const isDammEdge = strategyId === 'damm-edge' || position.position_type === 'damm-edge'
-      const strategy = isDammEdge
-        ? DAMM_EDGE_EXIT_STRATEGY
-        : STRATEGIES.find((s) => s.id === strategyId)
       if (!strategy) {
         console.warn(`[monitor] no strategy found for position ${position.id} (strategy_id=${strategyId})`)
         continue
       }
+      stats.checked++
       await checkPosition(position, strategy, stats)
     } catch (err) {
       console.error(`[monitor] error checking position ${position.id}:`, err)
