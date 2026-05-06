@@ -32,7 +32,8 @@ function heliusRpcFromApiKey(): string | null {
 }
 
 export function getHeliusRpcEndpoint(): string | null {
-  return heliusRpcFromApiKey() ?? cleanEnv(process.env.HELIUS_RPC_URL)
+  return heliusRpcFromApiKey() ??
+    (process.env.ENABLE_HELIUS_RPC_URL_ALIAS === 'true' ? cleanEnv(process.env.HELIUS_RPC_URL) : null)
 }
 
 function splitRpcList(value: string | undefined): string[] {
@@ -43,6 +44,7 @@ function splitRpcList(value: string | undefined): string[] {
 }
 
 export function getRpcEndpointCandidates(options: { includePublicFallback?: boolean } = {}): string[] {
+  const useRpcUrlAliases = process.env.ENABLE_RPC_URL_FALLBACKS === 'true'
   const usePublicFallback =
     options.includePublicFallback === true &&
     process.env.ENABLE_PUBLIC_RPC_FALLBACK === 'true' &&
@@ -50,8 +52,12 @@ export function getRpcEndpointCandidates(options: { includePublicFallback?: bool
 
   const endpoints = [
     getHeliusRpcEndpoint(),
-    cleanEnv(process.env.RPC_URL),
-    ...splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS),
+    ...(useRpcUrlAliases
+      ? [
+          cleanEnv(process.env.RPC_URL),
+          ...splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS),
+        ]
+      : []),
     ...(usePublicFallback
       ? ['https://api.mainnet-beta.solana.com']
       : []),
@@ -72,9 +78,14 @@ export function warnIfPublicFallbackActive(): void {
   if (process.env.ENABLE_PUBLIC_RPC_FALLBACK !== 'true') return
   if (process.env.DISABLE_PUBLIC_RPC_FALLBACK === 'true') return
   const hasDedicated =
-    Boolean(cleanEnv(process.env.RPC_URL)) ||
     Boolean(getHeliusRpcEndpoint()) ||
-    splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS).length > 0
+    (
+      process.env.ENABLE_RPC_URL_FALLBACKS === 'true' &&
+      (
+        Boolean(cleanEnv(process.env.RPC_URL)) ||
+        splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS).length > 0
+      )
+    )
   if (!hasDedicated) {
     const msg =
       '[solana] CRITICAL: no dedicated RPC endpoint configured — falling back to ' +
