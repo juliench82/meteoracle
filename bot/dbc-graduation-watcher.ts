@@ -1,4 +1,3 @@
-import 'dotenv/config'
 import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true, quiet: true })

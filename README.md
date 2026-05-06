@@ -172,8 +172,7 @@ Required variables are documented in `.env.local.example`. No secrets are commit
 
 ```bash
 npm install -g pm2
-set -a && source .env.local && set +a
-pm2 start ecosystem.config.cjs
+pm2 start ecosystem.config.cjs --update-env
 pm2 save && pm2 startup
 ```
 
