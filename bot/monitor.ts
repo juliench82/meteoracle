@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
-dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
+dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: true, quiet: true })
 
 import { PublicKey } from '@solana/web3.js'
 import { getConnection, getWallet, warnIfPublicFallbackActive } from '@/lib/solana'
@@ -792,6 +792,7 @@ async function main() {
   // warnIfPublicFallbackActive() logs to console; we additionally fire a Telegram
   // alert so it surfaces in the operator's chat rather than being buried in logs.
   if (
+    process.env.ENABLE_PUBLIC_RPC_FALLBACK === 'true' &&
     process.env.DISABLE_PUBLIC_RPC_FALLBACK !== 'true' &&
     !process.env.RPC_URL?.trim() &&
     !process.env.HELIUS_API_KEY?.trim() &&
@@ -804,7 +805,7 @@ async function main() {
       reason: 'no_dedicated_rpc_configured',
       message:
         'No dedicated RPC endpoint is set. Bot is using api.mainnet-beta.solana.com — ' +
-        'set RPC_URL or HELIUS_API_KEY and add DISABLE_PUBLIC_RPC_FALLBACK=true.',
+        'set RPC_URL or HELIUS_API_KEY, or remove ENABLE_PUBLIC_RPC_FALLBACK=true.',
     }).catch(() => {})
   }
 

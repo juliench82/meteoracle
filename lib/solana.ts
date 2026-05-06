@@ -43,11 +43,16 @@ function splitRpcList(value: string | undefined): string[] {
 }
 
 export function getRpcEndpointCandidates(options: { includePublicFallback?: boolean } = {}): string[] {
+  const usePublicFallback =
+    options.includePublicFallback === true &&
+    process.env.ENABLE_PUBLIC_RPC_FALLBACK === 'true' &&
+    process.env.DISABLE_PUBLIC_RPC_FALLBACK !== 'true'
+
   const endpoints = [
-    cleanEnv(process.env.RPC_URL),
     getHeliusRpcEndpoint(),
+    cleanEnv(process.env.RPC_URL),
     ...splitRpcList(process.env.SOLANA_RPC_FALLBACK_URLS),
-    ...(options.includePublicFallback && process.env.DISABLE_PUBLIC_RPC_FALLBACK !== 'true'
+    ...(usePublicFallback
       ? ['https://api.mainnet-beta.solana.com']
       : []),
   ].filter((endpoint): endpoint is string => Boolean(endpoint))
@@ -57,13 +62,14 @@ export function getRpcEndpointCandidates(options: { includePublicFallback?: bool
 
 /**
  * Warn loudly at startup if the public Solana RPC fallback is active.
- * In production DISABLE_PUBLIC_RPC_FALLBACK=true should be set.
+ * In production public fallback is opt-in via ENABLE_PUBLIC_RPC_FALLBACK=true.
  * This fires once per process so it doesn't spam logs.
  */
 let _publicFallbackWarned = false
 export function warnIfPublicFallbackActive(): void {
   if (_publicFallbackWarned) return
   _publicFallbackWarned = true
+  if (process.env.ENABLE_PUBLIC_RPC_FALLBACK !== 'true') return
   if (process.env.DISABLE_PUBLIC_RPC_FALLBACK === 'true') return
   const hasDedicated =
     Boolean(cleanEnv(process.env.RPC_URL)) ||
@@ -72,20 +78,25 @@ export function warnIfPublicFallbackActive(): void {
   if (!hasDedicated) {
     const msg =
       '[solana] CRITICAL: no dedicated RPC endpoint configured — falling back to ' +
-      'api.mainnet-beta.solana.com. Set RPC_URL or HELIUS_API_KEY and add ' +
-      'DISABLE_PUBLIC_RPC_FALLBACK=true to prevent rate-limited stalls in production.'
+      'api.mainnet-beta.solana.com. Set RPC_URL or HELIUS_API_KEY, or remove ' +
+      'ENABLE_PUBLIC_RPC_FALLBACK=true to prevent rate-limited stalls in production.'
     console.error(msg)
     sendAlert({ type: 'error', message: msg }).catch(() => {})
   }
 }
 
 export function createConnection(rpcUrl: string): Connection {
+  const baseConfig: ConnectionConfig = {
+    commitment: 'confirmed',
+    disableRetryOnRateLimit: true,
+  }
+
   if (!isHeliusRpcEndpoint(rpcUrl)) {
-    return new Connection(rpcUrl, 'confirmed')
+    return new Connection(rpcUrl, baseConfig)
   }
 
   const config: ConnectionConfig = {
-    commitment: 'confirmed',
+    ...baseConfig,
     disableRetryOnRateLimit: true,
     fetch: heliusRpcFetch,
   }
