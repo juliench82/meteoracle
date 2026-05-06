@@ -17,6 +17,7 @@ import {
 } from '@solana/spl-token'
 import BN from 'bn.js'
 import type { StrategyType } from '@meteora-ag/dlmm'
+import type { ZapInDlmmResponse } from '@meteora-ag/zap-sdk'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
@@ -36,7 +37,7 @@ async function getStrategyType() {
 }
 async function getZap() {
   const mod = await import('@meteora-ag/zap-sdk')
-  return new (mod as any).Zap(getConnection())
+  return new mod.Zap(getConnection())
 }
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
@@ -60,6 +61,10 @@ const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 const COMPUTE_BUDGET_SET_UNIT_LIMIT = 2
 const COMPUTE_BUDGET_SET_UNIT_PRICE = 3
 const ADD_LIQUIDITY_FALLBACK_CU = 1_400_000
+const DLMM_ZAP_SWAP_SLIPPAGE_BPS = 100
+const DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE = 3
+const DLMM_ZAP_MAX_ACCOUNTS = 48
+const DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE = 2
 
 function getClaimableFeesUsd(position: Record<string, any>): number | null {
   const value = position.claimable_fees_usd ?? position.metadata?.claimable_fees_usd
@@ -77,16 +82,6 @@ const MAX_BINS_DEFAULT = 150
 
 interface OpenPositionOptions {
   rebalanceFromPositionId?: string
-}
-
-interface LiquidityStrategyParams {
-  minBinId: number
-  maxBinId: number
-  strategyType: StrategyType
-}
-
-function stripComputeBudgetIxs(ixs: TransactionInstruction[]): TransactionInstruction[] {
-  return ixs.filter(ix => ix.programId.toBase58() !== COMPUTE_BUDGET_PROGRAM_ID)
 }
 
 function computeBudgetKind(ix: TransactionInstruction): number | null {
@@ -109,8 +104,13 @@ function addPriorityFeeAndPreserveComputeLimit(
   ]
 }
 
-function toIxArray(ix: TransactionInstruction | TransactionInstruction[]): TransactionInstruction[] {
-  return Array.isArray(ix) ? ix : [ix]
+function applyPriorityFee(
+  tx: Transaction,
+  priorityFee: number,
+  fallbackUnits = ADD_LIQUIDITY_FALLBACK_CU,
+): Transaction {
+  tx.instructions = addPriorityFeeAndPreserveComputeLimit(tx.instructions, priorityFee, fallbackUnits)
+  return tx
 }
 
 async function simulateAndCheck(tx: Transaction, label: string): Promise<boolean> {
@@ -269,40 +269,6 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
     if (isFinite(price) && price > 0) return price
   } catch {}
   return parseFloat(activeBin.pricePerToken)
-}
-
-async function waitForPositionAccountReady(
-  dlmmPool: Awaited<ReturnType<Awaited<ReturnType<typeof getDLMM>>['create']>>,
-  positionPubkey: PublicKey,
-  walletPubkey: PublicKey,
-  label: string,
-  maxAttempts = 15,
-  intervalMs = 2000
-): Promise<void> {
-  const connection = getConnection()
-  const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo')
-
-  for (let i = 1; i <= maxAttempts; i++) {
-    const info = await connection.getAccountInfo(positionPubkey, 'confirmed')
-    if (!info || !info.owner.equals(DLMM_PROGRAM_ID)) {
-      console.log(`${label} [wait] account not yet owned by DLMM… attempt ${i}/${maxAttempts}`)
-      await new Promise(r => setTimeout(r, intervalMs))
-      continue
-    }
-    try {
-      const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(walletPubkey)
-      const found = userPositions.find(p => p.publicKey.toBase58() === positionPubkey.toBase58())
-      if (found?.positionData?.lowerBinId !== undefined) {
-        console.log(`${label} [wait] position ready on-chain (attempt ${i}/${maxAttempts})`)
-        await new Promise(r => setTimeout(r, 2500))
-        return
-      }
-    } catch { /* transient */ }
-    console.log(`${label} [wait] owned but DLMM state not ready… attempt ${i}/${maxAttempts}`)
-    await new Promise(r => setTimeout(r, intervalMs))
-  }
-  console.warn(`${label} [wait] not confirmed after ${maxAttempts} attempts — adding 5s safety delay`)
-  await new Promise(r => setTimeout(r, 5000))
 }
 
 /**
@@ -684,8 +650,9 @@ export async function openPosition(
       return null
     }
 
+    const poolPubkey = new PublicKey(metrics.poolAddress)
     const DLMM = await getDLMM()
-    const dlmmPool  = await DLMM.create(connection, new PublicKey(metrics.poolAddress))
+    const dlmmPool  = await DLMM.create(connection, poolPubkey)
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
 
@@ -736,135 +703,126 @@ export async function openPosition(
     }
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
 
-    const lamports = Math.floor(solAmount * 1e9)
-    const solBias  = strategy.position.solBias ?? 0.5
-    const totalX   = new BN(Math.floor(lamports * (1 - solBias)))
-    const totalY   = new BN(Math.floor(lamports * solBias))
-    console.log(`${label} deposit split: X=${totalX.toString()} Y=${totalY.toString()} lamports (solBias=${solBias})`)
+    const solIsTokenX = mintX.toBase58() === NATIVE_MINT_STR
+    const solIsTokenY = mintY.toBase58() === NATIVE_MINT_STR
+    if (!solIsTokenX && !solIsTokenY) {
+      console.warn(`${label} pool has no SOL side — rejecting one-sided SOL zap-in`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn',
+        event: 'open_position_skipped_non_sol_pair',
+        payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },
+      })
+      return null
+    }
 
     const StrategyTypeEnum = await getStrategyType()
     const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
-    const liqStrategyParams: LiquidityStrategyParams = { minBinId, maxBinId, strategyType }
 
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    const keypairFactory = async (count: number): Promise<Keypair[]> =>
-      Array.from({ length: count }, () => new Keypair())
+    const amountIn = new BN(Math.floor(solAmount * 1e9))
+    const minDeltaId = minBinId - activeBinId
+    const maxDeltaId = maxBinId - activeBinId
+    const favorXInActiveId = solIsTokenX
+    const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk')
+    const directSwapEstimate = await estimateDlmmDirectSwap({
+      amountIn,
+      inputTokenMint: NATIVE_MINT,
+      lbPair: poolPubkey,
+      connection,
+      swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
+      minDeltaId,
+      maxDeltaId,
+      strategy: strategyType,
+    })
 
-    const response = await dlmmPool.initializeMultiplePositionAndAddLiquidityByStrategy(
-      keypairFactory,
-      totalX,
-      totalY,
-      liqStrategyParams,
-      wallet.publicKey,
-      wallet.publicKey,
-      1
+    console.log(
+      `${label} DLMM zap-in estimate: input=${amountIn.toString()} lamports ` +
+      `solSide=${solIsTokenX ? 'X' : 'Y'} swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
+      `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
     )
 
-    let lastSig = ''
-    let posIndex = 0
-    const total = response.instructionsByPositions.length
-    console.log(`${label} opening ${total} position segment(s)`)
+    const zap = await getZap()
+    const zapParams = await zap.getZapInDlmmDirectParams({
+      user: wallet.publicKey,
+      lbPair: poolPubkey,
+      inputTokenMint: NATIVE_MINT,
+      amountIn,
+      maxActiveBinSlippage: DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE,
+      minDeltaId,
+      maxDeltaId,
+      strategy: strategyType,
+      favorXInActiveId,
+      maxAccounts: DLMM_ZAP_MAX_ACCOUNTS,
+      swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
+      maxTransferAmountExtendPercentage: DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
+      directSwapEstimate: directSwapEstimate.result,
+    })
+    const positionKeypair = new Keypair()
+    const zapResponse: ZapInDlmmResponse = await zap.buildZapInDlmmTransaction({
+      ...zapParams,
+      position: positionKeypair.publicKey,
+    })
 
-    let positionKeypairForQuery: Keypair | null = null
+    const sendZapTx = async (
+      tx: Transaction | undefined,
+      signers: import('@solana/web3.js').Signer[],
+      stage: string,
+    ): Promise<string | null> => {
+      if (!tx || tx.instructions.length === 0) return null
+      const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), signers, label)
+      console.log(`${label} zap-in ${stage} confirmed ✔ sig: ${sig}`)
+      return sig
+    }
 
-    for (const { positionKeypair, initializePositionIx, addLiquidityIxs } of response.instructionsByPositions) {
-      if (!positionKeypairForQuery) positionKeypairForQuery = positionKeypair
-      posIndex++
-
-      console.log(`${label} segment ${posIndex}/${total}`, {
-        mint: metrics.address, strategy: strategy.id,
-        binRange: `${minBinId} → ${maxBinId} (${binRange} bins)`, binStep,
-      })
-
-      const rawInitIxs = toIxArray(initializePositionIx as TransactionInstruction | TransactionInstruction[])
-      const initIxs    = stripComputeBudgetIxs(rawInitIxs)
-      const initTx     = new Transaction().add(
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 100_000 }),
-        ...initIxs
-      )
-      lastSig = await sendLegacyTx(initTx, [wallet, positionKeypair], label)
-      const initSig = lastSig
-      console.log(`${label} seg ${posIndex}/${total} init confirmed ✔ sig: ${lastSig}`)
-
-      await waitForPositionAccountReady(dlmmPool, positionKeypair.publicKey, wallet.publicKey, label)
-
-      const liquiditySigs: string[] = []
-      let failedChunk = 0
-      let totalChunks = 0
+    let cleanupSent = false
+    const sendCleanup = async (stage: string): Promise<void> => {
+      if (cleanupSent) return
+      cleanupSent = true
       try {
-        const chunks = (addLiquidityIxs as TransactionInstruction[][]).length > 0
-          ? addLiquidityIxs as TransactionInstruction[][]
-          : [[...(addLiquidityIxs as unknown as TransactionInstruction[])]]
-        totalChunks = chunks.length
-
-        for (let ci = 0; ci < chunks.length; ci++) {
-          failedChunk = ci + 1
-          const liqIxs = addPriorityFeeAndPreserveComputeLimit(
-            chunks[ci],
-            priorityFee,
-            ADD_LIQUIDITY_FALLBACK_CU,
-          )
-          const liqTx  = new Transaction().add(
-            ...liqIxs
-          )
-          lastSig = await sendLegacyTx(liqTx, [wallet], label)
-          liquiditySigs.push(lastSig)
-          console.log(`${label} seg ${posIndex}/${total} liq chunk ${ci + 1}/${chunks.length} confirmed ✔ sig: ${lastSig}`)
-        }
-      } catch (liqErr: unknown) {
-        const liqMsg = liqErr instanceof Error ? liqErr.message : String(liqErr)
-        console.error(`${label} seg ${posIndex}/${total} addLiquidity failed — persisting as pending_retry`, { error: liqMsg })
-        await supabase.from('bot_logs').insert({
-          level: 'error', event: 'add_liquidity_failed',
-          payload: {
-            symbol: metrics.symbol, strategy: strategy.id,
-            positionPubkey: positionKeypair.publicKey.toBase58(),
-            initSig,
-            lastSuccessfulSig: lastSig,
-            liquiditySigs,
-            failedSegment: posIndex,
-            totalSegments: total,
-            failedChunk,
-            totalChunks,
-            error: liqMsg,
-          },
-        })
-        return await persistPosition(
-          metrics, strategy, initSig,
-          metrics.priceUsd ?? 0, entryPriceSol, solAmount,
-          positionKeypair.publicKey.toBase58(), 0, DRY_RUN, true
-        )
+        await sendZapTx(zapResponse.cleanUpTransaction, [wallet], stage)
+      } catch (cleanupErr) {
+        console.warn(`${label} zap-in cleanup failed after ${stage}:`, cleanupErr)
       }
+    }
+
+    let openSig = ''
+    try {
+      await sendZapTx(zapResponse.setupTransaction, [wallet], 'setup')
+      for (let i = 0; i < zapResponse.swapTransactions.length; i++) {
+        await sendZapTx(zapResponse.swapTransactions[i], [wallet], `swap ${i + 1}/${zapResponse.swapTransactions.length}`)
+      }
+      await sendZapTx(zapResponse.ledgerTransaction, [wallet], 'ledger')
+      openSig = await sendZapTx(zapResponse.zapInTransaction, [wallet, positionKeypair], 'position') ?? ''
+      await sendCleanup('cleanup')
+    } catch (zapErr) {
+      await sendCleanup('failed-open')
+      throw zapErr
     }
 
     let tokenAmountDeposited = 0
-    if (positionKeypairForQuery) {
-      try {
-        const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
-        const userPos = userPositions.find(
-          p => p.publicKey.toBase58() === positionKeypairForQuery!.publicKey.toBase58()
-        )
-        if (userPos) {
-          const rawAmount = userPos.positionData.totalXAmount
-          tokenAmountDeposited = typeof rawAmount === 'object'
-            ? (rawAmount as BN).toNumber() / 1e6
-            : Number(rawAmount) / 1e6
-          console.log(`${label} token amount deposited: ${tokenAmountDeposited.toFixed(4)}`)
-        }
-      } catch (err) {
-        console.warn(`${label} could not fetch token amount:`, err)
+    try {
+      const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
+      const userPos = userPositions.find(
+        p => p.publicKey.toBase58() === positionKeypair.publicKey.toBase58()
+      )
+      if (userPos) {
+        const rawAmount = userPos.positionData.totalXAmount
+        tokenAmountDeposited = typeof rawAmount === 'object'
+          ? (rawAmount as BN).toNumber() / 1e6
+          : Number(rawAmount) / 1e6
+        console.log(`${label} token amount deposited: ${tokenAmountDeposited.toFixed(4)}`)
       }
+    } catch (err) {
+      console.warn(`${label} could not fetch token amount:`, err)
     }
 
     console.log(`${label} position opened ✔`)
-    const firstPubKey = response.instructionsByPositions[0]?.positionKeypair?.publicKey?.toBase58()
     return await persistPosition(
-      metrics, strategy, lastSig,
+      metrics, strategy, openSig,
       metrics.priceUsd ?? 0, entryPriceSol, solAmount,
-      firstPubKey, tokenAmountDeposited, DRY_RUN
+      positionKeypair.publicKey.toBase58(), tokenAmountDeposited, DRY_RUN
     )
 
   } catch (err) {
