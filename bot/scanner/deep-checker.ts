@@ -492,6 +492,7 @@ async function runScannerOnce(): Promise<ScannerResult> {
   const {
     pools,
     earlyAgePools,
+    momentumSpikePools,
     momentumRegainPools,
     freshPools,
     momentumPools,
@@ -503,10 +504,14 @@ async function runScannerOnce(): Promise<ScannerResult> {
     momentumRejectedSpike,
   } = classifyPoolsIntoLanes(fetchedPools, laneConfig)
 
-  console.log(`[scanner] step 1/4 — got ${pools.length} pools`)
+  console.log(
+    `[scanner] step 1/4 — got ${fetchedPools.length} JS-filtered pools; ` +
+    `${pools.length} lane-eligible`,
+  )
   console.log(
     `[scanner] early age gate — kept ${earlyAgePools.length}/${fetchedPools.length} ` +
-    `<=${SCANNER_EARLY_MAX_AGE_MINUTES}min + ${momentumRegainPools.length} momentum-regain exception(s)`,
+    `<=${SCANNER_EARLY_MAX_AGE_MINUTES}min + ${momentumSpikePools.length} momentum-spike ` +
+    `+ ${momentumRegainPools.length} momentum-regain exception(s)`,
   )
 
   console.log(
@@ -523,7 +528,7 @@ async function runScannerOnce(): Promise<ScannerResult> {
 
   if (allSurvivors.length === 0) {
     console.log('[scanner] done — no lane survivors')
-    return finish({ scanned: pools.length, survivors: 0 })
+    return finish({ scanned: fetchedPools.length, survivors: 0 })
   }
 
   const supabase = createServerClient()
@@ -1015,7 +1020,7 @@ async function runScannerOnce(): Promise<ScannerResult> {
     `open-skipped: ${openSkippedCount}${openBlockedReason ? ` (${openBlockedReason})` : ''}`,
   )
   return finish({
-    scanned: pools.length,
+    scanned: fetchedPools.length,
     survivors: allSurvivors.length,
     deepChecked: survivors.length,
     candidates: candidateCount,

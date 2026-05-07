@@ -9,7 +9,7 @@ function envNumber(name: string, fallback: number): number {
 
 export const SCALP_SPIKE_MOMENTUM_REGAIN = {
   minAgeHours:                 envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_AGE_HOURS', 2),
-  maxAgeHours:                 envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MAX_AGE_HOURS', 48),
+  maxAgeHours:                 envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MAX_AGE_HOURS', envNumber('SCALP_SPIKE_MAX_AGE_HOURS', 999_999)),
   minVolume1hUsd:              envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_VOLUME_1H_USD', 15_000),
   minVolume1hTo24hAvgRatio:    envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_VOL_1H_TO_24H_AVG', 3),
   minFeeTvl1hPct:              envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_FEE_TVL_1H_PCT', 1),

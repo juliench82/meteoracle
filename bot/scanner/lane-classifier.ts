@@ -36,6 +36,7 @@ export type LaneClassifierConfig = {
 export type LaneClassificationResult = {
   pools: MeteoraPool[]
   earlyAgePools: MeteoraPool[]
+  momentumSpikePools: MeteoraPool[]
   momentumRegainPools: MeteoraPool[]
   freshPools: MeteoraPool[]
   momentumPools: MeteoraPool[]
@@ -161,9 +162,10 @@ export function classifyPoolsIntoLanes(
   config: LaneClassifierConfig,
 ): LaneClassificationResult {
   const earlyAgePools = fetchedPools.filter(pool => getPoolAgeMinutes(pool) <= config.scannerEarlyMaxAgeMinutes)
+  const momentumSpikePools = fetchedPools.filter(pool => passesMomentumSpike(pool, config))
   const momentumRegainPools = fetchedPools.filter(passesMomentumRegain)
   const pools = Array.from(
-    new Map([...earlyAgePools, ...momentumRegainPools].map(pool => [pool.address, pool])).values(),
+    new Map([...earlyAgePools, ...momentumSpikePools, ...momentumRegainPools].map(pool => [pool.address, pool])).values(),
   )
 
   const freshPools = pools.filter(pool => getPoolAgeMinutes(pool) <= config.freshMaxAgeMinutes)
@@ -217,6 +219,7 @@ export function classifyPoolsIntoLanes(
   return {
     pools,
     earlyAgePools,
+    momentumSpikePools,
     momentumRegainPools,
     freshPools,
     momentumPools,
