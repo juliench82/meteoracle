@@ -24,12 +24,12 @@ export interface MeteoraPool {
   pool_created_at?: number | string
   tvl: number | string
   current_price: number
-  volume?: { '24h'?: number | string; '1h'?: number | string; '5m'?: number | string }
+  volume?: { '24h'?: number | string; '1h'?: number | string; '30m'?: number | string; '5m'?: number | string }
   volume_24h?: number | string
   volume_1h?: number | string
   volume_5m?: number | string
-  fees?: { '24h'?: number | string; '1h'?: number | string; '5m'?: number | string }
-  fee_tvl_ratio?: { '24h'?: number | string; '1h'?: number | string; '5m'?: number | string }
+  fees?: { '24h'?: number | string; '1h'?: number | string; '30m'?: number | string; '5m'?: number | string }
+  fee_tvl_ratio?: { '24h'?: number | string; '1h'?: number | string; '30m'?: number | string; '5m'?: number | string }
   fee_tvl_ratio_24h?: number | string
   fee_tvl_ratio_1h?: number | string
   fee_tvl_ratio_5m?: number | string
@@ -167,7 +167,17 @@ export function getPoolAgeMinutes(pool: MeteoraPool): number {
 
 export function getPoolVolume(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
   const flatKey = `volume_${window}` as keyof MeteoraPool
-  return asNumber(pool.volume?.[window] ?? pool[flatKey], 0)
+  const direct = asNumber(pool.volume?.[window] ?? pool[flatKey], Number.NaN)
+  if (Number.isFinite(direct)) return direct
+
+  // Meteora currently returns 30m buckets on /pools but may omit 5m.
+  // Use the 30m average as a conservative 5m proxy so momentum scans keep working.
+  if (window === '5m') {
+    const thirtyMinuteVolume = asNumber(pool.volume?.['30m'], Number.NaN)
+    if (Number.isFinite(thirtyMinuteVolume)) return thirtyMinuteVolume / 6
+  }
+
+  return 0
 }
 
 export function getPoolTvl(pool: MeteoraPool): number {
@@ -176,7 +186,15 @@ export function getPoolTvl(pool: MeteoraPool): number {
 
 export function getFeeTvlRatio(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
   const flatKey = `fee_tvl_ratio_${window}` as keyof MeteoraPool
-  return asNumber(pool.fee_tvl_ratio?.[window] ?? pool[flatKey], 0)
+  const direct = asNumber(pool.fee_tvl_ratio?.[window] ?? pool[flatKey], Number.NaN)
+  if (Number.isFinite(direct)) return direct
+
+  if (window === '5m') {
+    const thirtyMinuteRatio = asNumber(pool.fee_tvl_ratio?.['30m'], Number.NaN)
+    if (Number.isFinite(thirtyMinuteRatio)) return thirtyMinuteRatio / 6
+  }
+
+  return 0
 }
 
 export function getFeeTvlPct(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
@@ -234,19 +252,13 @@ async function fetchMeteoraPoolsPage(
   sortBy: 'pool_created_at' | 'volume_5m' | 'volume_1h',
   config: PoolFetchConfig,
 ): Promise<MeteoraPool[]> {
+  const filters = [`tvl>=${config.minTvlUsd}`, 'is_blacklisted=false']
   const params: Record<string, string | number> = {
     page: 1,
     page_size: config.limit,
     limit: config.limit,
-    sort: `${sortBy}:desc`,
     sort_by: `${sortBy}:desc`,
-    'tvl>': config.minTvlUsd,
-    'tvl[gte]': config.minTvlUsd,
-  }
-  if (config.minFeeTvlRatio1h > 0) {
-    params['fee_tvl_ratio_1h>'] = config.minFeeTvlRatio1h
-    params['fee_tvl_ratio_1h[gte]'] = config.minFeeTvlRatio1h
-    params.min_fee_tvl_ratio_1h = config.minFeeTvlRatio1h
+    filter_by: filters.join(' && '),
   }
 
   const res = await axios.get<unknown>(`${baseUrl}/pools`, {
