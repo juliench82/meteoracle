@@ -46,7 +46,8 @@ export async function swapTokenToSol(
   tokenMint: string,
   label: string
 ): Promise<string | null> {
-  if (process.env.BOT_DRY_RUN !== 'false') {
+  // Skip only when dry-run is explicitly enabled — mirrors executor.ts guard.
+  if (process.env.BOT_DRY_RUN === 'true') {
     console.log(`${label} [swap] DRY RUN — skipping Jupiter swap`)
     return null
   }
@@ -100,4 +101,65 @@ export async function swapTokenToSol(
 
   console.log(`${label} [swap] token → SOL confirmed ✔ sig: ${sig} | outAmount: ${quote.outAmount}`)
   return sig
+}
+
+/**
+ * Buys `usdAmount` worth of `tokenMint` using SOL via Jupiter.
+ * Returns { sig, solSpent, tokenAmountOut } or throws.
+ */
+export async function buyTokenWithSol(
+  tokenMint: string,
+  solPriceUsd: number,
+  usdAmount: number,
+  label: string,
+): Promise<{ sig: string; solSpent: number; tokenAmountOut: bigint }> {
+  if (process.env.BOT_DRY_RUN === 'true') {
+    console.log(`${label} [swap] DRY RUN — skipping Jupiter buy`)
+    return { sig: 'DRY_RUN', solSpent: 0, tokenAmountOut: 0n }
+  }
+
+  if (tokenMint === NATIVE_MINT) throw new Error('buyTokenWithSol: cannot buy native SOL')
+  if (solPriceUsd <= 0) throw new Error('buyTokenWithSol: solPriceUsd must be > 0')
+
+  const solAmount = usdAmount / solPriceUsd
+  const lamports = BigInt(Math.floor(solAmount * 1e9))
+  if (lamports === 0n) throw new Error('buyTokenWithSol: lamport amount rounds to zero')
+
+  const connection = getConnection()
+  const wallet = getWallet()
+
+  console.log(`${label} [swap] buying ~$${usdAmount} (${solAmount.toFixed(5)} SOL) of ${tokenMint.slice(0, 8)}…`)
+
+  const quoteUrl =
+    `${JUPITER_QUOTE_API}/quote?inputMint=${NATIVE_MINT}&outputMint=${tokenMint}` +
+    `&amount=${lamports.toString()}&slippageBps=${slippageBps()}&onlyDirectRoutes=false`
+  const quoteRes = await fetchWithRetry(quoteUrl, {})
+  if (!quoteRes.ok) throw new Error(`Jupiter buy quote failed: ${quoteRes.status} ${await quoteRes.text()}`)
+  const quote = await quoteRes.json()
+
+  const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      quoteResponse: quote,
+      userPublicKey: wallet.publicKey.toBase58(),
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: 'auto',
+    }),
+  })
+  if (!swapRes.ok) throw new Error(`Jupiter buy swap tx failed: ${swapRes.status} ${await swapRes.text()}`)
+  const { swapTransaction } = await swapRes.json()
+
+  const txBuf = Buffer.from(swapTransaction, 'base64')
+  const tx = VersionedTransaction.deserialize(txBuf)
+  tx.sign([wallet])
+
+  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
+  await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
+
+  const tokenAmountOut = BigInt(quote.outAmount ?? '0')
+  console.log(`${label} [swap] buy confirmed ✔ sig: ${sig} | outAmount: ${tokenAmountOut.toString()}`)
+  return { sig, solSpent: Number(lamports) / 1e9, tokenAmountOut }
 }
