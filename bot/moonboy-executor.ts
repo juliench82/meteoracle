@@ -186,12 +186,12 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
     )
 
     // Update current price in DB (fire-and-forget, non-fatal)
-    supabase
-      .from('moonboy_positions')
-      .update({ current_price_usd: currentPriceUsd, pnl_pct: Math.round(pnlPct * 100) / 100 })
-      .eq('id', pos.id)
-      .then(() => {})
-      .catch(() => {})
+    void Promise.resolve(
+      supabase
+        .from('moonboy_positions')
+        .update({ current_price_usd: currentPriceUsd, pnl_pct: Math.round(pnlPct * 100) / 100 })
+        .eq('id', pos.id),
+    ).catch(() => {})
 
     let closeReason: string | null = null
     if (pnlPct >= moonboyStrategy.exits.takeProfitPct) {
