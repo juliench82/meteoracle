@@ -750,8 +750,7 @@ async function checkPosition(
   if (!closeReason) return
 
   console.log(`${label} EXIT triggered → ${closeReason}`)
-  const closeResult = await closePosition(position.id, closeReason)
-  const closed = closeResult.success && !closeResult.skipped
+  const closed = await closePosition(position.id, closeReason)
   if (closed) {
     stats.closed++
     await sendAlert({
@@ -764,7 +763,7 @@ async function checkPosition(
       ageHours: Math.round(ageHours * 10) / 10,
     })
   } else {
-    console.warn(`${label} close skipped or failed: ${closeResult.error ?? 'unknown error'}`)
+    console.warn(`${label} close skipped or failed`)
   }
 }
 
@@ -834,24 +833,9 @@ async function fetchDammPositionState(positionId: string): Promise<{
         )
       })()
 
-  const ageHours = (Date.now() - new Date(row.opened_at).getTime()) / 3_600_000
   const positionValueUsd = row.position_value_usd !== null ? roundMoney(row.position_value_usd) : null
+  const ageHours = (Date.now() - new Date(row.opened_at).getTime()) / (1000 * 60 * 60)
   const previousNullPnlTicks = Math.max(0, Math.trunc(nullableNumber(row.null_pnl_ticks) ?? 0))
-  return { pnlPct, ageHours, positionValueUsd, previousNullPnlTicks }
-}
 
-if (require.main === module) {
-  ;(async () => {
-    console.log('[monitor] starting standalone monitor loop')
-    const runTick = async () => {
-      try {
-        const result = await monitorPositions()
-        console.log(`[monitor] tick done — checked=${result.checked} closed=${result.closed} claimed=${result.claimed} rebalanced=${result.rebalanced}`)
-      } catch (err) {
-        console.error('[monitor] unhandled tick error:', err)
-      }
-    }
-    await runTick()
-    setInterval(runTick, MONITOR_INTERVAL_MS)
-  })()
+  return { pnlPct, ageHours, positionValueUsd, previousNullPnlTicks }
 }
