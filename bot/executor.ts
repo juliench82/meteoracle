@@ -1031,6 +1031,8 @@ async function persistPosition(
       symbol:          metrics.symbol,
       pool_address:    metrics.poolAddress,
       position_pubkey: positionPubKey ?? null,
+      strategy_id:     strategy.id,
+      position_type:   'dlmm',
       token_amount:    tokenAmount,
       sol_deposited:   solDeposited,
       entry_price_usd: entryPriceUsd,
