@@ -185,11 +185,12 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       `pnl=${pnlPct.toFixed(1)}% age=${ageHours.toFixed(1)}h`,
     )
 
-    // Update current price in DB
-    await supabase
+    // Update current price in DB (fire-and-forget, non-fatal)
+    supabase
       .from('moonboy_positions')
       .update({ current_price_usd: currentPriceUsd, pnl_pct: Math.round(pnlPct * 100) / 100 })
       .eq('id', pos.id)
+      .then(() => {})
       .catch(() => {})
 
     let closeReason: string | null = null
