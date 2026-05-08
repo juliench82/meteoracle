@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
 import { fetchLiveMeteoraSnapshot, mergeDbAndLiveLpPositions, type MeteoraLiveSourceStatus } from '@/lib/meteora-live'
 import { fetchWalletLiveBalances } from '@/lib/wallet-live'
+import { fetchMoonboyLivePositions } from '@/lib/moonboy-live'
 
 export const dynamic = 'force-dynamic'
 
@@ -50,7 +51,8 @@ function buildPortfolioSummary(openLp: any[], closedLp: any[], liveSource: Meteo
     0,
   )
   const totalFeesClaimedUsd = openLp.reduce(
-    (sum, position) => sum +
+    (sum, position) =>
+      sum +
       n(position.metadata?.total_fee_usd_claimed) +
       n(position.metadata?.total_reward_usd_claimed) +
       n(position.metadata?.fees_claimed_usd),
@@ -121,6 +123,11 @@ export async function GET() {
   const openLp = mergeDbAndLiveLpPositions(dbOpenLp, liveLp, liveSource)
   const closedLp = closedLpRes.status === 'fulfilled' ? (closedLpRes.value.data ?? []) : []
 
+  const moonboy = await fetchMoonboyLivePositions().catch((err) => {
+    console.warn('[dashboard-data] moonboy live fetch failed:', err)
+    return []
+  })
+
   return dashboardJson({
     openSpot:   openSpotRes.status   === 'fulfilled' ? (openSpotRes.value.data   ?? []) : [],
     closedSpot: closedSpotRes.status === 'fulfilled' ? (closedSpotRes.value.data ?? []) : [],
@@ -129,6 +136,7 @@ export async function GET() {
     watchlist:  watchlistRes.status  === 'fulfilled' ? (watchlistRes.value.data  ?? []) : [],
     wallet,
     portfolio: buildPortfolioSummary(openLp, closedLp, liveSource),
+    moonboy,
     meteoraLive: {
       ok: liveSource.dlmmOk || liveSource.dammOk,
       dlmmOk: liveSource.dlmmOk,

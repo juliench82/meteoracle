@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import { SpotKPIBar } from '@/components/dashboard/SpotKPIBar'
 import { SpotPositionsTable } from '@/components/dashboard/SpotPositionsTable'
+import { MoonboyPanel } from '@/components/dashboard/MoonboyPanel'
+import type { MoonboyLivePosition } from '@/lib/moonboy-live'
 
 const POLL_INTERVAL_MS = 30_000
 
@@ -38,6 +40,7 @@ interface InitialData {
   closedSpot: any[]
   openLp:     any[]
   closedLp:   any[]
+  moonboy:    MoonboyLivePosition[]
   wallet?:    { sol?: number | null } | null
   portfolio?: any
   meteoraLive?: {
@@ -137,6 +140,7 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
         openPositions={allOpen}
         closedPositions={allClosed.slice(0, 20)}
       />
+      <MoonboyPanel positions={data.moonboy ?? []} />
     </div>
   )
 }
