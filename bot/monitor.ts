@@ -11,6 +11,7 @@ import { rebalanceDlmmPosition } from '@/bot/rebalance'
 import { checkDammPositions } from '@/lib/pre-grad'
 import { sendAlert } from '@/bot/alerter'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
+import { checkMoonboyPositions } from '@/bot/moonboy-executor'
 import { STRATEGIES } from '@/strategies'
 import { mergeDbAndLiveLpPositions, type LiveMeteoraPosition } from '@/lib/meteora-live'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
@@ -309,6 +310,16 @@ export async function monitorPositions(): Promise<{
   if (!MONITOR_EXITS_ENABLED) {
     console.log('[monitor] exits disabled — MONITOR_EXITS_ENABLED=false')
     return stats
+  }
+
+  // Run moonboy position checks on every monitor tick (non-fatal)
+  try {
+    const moonboy = await checkMoonboyPositions()
+    if (moonboy.checked > 0) {
+      console.log(`[monitor] moonboy: checked=${moonboy.checked} closed=${moonboy.closed}`)
+    }
+  } catch (err) {
+    console.warn('[monitor] moonboy check failed (non-fatal):', err)
   }
 
   tickCount++
@@ -721,169 +732,126 @@ async function checkPosition(
           symbol: position.symbol,
           strategy: strategy.id,
           positionId: position.id,
-          reason: `meteora_pnl_unavailable_${currentNullPnlTicks}ticks`,
+          reason: `pnl_unavailable_${currentNullPnlTicks}ticks`,
           ageHours: Math.round(ageHours * 10) / 10,
         })
       }
-      console.warn(`${label} Meteora PnL unavailable ${currentNullPnlTicks} consecutive ticks`)
-    } else {
-      console.warn(`${label} Meteora PnL unavailable — skipping stop-loss/take-profit exits this tick`)
+      console.warn(`${label} DLMM PnL unavailable ${currentNullPnlTicks} consecutive ticks`)
+    } else if (strategy.exits.stopLossPct !== 0) {
+      console.warn(`${label} PnL unavailable — stop-loss/take-profit skipped this tick`)
     }
   }
 
-  if (closeReason) {
-    console.log(`${label} EXIT triggered → ${closeReason}`)
-    const closed = await closePosition(position.id, closeReason)
-    if (closed) {
-      stats.closed++
-      await sendAlert({
-        type: 'position_closed',
-        symbol: position.symbol,
-        strategy: strategy.id,
-        reason: closeReason,
-        ...(claimableFeesUsd !== null ? { claimableFeesUsd } : {}),
-        ilPct,
-        ageHours: Math.round(ageHours * 10) / 10,
-      })
-    }
-    return
+  if (closeReason === null && strategy.exits.minFeesToClaim > 0 &&
+      claimableFeesUsd !== null && claimableFeesUsd >= strategy.exits.minFeesToClaim) {
+    closeReason = `fee_yield_${claimableFeesUsd.toFixed(2)}usd`
   }
 
-  if (
-    inRange &&
-    SMART_REBALANCE_IN_RANGE &&
-    strategy.id !== 'scalp-spike' &&
-    strategy.id !== 'damm-edge'
-  ) {
-    const rangeWidth = rangeUpper - rangeLower
-    const positionInRange = rangeWidth > 0
-      ? ((currentPriceSol - rangeLower) / rangeWidth) * 100
-      : 50
+  if (!closeReason) return
 
-    const driftedHighInRange = positionInRange > (50 + SMART_REBALANCE_THRESHOLD_PCT / 2)
-    const driftedLowInRange = positionInRange < (50 - SMART_REBALANCE_THRESHOLD_PCT / 2)
-
-    if (driftedHighInRange || driftedLowInRange) {
-      console.log(`${label} SMART REBALANCE — price at ${positionInRange.toFixed(0)}% of range`)
-      const rebalanceReason = `smart_rebalance_${positionInRange.toFixed(0)}pct`
-      const result = await rebalanceDlmmPosition(position.id, {
-        reason: rebalanceReason,
-        source: 'monitor_smart',
-        position,
-        liveSourceOk: true,
-      })
-
-      if (result.reopened) {
-        stats.rebalanced++
-      } else if (result.closed) {
-        stats.closed++
-        console.warn(`${label} smart rebalance closed but reopen failed: ${result.error ?? 'unknown error'}`)
-      } else {
-        console.warn(`${label} smart rebalance skipped: ${result.error ?? 'unknown error'}`)
-      }
-    }
+  console.log(`${label} EXIT triggered → ${closeReason}`)
+  const closeResult = await closePosition(position.id, closeReason)
+  const closed = closeResult.success && !closeResult.skipped
+  if (closed) {
+    stats.closed++
+    await sendAlert({
+      type: 'position_closed',
+      symbol: position.symbol,
+      strategy: strategy.id,
+      reason: closeReason,
+      claimableFeesUsd: claimableFeesUsd ?? undefined,
+      ilPct,
+      ageHours: Math.round(ageHours * 10) / 10,
+    })
+  } else {
+    console.warn(`${label} close skipped or failed: ${closeResult.error ?? 'unknown error'}`)
   }
 }
 
 async function fetchPositionState(
   poolAddress: string,
-  positionPubKey: string
+  positionPubkey: string
 ): Promise<PositionStateRead> {
-  const connection = getConnection()
-  const DLMM = await getDLMM()
-
+  const failed: PositionStateRead = { ok: false, inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: false }
   try {
-    const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddress))
-    const activeBin = await dlmmPool.getActiveBin()
-    const currentPriceSol = parseFloat(activeBin.pricePerToken)
-
+    await warnIfPublicFallbackActive()
+    const connection = getConnection()
     const wallet = getWallet()
-    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
-    const pos = userPositions.find(p => p.publicKey.toBase58() === positionPubKey)
-
-    if (!pos) return { ok: true, inRange: false, currentPriceSol, claimableFeesSolEquivalent: 0, externallyClosed: true }
-
-    const posData = pos.positionData
-    const activeBinId = activeBin.binId
-    const inRange = activeBinId >= posData.lowerBinId && activeBinId <= posData.upperBinId
-
-    const feeX = Number(posData.feeX ?? 0) / 1e9
-    const feeY = Number(posData.feeY ?? 0) / 1e9
-    const claimableFeesSolEquivalent = feeX + feeY
-
+    const DLMM = await getDLMM()
+    const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddress))
+    const positionsByUser = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
+    const allPositions: Array<{ publicKey: PublicKey }> = [
+      ...positionsByUser.userPositions,
+    ]
+    const found = allPositions.find(
+      (p) => p.publicKey.toBase58() === positionPubkey
+    )
+    if (!found) {
+      return { ok: true, inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: true }
+    }
+    const activeBin = await dlmmPool.getActiveBin()
+    const currentPriceSol = parseFloat(dlmmPool.fromPricePerLamport(Number(activeBin.price)))
+    const positionData = await dlmmPool.getPosition(found.publicKey)
+    const inRange = positionData.positionData.positionBinData.some(
+      (bin: { binId: number }) => bin.binId === activeBin.binId
+    )
+    const totalXAmount = positionData.positionData.totalXAmount
+    const totalYAmount = positionData.positionData.totalYAmount
+    const claimableFeesSolEquivalent =
+      Number(totalYAmount) / 1e9 +
+      (Number(totalXAmount) * currentPriceSol) / 1e9
     return { ok: true, inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed: false }
   } catch (err) {
-    console.error(`[fetchPositionState] error for pool ${poolAddress}:`, err)
-    return { ok: false, inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: false }
+    console.error('[monitor] fetchPositionState error:', err)
+    return failed
   }
 }
 
-async function fetchDammPositionState(
-  positionId: string,
-): Promise<{ pnlPct: number | null; ageHours: number; positionValueUsd: number | null; previousNullPnlTicks: number }> {
+async function fetchDammPositionState(positionId: string): Promise<{
+  pnlPct: number | null
+  ageHours: number
+  positionValueUsd: number | null
+  previousNullPnlTicks: number
+}> {
   const rows = await sbSelect<DammPositionSnapshotRow>(
     'lp_positions',
-    `id=eq.${positionId}&select=pnl_pct,position_value_usd,opened_at,metadata,null_pnl_ticks`,
+    `id=eq.${positionId}&select=pnl_pct,position_value_usd,opened_at,metadata,null_pnl_ticks&limit=1`,
   )
-
-  if (!rows.length) return { pnlPct: null, ageHours: 0, positionValueUsd: null, previousNullPnlTicks: 0 }
-
   const row = rows[0]
-  const metadata = row.metadata ?? {}
-  const pnlPct = nullableNumber(
-    row.pnl_pct ??
-    metadata.pnl_pct ??
-    metadata.position_pnl_pct
-  )
-  const openedAt = new Date(row.opened_at).getTime()
-  const ageHours = Number.isFinite(openedAt)
-    ? (Date.now() - openedAt) / 3_600_000
-    : 0
-  const positionValueUsd = nullableNumber(row.position_value_usd)
-  const previousNullPnlTicks = Math.max(0, Math.trunc(nullableNumber(row.null_pnl_ticks) ?? 0))
+  if (!row) return { pnlPct: null, ageHours: 0, positionValueUsd: null, previousNullPnlTicks: 0 }
 
+  const pnlPct = row.pnl_pct !== null && row.pnl_pct !== undefined
+    ? roundPct(row.pnl_pct)
+    : (() => {
+        const metadata = row.metadata ?? {}
+        return firstNumber(
+          metadata.pnl_pct,
+          metadata.position_pnl_pct,
+          metadata.position_pnl_percentage,
+          metadata.pnl_percentage,
+          metadata.total_pnl_pct,
+          metadata.total_pnl_percentage,
+        )
+      })()
+
+  const ageHours = (Date.now() - new Date(row.opened_at).getTime()) / 3_600_000
+  const positionValueUsd = row.position_value_usd !== null ? roundMoney(row.position_value_usd) : null
+  const previousNullPnlTicks = Math.max(0, Math.trunc(nullableNumber(row.null_pnl_ticks) ?? 0))
   return { pnlPct, ageHours, positionValueUsd, previousNullPnlTicks }
 }
 
-// ── Entry point ─────────────────────────────────────────────────────────────────────────────
-
-async function main() {
-  console.log(`[monitor] starting — interval=${MONITOR_INTERVAL_MS / 1000}s`)
-
-  // Alert via Telegram if no dedicated RPC is configured (public fallback active).
-  // warnIfPublicFallbackActive() logs to console; we additionally fire a Telegram
-  // alert so it surfaces in the operator's chat rather than being buried in logs.
-  if (
-    process.env.ENABLE_PUBLIC_RPC_FALLBACK === 'true' &&
-    process.env.DISABLE_PUBLIC_RPC_FALLBACK !== 'true' &&
-    !process.env.RPC_URL?.trim() &&
-    !process.env.HELIUS_API_KEY?.trim() &&
-    !process.env.HELIUS_RPC_URL?.trim() &&
-    !process.env.SOLANA_RPC_FALLBACK_URLS?.trim()
-  ) {
-    warnIfPublicFallbackActive()
-    sendAlert({
-      type: 'rpc_fallback_warning',
-      reason: 'no_dedicated_rpc_configured',
-      message:
-        'No dedicated RPC endpoint is set. Bot is using api.mainnet-beta.solana.com — ' +
-        'set RPC_URL or HELIUS_API_KEY, or remove ENABLE_PUBLIC_RPC_FALLBACK=true.',
-    }).catch(() => {})
-  }
-
-  await monitorPositions()
-  setInterval(async () => {
-    try {
-      await monitorPositions()
-    } catch (err) {
-      console.error('[monitor] unhandled tick error:', err)
+if (require.main === module) {
+  ;(async () => {
+    console.log('[monitor] starting standalone monitor loop')
+    const runTick = async () => {
+      try {
+        const result = await monitorPositions()
+        console.log(`[monitor] tick done — checked=${result.checked} closed=${result.closed} claimed=${result.claimed} rebalanced=${result.rebalanced}`)
+      } catch (err) {
+        console.error('[monitor] unhandled tick error:', err)
+      }
     }
-  }, MONITOR_INTERVAL_MS)
-}
-
-if (require.main === module || process.env.LP_MONITOR_STANDALONE === 'true') {
-  main().catch(err => {
-    console.error('[monitor] fatal startup error:', err)
-    process.exit(1)
-  })
+    await runTick()
+    setInterval(runTick, MONITOR_INTERVAL_MS)
+  })()
 }

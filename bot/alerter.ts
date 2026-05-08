@@ -76,6 +76,25 @@ type AlertPayload =
   | { type: 'pnl_unavailable_warning'; symbol: string; strategy: string; positionId: string; reason: string; ageHours: number }
   | { type: 'sync_failure_alert'; reason: string; error: string }
   | { type: 'rpc_fallback_warning'; reason: string; message: string }
+  | {
+      type: 'moonboy_opened'
+      symbol: string
+      mint: string
+      buyUsd: number
+      solSpent: number
+      entryPriceUsd: number
+      takeProfitPct: number
+      stopLossPct: number
+    }
+  | {
+      type: 'moonboy_closed'
+      symbol: string
+      mint: string
+      pnlPct: number
+      reason: string
+      ageHours: number
+      swapSig: string
+    }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -281,6 +300,32 @@ function formatMessage(payload: AlertPayload): string {
         `Reason: ${payload.reason}`,
         payload.message,
       ].join('\n')
+
+    case 'moonboy_opened': {
+      const dexUrl = `https://dexscreener.com/solana/${payload.mint}`
+      const pnlSign = payload.takeProfitPct >= 0 ? '+' : ''
+      return [
+        `🌙 *MOONBOY BUY* ${payload.symbol}`,
+        `💵 Buy Size: $${payload.buyUsd} (~${payload.solSpent.toFixed(4)} SOL)`,
+        `📊 Entry: ${formatUsdPrice(payload.entryPriceUsd)}`,
+        `🎯 TP: ${pnlSign}${payload.takeProfitPct}% | SL: ${payload.stopLossPct}%`,
+        `📈 ${dexUrl}`,
+      ].join('\n')
+    }
+
+    case 'moonboy_closed': {
+      const pnlSign = payload.pnlPct >= 0 ? '+' : ''
+      const pnlEmoji = payload.pnlPct >= 0 ? '🟢' : '🔴'
+      const dexUrl = `https://dexscreener.com/solana/${payload.mint}`
+      return [
+        `${pnlEmoji} *MOONBOY SELL* ${payload.symbol}`,
+        `PnL: *${pnlSign}${payload.pnlPct.toFixed(2)}%*`,
+        `Reason: ${payload.reason}`,
+        `Held: ${payload.ageHours}h`,
+        `Sig: \`${payload.swapSig.slice(0, 12)}…\``,
+        `📈 ${dexUrl}`,
+      ].join('\n')
+    }
 
     case 'error':
       return `❌ *Bot Error*\n${payload.message}`
