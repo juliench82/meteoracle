@@ -906,26 +906,33 @@ export async function closePosition(
     const positionPubKey = new PublicKey(position.position_pubkey)
 
     let claimableFeesUsd = getClaimableFeesUsd(position) ?? 0
-    try {
-      const claimTxs = await dlmmPool.claimAllRewards({
-        owner:     wallet.publicKey,
-        positions: [{ publicKey: positionPubKey } as never],
-      })
-      for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
-        const sig = await sendLegacyTx(tx, [wallet], label)
-        console.log(`${label} fees claimed ✔ sig: ${sig}`)
-      }
-    } catch (err) {
-      console.warn(`${label} fee claim failed (continuing):`, err)
-    }
 
-    // Retry getPositionsByUserAndLbPair to tolerate 1–3s Meteora API lag after chain TX
+    // Fetch the full on-chain position object first — needed for both claimAllRewards
+    // (which walks positionData.feeX) and removeLiquidity (bin IDs). A single RPC
+    // call here prevents the `feeX undefined` crash when reward bins are present.
     const userPosition = await getPositionWithRetry(
       dlmmPool,
       wallet.publicKey,
       positionPubKey.toBase58(),
       label
     )
+
+    try {
+      if (userPosition) {
+        const claimTxs = await dlmmPool.claimAllRewards({
+          owner:     wallet.publicKey,
+          positions: [userPosition],
+        })
+        for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
+          const sig = await sendLegacyTx(tx, [wallet], label)
+          console.log(`${label} fees claimed ✔ sig: ${sig}`)
+        }
+      } else {
+        console.warn(`${label} position not found on-chain — skipping fee claim`)
+      }
+    } catch (err) {
+      console.warn(`${label} fee claim failed (continuing):`, err)
+    }
 
     if (userPosition) {
       const { lowerBinId, upperBinId } = userPosition.positionData
