@@ -165,6 +165,15 @@ function scoreEvilPandaDirect(
   if (token.liquidityUsd < f.minLiquidityUsd)
     return zero(`liquidityUsd ${token.liquidityUsd.toFixed(0)} < required ${f.minLiquidityUsd} for ${strategy.id}`)
 
+  // Harden Evil Panda entry quality with minimum recent fee/TVL gate (0.3% threshold on blended 1h/5m/24h)
+  const recentFeeTvlPct = Math.max(
+    token.feeTvl1hPct ?? 0,
+    (token.feeTvl5mPct ?? 0) * 6,
+    (token.feeTvl24hPct ?? 0) / 24
+  )
+  if (recentFeeTvlPct < 0.3)
+    return zero(`recent fee/TVL ${recentFeeTvlPct.toFixed(2)}% < 0.3% minimum for ${strategy.id} entry quality`)
+
   const ageScore =
     token.ageHours <= 0.5 ? 100 :
     token.ageHours <= 1 ? 90 :
@@ -269,9 +278,9 @@ function scoreRecentVolumeEfficiency(token: TokenMetrics): number {
 
 /**
  * Tier-aware freshness scoring:
- * - Large cap (Stable Farm): age irrelevant → always 100
- * - Memecoin (Scalp Spike):  72–120h is the sweet spot → 100; penalise very fresh
- * - Shitcoin (Evil Panda):   very fresh is best → original curve
+ *   - Large cap (Stable Farm): age irrelevant → always 100
+ *   - Memecoin (Scalp Spike):  72–120h is the sweet spot → 100; penalise very fresh
+ *   - Shitcoin (Evil Panda):   very fresh is best → original curve
  */
 function scoreFreshness(ageHours: number, isLargeCap: boolean, isMemecoin: boolean): number {
   if (isLargeCap) return 100
