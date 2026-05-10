@@ -320,7 +320,7 @@ function strategyTypeForDistribution(
   strategyTypeEnum: typeof import('@meteora-ag/dlmm').StrategyType,
   distributionType: Strategy['position']['distributionType'],
 ): StrategyType {
-  const strategyTypeMap: Record<string, StrategyType> = {
+  const strategyTypeMap: Record<string, string> = {  // fixed type
     spot:      strategyTypeEnum.Spot,
     curve:     strategyTypeEnum.Curve,
     'bid-ask': strategyTypeEnum.BidAsk,
@@ -340,7 +340,7 @@ async function getTotalDeployedSolForCap(
   if (limitState.liveFetchOk) {
     const livePubkeys = limitState.livePositions
       .map(position => position.position_pubkey)
-      .filter(Boolean)
+    .filter(Boolean)
 
     if (livePubkeys.length === 0) {
       return { totalDeployed: 0, source: limitState.countSource }
@@ -743,7 +743,7 @@ export async function openPosition(
 
     const amountIn = new BN(Math.floor(solAmount * 1e9))
     const minDeltaId = minBinId - activeBinId
-    const maxDeltaId = maxBinId - activeBinId
+n    const maxDeltaId = maxBinId - activeBinId
     const favorXInActiveId = solIsTokenX
     const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk')
     const directSwapEstimate = await estimateDlmmDirectSwap({
@@ -955,34 +955,59 @@ export async function closePosition(
       return true
     }
 
-    let swappedToSol = false
+    // Post-removeLiquidity ATA balance check: skip swapTokenToSol on zero/dust to prevent false failed-swap alerts
+    let hasTokenBalance = false
     try {
-      await swapTokenToSol(position.mint, label)
-      swappedToSol = true
-    } catch (swapErr) {
-      const swapMsg = swapErr instanceof Error ? swapErr.message : String(swapErr)
-      console.warn(`${label} token→SOL swap failed — trying DLMM zap fallback:`, swapMsg)
+      const tokenMint = new PublicKey(position.mint)
+      const tokenProgramId = await getTokenProgramId(tokenMint)
+      const tokenAta = getAssociatedTokenAddressSync(
+        tokenMint, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
+      )
+      const balResp = await connection.getTokenAccountBalance(tokenAta).catch(() => null)
+      const amount = new BN(balResp?.value?.amount ?? '0')
+      if (amount.isZero() || amount.lt(new BN(100))) {
+        console.log(`${label} token ATA balance zero/dust (${amount.toString()}) after removeLiquidity — skipping swapTokenToSol`)
+        hasTokenBalance = false
+      } else {
+        hasTokenBalance = true
+      }
+    } catch (balErr) {
+      console.warn(`${label} post-remove token balance check failed (attempting swap anyway):`, balErr)
+      hasTokenBalance = true
+    }
 
+    let swappedToSol = false
+    if (hasTokenBalance) {
       try {
-        swappedToSol = await zapOutDlmmFallback(dlmmPool, wallet, position.pool_address, label)
-      } catch (zapErr) {
-        console.warn(`${label} DLMM zap fallback failed:`, zapErr)
+        await swapTokenToSol(position.mint, label)
+        swappedToSol = true
+      } catch (swapErr) {
+        const swapMsg = swapErr instanceof Error ? swapErr.message : String(swapErr)
+        console.warn(`${label} token→SOL swap failed — trying DLMM zap fallback:`, swapMsg)
+
+        try {
+          swappedToSol = await zapOutDlmmFallback(dlmmPool, wallet, position.pool_address, label)
+        } catch (zapErr) {
+          console.warn(`${label} DLMM zap fallback failed:`, zapErr)
+        }
+
+        if (!swappedToSol) {
+          console.error(`${label} token→SOL swap failed after all retries — tokens are stranded in wallet`, { mint: position.mint, error: swapMsg })
+
+          await supabase.from('bot_logs').insert({
+            level: 'error',
+            event: 'swap_token_to_sol_failed',
+            payload: { positionId, mint: position.mint, reason, error: swapMsg },
+          })
+
+          await sendAlert({
+            type: 'error',
+            message: `⚠️ Swap failed for ${position.symbol} after close (${reason})\nMint: \`${position.mint}\`\nTokens are stranded in wallet — manual swap required.\nError: ${swapMsg}`,
+          })
+        }
       }
-
-      if (!swappedToSol) {
-        console.error(`${label} token→SOL swap failed after all retries — tokens are stranded in wallet`, { mint: position.mint, error: swapMsg })
-
-        await supabase.from('bot_logs').insert({
-          level: 'error',
-          event: 'swap_token_to_sol_failed',
-          payload: { positionId, mint: position.mint, reason, error: swapMsg },
-        })
-
-        await sendAlert({
-          type: 'error',
-          message: `⚠️ Swap failed for ${position.symbol} after close (${reason})\nMint: \`${position.mint}\`\nTokens are stranded in wallet — manual swap required.\nError: ${swapMsg}`,
-        })
-      }
+    } else {
+      swappedToSol = true
     }
 
     await markPositionClosed(positionId, claimableFeesUsd, reason)
