@@ -48,6 +48,14 @@ const BLUECHIP_QUOTE_MINTS = new Set([
   '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // USDC.e (Wormhole)
 ])
 
+// Pools quoted in one of these are SOL-paired and eligible for SCALP_SPIKE / MEME_SHITCOIN.
+// Any other quote mint (USDC, USDT, etc.) must not reach those strategies — the executor
+// only supports SOL-paired DLMM zap-ins. Non-SOL-quoted pools route to BLUECHIP or UNKNOWN.
+const SOL_QUOTE_MINTS = new Set([
+  'So11111111111111111111111111111111111111112', // WSOL (canonical)
+  'So11111111111111111111111111111111111111111', // native SOL variant
+])
+
 function envNumber(name: string, fallback: number): number {
   const value = process.env[name]
   if (value === undefined) return fallback
@@ -167,12 +175,22 @@ export function classifyToken(token: StrategyToken & { address: string }): Token
     return 'BLUECHIP'
   }
 
+  // Any non-SOL-quoted pool that didn't qualify for BLUECHIP cannot be opened —
+  // the executor only supports SOL-paired DLMM zap-ins for SCALP_SPIKE and MEME_SHITCOIN.
+  // If quoteTokenMint is known and is NOT a SOL mint, bail out early.
+  if (
+    token.quoteTokenMint !== undefined &&
+    !SOL_QUOTE_MINTS.has(token.quoteTokenMint)
+  ) {
+    return 'UNKNOWN'
+  }
+
   // New pools are Evil Panda only; filters decide whether they are safe enough.
   if (ageHours <= evilPandaStrategy.filters.maxAgeHours) {
     return 'MEME_SHITCOIN'
   }
 
-  // SCALP_SPIKE: any non-new token with MC>=500K and a real 5m/1h surge.
+  // SCALP_SPIKE: any non-new SOL-paired token with MC>=500K and a real 5m/1h surge.
   if (
     mcUsd >= scalpSpikeStrategy.filters.minMcUsd &&
     hasScalpSpikeSignals(token)
