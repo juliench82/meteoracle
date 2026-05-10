@@ -48,7 +48,7 @@ export const bluechipFarmStrategy: Strategy = {
 
   exits: {
     stopLossPct: -20,
-    takeProfitPct: 200,
+    takeProfitPct: 0, // removed +200% TP per request — no hard TP for bluechip
     outOfRangeMinutes: 60,
     maxDurationHours: 72,
     claimFeesBeforeClose: true,
