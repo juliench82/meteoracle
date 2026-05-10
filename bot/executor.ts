@@ -321,7 +321,7 @@ function strategyTypeForDistribution(
   strategyTypeEnum: typeof import('@meteora-ag/dlmm').StrategyType,
   distributionType: Strategy['position']['distributionType'],
 ): StrategyType {
-  const strategyTypeMap: Record<string, string> = {  // fixed type
+  const strategyTypeMap: Record<string, StrategyType> = {
     spot:      strategyTypeEnum.Spot,
     curve:     strategyTypeEnum.Curve,
     'bid-ask': strategyTypeEnum.BidAsk,
