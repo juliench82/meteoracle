@@ -237,7 +237,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         level: 'warn',
         event: 'stranded_sell_retry_failed',
         payload: { table: 'moonboy_positions', id: row.id, symbol: row.symbol, mint: row.mint, error: msg },
-      }).catch(() => {})
+      }).then(() => {}, () => {})
     }
   }
 
@@ -258,7 +258,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         level: 'warn',
         event: 'stranded_sell_no_mint',
         payload: { table: 'lp_positions', id: row.id, symbol: row.symbol },
-      }).catch(() => {})
+      }).then(() => {}, () => {})
       continue
     }
 
@@ -294,7 +294,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         level: 'warn',
         event: 'stranded_sell_retry_failed',
         payload: { table: 'lp_positions', id: row.id, symbol: row.symbol, mint, error: msg },
-      }).catch(() => {})
+      }).then(() => {}, () => {})
     }
   }
 
