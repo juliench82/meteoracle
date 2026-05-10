@@ -1,9 +1,12 @@
 export type PositionStatus =
   | 'active'
+  | 'open'
   | 'out_of_range'
   | 'closed'
   | 'error'
   | 'pending_retry'
+  | 'pending_close'
+  | 'dry_run'
   | 'orphaned'
 
 export interface Position {
@@ -23,6 +26,8 @@ export interface Position {
   positionValueUsd?: number
   /** Realised PnL in USD — snapshot captured from Meteora at close time only. */
   realizedPnlUsd?: number
+  /** PnL as a percentage — written by monitor on every tick, drives SL/TP logic. */
+  pnlPct?: number
   status: PositionStatus
   inRange: boolean
   openedAt: string
