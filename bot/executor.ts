@@ -4,6 +4,7 @@ import BN from 'bn.js'
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import type { Strategy, TokenMetrics } from '@/lib/types'
+import { isMoonboyEligible } from '@/strategies'
 
 const DRY_RUN = process.env.BOT_DRY_RUN === 'true'
 
@@ -102,7 +103,7 @@ export async function openPosition(
     console.log(`${label} position opened ✔ sig: ${sig}`)
 
     // 9. Persist to Supabase
-    return await persistPosition(
+    const positionId = await persistPosition(
       metrics,
       strategy,
       sig,
@@ -110,6 +111,14 @@ export async function openPosition(
       solAmount,
       positionPubKey?.toBase58()
     )
+
+    // 10. Moonboy post-LP guard: only fires if LP open succeeded and token matches moonboy filters.
+    // This replaces any scanner pre-open call — linkage is explicit via success path.
+    if (isMoonboyEligible(metrics)) {
+      await openMoonboyPosition(metrics)
+    }
+
+    return positionId
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} failed:`, message)
@@ -273,4 +282,9 @@ async function markPositionClosed(
       metadata: supabase.rpc ? undefined : { closeReason: reason }, // merge in monitor
     })
     .eq('id', positionId)
+}
+
+async function openMoonboyPosition(metrics: TokenMetrics): Promise<void> {
+  const label = `[moonboy][${metrics.symbol}]`
+  console.log(`${label} post-LP success — Moonboy buy triggered (stub: implement Jupiter swap + moonboy_positions persist + TP/SL monitor here)`)
 }
