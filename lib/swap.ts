@@ -224,7 +224,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         type: 'moonboy_closed',
         symbol: row.symbol,
         mint: row.mint,
-        pnlPct: null,
+        pnlPct: 0,
         reason: `sell_failed_recovered`,
         ageHours: 0,
         swapSig: sig ?? 'zero_balance',
@@ -283,7 +283,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         symbol: row.symbol,
         strategy: 'sell_failed_recovery',
         reason: 'sell_failed_recovered',
-        ilPct: null,
+        ilPct: 0,
         ageHours: 0,
       }).catch(() => {})
       stats.recovered++
