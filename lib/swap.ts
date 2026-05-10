@@ -1,5 +1,7 @@
 import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
+import { createServerClient } from '@/lib/supabase'
+import { sendAlert } from '@/bot/alerter'
 
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v6'
@@ -175,6 +177,128 @@ export async function swapTokenToSol(
   }
 
   throw lastError
+}
+
+/**
+ * Retries stranded sell_failed positions across moonboy_positions and lp_positions.
+ * Called at the top of every monitor tick. Swaps whatever token balance remains
+ * in the wallet directly to SOL — no LP close attempted.
+ * Promotes to status=closed on success, leaves as sell_failed if swap still fails.
+ */
+export async function retryStrandedSells(): Promise<{ retried: number; recovered: number }> {
+  const stats = { retried: 0, recovered: 0 }
+
+  if (process.env.BOT_DRY_RUN === 'true') {
+    return stats
+  }
+
+  const supabase = createServerClient()
+
+  // --- moonboy_positions ---
+  const { data: moonboys } = await supabase
+    .from('moonboy_positions')
+    .select('id, mint, symbol, close_reason')
+    .eq('status', 'sell_failed')
+  
+  for (const row of (moonboys ?? [])) {
+    const label = `[retry-sell][moonboy][${row.symbol}]`
+    stats.retried++
+    try {
+      const sig = await swapTokenToSol(row.mint, label)
+      if (sig === null) {
+        // Zero balance — token already gone, mark closed cleanly
+        console.log(`${label} zero balance — marking closed without swap`)
+      } else {
+        console.log(`${label} recovered ✔ sig=${sig.slice(0, 8)}…`)
+      }
+      await supabase
+        .from('moonboy_positions')
+        .update({
+          status: 'closed',
+          closed_at: new Date().toISOString(),
+          tx_close: sig ?? 'zero_balance',
+          close_reason: row.close_reason ?? 'sell_failed_recovered',
+        })
+        .eq('id', row.id)
+      await sendAlert({
+        type: 'moonboy_closed',
+        symbol: row.symbol,
+        mint: row.mint,
+        pnlPct: null,
+        reason: `sell_failed_recovered`,
+        ageHours: 0,
+        swapSig: sig ?? 'zero_balance',
+      }).catch(() => {})
+      stats.recovered++
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`${label} retry swap still failed — will try again next tick: ${msg}`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn',
+        event: 'stranded_sell_retry_failed',
+        payload: { table: 'moonboy_positions', id: row.id, symbol: row.symbol, mint: row.mint, error: msg },
+      }).catch(() => {})
+    }
+  }
+
+  // --- lp_positions ---
+  const { data: lpRows } = await supabase
+    .from('lp_positions')
+    .select('id, symbol, metadata, close_reason')
+    .eq('status', 'sell_failed')
+
+  for (const row of (lpRows ?? [])) {
+    const mint: string | undefined = (row.metadata as Record<string, unknown> | null)?.token_mint as string | undefined
+    const label = `[retry-sell][lp][${row.symbol}]`
+    stats.retried++
+
+    if (!mint) {
+      console.warn(`${label} no token_mint in metadata — cannot retry swap, skipping`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn',
+        event: 'stranded_sell_no_mint',
+        payload: { table: 'lp_positions', id: row.id, symbol: row.symbol },
+      }).catch(() => {})
+      continue
+    }
+
+    try {
+      const sig = await swapTokenToSol(mint, label)
+      if (sig === null) {
+        console.log(`${label} zero balance — marking closed without swap`)
+      } else {
+        console.log(`${label} recovered ✔ sig=${sig.slice(0, 8)}…`)
+      }
+      await supabase
+        .from('lp_positions')
+        .update({
+          status: 'closed',
+          closed_at: new Date().toISOString(),
+          tx_close: sig ?? 'zero_balance',
+          close_reason: row.close_reason ?? 'sell_failed_recovered',
+        })
+        .eq('id', row.id)
+      await sendAlert({
+        type: 'position_closed',
+        symbol: row.symbol,
+        strategy: 'sell_failed_recovery',
+        reason: 'sell_failed_recovered',
+        ilPct: null,
+        ageHours: 0,
+      }).catch(() => {})
+      stats.recovered++
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`${label} retry swap still failed — will try again next tick: ${msg}`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn',
+        event: 'stranded_sell_retry_failed',
+        payload: { table: 'lp_positions', id: row.id, symbol: row.symbol, mint, error: msg },
+      }).catch(() => {})
+    }
+  }
+
+  return stats
 }
 
 /**

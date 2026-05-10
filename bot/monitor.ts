@@ -12,6 +12,7 @@ import { checkDammPositions } from '@/lib/pre-grad'
 import { sendAlert } from '@/bot/alerter'
 import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
 import { checkMoonboyPositions } from '@/bot/moonboy-executor'
+import { retryStrandedSells } from '@/lib/swap'
 import { STRATEGIES } from '@/strategies'
 import { mergeDbAndLiveLpPositions, type LiveMeteoraPosition } from '@/lib/meteora-live'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
@@ -108,6 +109,7 @@ type PositionMetadata = {
   cost_basis_usd?: unknown
   claimable_fees_usd?: unknown
   position_value_usd?: unknown
+  token_mint?: unknown
   [key: string]: unknown
 }
 
@@ -307,6 +309,17 @@ export async function monitorPositions(): Promise<{
   await refreshRpcProviderCooldown('helius')
 
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
+
+  // Retry any stranded sell_failed positions first — non-fatal
+  try {
+    const stranded = await retryStrandedSells()
+    if (stranded.retried > 0) {
+      console.log(`[monitor] stranded-sell retry: retried=${stranded.retried} recovered=${stranded.recovered}`)
+    }
+  } catch (err) {
+    console.warn('[monitor] retryStrandedSells failed (non-fatal):', err)
+  }
+
   if (!MONITOR_EXITS_ENABLED) {
     console.log('[monitor] exits disabled — MONITOR_EXITS_ENABLED=false')
     return stats
