@@ -2,12 +2,14 @@ import type { Strategy } from '@/lib/types'
 import { evilPandaStrategy } from './evil-panda'
 import { scalpSpikeStrategy } from './scalp-spike'
 import { stableFarmStrategy } from './stable-farm'
+import { moonboyStrategy, isMoonboyEligible } from './moonboy'
 
 /**
  * All registered strategies, evaluated in priority order.
  * Scalp Spike runs first (most selective / time-sensitive),
  * then Evil Panda (broad memecoin coverage),
  * then Stable Farm (catch-all for large established pairs).
+ * Moonboy is deliberately excluded from scanner flow — it only fires post-LP success.
  */
 export const STRATEGIES: Strategy[] = [
   scalpSpikeStrategy,  // priority 1 — fast, tight, high-volume spikes
@@ -74,3 +76,5 @@ export function getAllMatchingStrategies(token: {
     )
   })
 }
+
+export { moonboyStrategy, isMoonboyEligible }
