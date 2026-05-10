@@ -3,17 +3,19 @@
  *
  * Processes:
  *
- * PIPELINE 1: Meteora market LP
- *   lp-scanner       — polls Meteora pools every 15min, classifies token, opens LP
+ * PIPELINE: Meteora market LP (DLMM + DAMM v2)
+ *   lp-scanner       — polls Meteora pools every 15min, classifies token, opens LP positions
  *   lp-monitor-dlmm  — monitors LP range health, rebalances, exits every 60s
- *
- * PIPELINE 2: Meteora DBC graduation
- *   dbc-graduation-watcher — watches DBC curves near migration and joins migrated DAMM v2 pools
  *
  * INTERFACE
  *   telegram-bot     — Telegram command interface (/tick, /positions, etc.)
  *   dashboard        — Next.js dashboard on port 3000
  *                      Uses start-dashboard.sh which cleans .next before every start.
+ *
+ * Pool discovery strategy:
+ *   Launchpads (pump.fun, Believe, Moonshot, etc.) handle migration of bonding curve
+ *   pools to Meteora DLMM / DAMM v2 automatically. The lp-scanner discovers these pools
+ *   via the Meteora API the moment they appear — no on-chain watching needed.
  *
  * Setup:
  *   npm install -g pm2
@@ -39,7 +41,7 @@
 
 module.exports = {
   apps: [
-    // ── PIPELINE 1: Meteora DLMM LP ──────────────────────────────────────────
+    // ── PIPELINE: Meteora LP (DLMM + DAMM v2) ────────────────────────────────
     {
       name:          'lp-scanner',
       script:        'npx',
@@ -89,29 +91,6 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: './logs/lp-monitor-dlmm-error.log',
       out_file:   './logs/lp-monitor-dlmm-out.log',
-      merge_logs: true,
-    },
-    {
-      name:          'dbc-graduation-watcher',
-      script:        'npx',
-      args:          'tsx bot/dbc-graduation-watcher.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  5_000,
-      exp_backoff_restart_delay: 30_000,
-      min_uptime:     60_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
-      env: {
-        NODE_ENV:                         'production',
-        DBC_GRADUATION_WATCHER_STANDALONE: 'true',
-        DBC_GRADUATION_WATCHER_ENABLED:   'true',
-        DAMM_MIGRATION_ENABLED:           'true',
-        NODE_OPTIONS:                     '--conditions=require',
-      },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/dbc-graduation-watcher-error.log',
-      out_file:   './logs/dbc-graduation-watcher-out.log',
       merge_logs: true,
     },
 
