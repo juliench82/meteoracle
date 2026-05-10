@@ -744,7 +744,7 @@ export async function openPosition(
 
     const amountIn = new BN(Math.floor(solAmount * 1e9))
     const minDeltaId = minBinId - activeBinId
-n    const maxDeltaId = maxBinId - activeBinId
+    const maxDeltaId = maxBinId - activeBinId
     const favorXInActiveId = solIsTokenX
     const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk')
     const directSwapEstimate = await estimateDlmmDirectSwap({
