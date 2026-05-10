@@ -742,11 +742,6 @@ async function checkPosition(
     }
   }
 
-  if (closeReason === null && strategy.exits.minFeesToClaim > 0 &&
-      claimableFeesUsd !== null && claimableFeesUsd >= strategy.exits.minFeesToClaim) {
-    closeReason = `fee_yield_${claimableFeesUsd.toFixed(2)}usd`
-  }
-
   if (!closeReason) return
 
   console.log(`${label} EXIT triggered → ${closeReason}`)
@@ -850,7 +845,7 @@ if (require.main === module || process.env.LP_MONITOR_STANDALONE === 'true') {
   } else {
     console.log(`${label} starting — poll every ${MONITOR_INTERVAL_MS / 1000}s`)
 
-    const standaloneMonitorTick = async (): Promise<void> => {
+    const standaloneMonitorTick = async (): Promise<void> {
       const start = Date.now()
       console.log(`${label} tick start`)
       try {
