@@ -146,8 +146,12 @@ export function isRpcRateLimitError(error: unknown): boolean {
   }
 
   if (error instanceof Error) {
-    return /\b429\b|too many requests|rate limit/i.test(error.message)
+    const msg = error.message || ''
+    if (/\b429\b|too many requests|rate limit|max usage reached/i.test(msg)) return true
+    if (msg.includes('-32429')) return true
   }
+
+  if (error && typeof error === 'object' && 'code' in error && (error as any).code === -32429) return true
 
   return false
 }
