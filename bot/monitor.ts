@@ -836,30 +836,24 @@ async function fetchDammPositionState(positionId: string): Promise<{
 }
 
 // ─── Standalone daemon (LP_MONITOR_STANDALONE=true) ──────────────────────────
-if (require.main === module || process.env.LP_MONITOR_STANDALONE === 'true') {
+if (process.env.LP_MONITOR_STANDALONE === 'true') {
   const label = '[lp-monitor]'
-  const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
+  console.log(`${label} starting — poll every ${MONITOR_INTERVAL_MS / 1000}s`)
 
-  if (!LP_MONITOR_ENABLED) {
-    console.log(`${label} disabled — LP_MONITOR_ENABLED=false`)
-  } else {
-    console.log(`${label} starting — poll every ${MONITOR_INTERVAL_MS / 1000}s`)
-
-    const standaloneMonitorTick = async (): Promise<void> {
-      const start = Date.now()
-      console.log(`${label} tick start`)
-      try {
-        const stats = await monitorPositions()
-        console.log(
-          `${label} tick done — checked=${stats.checked} closed=${stats.closed} ` +
-          `claimed=${stats.claimed} rebalanced=${stats.rebalanced} ` +
-          `elapsed=${Date.now() - start}ms`,
-        )
-      } catch (err) {
-        console.error(`${label} tick error:`, err)
-      }
+  const standaloneMonitorTick = async (): Promise<void> => {
+    const start = Date.now()
+    console.log(`${label} tick start`)
+    try {
+      const stats = await monitorPositions()
+      console.log(
+        `${label} tick done — checked=${stats.checked} closed=${stats.closed} ` +
+        `claimed=${stats.claimed} rebalanced=${stats.rebalanced} ` +
+        `elapsed=${Date.now() - start}ms`,
+      )
+    } catch (err) {
+      console.error(`${label} tick error:`, err)
     }
-
-    standaloneMonitorTick().then(() => setInterval(standaloneMonitorTick, MONITOR_INTERVAL_MS))
   }
+
+  standaloneMonitorTick().then(() => setInterval(standaloneMonitorTick, MONITOR_INTERVAL_MS))
 }
