@@ -26,6 +26,7 @@ import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 import { OPEN_LP_STATUSES, assertCanOpenLpPosition, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { STRATEGIES } from '@/strategies'
+import { openMoonboyPosition } from './moonboy-executor'
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -839,11 +840,15 @@ n    const maxDeltaId = maxBinId - activeBinId
     }
 
     console.log(`${label} position opened ✔`)
-    return await persistPosition(
+    const positionId = await persistPosition(
       metrics, strategy, openSig,
       metrics.priceUsd ?? 0, entryPriceSol, solAmount,
       positionKeypair.publicKey.toBase58(), tokenAmountDeposited, DRY_RUN
     )
+    if (entryPriceSol > 0) {
+      openMoonboyPosition(metrics, entryPriceSol).catch(() => {})
+    }
+    return positionId
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
