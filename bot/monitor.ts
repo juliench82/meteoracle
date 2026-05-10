@@ -726,17 +726,17 @@ async function checkPosition(
   // === EXIT LOGIC ===
   let closeReason: string | null = null
 
-  if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
-    const roundedOor = Math.round(oorSince)
-    closeReason = `out_of_range_${roundedOor}min`
-  } else if (currentNullPnlTicks >= PNL_UNAVAILABLE_FORCE_EXIT_TICKS) {
-    closeReason = `pnl_unavailable_${PNL_UNAVAILABLE_FORCE_EXIT_TICKS}ticks`
-  } else if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
+  if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
     closeReason = `stoploss_pnl_${pnlPct.toFixed(1)}pct`
   } else if (pnlPct !== null && pnlPct >= strategy.exits.takeProfitPct) {
     closeReason = `takeprofit_pnl_${pnlPct.toFixed(1)}pct`
   } else if (ageHours >= strategy.exits.maxDurationHours) {
     closeReason = `max_duration_${Math.round(ageHours)}h`
+  } else if (currentNullPnlTicks >= PNL_UNAVAILABLE_FORCE_EXIT_TICKS) {
+    closeReason = `pnl_unavailable_${PNL_UNAVAILABLE_FORCE_EXIT_TICKS}ticks`
+  } else if (!inRange && oorSince >= strategy.exits.outOfRangeMinutes) {
+    const roundedOor = Math.round(oorSince)
+    closeReason = `out_of_range_${roundedOor}min`
   } else if (pnlPct === null) {
     if (currentNullPnlTicks >= PNL_UNAVAILABLE_ALERT_TICKS) {
       if (currentNullPnlTicks === PNL_UNAVAILABLE_ALERT_TICKS || currentNullPnlTicks % PNL_UNAVAILABLE_ALERT_TICKS === 0) {
