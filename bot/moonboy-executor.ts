@@ -15,7 +15,6 @@ const MOONBOY_MAX_TOKEN_AGE_MINUTES = parseFloat(
   process.env.MOONBOY_MAX_TOKEN_AGE_MINUTES ?? '90',
 )
 const DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex/tokens'
-const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
 
 type MoonboyRow = {
   id: string
@@ -57,7 +56,7 @@ async function getDexScreenerData(mint: string): Promise<DexScreenerResult> {
   }
 }
 
-/** Backward-compat wrapper used by checkMoonboyPositions */
+/** Backward-compat wrapper used by checkMoonboyPositions price refresh. */
 async function getTokenPriceUsd(mint: string): Promise<number | null> {
   return (await getDexScreenerData(mint)).priceUsd
 }
@@ -81,7 +80,9 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     return null
   }
 
-  // ── DexScreener age gate ────────────────────────────────────────────────────
+  // ── DexScreener age gate ──────────────────────────────────────────────────
+  // Token age is measured from pairCreatedAt in DexScreener data, not Meteora.
+  // If pairCreatedAt is unavailable we skip to avoid opening on stale tokens.
   const dexData = await getDexScreenerData(metrics.address)
   const nowMs = Date.now()
   if (dexData.pairCreatedAt !== null) {
@@ -98,7 +99,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     console.warn(`${label} moonboy age gate — pairCreatedAt unavailable from DexScreener, skipping to be safe`)
     return null
   }
-  // ───────────────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
 
   const openCount = await countOpenMoonboys(supabase)
   if (openCount >= MOONBOY_MAX_OPEN) {
@@ -114,7 +115,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     .eq('status', 'open')
     .limit(1)
   if (existing && existing.length > 0) {
-    console.log(`${label} moonboy position already open for ${metrics.address.slice(0, 8)}\u2026 — skipping`)
+    console.log(`${label} moonboy position already open for ${metrics.address.slice(0, 8)}… — skipping`)
     return null
   }
 
@@ -163,14 +164,14 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
       dry_run:         isDryRun,
       sol_price_usd:   solPriceUsd,
       metadata: {
-        take_profit_pct:         moonboyStrategy.exits.takeProfitPct,
-        stop_loss_pct:           moonboyStrategy.exits.stopLossPct,
-        max_duration_hours:      moonboyStrategy.exits.maxDurationHours,
-        buy_usd:                 MOONBOY_BUY_USD,
-        market_cap_usd:          metrics.mcUsd,
-        volume_24h_usd:          metrics.volume24h,
-        age_hours:               metrics.ageHours,
-        dex_pair_created_at:     dexData.pairCreatedAt,
+        take_profit_pct:        moonboyStrategy.exits.takeProfitPct,
+        stop_loss_pct:          moonboyStrategy.exits.stopLossPct,
+        max_duration_hours:     moonboyStrategy.exits.maxDurationHours,
+        buy_usd:                MOONBOY_BUY_USD,
+        market_cap_usd:         metrics.mcUsd,
+        volume_24h_usd:         metrics.volume24h,
+        age_hours:              metrics.ageHours,
+        dex_pair_created_at:    dexData.pairCreatedAt,
         token_age_minutes_at_open: tokenAgeMinutesAtOpen,
       },
     })
@@ -193,7 +194,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     stopLossPct: moonboyStrategy.exits.stopLossPct,
   }).catch(() => {})
 
-  console.log(`${label} moonboy position opened \u2714 id=${data.id} sig=${sig.slice(0, 8)}\u2026`)
+  console.log(`${label} moonboy position opened ✔ id=${data.id} sig=${sig.slice(0, 8)}…`)
   return data.id
 }
 
@@ -251,7 +252,7 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
 
     if (!closeReason) continue
 
-    console.log(`${label} EXIT \u2192 ${closeReason}`)
+    console.log(`${label} EXIT → ${closeReason}`)
     let swapSig: string | null = null
     if (!pos.dry_run) {
       try {
@@ -265,8 +266,9 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
         })
         await sendAlert({
           type: 'error',
-          message: `\u26a0\ufe0f Moonboy sell FAILED for ${pos.symbol} (${closeReason})\nMint: \`${pos.mint}\`\nTokens stranded in wallet \u2014 manual swap required.\nError: ${msg}`,
+          message: `⚠️ Moonboy sell FAILED for ${pos.symbol} (${closeReason})\nMint: \`${pos.mint}\`\nTokens stranded in wallet — manual swap required.\nError: ${msg}`,
         }).catch(() => {})
+        // Mark as sell_failed so we don't retry forever
         await supabase.from('moonboy_positions').update({ status: 'sell_failed', close_reason: closeReason }).eq('id', pos.id)
         stats.closed++
         continue
@@ -293,7 +295,7 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       swapSig: swapSig ?? 'DRY_RUN',
     }).catch(() => {})
 
-    console.log(`${label} moonboy closed \u2714 reason=${closeReason} pnl=${pnlPct.toFixed(1)}%`)
+    console.log(`${label} moonboy closed ✔ reason=${closeReason} pnl=${pnlPct.toFixed(1)}%`)
     stats.closed++
   }
 

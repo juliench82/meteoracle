@@ -44,6 +44,7 @@ import {
 import { createConnection, getRpcEndpointCandidates } from '@/lib/solana'
 import { summarizeError } from '@/lib/logging'
 import { sendAlert } from './alerter'
+import { openMoonboyPosition } from './moonboy-executor'
 
 const METEORA_DAMM_API = 'https://amm-v2.meteora.ag'
 const METEORA_DAMM_V2_DATAPI = 'https://damm-v2.datapi.meteora.ag'
@@ -484,6 +485,7 @@ async function fetchDammPositionPnlWithRetry(positionPubkey: string): Promise<{
  *   7. Persist to lp_positions with the caller's DAMM strategy id.
  *      entry_price_sol is captured as normalized SOL/token at open so TP/SL have a baseline.
  *   8. Fire pre_grad_opened Telegram alert.
+ *   9. Fire Moonboy companion buy (age-gated inside openMoonboyPosition, fire-and-forget).
  */
 export async function openDammPosition(
   params: DammPositionParams,
@@ -556,6 +558,29 @@ export async function openDammPosition(
         poolAddress: params.poolAddress,
         bondingCurvePct: params.bondingCurvePct ?? 0,
       })
+
+      // Moonboy companion — age-gated inside openMoonboyPosition, fire-and-forget
+      openMoonboyPosition(
+        {
+          address:      params.tokenAddress,
+          symbol:       params.symbol,
+          mcUsd:        0,
+          volume24h:    0,
+          liquidityUsd: params.liquidityUsd,
+          topHolderPct: 0,
+          holderCount:  0,
+          ageHours:     params.ageMinutes / 60,
+          rugcheckScore: 0,
+          priceUsd:     0,
+          poolAddress:  params.poolAddress,
+          dexId:        'meteora',
+          feeTvl24hPct: params.feeTvl24hPct,
+          bondingCurvePct: params.bondingCurvePct,
+        },
+        0,
+      ).catch(err =>
+        console.warn('[DAMM] openMoonboyPosition non-fatal error:', err?.message ?? err),
+      )
 
       console.log('[DAMM] dry_run=true — row persisted, alert sent, skipping real open')
       return { positionPubkey: positionId, txSignature: 'DRY_RUN', success: true, positionId }
@@ -719,6 +744,29 @@ export async function openDammPosition(
       bondingCurvePct: params.bondingCurvePct ?? 0,
     })
 
+    // 8. Moonboy companion — age-gated inside openMoonboyPosition, fire-and-forget
+    openMoonboyPosition(
+      {
+        address:      params.tokenAddress,
+        symbol:       params.symbol,
+        mcUsd:        0,
+        volume24h:    0,
+        liquidityUsd: params.liquidityUsd,
+        topHolderPct: 0,
+        holderCount:  0,
+        ageHours:     params.ageMinutes / 60,
+        rugcheckScore: 0,
+        priceUsd:     entryPriceSol,
+        poolAddress:  params.poolAddress,
+        dexId:        'meteora',
+        feeTvl24hPct: params.feeTvl24hPct,
+        bondingCurvePct: params.bondingCurvePct,
+      },
+      0,
+    ).catch(err =>
+      console.warn('[DAMM] openMoonboyPosition non-fatal error:', err?.message ?? err),
+    )
+
     return { positionPubkey, txSignature: signature, success: true, positionId }
   } catch (e: any) {
     const msg = e?.message ?? String(e)
@@ -789,207 +837,125 @@ async function saveDammPosition({
     .select('id')
     .single()
 
-  if (error) {
-    console.error('[DAMM] Failed to persist lp_position:', error.message)
-    throw new Error(`[DAMM] Supabase insert failed: ${error.message}`)
+  if (error || !data) {
+    throw new Error(`[DAMM] saveDammPosition DB insert failed: ${error?.message ?? 'no data'}`)
   }
 
-  console.log(`[DAMM] lp_position saved: id=${data.id} entry_price_sol=${entryPriceSol} dry_run=${dryRun}`)
+  console.log(`[DAMM] position persisted id=${data.id} pubkey=${positionPubkey}`)
   return data.id
 }
 
 // ── Close ──────────────────────────────────────────────────────────────────────
 
-/**
- * Close a DAMM v2 position via Zap Out → 100% back to SOL.
- *
- * positionId: Supabase row id from lp_positions.
- * Loads pool_address, position_pubkey, and sol_deposited from DB; no guessing.
- *
- * After the zap-out tx confirms, calls the Meteora DAMM v2 position API with
- * up to 4 retries (1.5s gap) to tolerate post-tx lag. PnL is written to both
- * the top-level realized_pnl_usd column AND metadata for legacy compatibility.
- * Falls back to null if all retries fail — the row is still closed cleanly.
- *
- * Return value now surfaces realizedPnlUsd and totalFeeEarnedUsd so callers
- * (handleDammExit) can include them in Telegram alerts without a second fetch.
- */
 export async function closeDammPosition(
   positionId: string,
   reason: string,
 ): Promise<{
-  txSignature: string
   success: boolean
-  error?: string
   realizedPnlUsd: number | null
   totalFeeEarnedUsd: number | null
-  skipped?: boolean
+  txSignature: string
+  error?: string
 }> {
-  let claimedForClose = false
-  let closeTxSignature: string | null = null
-  let previousStatus = 'active'
-  let previousCloseReason: string | null = null
-  let previousMetadata: Record<string, unknown> = {}
-  try {
-    const supabase = createServerClient()
-    const { data: row, error: dbErr } = await supabase
-      .from('lp_positions')
-      .select('pool_address, position_pubkey, sol_deposited, metadata, dry_run, status, close_reason')
-      .eq('id', positionId)
-      .single()
+  const supabase = createServerClient()
+  const label = `[DAMM][close][${positionId}]`
 
-    if (dbErr || !row) {
-      throw new Error(`[DAMM] lp_position ${positionId} not found: ${dbErr?.message ?? 'null row'}`)
-    }
+  const { data: position, error: fetchError } = await supabase
+    .from('lp_positions')
+    .select('*')
+    .eq('id', positionId)
+    .single()
 
-    previousStatus = String(row.status ?? 'active')
-    previousCloseReason = typeof row.close_reason === 'string' ? row.close_reason : null
-    previousMetadata = (row.metadata as Record<string, unknown>) ?? {}
-    if (!CLOSEABLE_DAMM_STATUSES.includes(previousStatus)) {
-      const message = `[DAMM] position ${positionId} status=${previousStatus}; close skipped`
-      console.warn(message)
-      return {
-        txSignature: '',
-        success: false,
-        error: message,
-        realizedPnlUsd: null,
-        totalFeeEarnedUsd: null,
-        skipped: true,
-      }
-    }
+  if (fetchError || !position) {
+    return { success: false, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: '', error: `position not found: ${fetchError?.message ?? 'null row'}` }
+  }
 
-    const closeStartedAt = new Date().toISOString()
-    const { data: claimedRows, error: claimErr } = await supabase
-      .from('lp_positions')
-      .update({
-        status: 'pending_close',
-        close_reason: reason,
-        metadata: {
-          ...previousMetadata,
-          close_started_at: closeStartedAt,
-          close_reason: reason,
-        },
-      })
-      .eq('id', positionId)
-      .in('status', CLOSEABLE_DAMM_STATUSES)
-      .select('id')
+  const previousMetadata = (position.metadata ?? {}) as Record<string, unknown>
 
-    if (claimErr) {
-      throw new Error(`[DAMM] close claim failed for ${positionId}: ${claimErr.message}`)
-    }
-
-    if (!claimedRows || claimedRows.length === 0) {
-      const message = `[DAMM] position ${positionId} was already claimed or closed; close skipped`
-      console.warn(message)
-      return {
-        txSignature: '',
-        success: false,
-        error: message,
-        realizedPnlUsd: null,
-        totalFeeEarnedUsd: null,
-        skipped: true,
-      }
-    }
-
-    claimedForClose = true
-
-    const positionPubkey = String(row.position_pubkey ?? '')
-    const poolAddress = String(row.pool_address ?? '')
-
-    if (!positionPubkey || positionPubkey === 'DRY_RUN') {
-      // dry_run close — just mark closed
-      await supabase
-        .from('lp_positions')
-        .update({
-          status: 'closed',
-          closed_at: new Date().toISOString(),
-          close_reason: reason,
-          metadata: { ...previousMetadata, close_reason: reason, dry_run_close: true },
-        })
-        .eq('id', positionId)
-
-      console.log(`[DAMM] dry_run close for ${positionId}`)
-      return { txSignature: 'DRY_RUN', success: true, realizedPnlUsd: null, totalFeeEarnedUsd: null }
-    }
-
-    const wallet = getWallet()
-    const zap = await getZap()
-
-    const zapResult = await zap.zapOutThroughDammV2({
-      owner: wallet.publicKey,
-      pool: new PublicKey(poolAddress),
-      position: new PublicKey(positionPubkey),
-      outTokenMint: NATIVE_MINT,
-      slippage: 100,
-    })
-
-    const zapTx = await resolveTransaction(zapResult)
-    closeTxSignature = await sendWithPriority(zapTx, [wallet], '[DAMM][close]')
-
-    console.log(`[DAMM] ✅ Closed: pos=${positionPubkey} sig=${closeTxSignature}`)
-
-    // Fetch realized PnL from Meteora API with retry
-    const pnlResult = await fetchDammPositionPnlWithRetry(positionPubkey)
-
-    const closedAt = new Date().toISOString()
+  if (position.dry_run === true) {
+    console.log(`${label} DRY RUN row — marking closed in DB only (reason: ${reason})`)
     await supabase
       .from('lp_positions')
       .update({
         status: 'closed',
-        closed_at: closedAt,
+        closed_at: new Date().toISOString(),
         close_reason: reason,
-        tx_close: closeTxSignature,
-        realized_pnl_usd: pnlResult?.realized_pnl_usd ?? null,
+        metadata: { ...previousMetadata, close_reason: reason },
+      })
+      .eq('id', positionId)
+    return { success: true, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: 'DRY_RUN' }
+  }
+
+  if (!position.position_pubkey) {
+    console.error(`${label} position_pubkey is null — cannot close on-chain`)
+    return { success: false, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: '', error: 'missing_position_pubkey' }
+  }
+
+  try {
+    const zap = await getZap()
+    const wallet = getWallet()
+    const connection = getConnection()
+
+    const positionPubkey = new PublicKey(position.position_pubkey)
+    const poolAddress = new PublicKey(position.pool_address)
+
+    const { TOKEN_2022_PROGRAM_ID: T22 } = await import('@solana/spl-token')
+
+    const tx: Transaction = await zap.zapOutThroughDammV2({
+      user: wallet.publicKey,
+      positionNft: positionPubkey,
+      pool: poolAddress,
+      outputTokenMint: NATIVE_MINT,
+      outputTokenProgram: TOKEN_PROGRAM_ID,
+    })
+
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
+    tx.recentBlockhash = blockhash
+    tx.feePayer = wallet.publicKey
+
+    if (!tx.instructions.some(ix => ix.programId.equals(ComputeBudgetProgram.programId))) {
+      tx.instructions.unshift(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+      )
+    }
+
+    tx.sign(wallet)
+    const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
+    await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
+    console.log(`${label} zap-out confirmed: ${sig}`)
+
+    const pnlResult = await fetchDammPositionPnlWithRetry(position.position_pubkey)
+
+    await supabase
+      .from('lp_positions')
+      .update({
+        status: 'closed',
+        closed_at: new Date().toISOString(),
+        close_reason: reason,
+        tx_close: sig,
+        ...(pnlResult !== null ? { realized_pnl_usd: pnlResult.realized_pnl_usd } : {}),
         metadata: {
           ...previousMetadata,
           close_reason: reason,
-          close_started_at: closeStartedAt,
-          closed_at: closedAt,
-          tx_close: closeTxSignature,
-          realized_pnl_usd: pnlResult?.realized_pnl_usd ?? null,
-          total_fee_earned_usd: pnlResult?.total_fee_earned_usd ?? null,
+          tx_close: sig,
+          ...(pnlResult !== null ? {
+            realized_pnl_usd: pnlResult.realized_pnl_usd,
+            total_fee_earned_usd: pnlResult.total_fee_earned_usd,
+          } : {}),
         },
       })
       .eq('id', positionId)
 
     return {
-      txSignature: closeTxSignature,
       success: true,
       realizedPnlUsd: pnlResult?.realized_pnl_usd ?? null,
       totalFeeEarnedUsd: pnlResult?.total_fee_earned_usd ?? null,
+      txSignature: sig,
     }
   } catch (e: any) {
     const msg = e?.message ?? String(e)
-    console.error('[DAMM] closeDammPosition failed:', msg)
-
-    if (claimedForClose) {
-      try {
-        const supabase = createServerClient()
-        await supabase
-          .from('lp_positions')
-          .update({
-            status: previousStatus as any,
-            close_reason: previousCloseReason,
-            metadata: {
-              ...previousMetadata,
-              close_error: msg,
-              close_error_at: new Date().toISOString(),
-              ...(closeTxSignature && { tx_close_partial: closeTxSignature }),
-            },
-          })
-          .eq('id', positionId)
-        console.warn(`[DAMM] rolled back status to ${previousStatus} for ${positionId} after close failure`)
-      } catch (rollbackErr: any) {
-        console.error('[DAMM] rollback also failed:', rollbackErr?.message ?? String(rollbackErr))
-      }
-    }
-
-    return {
-      txSignature: closeTxSignature ?? '',
-      success: false,
-      error: msg,
-      realizedPnlUsd: null,
-      totalFeeEarnedUsd: null,
-    }
+    console.error(`${label} closeDammPosition failed:`, msg)
+    return { success: false, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: '', error: msg }
   }
 }
