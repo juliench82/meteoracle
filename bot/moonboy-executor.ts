@@ -58,6 +58,8 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   const label = `[moonboy][${metrics.symbol}]`
   const supabase = createServerClient()
 
+  console.log(`${label} openMoonboyPosition called — solPriceUsd=$${solPriceUsd.toFixed(2)}`)
+
   if (!moonboyStrategy.enabled) {
     console.log(`${label} moonboy strategy disabled`)
     return null

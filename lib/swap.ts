@@ -318,6 +318,7 @@ export async function buyTokenWithSol(
 
   if (tokenMint === NATIVE_MINT) throw new Error('buyTokenWithSol: cannot buy native SOL')
   if (solPriceUsd <= 0) throw new Error('buyTokenWithSol: solPriceUsd must be > 0')
+  if (solPriceUsd < 10) throw new Error(`buyTokenWithSol: solPriceUsd suspiciously low (${solPriceUsd}) — aborting`)
 
   const solAmount = usdAmount / solPriceUsd
   const lamports = BigInt(Math.floor(solAmount * 1e9))
