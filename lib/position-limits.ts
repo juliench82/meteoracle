@@ -1,5 +1,6 @@
 import { fetchLiveMeteoraSnapshot, type LiveMeteoraPosition } from '@/lib/meteora-live'
 import { createServerClient } from '@/lib/supabase'
+import { getConnection, getWallet } from '@/lib/solana'
 
 export const OPEN_LP_STATUSES = ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry']
 
@@ -89,6 +90,23 @@ export async function getOpenLpLimitState(scope: OpenLpScope = 'all'): Promise<O
   }
 }
 
+/** Live wallet balance guard — called before every open/rebalance to prevent reserve breach across processes */
+export async function assertWalletHasReserve(label: string): Promise<number> {
+  const connection = getConnection()
+  const wallet = getWallet()
+  const lamports = await connection.getBalance(wallet.publicKey, 'confirmed')
+  const sol = lamports / 1_000_000_000
+  const minReserve = parseFloat(process.env.WALLET_MIN_SOL_RESERVE ?? '0.5')
+  const buffer = 0.05 // extra for fees + rebalance
+
+  if (sol < minReserve + buffer) {
+    throw new Error(
+      `${label} wallet ${sol.toFixed(3)} SOL < reserve ${minReserve} + ${buffer} buffer — aborting to protect funds`,
+    )
+  }
+  return sol
+}
+
 export async function assertCanOpenLpPosition(
   maxConcurrentPositions: number,
   label: string,
@@ -102,6 +120,8 @@ export async function assertCanOpenLpPosition(
       `source=${state.countSource}, live=${state.liveOpenCount}, cached=${state.cachedOpenCount})`,
     )
   }
+
+  await assertWalletHasReserve(label) // cross-process safety net
 
   return state
 }
