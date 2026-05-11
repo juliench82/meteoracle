@@ -1127,6 +1127,7 @@ async function persistPosition(
       tx_open:         sig,
       metadata: {
         strategy_id:           strategy.id,
+        strategy_version:      strategy.version,
         bin_range_down:        strategy.position.rangeDownPct,
         bin_range_up:          strategy.position.rangeUpPct,
         maxDurationHours:      strategy.exits.maxDurationHours,
