@@ -592,6 +592,32 @@ async function checkPosition(
 
   if (externallyClosed) {
     console.warn(`${label} position missing on-chain — marking closed in DB`)
+
+    // Compute a best-effort financial snapshot from the last known metadata
+    // so the closed row is not left with bare nulls.
+    const meta = position.metadata ?? {}
+    const snapshotPnlUsd = firstNumber(
+      position.pnl_usd,
+      meta.pnl_usd,
+      meta.position_pnl_usd,
+      meta.total_pnl_usd,
+    )
+    const deployedSolSnap = firstNumber(position.sol_deposited) ?? 0
+    const snapshotPnlPct = resolveMeteoraPnlPct(position, snapshotPnlUsd, deployedSolSnap)
+    const snapshotPositionValueUsd = firstNumber(
+      position.position_value_usd,
+      meta.position_value_usd,
+    )
+    const snapshotClaimableFeesUsd = firstNumber(
+      position.claimable_fees_usd,
+      meta.claimable_fees_usd,
+    )
+    const entryPriceSolSnap = firstNumber(position.entry_price_sol, meta.entry_price_sol) ?? 0
+    const snapshotAgeHours = (now - new Date(position.opened_at).getTime()) / (1000 * 60 * 60)
+
+    // IL approximation using last entry price (no live price available)
+    const snapshotIlPct = 0 // on-chain price gone; IL unknown
+
     try {
       await sbUpdate('lp_positions', `id=eq.${position.id}`, {
         status: 'closed',
@@ -599,6 +625,20 @@ async function checkPosition(
         in_range: false,
         oor_since_at: null,
         close_reason: 'external_close_detected',
+        ...(snapshotPnlUsd !== null ? { pnl_usd: snapshotPnlUsd } : {}),
+        ...(snapshotPnlPct !== null ? { pnl_pct: snapshotPnlPct } : {}),
+        ...(snapshotPositionValueUsd !== null ? { position_value_usd: snapshotPositionValueUsd } : {}),
+        ...(snapshotClaimableFeesUsd !== null ? { claimable_fees_usd: snapshotClaimableFeesUsd } : {}),
+        metadata: {
+          ...meta,
+          close_reason: 'external_close_detected',
+          external_close_detected_at: new Date().toISOString(),
+          ...(snapshotPnlUsd !== null && { pnl_usd: snapshotPnlUsd }),
+          ...(snapshotPnlPct !== null && { pnl_pct: snapshotPnlPct }),
+          ...(snapshotPositionValueUsd !== null && { position_value_usd: snapshotPositionValueUsd }),
+          ...(snapshotClaimableFeesUsd !== null && { claimable_fees_usd: snapshotClaimableFeesUsd }),
+          age_hours_at_close: Math.round(snapshotAgeHours * 10) / 10,
+        },
       })
       stats.closed++
     } catch (err) {
