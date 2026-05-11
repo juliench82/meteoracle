@@ -11,7 +11,7 @@ import { moonboyStrategy } from '@/strategies/moonboy'
 
 const MOONBOY_BUY_USD = parseFloat(process.env.MOONBOY_BUY_USD ?? '10')
 const MOONBOY_MAX_OPEN = parseInt(process.env.MOONBOY_MAX_OPEN ?? '3')
-const JUPITER_PRICE_API = 'https://api.jup.ag/price/v2'
+const DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex/tokens'
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
 
 type MoonboyRow = {
@@ -38,13 +38,17 @@ async function countOpenMoonboys(supabase: ReturnType<typeof createServerClient>
 
 async function getTokenPriceUsd(mint: string): Promise<number | null> {
   try {
-    const res = await fetch(`${JUPITER_PRICE_API}?ids=${mint}`, {
+    const res = await fetch(`${DEXSCREENER_API}/${mint}`, {
       signal: AbortSignal.timeout(8_000),
     })
     if (!res.ok) return null
     const data = await res.json()
-    const price = data?.data?.[mint]?.price
-    return typeof price === 'number' && price > 0 ? price : null
+    const pairs: any[] = data?.pairs ?? []
+    if (pairs.length === 0) return null
+    // Prefer Solana pairs, fall back to first result
+    const pair = pairs.find((p: any) => p.chainId === 'solana') ?? pairs[0]
+    const price = parseFloat(pair?.priceUsd ?? '0')
+    return price > 0 ? price : null
   } catch {
     return null
   }
