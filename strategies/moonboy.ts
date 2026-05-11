@@ -12,6 +12,7 @@ import type { Strategy } from '@/lib/types'
  */
 export const moonboyStrategy: Strategy = {
   id: 'moonboy',
+  version: 'v1.0',
   name: 'Moonboy',
   description: 'Spot buy $10 on early tokens, sell at 2x or −50%.',
   enabled: process.env.MOONBOY_ENABLED !== 'false',

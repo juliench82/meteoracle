@@ -14,6 +14,7 @@ const USDCe = '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo' // Wormhole USDC.e
  */
 export const bluechipFarmStrategy: Strategy = {
   id: 'bluechip-farm',
+  version: 'v1.0',
   name: 'Bluechip Farm',
   description:
     'Fee farming on established large-cap token pairs quoted in USDC or USDT only. ' +

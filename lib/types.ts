@@ -82,6 +82,8 @@ export interface TokenMetrics {
   quoteTokenMint?: string
   /** Pool bin step (e.g. 20, 50, 100, 200). Used to enforce minBinStep strategy filter. */
   binStep?: number
+  /** Score assigned by the scorer — set by scanner before passing to executor. */
+  score?: number
 }
 
 export interface TokenFilters {
@@ -103,7 +105,7 @@ export interface TokenFilters {
    */
   minBinStep?: number
   /**
-   * If set, the pool's quote token mint must be one of these addresses.
+   * If set, the pool's quote token must be one of these addresses.
    * Used by bluechip-farm to enforce USDC/USDT-only pairs.
    * Leave undefined to allow any quote token (SOL, USDC, USDT).
    */
@@ -130,6 +132,14 @@ export interface ExitRules {
 
 export interface Strategy {
   id: string
+  /**
+   * Semantic version for this set of parameters.
+   * Bump whenever filters, position config, or exit rules change.
+   * Written into lp_positions.metadata.strategy_version on open — enables
+   * SQL slicing of performance by param version for backtesting.
+   * Format: 'v<major>.<minor>', e.g. 'v1.0', 'v1.1', 'v2.0'.
+   */
+  version: string
   name: string
   description: string
   filters: TokenFilters

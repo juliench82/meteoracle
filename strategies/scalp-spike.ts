@@ -36,6 +36,7 @@ export const SCALP_SPIKE_MOMENTUM_REGAIN = {
  */
 export const scalpSpikeStrategy: Strategy = {
   id: 'scalp-spike',
+  version: 'v1.0',
   name: 'Scalp Spike',
   description:
     'Short-duration fee farming on volume-spiking tokens — meme or utility. ' +

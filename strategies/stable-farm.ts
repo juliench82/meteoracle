@@ -11,6 +11,7 @@ import type { Strategy } from '@/lib/types'
  */
 export const stableFarmStrategy: Strategy = {
   id: 'stable-farm',
+  version: 'v1.0',
   name: 'Stable Farm',
   description:
     'Curve-distribution fee farming on high-liquidity established pairs. Targets SOL/USDC, SOL/USDT, and major stablecoin pools with deep liquidity. Narrow range, tight bin step, long hold.',

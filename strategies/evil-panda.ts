@@ -42,6 +42,7 @@ export const EVIL_PANDA_SCANNER_SCORE_WEIGHTS = {
  */
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
+  version: 'v1.0',
   name: 'Evil Panda',
   description:
     'Wide-range memecoin fee farming. Bid-ask distribution, 100% single-sided SOL. ' +
