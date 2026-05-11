@@ -10,6 +10,7 @@ import {
   writeScannerHeartbeat,
   type ScannerResult,
 } from './scanner/deep-checker'
+import { validateStartup } from '@/lib/startup-validation'
 
 export { runScanner, type ScannerResult }
 
@@ -54,8 +55,16 @@ if (require.main === module || process.env.LP_SCANNER_STANDALONE === 'true') {
     console.log(`${label} disabled — LP_SCANNER_ENABLED=false`)
   } else {
     console.log(`${label} starting — poll every ${SCAN_INTERVAL_MS / 1000}s`)
-    void writeScannerHeartbeat('startup')
-    setInterval(() => { void writeScannerHeartbeat('interval') }, 30_000)
-    standaloneScannerTick().then(() => setInterval(standaloneScannerTick, SCAN_INTERVAL_MS))
+    validateStartup(label)
+      .then(() => {
+        void writeScannerHeartbeat('startup')
+        setInterval(() => { void writeScannerHeartbeat('interval') }, 30_000)
+        return standaloneScannerTick()
+      })
+      .then(() => setInterval(standaloneScannerTick, SCAN_INTERVAL_MS))
+      .catch((err: unknown) => {
+        console.error(err instanceof Error ? err.message : String(err))
+        process.exit(1)
+      })
   }
 }
