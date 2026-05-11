@@ -38,6 +38,7 @@ const SYNC_FAIL_ALERT_THRESHOLD = parseInt(process.env.MONITOR_SYNC_FAIL_ALERT_T
 
 const DAMM_EDGE_EXIT_STRATEGY: Strategy = {
   id: 'damm-edge',
+  version: 'v1.0',
   name: 'DAMM Edge',
   description: 'DAMM v2 market-edge exit policy.',
   enabled: true,
