@@ -3,6 +3,19 @@ import axios from 'axios'
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM = 'https://dlmm-api.meteora.ag'
 
+// Simple 10-min cache — pools change slowly; scanner ticks every 15 min
+let meteoraPoolsCache: { pools: MeteoraPool[]; ts: number } | null = null
+const METEORA_CACHE_TTL_MS = parseInt(
+  process.env.METEORA_POOLS_CACHE_TTL_MS ?? '600000',
+  10,
+)
+
+function getCachedMeteoraPools(): MeteoraPool[] | null {
+  if (!meteoraPoolsCache) return null
+  if (Date.now() - meteoraPoolsCache.ts > METEORA_CACHE_TTL_MS) return null
+  return meteoraPoolsCache.pools
+}
+
 export const WSOL = 'So11111111111111111111111111111111111111112'
 export const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 export const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
@@ -249,7 +262,7 @@ export function getTradableToken(pool: MeteoraPool): MeteoraToken {
 
 async function fetchMeteoraPoolsPage(
   baseUrl: string,
-  sortBy: 'pool_created_at' | 'volume_5m' | 'volume_1h',
+  sortBy: 'pool_created_at' | 'volume_1h' | 'volume_5m',
   config: PoolFetchConfig,
 ): Promise<MeteoraPool[]> {
   const filters = [`tvl>=${config.minTvlUsd}`, 'is_blacklisted=false']
@@ -301,6 +314,12 @@ async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchC
 export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pools: MeteoraPool[]; error?: string }> {
   let allPools: MeteoraPool[] = []
 
+  const cached = getCachedMeteoraPools()
+  if (cached) {
+    console.log(`[scanner] using cached Meteora pools (${cached.length} entries, TTL ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min)`)
+    return { pools: cached }
+  }
+
   for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
     try {
       console.log(`[scanner] trying Meteora endpoint: ${endpoint}`)
@@ -319,6 +338,9 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
   if (allPools.length === 0) {
     return { pools: [], error: 'All Meteora endpoints failed or returned empty' }
   }
+
+  meteoraPoolsCache = { pools: allPools, ts: Date.now() }
+  console.log(`[scanner] cached ${allPools.length} Meteora pools for ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min`)
 
   const pools = allPools.filter((pool) => {
     if (pool.is_blacklisted) return false
