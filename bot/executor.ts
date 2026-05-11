@@ -119,7 +119,7 @@ async function simulateAndCheck(tx: Transaction, label: string): Promise<boolean
   try {
     const sim = await connection.simulateTransaction(tx)
     if (sim.value.err) {
-      console.error(`${label} ⚠ simulation FAILED — aborting send`, {
+      console.error(`${label} \u26a0 simulation FAILED \u2014 aborting send`, {
         err:  sim.value.err,
         logs: sim.value.logs?.slice(-5),
       })
@@ -130,7 +130,7 @@ async function simulateAndCheck(tx: Transaction, label: string): Promise<boolean
   } catch (simErr: unknown) {
     const msg = simErr instanceof Error ? simErr.message : String(simErr)
     if (msg.includes('memory allocation failed') || msg.includes('out of memory')) {
-      console.error(`${label} ⚠ simulation OOM — position too large, aborting`, { error: msg })
+      console.error(`${label} \u26a0 simulation OOM \u2014 position too large, aborting`, { error: msg })
       return false
     }
     console.warn(`${label} simulation threw (proceeding):`, msg)
@@ -144,7 +144,7 @@ async function simulateAndCheck(tx: Transaction, label: string): Promise<boolean
  * If confirmTransaction throws (RPC timeout, block height expiry, etc.)
  * we fall back to getSignatureStatus. If the chain shows the tx as
  * 'confirmed' or 'finalized' we treat it as success and return the sig
- * — the tx landed, the RPC just timed out waiting. Only re-throws when
+ * \u2014 the tx landed, the RPC just timed out waiting. Only re-throws when
  * the chain also has no record of the tx, preventing false-positive
  * active positions.
  */
@@ -159,7 +159,7 @@ async function sendLegacyTx(
   tx.feePayer = signers[0].publicKey
 
   const simOk = await simulateAndCheck(tx, label)
-  if (!simOk) throw new Error(`${label} transaction aborted — simulation reported program error`)
+  if (!simOk) throw new Error(`${label} transaction aborted \u2014 simulation reported program error`)
 
   tx.sign(...signers)
   const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
@@ -168,21 +168,19 @@ async function sendLegacyTx(
     await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
   } catch (confirmErr: unknown) {
     const errMsg = confirmErr instanceof Error ? confirmErr.message : String(confirmErr)
-    console.warn(`${label} confirmTransaction threw — checking chain directly for ${sig.slice(0, 8)}…`, errMsg)
+    console.warn(`${label} confirmTransaction threw \u2014 checking chain directly for ${sig.slice(0, 8)}\u2026`, errMsg)
 
-    // Give the RPC a moment to catch up before we query status
     await new Promise(r => setTimeout(r, 3_000))
 
     const statusResp = await connection.getSignatureStatus(sig, { searchTransactionHistory: true })
     const status = statusResp.value
 
     if (status && !status.err && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
-      console.log(`${label} tx confirmed on-chain via status fallback ✔ (${status.confirmationStatus}) sig: ${sig}`)
+      console.log(`${label} tx confirmed on-chain via status fallback \u2714 (${status.confirmationStatus}) sig: ${sig}`)
       return sig
     }
 
-    // Chain also has no record — tx genuinely did not land
-    console.error(`${label} tx not confirmed on-chain after fallback check — sig: ${sig}`, { status })
+    console.error(`${label} tx not confirmed on-chain after fallback check \u2014 sig: ${sig}`, { status })
     throw confirmErr
   }
 
@@ -197,7 +195,7 @@ async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
 }
 
 /**
- * Fallback for the token→SOL swap leg after DLMM liquidity removal.
+ * Fallback for the token\u2192SOL swap leg after DLMM liquidity removal.
  * Uses zapOutThroughDlmm which routes through the LB pair directly.
  * Only viable for SOL-paired pools (one side is NATIVE_MINT).
  * Returns true if the zap was sent successfully, false if skipped.
@@ -217,7 +215,7 @@ async function zapOutDlmmFallback(
     tokenY.toBase58() === NATIVE_MINT_STR
 
   if (!pairHasSol) {
-    console.log(`${label} DLMM zap fallback skipped — pair has no SOL side`)
+    console.log(`${label} DLMM zap fallback skipped \u2014 pair has no SOL side`)
     return false
   }
 
@@ -238,7 +236,7 @@ async function zapOutDlmmFallback(
   const amountIn = new BN(bal?.value?.amount ?? '0')
 
   if (amountIn.isZero()) {
-    console.log(`${label} DLMM zap fallback skipped — no token balance to zap`)
+    console.log(`${label} DLMM zap fallback skipped \u2014 no token balance to zap`)
     return false
   }
 
@@ -254,13 +252,13 @@ async function zapOutDlmmFallback(
     )
     minimumSwapAmountOut = quote.minOutAmount
   } catch (quoteErr) {
-    console.warn(`${label} DLMM zap fallback skipped — quote failed:`, quoteErr)
+    console.warn(`${label} DLMM zap fallback skipped \u2014 quote failed:`, quoteErr)
     return false
   }
 
   console.log(
-    `${label} DLMM zap fallback — zapOutThroughDlmm ${amountIn.toString()} lamports ` +
-    `of ${inputMint.toBase58().slice(0, 8)}… minOut=${minimumSwapAmountOut.toString()}`,
+    `${label} DLMM zap fallback \u2014 zapOutThroughDlmm ${amountIn.toString()} lamports ` +
+    `of ${inputMint.toBase58().slice(0, 8)}\u2026 minOut=${minimumSwapAmountOut.toString()}`,
   )
 
   const zap = await getZap()
@@ -279,7 +277,7 @@ async function zapOutDlmmFallback(
 
   const priorityFee = await getPriorityFee([lbPairAddress, wallet.publicKey.toBase58()])
   const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), [wallet], `${label}[zap-dlmm]`)
-  console.log(`${label} DLMM zap fallback ✔ sig: ${sig}`)
+  console.log(`${label} DLMM zap fallback \u2714 sig: ${sig}`)
   return true
 }
 
@@ -294,7 +292,7 @@ function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pric
 
 /**
  * Fetches userPositions with up to `maxAttempts` retries spaced `delayMs` apart.
- * Meteora's position API can lag 1–3s behind the chain after a removeLiquidity tx.
+ * Meteora's position API can lag 1\u20133s behind the chain after a removeLiquidity tx.
  * Returns the matching position or null if still absent after all retries.
  */
 async function getPositionWithRetry(
@@ -310,7 +308,7 @@ async function getPositionWithRetry(
     const found = userPositions.find((p: { publicKey: PublicKey }) => p.publicKey.toBase58() === positionPubkey)
     if (found) return found
     if (attempt < maxAttempts) {
-      console.log(`${label} position not yet visible in API — retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`)
+      console.log(`${label} position not yet visible in API \u2014 retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`)
       await new Promise(r => setTimeout(r, delayMs))
     }
   }
@@ -447,7 +445,7 @@ export async function addLiquidityToPosition(
       event: 'add_liquidity_dry_run',
       payload: { positionId, symbol, solAmount, strategy: strategy.id },
     })
-    console.log(`${label} dry_run=true — skipping add liquidity tx`)
+    console.log(`${label} dry_run=true \u2014 skipping add liquidity tx`)
     return { success: true, dryRun: true, txSignature: 'DRY_RUN', symbol, solAdded: solAmount }
   }
 
@@ -462,7 +460,7 @@ export async function addLiquidityToPosition(
       txSignature: '',
       symbol,
       solAdded: solAmount,
-      error: `insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`,
+      error: `insufficient balance \u2014 need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)} SOL`,
     }
   }
 
@@ -482,7 +480,7 @@ export async function addLiquidityToPosition(
       txSignature: '',
       symbol,
       solAdded: solAmount,
-      error: `global exposure cap hit — ${(totalDeployed + solAmount).toFixed(3)}/${maxTotalDeployed} SOL`,
+      error: `global exposure cap hit \u2014 ${(totalDeployed + solAmount).toFixed(3)}/${maxTotalDeployed} SOL`,
     }
   }
 
@@ -573,7 +571,7 @@ export async function addLiquidityToPosition(
       payload: { positionId, symbol, solAmount, strategy: strategy.id, txSignature: sig },
     })
 
-    console.log(`${label} added ${solAmount} SOL to ${symbol} ✔ sig: ${sig}`)
+    console.log(`${label} added ${solAmount} SOL to ${symbol} \u2714 sig: ${sig}`)
     return { success: true, dryRun: false, txSignature: sig, symbol, solAdded: solAmount }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -600,7 +598,7 @@ export async function openPosition(
   const supabase = createServerClient()
 
   if (DRY_RUN) {
-    console.log(`${label} DRY RUN — skipping on-chain tx`)
+    console.log(`${label} DRY RUN \u2014 skipping on-chain tx`)
     const envCap = MARKET_LP_SOL_PER_POSITION
     const dryRunSolAmount = strategy.position.maxSolPerPosition
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
@@ -640,7 +638,7 @@ export async function openPosition(
     const maxTotalDeployed = MAX_MARKET_LP_SOL_DEPLOYED
     const { totalDeployed, source: exposureSource } = await getTotalDeployedSolForCap(supabase, limitState)
     if (totalDeployed + solAmount > maxTotalDeployed) {
-      console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed (${exposureSource})`)
+      console.warn(`${label} global exposure cap hit \u2014 ${totalDeployed.toFixed(3)} SOL deployed (${exposureSource})`)
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_exposure_cap',
         payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed, source: exposureSource },
@@ -655,7 +653,7 @@ export async function openPosition(
     const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL + WALLET_MIN_SOL_RESERVE
 
     if (balanceSol < requiredSol) {
-      console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)}`)
+      console.warn(`${label} insufficient balance \u2014 need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)}`)
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_insufficient_balance',
         payload: {
@@ -686,13 +684,13 @@ export async function openPosition(
     const ataIxs: TransactionInstruction[] = []
     for (const [lbl, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
-        console.log(`${label} token ${lbl} is native SOL — skipping ATA`)
+        console.log(`${label} token ${lbl} is native SOL \u2014 skipping ATA`)
         continue
       }
       const tokenProgramId = await getTokenProgramId(mint)
       const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID)
       if (!(await connection.getAccountInfo(ata))) {
-        console.log(`${label} creating ATA for token ${lbl} (${mint.toBase58().slice(0, 8)}…)`)
+        console.log(`${label} creating ATA for token ${lbl} (${mint.toBase58().slice(0, 8)}\u2026)`)
         ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
           wallet.publicKey, ata, wallet.publicKey, mint, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
         ))
@@ -703,7 +701,7 @@ export async function openPosition(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }), ...ataIxs
       )
       const ataSig = await sendLegacyTx(ataTx, [wallet], label)
-      console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
+      console.log(`${label} ATA(s) created \u2714 sig: ${ataSig}`)
     }
 
     const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
@@ -714,19 +712,19 @@ export async function openPosition(
 
     const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
     if (binRange > maxBins) {
-      console.warn(`${label} bin range too wide — rejecting`, { binRange, maxBins, binStep })
+      console.warn(`${label} bin range too wide \u2014 rejecting`, { binRange, maxBins, binStep })
       await supabase.from('bot_logs').insert({
         level: 'warn', event: 'open_position_skipped_bin_range_cap',
         payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
       })
       return null
     }
-    console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
+    console.log(`${label} bin range: ${minBinId} \u2192 ${maxBinId} (${binRange} bins, step=${binStep})`)
 
     const solIsTokenX = mintX.toBase58() === NATIVE_MINT_STR
     const solIsTokenY = mintY.toBase58() === NATIVE_MINT_STR
     if (!solIsTokenX && !solIsTokenY) {
-      console.warn(`${label} pool has no SOL side — rejecting one-sided SOL zap-in`)
+      console.warn(`${label} pool has no SOL side \u2014 rejecting one-sided SOL zap-in`)
       await supabase.from('bot_logs').insert({
         level: 'warn',
         event: 'open_position_skipped_non_sol_pair',
@@ -792,7 +790,7 @@ export async function openPosition(
     ): Promise<string | null> => {
       if (!tx || tx.instructions.length === 0) return null
       const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), signers, label)
-      console.log(`${label} zap-in ${stage} confirmed ✔ sig: ${sig}`)
+      console.log(`${label} zap-in ${stage} confirmed \u2714 sig: ${sig}`)
       return sig
     }
 
@@ -838,16 +836,23 @@ export async function openPosition(
       console.warn(`${label} could not fetch token amount:`, err)
     }
 
-    console.log(`${label} position opened ✔`)
+    console.log(`${label} position opened \u2714`)
     const positionId = await persistPosition(
       metrics, strategy, openSig,
       metrics.priceUsd ?? 0, entryPriceSol, solAmount,
       positionKeypair.publicKey.toBase58(), tokenAmountDeposited, DRY_RUN
     )
     await sendOpenAlert(metrics, strategy, positionId, solAmount, entryPriceSol)
-    if (entryPriceSol > 0) {
-      openMoonboyPosition(metrics, entryPriceSol).catch(() => {})
-    }
+
+    // Moonboy companion buy — fire-and-forget, never blocks LP open result.
+    // solPriceUsd derived from priceUsd/entryPriceSol (USD per token / SOL per token = USD/SOL).
+    const solPriceUsd = entryPriceSol > 0 && (metrics.priceUsd ?? 0) > 0
+      ? (metrics.priceUsd ?? 0) / entryPriceSol
+      : 0
+    openMoonboyPosition(metrics, solPriceUsd).catch(err =>
+      console.warn('[executor] openMoonboyPosition non-fatal error:', err?.message ?? err)
+    )
+
     return positionId
 
   } catch (err) {
@@ -876,10 +881,10 @@ export async function closePosition(
   }
 
   const label = `[executor][close][${position.symbol}]`
-  console.log(`${label} closing — reason: ${reason}`)
+  console.log(`${label} closing \u2014 reason: ${reason}`)
 
   if (position.dry_run === true) {
-    console.log(`${label} DRY RUN row — marking closed in DB only`)
+    console.log(`${label} DRY RUN row \u2014 marking closed in DB only`)
     const claimableFeesUsd = getClaimableFeesUsd(position) ?? 0
     await markPositionClosed(positionId, claimableFeesUsd, reason)
     await sendCloseAlert(position, claimableFeesUsd, reason)
@@ -887,7 +892,7 @@ export async function closePosition(
   }
 
   if (ENV_DRY_RUN_FORCED) {
-    console.warn(`${label} BOT_DRY_RUN=true — refusing to close live on-chain position`)
+    console.warn(`${label} BOT_DRY_RUN=true \u2014 refusing to close live on-chain position`)
     await supabase.from('bot_logs').insert({
       level: 'warn',
       event: 'close_position_skipped_env_dry_run',
@@ -897,7 +902,7 @@ export async function closePosition(
   }
 
   if (!position.position_pubkey) {
-    console.error(`${label} position_pubkey is null — cannot close on-chain, marking closed in DB`)
+    console.error(`${label} position_pubkey is null \u2014 cannot close on-chain, marking closed in DB`)
     await markPositionClosed(positionId, getClaimableFeesUsd(position) ?? 0, `${reason}_no_pubkey`)
     return false
   }
@@ -912,9 +917,6 @@ export async function closePosition(
 
     let claimableFeesUsd = getClaimableFeesUsd(position) ?? 0
 
-    // Fetch the full on-chain position object first — needed for both claimAllRewards
-    // (which walks positionData.feeX) and removeLiquidity (bin IDs). A single RPC
-    // call here prevents the `feeX undefined` crash when reward bins are present.
     const userPosition = await getPositionWithRetry(
       dlmmPool,
       wallet.publicKey,
@@ -930,10 +932,10 @@ export async function closePosition(
         })
         for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
           const sig = await sendLegacyTx(tx, [wallet], label)
-          console.log(`${label} fees claimed ✔ sig: ${sig}`)
+          console.log(`${label} fees claimed \u2714 sig: ${sig}`)
         }
       } else {
-        console.warn(`${label} position not found on-chain — skipping fee claim`)
+        console.warn(`${label} position not found on-chain \u2014 skipping fee claim`)
       }
     } catch (err) {
       console.warn(`${label} fee claim failed (continuing):`, err)
@@ -951,17 +953,15 @@ export async function closePosition(
       })
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
         const sig = await sendLegacyTx(tx, [wallet], label)
-        console.log(`${label} liquidity removed ✔ sig: ${sig}`)
+        console.log(`${label} liquidity removed \u2714 sig: ${sig}`)
       }
     } else {
-      console.warn(`${label} position not found on-chain after retries — marking closed in DB`)
+      console.warn(`${label} position not found on-chain after retries \u2014 marking closed in DB`)
       await markPositionClosed(positionId, claimableFeesUsd, `${reason}_external`)
       await sendCloseAlert(position, claimableFeesUsd, reason)
       return true
     }
 
-    // Re-fetch userPosition one more time after successful removeLiquidity and use its final feeX/feeY for claimableFeesUsd
-    // instead of pre-close DB snapshot. This makes every closed row's PnL authoritative and eliminates the drift vs Meteora dashboard.
     const finalUserPosition = await getPositionWithRetry(
       dlmmPool,
       wallet.publicKey,
@@ -974,7 +974,6 @@ export async function closePosition(
       claimableFeesUsd = getClaimableFeesUsd(finalUserPosition) ?? claimableFeesUsd
     }
 
-    // Post-removeLiquidity ATA balance check: skip swapTokenToSol on zero/dust to prevent false failed-swap alerts
     let hasTokenBalance = false
     try {
       const tokenMint = new PublicKey(position.mint)
@@ -985,7 +984,7 @@ export async function closePosition(
       const balResp = await connection.getTokenAccountBalance(tokenAta).catch(() => null)
       const amount = new BN(balResp?.value?.amount ?? '0')
       if (amount.isZero() || amount.lt(new BN(100))) {
-        console.log(`${label} token ATA balance zero/dust (${amount.toString()}) after removeLiquidity — skipping swapTokenToSol`)
+        console.log(`${label} token ATA balance zero/dust (${amount.toString()}) after removeLiquidity \u2014 skipping swapTokenToSol`)
         hasTokenBalance = false
       } else {
         hasTokenBalance = true
@@ -1002,7 +1001,7 @@ export async function closePosition(
         swappedToSol = true
       } catch (swapErr) {
         const swapMsg = swapErr instanceof Error ? swapErr.message : String(swapErr)
-        console.warn(`${label} token→SOL swap failed — trying DLMM zap fallback:`, swapMsg)
+        console.warn(`${label} token\u2192SOL swap failed \u2014 trying DLMM zap fallback:`, swapMsg)
 
         try {
           swappedToSol = await zapOutDlmmFallback(dlmmPool, wallet, position.pool_address, label)
@@ -1011,7 +1010,7 @@ export async function closePosition(
         }
 
         if (!swappedToSol) {
-          console.error(`${label} token→SOL swap failed after all retries — tokens are stranded in wallet`, { mint: position.mint, error: swapMsg })
+          console.error(`${label} token\u2192SOL swap failed after all retries \u2014 tokens are stranded in wallet`, { mint: position.mint, error: swapMsg })
 
           await supabase.from('bot_logs').insert({
             level: 'error',
@@ -1021,7 +1020,7 @@ export async function closePosition(
 
           await sendAlert({
             type: 'error',
-            message: `⚠️ Swap failed for ${position.symbol} after close (${reason})\nMint: \`${position.mint}\`\nTokens are stranded in wallet — manual swap required.\nError: ${swapMsg}`,
+            message: `\u26a0\ufe0f Swap failed for ${position.symbol} after close (${reason})\nMint: \`${position.mint}\`\nTokens are stranded in wallet \u2014 manual swap required.\nError: ${swapMsg}`,
           })
         }
       }
