@@ -548,8 +548,7 @@ export async function addLiquidityToPosition(
     const parsedManualAddCostUsd = Number(metadata.manual_add_cost_usd ?? metadata.manual_add_estimated_cost_usd ?? 0)
     const previousManualAddCostUsd = Number.isFinite(parsedManualAddCostUsd) ? parsedManualAddCostUsd : 0
     const manualAddCostUsd = addSolPriceUsd > 0
-      ? Math.round((previousManualAddCostUsd + solAmount * addSolPriceUsd) * 100) / 100
-      : previousManualAddCostUsd
+      ? Math.round((previousManualAddCostUsd + solAmount * addSolPriceUsd) * 100) / 100 : previousManualAddCostUsd
 
     await supabase
       .from('lp_positions')
@@ -959,6 +958,20 @@ export async function closePosition(
       await markPositionClosed(positionId, claimableFeesUsd, `${reason}_external`)
       await sendCloseAlert(position, claimableFeesUsd, reason)
       return true
+    }
+
+    // Re-fetch userPosition one more time after successful removeLiquidity and use its final feeX/feeY for claimableFeesUsd
+    // instead of pre-close DB snapshot. This makes every closed row's PnL authoritative and eliminates the drift vs Meteora dashboard.
+    const finalUserPosition = await getPositionWithRetry(
+      dlmmPool,
+      wallet.publicKey,
+      positionPubKey.toBase58(),
+      label,
+      2,
+      800
+    )
+    if (finalUserPosition) {
+      claimableFeesUsd = getClaimableFeesUsd(finalUserPosition) ?? claimableFeesUsd
     }
 
     // Post-removeLiquidity ATA balance check: skip swapTokenToSol on zero/dust to prevent false failed-swap alerts
