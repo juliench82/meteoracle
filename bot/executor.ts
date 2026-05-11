@@ -845,6 +845,7 @@ export async function openPosition(
       metrics.priceUsd ?? 0, entryPriceSol, solAmount,
       positionKeypair.publicKey.toBase58(), tokenAmountDeposited, DRY_RUN
     )
+    await sendOpenAlert(metrics, strategy, positionId, solAmount, entryPriceSol)
     if (entryPriceSol > 0) {
       openMoonboyPosition(metrics, entryPriceSol).catch(() => {})
     }
@@ -1026,6 +1027,36 @@ export async function closePosition(
       payload: { positionId, reason, error: message },
     })
     return false
+  }
+}
+
+async function sendOpenAlert(
+  metrics: TokenMetrics,
+  strategy: Strategy,
+  positionId: string,
+  solDeposited: number,
+  entryPriceSol: number,
+): Promise<void> {
+  try {
+    await sendAlert({
+      type: 'position_opened',
+      symbol: metrics.symbol,
+      strategy: strategy.id,
+      solDeposited,
+      entryPrice: metrics.priceUsd ?? 0,
+      positionId,
+      takeProfitPct: strategy.exits.takeProfitPct,
+      stopLossPct: strategy.exits.stopLossPct,
+      volume24h: metrics.volume24h,
+      entryPriceUsd: metrics.priceUsd ?? 0,
+      entryPriceSol,
+      meteoracleScore: metrics.score,
+      rugcheckScore: metrics.rugcheckScore,
+      poolAddress: metrics.poolAddress,
+      mint: metrics.address,
+    })
+  } catch (alertErr) {
+    console.warn('[executor] sendOpenAlert failed (non-fatal):', alertErr)
   }
 }
 
