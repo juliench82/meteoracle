@@ -86,7 +86,7 @@ async function fetchPositions(): Promise<PositionRow[]> {
 
   const { data, error } = await query
   if (error) throw new Error(`Supabase query failed: ${error.message}`)
-  return (data ?? []) as PositionRow[]
+  return (data ?? []) as unknown as PositionRow[]
 }
 
 // ── Aggregate ─────────────────────────────────────────────────────────────────
