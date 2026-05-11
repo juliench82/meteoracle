@@ -1,9 +1,11 @@
 import axios from 'axios'
+import { createServerClient } from '@/lib/supabase'
+import { summarizeError } from '@/lib/logging'
 
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM = 'https://dlmm-api.meteora.ag'
 
-// Simple 10-min cache — pools change slowly; scanner ticks every 15 min
+// Simple in-process cache — pools change slowly; scanner ticks every 15 min
 let meteoraPoolsCache: { pools: MeteoraPool[]; ts: number } | null = null
 const METEORA_CACHE_TTL_MS = parseInt(
   process.env.METEORA_POOLS_CACHE_TTL_MS ?? '600000',
@@ -260,6 +262,96 @@ export function getTradableToken(pool: MeteoraPool): MeteoraToken {
   return QUOTE_ASSETS.has(pool.token_x.address) ? pool.token_y : pool.token_x
 }
 
+// ─── Supabase persistent cache ────────────────────────────────────────────────
+
+/**
+ * Read scanner_pool_cache rows fresher than the in-memory TTL and seed the
+ * in-memory cache from them. Called once on cold start before hitting Meteora.
+ * Returns the pool list if usable, null otherwise.
+ */
+async function loadDbPoolCache(): Promise<MeteoraPool[] | null> {
+  try {
+    const cutoff = new Date(Date.now() - METEORA_CACHE_TTL_MS).toISOString()
+    const { data, error } = await createServerClient()
+      .from('scanner_pool_cache')
+      .select('metadata')
+      .gte('last_seen_at', cutoff)
+      .eq('is_blacklisted', false)
+
+    if (error) throw error
+    if (!data || data.length === 0) return null
+
+    const pools = data
+      .map((row) => normalizeMeteoraPool(row.metadata))
+      .filter((p): p is MeteoraPool => p !== null)
+
+    if (pools.length === 0) return null
+
+    console.log(`[scanner] warm-start: loaded ${pools.length} pools from scanner_pool_cache`)
+    return pools
+  } catch (err) {
+    console.warn(`[scanner] scanner_pool_cache read failed: ${summarizeError(err)}`)
+    return null
+  }
+}
+
+/**
+ * Bulk-upsert fetched pools into scanner_pool_cache. Fire-and-forget —
+ * errors are logged but never propagate to the scan tick.
+ */
+function persistDbPoolCache(pools: MeteoraPool[]): void {
+  if (pools.length === 0) return
+
+  const now = new Date().toISOString()
+
+  const rows = pools.map((pool) => {
+    const tradable = getTradableToken(pool)
+    const createdAt = getPoolCreatedAt(pool)
+    return {
+      pool_address: pool.address,
+      token_address: tradable.address,
+      symbol: tradable.symbol,
+      scanner_lane: 'meteora',
+      pool_created_at: createdAt ? new Date(createdAt * 1000).toISOString() : null,
+      age_minutes: Math.round(getPoolAgeMinutes(pool)),
+      liquidity_usd: getPoolTvl(pool),
+      market_cap_usd: tradable.market_cap > 0 ? tradable.market_cap : null,
+      volume_24h: getPoolVolume(pool, '24h') || null,
+      volume_1h: getPoolVolume(pool, '1h') || null,
+      volume_5m: getPoolVolume(pool, '5m') || null,
+      fee_tvl_24h_pct: getFeeTvlPct(pool, '24h') || null,
+      fee_tvl_1h_pct: getFeeTvlPct(pool, '1h') || null,
+      fee_tvl_5m_pct: getFeeTvlPct(pool, '5m') || null,
+      volume_spike_ratio: getRecentVolumeGrowth(pool) || null,
+      momentum_score: scoreMeteoraMomentum(pool),
+      is_blacklisted: pool.is_blacklisted,
+      last_seen_at: now,
+      metadata: pool as unknown as Record<string, unknown>,
+      updated_at: now,
+    }
+  })
+
+  // Chunk to avoid hitting Supabase's 1 MB request limit on large pool sets
+  const CHUNK = 200
+  const chunks: typeof rows[] = []
+  for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK))
+
+  Promise.allSettled(
+    chunks.map((chunk) =>
+      createServerClient()
+        .from('scanner_pool_cache')
+        .upsert(chunk, { onConflict: 'pool_address', ignoreDuplicates: false }),
+    ),
+  ).then((results) => {
+    const failed = results.filter((r) => r.status === 'rejected')
+    if (failed.length > 0) {
+      console.warn(`[scanner] scanner_pool_cache upsert: ${failed.length}/${chunks.length} chunks failed`)
+    }
+  }).catch(() => { /* never throws */ })
+}
+
+// ─── Meteora API fetchers ─────────────────────────────────────────────────────
+
 async function fetchMeteoraPoolsPage(
   baseUrl: string,
   sortBy: 'pool_created_at' | 'volume_1h' | 'volume_5m',
@@ -314,12 +406,24 @@ async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchC
 export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pools: MeteoraPool[]; error?: string }> {
   let allPools: MeteoraPool[] = []
 
+  // 1. In-process memory cache (fastest, same process lifetime)
   const cached = getCachedMeteoraPools()
   if (cached) {
-    console.log(`[scanner] using cached Meteora pools (${cached.length} entries, TTL ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min)`)
+    console.log(`[scanner] using in-memory cached Meteora pools (${cached.length} entries, TTL ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min)`)
     return { pools: cached }
   }
 
+  // 2. Persistent DB cache (warm across restarts, same TTL window)
+  const dbPools = await loadDbPoolCache()
+  if (dbPools && dbPools.length > 0) {
+    meteoraPoolsCache = { pools: dbPools, ts: Date.now() }
+    // Still return filtered view so caller behaviour is unchanged
+    const pools = applyJsPreFilter(dbPools, config)
+    console.log(`[scanner] warm-start: ${dbPools.length} pools from DB; ${pools.length} passed JS pre-filter`)
+    return { pools }
+  }
+
+  // 3. Live fetch from Meteora API
   for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
     try {
       console.log(`[scanner] trying Meteora endpoint: ${endpoint}`)
@@ -342,7 +446,21 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
   meteoraPoolsCache = { pools: allPools, ts: Date.now() }
   console.log(`[scanner] cached ${allPools.length} Meteora pools for ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min`)
 
-  const pools = allPools.filter((pool) => {
+  // Persist to DB asynchronously — never blocks the tick
+  persistDbPoolCache(allPools)
+
+  const pools = applyJsPreFilter(allPools, config)
+  console.log(
+    `[scanner] ${allPools.length} filtered Meteora pools fetched; ${pools.length} passed JS pre-filter ` +
+    `(minTvl=$${config.minTvlUsd}, ` +
+    `minFeeTvl1h=${(config.minFeeTvlRatio1h * 100).toFixed(1)}%, ` +
+    `minVolTvl1h=${config.minVolumeTvl1hRatio.toFixed(2)})`,
+  )
+  return { pools }
+}
+
+function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): MeteoraPool[] {
+  return allPools.filter((pool) => {
     if (pool.is_blacklisted) return false
     const isFresh = getPoolAgeMinutes(pool) <= config.freshMaxAgeMinutes
     const isRegain = config.isMomentumRegain(pool)
@@ -358,12 +476,4 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
     if (!isFresh && !hasMomentumVolume && !isRegain) return false
     return true
   })
-
-  console.log(
-    `[scanner] ${allPools.length} filtered Meteora pools fetched; ${pools.length} passed JS pre-filter ` +
-    `(minTvl=$${config.minTvlUsd}, ` +
-    `minFeeTvl1h=${(config.minFeeTvlRatio1h * 100).toFixed(1)}%, ` +
-    `minVolTvl1h=${config.minVolumeTvl1hRatio.toFixed(2)})`,
-  )
-  return { pools }
 }
