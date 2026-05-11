@@ -4,7 +4,7 @@ import { createServerClient } from '@/lib/supabase'
 import { sendAlert } from '@/bot/alerter'
 
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
-const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v6'
+const JUPITER_QUOTE_API = process.env.JUPITER_QUOTE_API_URL ?? 'https://public.jupiterapi.com'
 const SWAP_TIMEOUT_MS = 20_000
 const SWAP_MAX_RETRIES = 3
 const SWAP_RETRY_DELAY_MS = 3_000
