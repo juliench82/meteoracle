@@ -135,6 +135,8 @@ function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record
     }),
     in_range: live.in_range,
     current_price: live.current_price,
+    sol_deposited: live.sol_deposited,
+    token_amount: live.token_amount,
     ...(live.claimable_fees_usd !== null && live.claimable_fees_usd !== undefined && {
       claimable_fees_usd: Math.round(live.claimable_fees_usd * 100) / 100,
     }),
@@ -143,6 +145,9 @@ function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record
     }),
     ...(live.pnl_usd !== null && live.pnl_usd !== undefined && {
       pnl_usd: Math.round(live.pnl_usd * 100) / 100,
+    }),
+    ...(live.pnl_pct !== null && live.pnl_pct !== undefined && {
+      pnl_pct: Math.round(live.pnl_pct * 100) / 100,
     }),
     metadata: {
       ...(existing.metadata ?? {}),
