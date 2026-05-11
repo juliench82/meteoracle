@@ -21,6 +21,8 @@ import { evaluateDammEdge } from '@/strategies/damm-edge'
 import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
 import { scalpSpikeStrategy } from '@/strategies/scalp-spike'
 import { openDammPosition, resolveVerifiedDammV2PoolForToken } from '../damm-executor'
+import { openMoonboyPosition } from '../moonboy-executor'
+import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
@@ -114,10 +116,6 @@ const METEORA_NEW_LISTING_FEETVL  = 8   // %
 
 const SUPABASE_TIMEOUT_MS      = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
-// Per-call timeout for external enrichment calls in the deep-check loop.
-// Covers Helius, Rugcheck, PumpFun bonding curve, DAMM pool resolver, and DexScreener.
-// These all have their own axios timeouts but this outer guard handles connection-level
-// stalls that can occur before the axios clock starts.
 const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
@@ -129,7 +127,6 @@ type CachedBondingCurve = {
   complete: boolean | null
 }
 
-// Thresholds for high-curve detection (logged, falls through to normal scoring)
 const PUMPFUN_HIGHCURVE_THRESHOLD  = 95
 
 export type ScannerResult = {
@@ -399,6 +396,44 @@ async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createSer
   )
 }
 
+/**
+ * Attempt a Moonboy spot-buy after a successful LP open.
+ * Fire-and-forget: logs errors but never throws or blocks the scan tick.
+ * Gate: MOONBOY_ENABLED !== 'false' AND token age (DexScreener) <= 1.5h.
+ */
+async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): Promise<void> {
+  if (!moonboyStrategy.enabled) return
+  if (metrics.ageHours > moonboyStrategy.filters.maxAgeHours) {
+    console.log(
+      `[moonboy] ${metrics.symbol} — skip: age ${metrics.ageHours.toFixed(1)}h > ` +
+      `${moonboyStrategy.filters.maxAgeHours}h gate`,
+    )
+    return
+  }
+  try {
+    const moonboyId = await openMoonboyPosition(metrics, solPriceUsd)
+    if (moonboyId) {
+      console.log(`[moonboy] ${metrics.symbol} — spot-buy opened alongside LP (id=${moonboyId})`)
+    }
+  } catch (err) {
+    console.warn(
+      `[moonboy] ${metrics.symbol} — openMoonboyPosition threw (non-fatal):`,
+      err instanceof Error ? err.message : String(err),
+    )
+  }
+}
+
+/** Resolve SOL price in USD from metrics. Falls back to 150 if unavailable. */
+function resolveSolPriceUsd(metrics: TokenMetrics): number {
+  // If the quote token is SOL, token.price is denominated in USD per token.
+  // We don't have an explicit SOL/USD oracle here — use the last known value
+  // stored in the bot or fall back to a conservative default.
+  // moonboy-executor already has its own DexScreener price fetch per position,
+  // so this value only affects the dry-run sol_spent estimate.
+  const envSolPrice = parseFloat(process.env.SOL_PRICE_USD ?? '')
+  return Number.isFinite(envSolPrice) && envSolPrice > 0 ? envSolPrice : 150
+}
+
 let scannerRunPromise: Promise<ScannerResult> | null = null
 let scannerRunStartedAt = 0
 
@@ -417,11 +452,6 @@ function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
 }
 
 export interface RunScannerOptions {
-  /**
-   * When true: skip pool-fetcher (use last 1h candidates from DB as summary),
-   * skip monitor, and never open new positions.
-   * Intended for /tick?mode=tick manual invocations where a full 15-min scan is too slow.
-   */
   tickMode?: boolean
 }
 
@@ -482,7 +512,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   await refreshRpcProviderCooldown('helius')
 
-  // ── tickMode: skip pool-fetcher entirely, report last 1h candidates ────────
   if (tickMode) {
     console.log('[scanner] tickMode=true — skipping pool-fetcher, reporting last 1h candidates')
     const supabase = createServerClient()
@@ -506,7 +535,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       openBlockedReason: 'tick_mode_no_open',
     })
   }
-  // ─────────────────────────────────────────────────────────────────────────
 
   console.log('[scanner] step 1/4 — fetching Meteora pools')
   const laneConfig = {
@@ -681,7 +709,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: cached open LP position exists (live fallback mode)`); continue }
     }
 
-    // Pump.fun high-curve detection: log progress, then fall through to normal scoring.
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
       const curve = await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
       const progress = curve?.progressPct ?? 0
@@ -712,7 +739,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const volumeGrowth1h = getRecentVolumeGrowth(bestPool)
     const momentumScore = scoreMeteoraMomentum(bestPool)
 
-    // New Meteora listing fast-path: log and fall through to normal scoring.
     if (
       poolAgeHours < METEORA_NEW_LISTING_AGE_H &&
       liqUsd >= METEORA_NEW_LISTING_LIQ_USD &&
@@ -770,7 +796,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           holderCount = Math.max(holderCount, token.holders)
         }
       } else {
-        // timeout — fall back to Meteora holders so scoring still works
         holderCount  = token.holders ?? 0
         topHolderPct = 0
         console.warn(`[scanner] ${symbol} — Helius timeout, falling back to Meteora holders (${holderCount})`)
@@ -825,7 +850,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       binStep,
     }
 
-    // ========== DAMM v2 EDGE (additive hook — Meteora-origin pools only) =======
+    // ========== DAMM v2 EDGE =================================================
     if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED === 'true') {
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
@@ -876,6 +901,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
                 openedDammCountThisTick++
                 dailyLossLimitHit = null
                 openedMintsThisTick.add(tokenAddress)
+                // Moonboy hook — fire-and-forget after successful DAMM open
+                void maybeTriggerMoonboy(metrics, resolveSolPriceUsd(metrics))
                 await sendAlert({
                   type:          'position_opened',
                   symbol,
@@ -898,7 +925,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     } else if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED !== 'true') {
       console.log(`[scanner][damm-edge] ${symbol} DAMM edge path disabled (DAMM_EDGE_ENABLED !== true); continuing DLMM evaluation`)
     }
-    // ========== END DAMM v2 EDGE ================================================
+    // ========== END DAMM v2 EDGE =============================================
 
     const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : classifyToken({
       address:        metrics.address,
@@ -1050,6 +1077,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         openedCount++
         dailyLossLimitHit = null
         openedMintsThisTick.add(tokenAddress)
+        // Moonboy hook — fire-and-forget after successful DLMM open
+        void maybeTriggerMoonboy(metrics, resolveSolPriceUsd(metrics))
         await sendAlert({
           type: 'position_opened',
           symbol,
