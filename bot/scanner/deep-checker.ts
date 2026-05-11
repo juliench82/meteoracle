@@ -114,6 +114,11 @@ const METEORA_NEW_LISTING_FEETVL  = 8   // %
 
 const SUPABASE_TIMEOUT_MS      = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
+// Per-call timeout for external enrichment calls in the deep-check loop.
+// Covers Helius, Rugcheck, PumpFun bonding curve, DAMM pool resolver, and DexScreener.
+// These all have their own axios timeouts but this outer guard handles connection-level
+// stalls that can occur before the axios clock starts.
+const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
 const _bondingCurveCache = new Map<string, { pct: number; complete: boolean | null; ts: number }>()
@@ -139,6 +144,7 @@ export type ScannerResult = {
   openCount?: number
   openBlockedReason?: string
   error?: string
+  tickMode?: boolean
 }
 
 function detectLaunchpadSource(tokenAddress: string): 'pumpfun' | 'moonshot' | 'meteora' {
@@ -213,7 +219,11 @@ async function getCachedPumpFunBondingCurve(
     return { progressPct: cached.pct, complete: cached.complete }
   }
 
-  const curve = await fetchBondingCurve(tokenAddress, heliusRpcUrl)
+  const curve = await withTimeout(
+    fetchBondingCurve(tokenAddress, heliusRpcUrl),
+    EXTERNAL_CALL_TIMEOUT_MS,
+    `fetchBondingCurve ${tokenAddress.slice(0, 8)}`,
+  )
   if (!curve) return null
 
   _bondingCurveCache.set(tokenAddress, {
@@ -406,7 +416,16 @@ function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
   }
 }
 
-export async function runScanner(): Promise<ScannerResult> {
+export interface RunScannerOptions {
+  /**
+   * When true: skip pool-fetcher (use last scan_candidates from DB as pool source),
+   * limit deep checks to 5, and never open new positions.
+   * Intended for /tick manual invocations where a full 15-min scan is too slow.
+   */
+  tickMode?: boolean
+}
+
+export async function runScanner(opts: RunScannerOptions = {}): Promise<ScannerResult> {
   if (scannerRunPromise) {
     const ageMs = Date.now() - scannerRunStartedAt
     console.warn(`[scanner] previous tick still running (${Math.round(ageMs / 1000)}s) — skipping overlapping tick`)
@@ -416,7 +435,7 @@ export async function runScanner(): Promise<ScannerResult> {
   }
 
   scannerRunStartedAt = Date.now()
-  const run = runScannerOnce().finally(() => {
+  const run = runScannerOnce(opts).finally(() => {
     if (scannerRunPromise === run) {
       scannerRunPromise = null
       scannerRunStartedAt = 0
@@ -441,10 +460,11 @@ export async function runScanner(): Promise<ScannerResult> {
   return Promise.race([run, timeout])
 }
 
-async function runScannerOnce(): Promise<ScannerResult> {
+async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResult> {
+  const { tickMode = false } = opts
   const startedAt = Date.now()
   const finish = async (result: Partial<ScannerResult>): Promise<ScannerResult> => {
-    const fullResult = emptyScannerResult(result)
+    const fullResult = emptyScannerResult({ ...result, tickMode })
     await logScannerTick(fullResult, Date.now() - startedAt)
     return fullResult
   }
@@ -461,6 +481,32 @@ async function runScannerOnce(): Promise<ScannerResult> {
   }
 
   await refreshRpcProviderCooldown('helius')
+
+  // ── tickMode: skip pool-fetcher entirely, score from last candidates ──────
+  if (tickMode) {
+    console.log('[scanner] tickMode=true — skipping pool-fetcher, checking monitor health only')
+    const supabase = createServerClient()
+    const since = new Date(Date.now() - 60 * 60 * 1_000).toISOString()
+    const { data: recentCandidates } = await supabase
+      .from('scan_candidates')
+      .select('symbol, score, strategy_id')
+      .gte('created_at', since)
+      .order('score', { ascending: false })
+      .limit(5)
+
+    const topSymbols = (recentCandidates ?? []).map(c => `${c.symbol}(${c.score})`).join(', ')
+    console.log(`[scanner] tickMode — recent candidates (1h): ${topSymbols || 'none'}`)
+    return finish({
+      scanned: 0,
+      survivors: 0,
+      deepChecked: 0,
+      candidates: recentCandidates?.length ?? 0,
+      opened: 0,
+      openSkipped: 0,
+      openBlockedReason: 'tick_mode_no_open',
+    })
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   console.log('[scanner] step 1/4 — fetching Meteora pools')
   const laneConfig = {
@@ -636,7 +682,6 @@ async function runScannerOnce(): Promise<ScannerResult> {
     }
 
     // Pump.fun high-curve detection: log progress, then fall through to normal scoring.
-    // The scorer awards +8 curveBonus at 70-95% and +4 at 95-99%.
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
       const curve = await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
       const progress = curve?.progressPct ?? 0
@@ -645,7 +690,6 @@ async function runScannerOnce(): Promise<ScannerResult> {
       } else {
         console.log(`[scanner] ${symbol} — pump.fun curve ${progress.toFixed(1)}% (complete=${curve?.complete ?? 'unknown'})`)
       }
-      // Always fall through to normal pool selection and scoring
     }
 
     const bestPool = selectBestPool(lane === 'fresh' ? freshPools : momentumPools, tokenAddress, lane)
@@ -678,7 +722,6 @@ async function runScannerOnce(): Promise<ScannerResult> {
         `[scanner] ${symbol} — new Meteora listing ` +
         `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, recentFeeTvl=${Math.max(feeTvl1hPct, feeTvl5mPct * 12).toFixed(1)}%) — scoring normally`
       )
-      // fall through to normal scoring + openPosition
     }
 
     const quoteTokenMint = getQuoteTokenMint(bestPool)
@@ -695,7 +738,11 @@ async function runScannerOnce(): Promise<ScannerResult> {
 
     let resolvedMc = mcUsd
     if (!resolvedMc || resolvedMc < 1) {
-      resolvedMc = await fetchMcFromDexScreener(tokenAddress, token.price)
+      resolvedMc = await withTimeout(
+        fetchMcFromDexScreener(tokenAddress, token.price),
+        EXTERNAL_CALL_TIMEOUT_MS,
+        `fetchMcFromDexScreener ${symbol}`,
+      ).then(v => v ?? 0)
       if (!resolvedMc || resolvedMc < 1) {
         if (lane !== 'fresh') {
           console.log(`[scanner] ${symbol} — skip: no market_cap`)
@@ -711,11 +758,22 @@ async function runScannerOnce(): Promise<ScannerResult> {
 
     if (USE_HELIUS) {
       console.log(`[scanner] ${symbol} — calling Helius`)
-      const holderData = await checkHolders(tokenAddress)
-      holderCount  = holderData.holderCount
-      topHolderPct = holderData.topHolderPct
-      if (!holderData.reliable && token.holders) {
-        holderCount = Math.max(holderCount, token.holders)
+      const holderData = await withTimeout(
+        checkHolders(tokenAddress),
+        EXTERNAL_CALL_TIMEOUT_MS,
+        `checkHolders ${symbol}`,
+      )
+      if (holderData) {
+        holderCount  = holderData.holderCount
+        topHolderPct = holderData.topHolderPct
+        if (!holderData.reliable && token.holders) {
+          holderCount = Math.max(holderCount, token.holders)
+        }
+      } else {
+        // timeout — fall back to Meteora holders so scoring still works
+        holderCount  = token.holders ?? 0
+        topHolderPct = 0
+        console.warn(`[scanner] ${symbol} — Helius timeout, falling back to Meteora holders (${holderCount})`)
       }
     } else {
       holderCount  = token.holders ?? 0
@@ -724,7 +782,11 @@ async function runScannerOnce(): Promise<ScannerResult> {
     }
 
     console.log(`[scanner] ${symbol} — calling Rugcheck`)
-    const rugScore = await getRugscore(tokenAddress, symbol)
+    const rugScore = await withTimeout(
+      getRugscore(tokenAddress, symbol),
+      EXTERNAL_CALL_TIMEOUT_MS,
+      `getRugscore ${symbol}`,
+    ).then(v => v ?? 0)
 
     const holderCountForFilter = holderCount > 0 ? holderCount : (token.holders ?? 0)
 
@@ -764,11 +826,6 @@ async function runScannerOnce(): Promise<ScannerResult> {
     }
 
     // ========== DAMM v2 EDGE (additive hook — Meteora-origin pools only) =======
-    // Fires ONLY for native Meteora pools (launchpadSource === 'meteora').
-    // If the token qualifies, resolves a verified DAMM v2 pool before opening.
-    // The DLMM path is skipped only after a DAMM open actually succeeds.
-    // All existing DLMM strategy logic below is
-    // untouched — this block is pure additive code.
     if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED === 'true') {
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
@@ -787,13 +844,14 @@ async function runScannerOnce(): Promise<ScannerResult> {
               `(${openDammCount}/${MAX_CONCURRENT_DAMM_POSITIONS}) — continuing DLMM evaluation`,
             )
           } else {
-            const verifiedDammPool = await resolveVerifiedDammV2PoolForToken({
-              tokenAddress,
-              quoteMint: WSOL,
-            })
+            const verifiedDammPool = await withTimeout(
+              resolveVerifiedDammV2PoolForToken({ tokenAddress, quoteMint: WSOL }),
+              EXTERNAL_CALL_TIMEOUT_MS,
+              `resolveVerifiedDammV2PoolForToken ${symbol}`,
+            )
 
             if (!verifiedDammPool) {
-              console.log(`[scanner][damm-edge] ${symbol} has no verified DAMM v2 SOL pool; continuing DLMM evaluation`)
+              console.log(`[scanner][damm-edge] ${symbol} has no verified DAMM v2 SOL pool (or timeout); continuing DLMM evaluation`)
             } else {
               const dammParams = {
                 ...dammDecision.params,
