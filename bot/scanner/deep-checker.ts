@@ -418,9 +418,9 @@ function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
 
 export interface RunScannerOptions {
   /**
-   * When true: skip pool-fetcher (use last scan_candidates from DB as pool source),
-   * limit deep checks to 5, and never open new positions.
-   * Intended for /tick manual invocations where a full 15-min scan is too slow.
+   * When true: skip pool-fetcher (use last 1h candidates from DB as summary),
+   * skip monitor, and never open new positions.
+   * Intended for /tick?mode=tick manual invocations where a full 15-min scan is too slow.
    */
   tickMode?: boolean
 }
@@ -482,15 +482,15 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   await refreshRpcProviderCooldown('helius')
 
-  // ── tickMode: skip pool-fetcher entirely, score from last candidates ──────
+  // ── tickMode: skip pool-fetcher entirely, report last 1h candidates ────────
   if (tickMode) {
-    console.log('[scanner] tickMode=true — skipping pool-fetcher, checking monitor health only')
+    console.log('[scanner] tickMode=true — skipping pool-fetcher, reporting last 1h candidates')
     const supabase = createServerClient()
     const since = new Date(Date.now() - 60 * 60 * 1_000).toISOString()
     const { data: recentCandidates } = await supabase
-      .from('scan_candidates')
+      .from('candidates')
       .select('symbol, score, strategy_id')
-      .gte('created_at', since)
+      .gte('scanned_at', since)
       .order('score', { ascending: false })
       .limit(5)
 

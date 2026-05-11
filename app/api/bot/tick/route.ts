@@ -11,8 +11,13 @@ export const dynamic = 'force-dynamic'
  * Order of checks:
  *  1. BOT_ENABLED env var — hard kill-switch, survives DB outages
  *  2. bot_state.enabled  — soft runtime toggle via /stop and /start
- *  3. monitorPositions   — DLMM + DAMM exits (time-sensitive)
- *  4. runScanner         — new candidates
+ *  3. monitorPositions   — DLMM + DAMM exits (time-sensitive) [skipped in tick mode]
+ *  4. runScanner         — new candidates [tickMode=true skips pool-fetcher + open]
+ *
+ * Query param:
+ *  ?mode=tick  — lightweight health check: skips pool-fetcher, reads last 1h
+ *               candidates from DB, skips monitor. Returns in ~1-2s.
+ *  (none)      — full scan + monitor cycle (~15 min).
  */
 function getTickSecret(): string | null {
   return process.env.BOT_SECRET ?? process.env.BOT_TICK_SECRET ?? process.env.CRON_SECRET ?? null
@@ -38,6 +43,11 @@ function authorizeTick(request: Request): NextResponse | null {
   return null
 }
 
+function isTickMode(request: Request): boolean {
+  const url = new URL(request.url)
+  return url.searchParams.get('mode') === 'tick'
+}
+
 export async function POST(request: Request) {
   const authError = authorizeTick(request)
   if (authError) return authError
@@ -58,14 +68,16 @@ export async function POST(request: Request) {
     })
   }
 
+  const tickMode = isTickMode(request)
   const startedAt = Date.now()
   const supabase = createServerClient()
 
   try {
-    const monitorResult = await monitorPositions()
-    const scanResult = await runScanner()
+    const monitorResult = tickMode ? null : await monitorPositions()
+    const scanResult = await runScanner({ tickMode })
 
     const payload = {
+      tickMode,
       monitor: monitorResult,
       scanner: scanResult,
       durationMs: Date.now() - startedAt,
@@ -73,7 +85,7 @@ export async function POST(request: Request) {
 
     await supabase.from('bot_logs').insert({
       level: 'info',
-      event: 'bot_tick',
+      event: tickMode ? 'bot_tick_light' : 'bot_tick',
       payload,
     })
 
@@ -84,7 +96,7 @@ export async function POST(request: Request) {
     await supabase.from('bot_logs').insert({
       level: 'error',
       event: 'bot_tick_failed',
-      payload: { error: message, durationMs: Date.now() - startedAt },
+      payload: { error: message, tickMode, durationMs: Date.now() - startedAt },
     })
 
     return NextResponse.json({ status: 'error', error: message }, { status: 500 })
