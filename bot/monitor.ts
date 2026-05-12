@@ -80,6 +80,28 @@ const LIVE_CACHE_ALERT_INTERVAL_MS =
   parseInt(process.env.MONITOR_LIVE_CACHE_ALERT_INTERVAL_MIN ?? '15', 10) * 60_000
 const _unmanagedLiveAlertAt = new Map<string, number>()
 
+// ─── Jupiter SOL/USD price ────────────────────────────────────────────────────
+const SOL_MINT = 'So11111111111111111111111111111111111111112'
+const JUP_PRICE_URL = `https://price.jup.ag/v6/price?ids=${SOL_MINT}`
+
+async function fetchLiveSolPriceUsd(): Promise<number | null> {
+  try {
+    const res = await fetch(JUP_PRICE_URL, { signal: AbortSignal.timeout(5_000) })
+    if (!res.ok) {
+      console.warn(`[monitor] Jupiter price fetch ${res.status} — falling back to metadata sol_price_usd`)
+      return null
+    }
+    const json = await res.json() as { data?: Record<string, { price?: number }> }
+    const price = json.data?.[SOL_MINT]?.price
+    if (typeof price === 'number' && price > 0) return price
+    console.warn('[monitor] Jupiter price response missing SOL price field')
+    return null
+  } catch (err) {
+    console.warn('[monitor] fetchLiveSolPriceUsd failed (non-fatal):', err)
+    return null
+  }
+}
+
 type PositionStateRead = {
   ok: boolean
   inRange: boolean
@@ -141,6 +163,9 @@ type DammPositionSnapshotRow = {
   opened_at: string
   metadata: PositionMetadata | null
   null_pnl_ticks: number | null
+  pool_address: string | null
+  position_pubkey: string | null
+  sol_deposited: number | null
 }
 
 function isLiveCacheStrategy(strategyId: string | null | undefined): boolean {
@@ -226,7 +251,7 @@ function isLpPositionRow(value: unknown): value is LpPositionRow {
     typeof value.opened_at === 'string'
 }
 
-function resolveMeteoraPnlPct(position: LpPositionRow, pnlUsd: number | null, deployedSol: number): number | null {
+function resolveMeteoraPnlPct(position: LpPositionRow, pnlUsd: number | null, deployedSol: number, liveSolPriceUsd: number | null): number | null {
   const metadata = position.metadata ?? {}
   const explicitPct = firstNumber(
     position.pnl_pct,
@@ -240,13 +265,16 @@ function resolveMeteoraPnlPct(position: LpPositionRow, pnlUsd: number | null, de
   if (explicitPct !== null) return explicitPct
 
   if (pnlUsd === null || deployedSol <= 0) return null
+
+  // Prefer live tick price; fall back to metadata only if live is unavailable
+  const solPriceUsd = liveSolPriceUsd ?? firstNumber(metadata.sol_price_usd, metadata.current_sol_price_usd)
+
   const costBasisUsd = firstNumber(
     metadata.meteora_total_deposit_usd,
     metadata.total_deposit_usd,
     metadata.deposit_usd,
     metadata.cost_basis_usd,
   ) ?? (() => {
-    const solPriceUsd = firstNumber(metadata.sol_price_usd, metadata.current_sol_price_usd)
     return solPriceUsd !== null && solPriceUsd > 0 ? deployedSol * solPriceUsd : null
   })()
 
@@ -308,6 +336,14 @@ export async function monitorPositions(): Promise<{
   }
 
   await refreshRpcProviderCooldown('helius')
+
+  // ── Live SOL/USD price — fetched once per tick, passed to all exit checks ──
+  const liveSolPriceUsd = await fetchLiveSolPriceUsd()
+  if (liveSolPriceUsd !== null) {
+    console.log(`[monitor] live SOL/USD = $${liveSolPriceUsd.toFixed(4)} (Jupiter)`)
+  } else {
+    console.warn('[monitor] live SOL/USD unavailable — USD metrics will use last known metadata price')
+  }
 
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
 
@@ -474,7 +510,7 @@ export async function monitorPositions(): Promise<{
         continue
       }
       stats.checked++
-      await checkPosition(position, strategy, stats)
+      await checkPosition(position, strategy, stats, liveSolPriceUsd)
     } catch (err) {
       console.error(`[monitor] error checking position ${position.id}:`, err)
       try {
@@ -493,9 +529,15 @@ async function checkDammEdgePosition(
   position: LpPositionRow,
   strategy: Strategy,
   stats: { checked: number; closed: number; claimed: number; rebalanced: number },
+  liveSolPriceUsd: number | null,
 ): Promise<void> {
   const label = `[monitor][${position.symbol}][damm-edge]`
-  const { pnlPct, ageHours, positionValueUsd, previousNullPnlTicks } = await fetchDammPositionState(position.id)
+  const { pnlPct, ageHours, positionValueUsd, previousNullPnlTicks } = await fetchDammPositionState(
+    position.id,
+    position.pool_address,
+    position.position_pubkey,
+    liveSolPriceUsd,
+  )
   const currentNullPnlTicks = pnlPct === null ? previousNullPnlTicks + 1 : 0
 
   try {
@@ -563,7 +605,8 @@ async function checkDammEdgePosition(
 async function checkPosition(
   position: LpPositionRow,
   strategy: Strategy,
-  stats: { checked: number; closed: number; claimed: number; rebalanced: number }
+  stats: { checked: number; closed: number; claimed: number; rebalanced: number },
+  liveSolPriceUsd: number | null,
 ): Promise<void> {
   const strategyId = position.strategy_id ?? position.metadata?.strategy_id
   const isDammEdge =
@@ -571,7 +614,7 @@ async function checkPosition(
     position.position_type === 'damm-edge'
 
   if (isDammEdge) {
-    await checkDammEdgePosition(position, strategy, stats)
+    await checkDammEdgePosition(position, strategy, stats, liveSolPriceUsd)
     return
   }
 
@@ -603,7 +646,7 @@ async function checkPosition(
       meta.total_pnl_usd,
     )
     const deployedSolSnap = firstNumber(position.sol_deposited) ?? 0
-    const snapshotPnlPct = resolveMeteoraPnlPct(position, snapshotPnlUsd, deployedSolSnap)
+    const snapshotPnlPct = resolveMeteoraPnlPct(position, snapshotPnlUsd, deployedSolSnap, liveSolPriceUsd)
     const snapshotPositionValueUsd = firstNumber(
       position.position_value_usd,
       meta.position_value_usd,
@@ -612,11 +655,7 @@ async function checkPosition(
       position.claimable_fees_usd,
       meta.claimable_fees_usd,
     )
-    const entryPriceSolSnap = firstNumber(position.entry_price_sol, meta.entry_price_sol) ?? 0
     const snapshotAgeHours = (now - new Date(position.opened_at).getTime()) / (1000 * 60 * 60)
-
-    // IL approximation using last entry price (no live price available)
-    const snapshotIlPct = 0 // on-chain price gone; IL unknown
 
     try {
       await sbUpdate('lp_positions', `id=eq.${position.id}`, {
@@ -673,9 +712,10 @@ async function checkPosition(
     ? Math.round((2 * Math.sqrt(k) / (1 + k) - 1) * 10000) / 100
     : 0
 
-  const liveSolPriceUsd = firstNumber(position.metadata?.sol_price_usd, position.metadata?.current_sol_price_usd)
-  const derivedClaimableFeesUsd = liveSolPriceUsd !== null
-    ? roundMoney(claimableFeesSolEquivalent * liveSolPriceUsd)
+  // Use live tick price; fall back to metadata only if unavailable
+  const solPriceUsd = liveSolPriceUsd ?? firstNumber(position.metadata?.sol_price_usd, position.metadata?.current_sol_price_usd)
+  const derivedClaimableFeesUsd = solPriceUsd !== null
+    ? roundMoney(claimableFeesSolEquivalent * solPriceUsd)
     : null
   const liveClaimableFeesUsd = nullableNumber(position.claimable_fees_usd ?? position.metadata?.claimable_fees_usd)
   const livePositionValueUsd = nullableNumber(position.position_value_usd ?? position.metadata?.position_value_usd)
@@ -688,11 +728,11 @@ async function checkPosition(
   const claimableFeesUsd = liveClaimableFeesUsd ?? derivedClaimableFeesUsd
   const positionValueUsd = livePositionValueUsd
   const deployedSol = firstNumber(position.sol_deposited) ?? 0
-  const pnlPct = resolveMeteoraPnlPct(position, livePnlUsd, deployedSol)
+  const pnlPct = resolveMeteoraPnlPct(position, livePnlUsd, deployedSol, liveSolPriceUsd)
   const previousNullPnlTicks = Math.max(0, Math.trunc(nullableNumber(position.null_pnl_ticks) ?? 0))
   const currentNullPnlTicks = pnlPct === null ? previousNullPnlTicks + 1 : 0
-  const pnlSol = livePnlUsd !== null && liveSolPriceUsd !== null && liveSolPriceUsd > 0
-    ? Math.round((livePnlUsd / liveSolPriceUsd) * 1e6) / 1e6
+  const pnlSol = livePnlUsd !== null && solPriceUsd !== null && solPriceUsd > 0
+    ? Math.round((livePnlUsd / solPriceUsd) * 1e6) / 1e6
     : null
 
   const wasInRange = position.status !== 'out_of_range' && position.in_range !== false
@@ -727,6 +767,7 @@ async function checkPosition(
           ...(position.metadata ?? {}),
           ...(livePnlUsd !== null && { pnl_usd: livePnlUsd, position_pnl_usd: livePnlUsd }),
           ...(pnlPct !== null && { pnl_pct: pnlPct, position_pnl_pct: pnlPct }),
+          ...(solPriceUsd !== null && { sol_price_usd: solPriceUsd }),
           exit_signal_basis: 'meteora_pnl',
         },
       } : {}),
@@ -759,6 +800,7 @@ async function checkPosition(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
     ` pnlUsd=${livePnlUsd !== null ? `$${livePnlUsd.toFixed(2)}` : 'n/a'}` +
     ` pnlPct=${pnlPct !== null ? `${pnlPct.toFixed(2)}%` : 'n/a'}` +
+    ` solUsd=${solPriceUsd !== null ? `$${solPriceUsd.toFixed(2)}` : 'n/a(meta)'}` +
     ` priceMove=${pricePct.toFixed(1)}% fees=${feeYieldPct.toFixed(1)}%deployed` +
     ` claimable=$${claimableFeesUsd ?? 'n/a'} posValue=$${positionValueUsd ?? 'n/a'}` +
     ` age=${ageHours.toFixed(1)}h oorMin=${oorSince.toFixed(0)}`
@@ -855,7 +897,36 @@ async function fetchPositionState(
   }
 }
 
-async function fetchDammPositionState(positionId: string): Promise<{
+// ─── DAMM on-chain live PnL ───────────────────────────────────────────────────
+// Reads vault balances directly from the DAMM v2 pool account so exit decisions
+// are never based on a stale DB row.  Falls back to null (not to DB) on failure
+// so the null_pnl_ticks counter is incremented correctly.
+async function fetchDammLivePnl(
+  poolAddress: string,
+  positionPubkey: string,
+  costBasisUsd: number | null,
+  liveSolPriceUsd: number | null,
+): Promise<number | null> {
+  if (!poolAddress || !positionPubkey || costBasisUsd === null || costBasisUsd <= 0) return null
+  if (liveSolPriceUsd === null || liveSolPriceUsd <= 0) return null
+
+  try {
+    const { getDammV2PositionValue } = await import('@/lib/damm-v2')
+    const valueUsd = await getDammV2PositionValue(poolAddress, positionPubkey, liveSolPriceUsd)
+    if (valueUsd === null) return null
+    return roundPct(((valueUsd - costBasisUsd) / costBasisUsd) * 100)
+  } catch (err) {
+    console.warn('[monitor] fetchDammLivePnl failed (non-fatal):', err)
+    return null
+  }
+}
+
+async function fetchDammPositionState(
+  positionId: string,
+  poolAddress: string,
+  positionPubkey: string,
+  liveSolPriceUsd: number | null,
+): Promise<{
   pnlPct: number | null
   ageHours: number
   positionValueUsd: number | null
@@ -863,24 +934,45 @@ async function fetchDammPositionState(positionId: string): Promise<{
 }> {
   const rows = await sbSelect<DammPositionSnapshotRow>(
     'lp_positions',
-    `id=eq.${positionId}&select=pnl_pct,position_value_usd,opened_at,metadata,null_pnl_ticks&limit=1`,
+    `id=eq.${positionId}&select=pnl_pct,position_value_usd,opened_at,metadata,null_pnl_ticks,pool_address,position_pubkey,sol_deposited&limit=1`,
   )
   const row = rows[0]
   if (!row) return { pnlPct: null, ageHours: 0, positionValueUsd: null, previousNullPnlTicks: 0 }
 
-  const pnlPct = row.pnl_pct !== null && row.pnl_pct !== undefined
-    ? roundPct(row.pnl_pct)
-    : (() => {
-        const metadata = row.metadata ?? {}
-        return firstNumber(
+  const metadata = row.metadata ?? {}
+  const deployedSol = nullableNumber(row.sol_deposited) ?? 0
+
+  // Resolve cost basis for live PnL computation
+  const costBasisUsd = firstNumber(
+    metadata.meteora_total_deposit_usd,
+    metadata.total_deposit_usd,
+    metadata.deposit_usd,
+    metadata.cost_basis_usd,
+  ) ?? (() => {
+    const solUsd = liveSolPriceUsd ?? firstNumber(metadata.sol_price_usd, metadata.current_sol_price_usd)
+    return solUsd !== null && deployedSol > 0 ? deployedSol * solUsd : null
+  })()
+
+  // Try on-chain live PnL first; fall back to DB row only if on-chain call fails
+  const livePnlPct = await fetchDammLivePnl(
+    row.pool_address ?? poolAddress,
+    row.position_pubkey ?? positionPubkey,
+    costBasisUsd,
+    liveSolPriceUsd,
+  )
+
+  const pnlPct = livePnlPct ?? (
+    row.pnl_pct !== null && row.pnl_pct !== undefined
+      ? roundPct(row.pnl_pct)
+      : (() => firstNumber(
           metadata.pnl_pct,
           metadata.position_pnl_pct,
           metadata.position_pnl_percentage,
           metadata.pnl_percentage,
           metadata.total_pnl_pct,
           metadata.total_pnl_percentage,
-        )
-      })()
+        ))()
+  )
 
   const positionValueUsd = row.position_value_usd !== null ? roundMoney(row.position_value_usd) : null
   const ageHours = (Date.now() - new Date(row.opened_at).getTime()) / (1000 * 60 * 60)
