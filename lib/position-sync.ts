@@ -28,6 +28,7 @@ export interface MeteoraPositionSyncResult {
   dlmmInserted: number
   dammInserted: number
   externallyClosed: number
+  ilStopped: number
   insertedPositions: LiveMeteoraPosition[]
   positions: LiveMeteoraPosition[]
 }
@@ -35,6 +36,10 @@ export interface MeteoraPositionSyncResult {
 let _syncFailCount = 0
 const CLOSED_LIVE_REOPEN_GRACE_MS =
   parseInt(process.env.METEORA_CLOSED_LIVE_REOPEN_GRACE_SEC ?? '180', 10) * 1_000
+
+// IL/PnL stop threshold — negative percentage, e.g. -5 means stop at -5%
+// Override via METEORA_IL_STOP_PCT env var (e.g. "-8" for -8%)
+const IL_STOP_PCT = parseFloat(process.env.METEORA_IL_STOP_PCT ?? '-5')
 
 async function fetchCachedPositions(positionPubkeys: string[]): Promise<Map<string, CachedPosition[]>> {
   if (positionPubkeys.length === 0) return new Map()
@@ -190,6 +195,42 @@ async function updateCachedPosition(live: LiveMeteoraPosition, existing: CachedP
   }
 }
 
+/**
+ * Returns true if the position has breached the IL/PnL stop threshold.
+ * Uses pnl_pct from the live snapshot (sourced from Meteora DLMM API position_pnl_pct).
+ * Skips dry_run positions and positions already exiting.
+ */
+function shouldTriggerIlStop(live: LiveMeteoraPosition, existing: CachedPosition): boolean {
+  if (existing.dry_run === true) return false
+  if (existing.status === 'pending_close' || existing.status === 'closed') return false
+  const pnlPct = live.pnl_pct
+  if (pnlPct === null || pnlPct === undefined || !Number.isFinite(pnlPct)) return false
+  return pnlPct <= IL_STOP_PCT
+}
+
+async function markIlStop(existing: CachedPosition, live: LiveMeteoraPosition): Promise<void> {
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/lp_positions?id=eq.${existing.id}`, {
+    method: 'PATCH',
+    headers: getSupabaseRestHeaders('minimal'),
+    body: JSON.stringify({
+      status: 'pending_close',
+      close_reason: 'il_stop',
+      metadata: {
+        ...(existing.metadata ?? {}),
+        il_stop_triggered_at: new Date().toISOString(),
+        il_stop_pnl_pct: live.pnl_pct,
+        il_stop_pnl_usd: live.pnl_usd ?? null,
+        il_stop_threshold_pct: IL_STOP_PCT,
+      },
+    }),
+    signal: AbortSignal.timeout(10_000),
+  })
+
+  if (!res.ok) {
+    throw new Error(`markIlStop ${res.status}: ${await res.text()}`)
+  }
+}
+
 function isDammCached(row: CachedPosition): boolean {
   return (
     row.strategy_id === 'damm-edge' ||
@@ -256,6 +297,7 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
     const insertedPositions: LiveMeteoraPosition[] = []
     let updated = 0
     let externallyClosed = 0
+    let ilStopped = 0
 
     for (const live of liveWithPubkeys) {
       const cachedRows = cachedByPubkey.get(live.position_pubkey) ?? []
@@ -269,6 +311,17 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
       for (const cached of cachedRows) {
         await updateCachedPosition(live, cached)
         updated++
+
+        if (shouldTriggerIlStop(live, cached)) {
+          await markIlStop(cached, live)
+          ilStopped++
+          const msg = `[position-sync] IL stop triggered for ${cached.symbol ?? cached.position_pubkey} — pnl_pct=${live.pnl_pct}% (threshold=${IL_STOP_PCT}%)`
+          console.warn(msg)
+          await sendAlert({
+            type: 'warning',
+            message: msg,
+          }).catch(() => {})
+        }
       }
     }
 
@@ -284,7 +337,7 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
     const dammInserted = insertedPositions.filter(p => p.position_type === 'damm-edge').length
 
     console.log(
-      `[position-sync] Meteora sync done live=${livePositions.length} updated=${updated} inserted=${insertedPositions.length} closed=${externallyClosed} ` +
+      `[position-sync] Meteora sync done live=${livePositions.length} updated=${updated} inserted=${insertedPositions.length} closed=${externallyClosed} il_stopped=${ilStopped} ` +
       `(source dlmm=${snapshot.dlmmOk ? 'ok' : 'failed'}, damm=${snapshot.dammOk ? 'ok' : 'failed'}) ` +
       `(dlmm live=${dlmmLive} inserted=${dlmmInserted}, damm live=${dammLive} inserted=${dammInserted})`,
     )
@@ -304,6 +357,7 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
       dlmmInserted,
       dammInserted,
       externallyClosed,
+      ilStopped,
       insertedPositions,
       positions: livePositions,
     }
