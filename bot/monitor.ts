@@ -68,6 +68,7 @@ const DAMM_EDGE_EXIT_STRATEGY: Strategy = {
     maxDurationHours: 72,
     claimFeesBeforeClose: true,
     minFeesToClaim: 0,
+    // DAMM uses CPMM — no IL formula applies. maxIlPct intentionally absent.
   },
 }
 
@@ -800,6 +801,7 @@ async function checkPosition(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
     ` pnlUsd=${livePnlUsd !== null ? `$${livePnlUsd.toFixed(2)}` : 'n/a'}` +
     ` pnlPct=${pnlPct !== null ? `${pnlPct.toFixed(2)}%` : 'n/a'}` +
+    ` ilPct=${ilPct.toFixed(2)}% (max=${strategy.exits.maxIlPct ?? 'disabled'})` +
     ` solUsd=${solPriceUsd !== null ? `$${solPriceUsd.toFixed(2)}` : 'n/a(meta)'}` +
     ` priceMove=${pricePct.toFixed(1)}% fees=${feeYieldPct.toFixed(1)}%deployed` +
     ` claimable=$${claimableFeesUsd ?? 'n/a'} posValue=$${positionValueUsd ?? 'n/a'}` +
@@ -809,7 +811,15 @@ async function checkPosition(
   // === EXIT LOGIC ===
   let closeReason: string | null = null
 
-  if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
+  // IL exit — checked first: structural divergence loss is a distinct signal from PnL.
+  // Only fires when the strategy defines maxIlPct and we have a valid entry price.
+  if (
+    strategy.exits.maxIlPct !== undefined &&
+    entryPriceSol > 0 &&
+    ilPct <= strategy.exits.maxIlPct
+  ) {
+    closeReason = `il_exit_${ilPct.toFixed(2)}pct`
+  } else if (pnlPct !== null && pnlPct <= strategy.exits.stopLossPct) {
     closeReason = `stoploss_pnl_${pnlPct.toFixed(1)}pct`
   } else if (pnlPct !== null && pnlPct >= strategy.exits.takeProfitPct) {
     closeReason = `takeprofit_pnl_${pnlPct.toFixed(1)}pct`
