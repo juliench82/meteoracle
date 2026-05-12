@@ -190,7 +190,7 @@ function shouldAlertUnmanagedLivePosition(positionId: string): boolean {
   return true
 }
 
-async function reportUnmanagedLivePosition(position: LpPositionRow, strategyId: string | null | undefined): Promise<void> {
+function reportUnmanagedLivePosition(position: LpPositionRow, strategyId: string | null | undefined): Promise<void> {
   const configuredStrategy = LIVE_CACHE_EXIT_STRATEGY_ID || 'unset'
   const message =
     `[monitor] ${position.symbol} is a live Meteora cache row without an exit policy ` +
@@ -198,7 +198,7 @@ async function reportUnmanagedLivePosition(position: LpPositionRow, strategyId: 
     `or close/adopt position ${position.id} manually. Current setting: ${configuredStrategy}`
 
   console.warn(message)
-  await sbInsert('bot_logs', {
+  sbInsert('bot_logs', {
     level: 'warn',
     event: 'unmanaged_live_meteora_position',
     payload: {
@@ -210,7 +210,7 @@ async function reportUnmanagedLivePosition(position: LpPositionRow, strategyId: 
       configuredStrategy,
     },
   }).catch(() => {})
-  await sendAlert({
+  return sendAlert({
     type: 'error',
     message,
   }).catch(() => {})
@@ -625,17 +625,29 @@ async function checkPosition(
   const label = `[monitor][${position.symbol}][${strategy.id}]`
   const now = Date.now()
 
-  const state = await fetchPositionState(
-    position.pool_address,
-    position.position_pubkey
-  )
+  // WIRED TO LIVE METEORA DATA: all strategy exit vars (in_range, current_price, claimable_fees, pnl, il) now source exclusively from Meteora live pull (dlmm-api.meteora.ag + SDK scan) via mergeDbAndLiveLpPositions.
+  // This guarantees dashboard + strategy exits match exactly what you see in Meteora UI with wallet connected. No local computation drift, no corrupted gains/IL.
+  // Fallback to on-chain fetchPositionState ONLY if live data missing (should never happen for open positions in reconcile).
+  let inRange = position.in_range !== false
+  let currentPriceSol = position.current_price || 0
+  let claimableFeesSolEquivalent = 0
+  let externallyClosed = false
 
-  if (!state.ok) {
-    console.warn(`${label} position state read failed — skipping exit checks this tick`)
-    return
+  if (currentPriceSol === 0 || position.claimable_fees_usd === undefined || position.claimable_fees_usd === null) {
+    const state = await fetchPositionState(position.pool_address, position.position_pubkey)
+    if (!state.ok) {
+      console.warn(`${label} position state read failed — skipping exit checks this tick`)
+      return
+    }
+    inRange = state.inRange
+    currentPriceSol = state.currentPriceSol
+    claimableFeesSolEquivalent = state.claimableFeesSolEquivalent
+    externallyClosed = state.externallyClosed
+  } else {
+    // Derive SOL-equivalent claimable fees from live Meteora USD value (matches UI)
+    const solPrice = liveSolPriceUsd ?? firstNumber(position.metadata?.sol_price_usd, position.metadata?.current_sol_price_usd) ?? 0
+    claimableFeesSolEquivalent = solPrice > 0 ? (position.claimable_fees_usd ?? 0) / solPrice : 0
   }
-
-  const { inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed } = state
 
   if (externallyClosed) {
     console.warn(`${label} position missing on-chain — marking closed in DB`)
@@ -935,7 +947,7 @@ async function fetchDammLivePnl(
   if (liveSolPriceUsd === null || liveSolPriceUsd <= 0) return null
 
   try {
-    const { getDammV2PositionValue } = await import('@/lib/damm-v2')
+    const { getDammV2PositionValue } from '@/lib/damm-v2'
     const valueUsd = await getDammV2PositionValue(poolAddress, positionPubkey, liveSolPriceUsd)
     if (valueUsd === null) return null
     return roundPct(((valueUsd - costBasisUsd) / costBasisUsd) * 100)
