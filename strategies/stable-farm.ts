@@ -1,80 +1,45 @@
 import type { Strategy } from '@/lib/types'
 
-/**
- * Stable Farm Strategy
- * Targets established, liquid pairs (SOL/USDC, SOL/USDT, stablecoin pairs)
- * with consistent high volume. Uses Curve distribution and a tight bin step
- * to maximize fee density around the active price. Low risk, low maintenance,
- * long duration.
- *
- * Profile: LOW risk / STEADY yield / LONG duration
- */
+function envNumber(name: string, fallback: number): number {
+  const value = process.env[name]
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
 export const stableFarmStrategy: Strategy = {
   id: 'stable-farm',
-  version: 'v1.0',
+  version: 'v1.1',
   name: 'Stable Farm',
-  description:
-    'Curve-distribution fee farming on high-liquidity established pairs. Targets SOL/USDC, SOL/USDT, and major stablecoin pools with deep liquidity. Narrow range, tight bin step, long hold.',
+  description: 'Known stablecoin pairs. Tight bid-ask distribution, low tolerance for depeg.',
   enabled: true,
-
   filters: {
-    // Large cap or stablecoin pairs only
-    minMcUsd: 10_000_000,
-    maxMcUsd: Number.MAX_SAFE_INTEGER, // no upper limit for established pairs
-
-    // Must have substantial daily volume
-    minVolume24h: 1_000_000,
-
-    // Deep liquidity required — this is the whole premise
-    minLiquidityUsd: 500_000,
-
-    // Established projects — holder concentration matters less for SOL/USDC
-    maxTopHolderPct: 30,
-    minHolderCount: 1000,
-
-    // No age restriction — we want old, proven pairs
-    maxAgeHours: 999999,
-
-    // Lower rugcheck threshold — large established tokens score differently
-    minRugcheckScore: 40,
-
+    minMcUsd: 0,
+    maxMcUsd: Number.MAX_SAFE_INTEGER,
+    minVolume24h: 0,
+    minLiquidityUsd: envNumber('STABLE_FARM_MIN_LIQUIDITY_USD', 50_000),
+    maxTopHolderPct: 100,
+    minHolderCount: 0,
+    maxAgeHours: Number.MAX_SAFE_INTEGER,
+    minRugcheckScore: 0,
     requireSocialSignal: false,
-
-    minFeeTvl24hPct: 4, // steady is enough here — BLUECHIP/STABLE doesn't need to be screaming hot
+    minFeeTvl24hPct: 0,
   },
-
   position: {
-    // Very tight bin step — stables move slowly, capture more volume per bin
-    binStep: 5,
-
-    // Tight range: ±10% around current price
-    rangeDownPct: -10,
-    rangeUpPct: 10,
-
-    // Curve distribution — concentrate liquidity at the center
-    distributionType: 'curve',
-
-    // Balanced 50/50 deposit for stable pairs
-    solBias: 0.5,
-
-    // Larger position size — lower risk profile allows more capital
-    maxSolPerPosition: 2.0,
+    binStep: envNumber('STABLE_FARM_BIN_STEP', 1),
+    rangeDownPct: envNumber('STABLE_FARM_RANGE_DOWN_PCT', -2),
+    rangeUpPct: envNumber('STABLE_FARM_RANGE_UP_PCT', 2),
+    distributionType: 'bid-ask',
+    solBias: 0,
   },
-
   exits: {
-    // Wide stop loss — established pairs don't crash like memes
-    stopLossPct: -15,
-
-    // No rush to take profit — compound fees over time
-    takeProfitPct: 500,
-
-    // Tightened from 240 — close after 60min OOR
-    outOfRangeMinutes: 60,
-
-    // Long duration — this is a farming strategy, not a trade
-    maxDurationHours: 168, // 7 days
-
+    stopLossPct: envNumber('STABLE_FARM_STOP_LOSS_PCT', -5),
+    takeProfitPct: envNumber('STABLE_FARM_TAKE_PROFIT_PCT', 10),
+    outOfRangeMinutes: envNumber('STABLE_FARM_OOR_MINUTES', 10),
+    maxDurationHours: envNumber('STABLE_FARM_MAX_DURATION_HOURS', 168),
     claimFeesBeforeClose: true,
-    minFeesToClaim: 0.005, // higher threshold — larger positions earn more
+    minFeesToClaim: envNumber('STABLE_FARM_MIN_FEES_TO_CLAIM', 0.0001),
+    // IL exit: 3% IL on a stable pair = depeg event. Exit immediately.
+    maxIlPct: envNumber('STABLE_FARM_MAX_IL_PCT', -3),
   },
 }

@@ -7,76 +7,40 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-export const EVIL_PANDA_SCANNER_SCORE_WEIGHTS = {
-  freshness:    envNumber('EVIL_PANDA_SCORE_WEIGHT_FRESHNESS', 0.20),
-  rugcheck:     envNumber('EVIL_PANDA_SCORE_WEIGHT_RUGCHECK', 0.20),
-  holders:      envNumber('EVIL_PANDA_SCORE_WEIGHT_HOLDERS', 0.10),
-  feeTvl1h:     envNumber('EVIL_PANDA_SCORE_WEIGHT_FEE_TVL_1H', 0.30),
-  volumeTvl1h:  envNumber('EVIL_PANDA_SCORE_WEIGHT_VOLUME_TVL_1H', 0.20),
-}
-
-/**
- * Evil Panda Strategy
- * Wide-range (−50% / +100%) bid-ask fee farming on fresh low-cap memecoins.
- * Bid-ask distribution maximises fees on pumps — SOL auto-sells into token on moons.
- * Single-sided SOL deposit below current price.
- *
- * Tier: MEME_SHITCOIN — age < 48h OR mc < $3M OR vol1h/liq > 5% OR top10holders > 35%
- * Profile: HIGH risk / fee-only yield / SHORT-MEDIUM duration
- *
- * Credit: @tendorian9 on X
- *
- * Range math (binStep=100 → 1% per bin):
- *   rangeDown = 50 bins (−50%)
- *   rangeUp   = 100 bins (+100%)
- *   total     = 150 bins  ← well within MAX_BINS_BY_STRATEGY[evil-panda]=200
- *
- * minBinStep=80: rejects stable/USDC pools (binStep 1–20) that would produce
- * 750+ bins for this range width and always hit the OOM/bin-cap guard.
- *
- * Exit logic:
- * - stopLoss    : −30% Meteora PnL
- * - takeProfit  : +40% Meteora PnL
- * - OOR         : 15 min out of range (give price a short recovery window)
- * - maxDuration : 72h (3 days) hard stop
- */
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
-  version: 'v1.0',
+  version: 'v1.1',
   name: 'Evil Panda',
-  description:
-    'Wide-range memecoin fee farming. Bid-ask distribution, 100% single-sided SOL. ' +
-    '−50% / +100% range captures dumps and moons, auto-sells SOL into token on pumps.',
+  description: 'New SOL-paired meme tokens. Wide range, short duration, fast exit.',
   enabled: true,
-
   filters: {
-    minMcUsd:             envNumber('EVIL_PANDA_MIN_MC_USD', 50_000),
-    maxMcUsd:             envNumber('EVIL_PANDA_MAX_MC_USD', 10_000_000),
-    minVolume24h:         envNumber('EVIL_PANDA_MIN_VOLUME_24H', 0),
-    minLiquidityUsd:      envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 20_000),
-    maxTopHolderPct:      envNumber('EVIL_PANDA_MAX_TOP_HOLDER_PCT', 35),
-    minHolderCount:       envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 100),
-    maxAgeHours:          envNumber('EVIL_PANDA_MAX_AGE_HOURS', 2),
-    minRugcheckScore:     envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 65),
-    requireSocialSignal:   false,
-    minFeeTvl24hPct:      envNumber('EVIL_PANDA_MIN_FEE_TVL_24H_PCT', 0),
-    minBinStep:           envNumber('EVIL_PANDA_MIN_BIN_STEP', 80),
+    minMcUsd: 0,
+    maxMcUsd: Number.MAX_SAFE_INTEGER,
+    minVolume24h: 0,
+    minLiquidityUsd: envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 5_000),
+    maxTopHolderPct: envNumber('EVIL_PANDA_MAX_TOP_HOLDER_PCT', 30),
+    minHolderCount: envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 100),
+    maxAgeHours: envNumber('EVIL_PANDA_MAX_AGE_HOURS', 2),
+    minRugcheckScore: envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 300),
+    requireSocialSignal: false,
+    minFeeTvl24hPct: 0,
+    minBinStep: envNumber('EVIL_PANDA_MIN_BIN_STEP', 80),
   },
-
   position: {
-    binStep:              100,
-    rangeDownPct:         -50,
-    rangeUpPct:           100,
-    distributionType: 'bid-ask',
-    solBias:              1.0,
+    binStep: envNumber('EVIL_PANDA_BIN_STEP', 100),
+    rangeDownPct: envNumber('EVIL_PANDA_RANGE_DOWN_PCT', -50),
+    rangeUpPct: envNumber('EVIL_PANDA_RANGE_UP_PCT', 100),
+    distributionType: 'spot',
+    solBias: envNumber('EVIL_PANDA_SOL_BIAS', 1),
   },
-
   exits: {
-    stopLossPct:              -30,
-    takeProfitPct:             40,
-    outOfRangeMinutes:         15,
-    maxDurationHours:          72,
-    claimFeesBeforeClose:    true,
-    minFeesToClaim:          0.001,
+    stopLossPct: envNumber('EVIL_PANDA_STOP_LOSS_PCT', -25),
+    takeProfitPct: envNumber('EVIL_PANDA_TAKE_PROFIT_PCT', 50),
+    outOfRangeMinutes: envNumber('EVIL_PANDA_OOR_MINUTES', 30),
+    maxDurationHours: envNumber('EVIL_PANDA_MAX_DURATION_HOURS', 12),
+    claimFeesBeforeClose: true,
+    minFeesToClaim: envNumber('EVIL_PANDA_MIN_FEES_TO_CLAIM', 0.001),
+    // IL exit: -15% IL ≈ 2.3× price move from entry. Override via env.
+    maxIlPct: envNumber('EVIL_PANDA_MAX_IL_PCT', -15),
   },
 }

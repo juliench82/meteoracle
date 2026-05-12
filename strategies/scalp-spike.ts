@@ -7,70 +7,39 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-export const SCALP_SPIKE_MOMENTUM_REGAIN = {
-  minAgeHours:                 envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_AGE_HOURS', 2),
-  maxAgeHours:                 envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MAX_AGE_HOURS', envNumber('SCALP_SPIKE_MAX_AGE_HOURS', 999_999)),
-  minVolume1hUsd:              envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_VOLUME_1H_USD', 15_000),
-  minVolume1hTo24hAvgRatio:    envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_VOL_1H_TO_24H_AVG', 3),
-  minFeeTvl1hPct:              envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_FEE_TVL_1H_PCT', 1),
-  minFeeTvl1hTo24hAvgRatio:    envNumber('SCALP_SPIKE_MOMENTUM_REGAIN_MIN_FEE_TVL_1H_TO_24H_AVG', 3),
-}
-
-/**
- * Scalp Spike Strategy
- *
- * Short-duration fee farming on any token (meme OR utility) experiencing a
- * real volume surge. Classification is driven entirely by the vol spike ratio
- * in classifyToken — NOT by token type or MC ceiling.
- *
- * Use cases:
- *  - Established memecoins with a narrative pump
- *  - Utility tokens (e.g. SKR) during staking-event or product-launch volume rush
- *  - Any SOL-paired token age>=48h that suddenly spikes
- *
- * Structural IL risk is high for utility tokens with staking reward inflation.
- * Hard exits (outOfRangeMinutes, maxDurationHours) are the primary protection.
- *
- * Tier: any MC >= 500K, age >= 48h, vol spike confirmed
- * Profile: HIGH risk / HIGH reward / SHORT duration
- */
 export const scalpSpikeStrategy: Strategy = {
   id: 'scalp-spike',
-  version: 'v1.0',
+  version: 'v1.1',
   name: 'Scalp Spike',
-  description:
-    'Short-duration fee farming on volume-spiking tokens — meme or utility. ' +
-    'Classification is driven by vol spike ratio, not token type or MC ceiling. ' +
-    'Tight range, hard time exit to limit IL exposure on inflationary tokens.',
+  description: 'SOL-paired tokens with a live 5m/1h volume spike. Tight range, hard exit.',
   enabled: true,
-
   filters: {
-    minMcUsd:            envNumber('SCALP_SPIKE_MIN_MC_USD', 500_000), // floor only — no ceiling
-    maxMcUsd:            envNumber('SCALP_SPIKE_MAX_MC_USD', Number.MAX_SAFE_INTEGER),
-    minVolume24h:        envNumber('SCALP_SPIKE_MIN_VOLUME_24H', 100_000),
-    minLiquidityUsd:     envNumber('SCALP_SPIKE_MIN_LIQUIDITY_USD', 30_000),
-    maxTopHolderPct:     envNumber('SCALP_SPIKE_MAX_TOP_HOLDER_PCT', 70),
-    minHolderCount:      envNumber('SCALP_SPIKE_MIN_HOLDER_COUNT', 300),
-    maxAgeHours:         envNumber('SCALP_SPIKE_MAX_AGE_HOURS', 999_999), // no age ceiling
-    minRugcheckScore:    envNumber('SCALP_SPIKE_MIN_RUGCHECK_SCORE', 50), // slightly relaxed vs evil-panda
-    requireSocialSignal:   false,
-    minFeeTvl24hPct:      envNumber('SCALP_SPIKE_MIN_FEE_TVL_24H_PCT', 0),
+    minMcUsd: envNumber('SCALP_SPIKE_MIN_MC_USD', 500_000),
+    maxMcUsd: Number.MAX_SAFE_INTEGER,
+    minVolume24h: 0,
+    minLiquidityUsd: envNumber('SCALP_SPIKE_MIN_LIQUIDITY_USD', 10_000),
+    maxTopHolderPct: envNumber('SCALP_SPIKE_MAX_TOP_HOLDER_PCT', 25),
+    minHolderCount: envNumber('SCALP_SPIKE_MIN_HOLDER_COUNT', 200),
+    maxAgeHours: Number.MAX_SAFE_INTEGER,
+    minRugcheckScore: envNumber('SCALP_SPIKE_MIN_RUGCHECK_SCORE', 400),
+    requireSocialSignal: false,
+    minFeeTvl24hPct: 0,
   },
-
   position: {
-    binStep:               50,
-    rangeDownPct:         -20,
-    rangeUpPct:            20,
-    distributionType:  'spot',
-    solBias:              0.6,
+    binStep: envNumber('SCALP_SPIKE_BIN_STEP', 100),
+    rangeDownPct: envNumber('SCALP_SPIKE_RANGE_DOWN_PCT', -20),
+    rangeUpPct: envNumber('SCALP_SPIKE_RANGE_UP_PCT', 40),
+    distributionType: 'spot',
+    solBias: envNumber('SCALP_SPIKE_SOL_BIAS', 1),
   },
-
   exits: {
-    stopLossPct:           -25,
-    takeProfitPct:         envNumber('SCALP_SPIKE_TAKE_PROFIT_PCT', 25),
-    outOfRangeMinutes:     envNumber('SCALP_SPIKE_OOR_MINUTES', 10),
-    maxDurationHours:        8,             // tighter than before — IL risk on utility tokens
-    claimFeesBeforeClose:  true,
-    minFeesToClaim:       0.0005,
+    stopLossPct: envNumber('SCALP_SPIKE_STOP_LOSS_PCT', -15),
+    takeProfitPct: envNumber('SCALP_SPIKE_TAKE_PROFIT_PCT', 30),
+    outOfRangeMinutes: envNumber('SCALP_SPIKE_OOR_MINUTES', 15),
+    maxDurationHours: envNumber('SCALP_SPIKE_MAX_DURATION_HOURS', 6),
+    claimFeesBeforeClose: true,
+    minFeesToClaim: envNumber('SCALP_SPIKE_MIN_FEES_TO_CLAIM', 0.001),
+    // IL exit: -10% IL on a tight range means the spike already ran hard against us.
+    maxIlPct: envNumber('SCALP_SPIKE_MAX_IL_PCT', -10),
   },
 }

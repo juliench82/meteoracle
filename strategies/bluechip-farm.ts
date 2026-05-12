@@ -1,58 +1,53 @@
 import type { Strategy } from '@/lib/types'
 
-// Stable quote mint addresses — pool MUST be quoted in one of these.
-// Any SOL-paired token, no matter how large its MC, is NOT a bluechip.
-const USDC  = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
-const USDT  = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
-const USDCe = '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo' // Wormhole USDC.e
+function envNumber(name: string, fallback: number): number {
+  const value = process.env[name]
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
 
-/**
- * Bluechip Farm Strategy
- * Targets established large-cap tokens paired with USDC/USDT — NOT SOL.
- * A SOL-paired shitcoin with $100M MC is still a shitcoin.
- * Wider range than stable-farm to tolerate real directional movement.
- */
 export const bluechipFarmStrategy: Strategy = {
   id: 'bluechip-farm',
-  version: 'v1.0',
+  version: 'v1.1',
   name: 'Bluechip Farm',
-  description:
-    'Fee farming on established large-cap token pairs quoted in USDC or USDT only. ' +
-    'SOL-paired tokens are excluded regardless of market cap. ' +
-    'Targets long-lived, broadly-held assets with sufficient liquidity and steady volume. ' +
-    'Moderate range, medium duration.',
+  description: 'Large-cap, long-lived, USDC/USDT-quoted pools. Moderate range, medium duration.',
   enabled: true,
-
   filters: {
-    minMcUsd: 100_000_000,
+    minMcUsd: envNumber('BLUECHIP_FARM_MIN_MC_USD', 100_000_000),
     maxMcUsd: Number.MAX_SAFE_INTEGER,
-    minVolume24h: 100_000,
-    minLiquidityUsd: 100_000,
-    maxTopHolderPct: 25,
-    minHolderCount: 5_000,
-    maxAgeHours: 999999,
-    minRugcheckScore: 40,
+    minVolume24h: envNumber('BLUECHIP_FARM_MIN_VOLUME_24H', 500_000),
+    minLiquidityUsd: envNumber('BLUECHIP_FARM_MIN_LIQUIDITY_USD', 100_000),
+    maxTopHolderPct: envNumber('BLUECHIP_FARM_MAX_TOP_HOLDER_PCT', 25),
+    minHolderCount: envNumber('BLUECHIP_FARM_MIN_HOLDER_COUNT', 5_000),
+    maxAgeHours: Number.MAX_SAFE_INTEGER,
+    minRugcheckScore: 0,
     requireSocialSignal: false,
-    minFeeTvl24hPct: 3,
-    // HARD GATE: pool quote token must be a stable — USDC, USDT, or USDC.e.
-    requiredQuoteMints: [USDC, USDT, USDCe],
+    minFeeTvl24hPct: 0,
+    requiredQuoteMints: [
+      'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+      'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+      '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', // USDC.e
+    ],
   },
-
   position: {
-    binStep: 10,
-    rangeDownPct: -15,
-    rangeUpPct: 15,
+    binStep: envNumber('BLUECHIP_FARM_BIN_STEP', 20),
+    rangeDownPct: envNumber('BLUECHIP_FARM_RANGE_DOWN_PCT', -15),
+    rangeUpPct: envNumber('BLUECHIP_FARM_RANGE_UP_PCT', 20),
     distributionType: 'curve',
-    solBias: 0.5,
-    maxSolPerPosition: 0.5,
+    solBias: 0,
   },
-
   exits: {
-    stopLossPct: -20,
-    takeProfitPct: 0, // removed +200% TP per request — no hard TP for bluechip
-    outOfRangeMinutes: 60,
-    maxDurationHours: 72,
+    stopLossPct: envNumber('BLUECHIP_FARM_STOP_LOSS_PCT', -20),
+    takeProfitPct: envNumber('BLUECHIP_FARM_TAKE_PROFIT_PCT', 40),
+    outOfRangeMinutes: envNumber('BLUECHIP_FARM_OOR_MINUTES', 60),
+    maxDurationHours: envNumber('BLUECHIP_FARM_MAX_DURATION_HOURS', 720),
     claimFeesBeforeClose: true,
-    minFeesToClaim: 0.002,
+    minFeesToClaim: envNumber('BLUECHIP_FARM_MIN_FEES_TO_CLAIM', 0.01),
+    // IL exits disabled for bluechip-farm — long-duration, fee income justifies holding.
+    // Enable via BLUECHIP_FARM_MAX_IL_PCT env if needed (e.g. -20).
+    maxIlPct: process.env.BLUECHIP_FARM_MAX_IL_PCT !== undefined
+      ? envNumber('BLUECHIP_FARM_MAX_IL_PCT', -20)
+      : undefined,
   },
 }

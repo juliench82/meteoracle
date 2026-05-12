@@ -128,6 +128,20 @@ export interface ExitRules {
   maxDurationHours: number
   claimFeesBeforeClose: boolean
   minFeesToClaim: number
+  /**
+   * Maximum impermanent loss % before forcing exit. Negative number, e.g. -15 means
+   * exit when IL reaches -15%. Only evaluated for DLMM positions. Leave undefined to
+   * disable IL-based exits for a strategy (e.g. bluechip-farm).
+   *
+   * Formula: IL% = (2√k / (1+k) − 1) × 100  where k = currentPrice / entryPrice
+   *
+   * Suggested defaults:
+   *   evil-panda:   -15  (wide range; IL at 15% ≈ 2.3× price move)
+   *   scalp-spike:  -10  (tight range; spike scenario — exit fast)
+   *   stable-farm:   -3  (any 3% IL on a stable pair is a depeg event)
+   *   bluechip-farm: undefined (disabled — long-duration, fee income justifies holding)
+   */
+  maxIlPct?: number
 }
 
 export interface Strategy {
