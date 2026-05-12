@@ -252,10 +252,13 @@ function isLpPositionRow(value: unknown): value is LpPositionRow {
     typeof value.opened_at === 'string'
 }
 
+// Bug 2 fix: do NOT read position.pnl_pct (raw DB column) as step 1 — it may be
+// stale from a previous sync cycle. Only read metadata fields that have already
+// been overwritten by mergeDbAndLiveLpPositions with fresh Meteora API data.
 function resolveMeteoraPnlPct(position: LpPositionRow, pnlUsd: number | null, deployedSol: number, liveSolPriceUsd: number | null): number | null {
   const metadata = position.metadata ?? {}
+  // Metadata fields only — position.pnl_pct is the raw DB column and may be stale.
   const explicitPct = firstNumber(
-    position.pnl_pct,
     metadata.pnl_pct,
     metadata.position_pnl_pct,
     metadata.position_pnl_percentage,
@@ -702,16 +705,23 @@ async function checkPosition(
     return
   }
 
+  // Bug 1 fix: entryPriceSol must come from live-merged position data only.
+  // If it is 0 or null, ilPct cannot be computed — treat as null, not 0.
+  // IL exit guard below requires entryPriceSol > 0, so a null entry silently
+  // disables IL exits rather than always returning 0 (which silences the exit).
   const entryPriceSol = firstNumber(position.entry_price_sol, position.metadata?.entry_price_sol) ?? 0
 
   const pricePct = entryPriceSol > 0
     ? ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100
     : 0
 
-  const k = entryPriceSol > 0 && currentPriceSol > 0 ? currentPriceSol / entryPriceSol : 1
-  const ilPct = entryPriceSol > 0
-    ? Math.round((2 * Math.sqrt(k) / (1 + k) - 1) * 10000) / 100
-    : 0
+  // ilPct is null when entryPriceSol is 0 — IL exits must not fire on missing data.
+  const ilPct: number | null = entryPriceSol > 0 && currentPriceSol > 0
+    ? (() => {
+        const k = currentPriceSol / entryPriceSol
+        return Math.round((2 * Math.sqrt(k) / (1 + k) - 1) * 10000) / 100
+      })()
+    : null
 
   // Use live tick price; fall back to metadata only if unavailable
   const solPriceUsd = liveSolPriceUsd ?? firstNumber(position.metadata?.sol_price_usd, position.metadata?.current_sol_price_usd)
@@ -801,7 +811,7 @@ async function checkPosition(
     `${label} inRange=${inRange} price=${currentPriceSol.toFixed(9)} entry=${entryPriceSol.toFixed(9)}` +
     ` pnlUsd=${livePnlUsd !== null ? `$${livePnlUsd.toFixed(2)}` : 'n/a'}` +
     ` pnlPct=${pnlPct !== null ? `${pnlPct.toFixed(2)}%` : 'n/a'}` +
-    ` ilPct=${ilPct.toFixed(2)}% (max=${strategy.exits.maxIlPct ?? 'disabled'})` +
+    ` ilPct=${ilPct !== null ? `${ilPct.toFixed(2)}%` : 'n/a (no entry)'} (max=${strategy.exits.maxIlPct ?? 'disabled'})` +
     ` solUsd=${solPriceUsd !== null ? `$${solPriceUsd.toFixed(2)}` : 'n/a(meta)'}` +
     ` priceMove=${pricePct.toFixed(1)}% fees=${feeYieldPct.toFixed(1)}%deployed` +
     ` claimable=$${claimableFeesUsd ?? 'n/a'} posValue=$${positionValueUsd ?? 'n/a'}` +
@@ -811,11 +821,11 @@ async function checkPosition(
   // === EXIT LOGIC ===
   let closeReason: string | null = null
 
-  // IL exit — checked first: structural divergence loss is a distinct signal from PnL.
-  // Only fires when the strategy defines maxIlPct and we have a valid entry price.
+  // Bug 1 fix: IL exit only fires when ilPct is a real computed value (entryPriceSol > 0).
+  // ilPct === null means entry price was missing — skip rather than silently pass.
   if (
     strategy.exits.maxIlPct !== undefined &&
-    entryPriceSol > 0 &&
+    ilPct !== null &&
     ilPct <= strategy.exits.maxIlPct
   ) {
     closeReason = `il_exit_${ilPct.toFixed(2)}pct`
@@ -868,6 +878,9 @@ async function checkPosition(
   }
 }
 
+// Bug 3 fix: use feeX/feeY (claimable fees only), not totalXAmount/totalYAmount
+// (full position value). The old code computed SOL-equivalent of the full
+// position, inflating fee yield display and fee-based exit logic.
 async function fetchPositionState(
   poolAddress: string,
   positionPubkey: string
@@ -895,11 +908,12 @@ async function fetchPositionState(
     const inRange = positionData.positionData.positionBinData.some(
       (bin: { binId: number }) => bin.binId === activeBin.binId
     )
-    const totalXAmount = positionData.positionData.totalXAmount
-    const totalYAmount = positionData.positionData.totalYAmount
+    // Bug 3 fix: feeX = token fees, feeY = SOL fees — only claimable fees, not position value.
+    const feeX = positionData.positionData.feeX ?? positionData.positionData.totalClaimableFeeXAmount ?? BigInt(0)
+    const feeY = positionData.positionData.feeY ?? positionData.positionData.totalClaimableFeeYAmount ?? BigInt(0)
     const claimableFeesSolEquivalent =
-      Number(totalYAmount) / 1e9 +
-      (Number(totalXAmount) * currentPriceSol) / 1e9
+      Number(feeY) / 1e9 +
+      (Number(feeX) * currentPriceSol) / 1e9
     return { ok: true, inRange, currentPriceSol, claimableFeesSolEquivalent, externallyClosed: false }
   } catch (err) {
     console.error('[monitor] fetchPositionState error:', err)
@@ -952,18 +966,22 @@ async function fetchDammPositionState(
   const metadata = row.metadata ?? {}
   const deployedSol = nullableNumber(row.sol_deposited) ?? 0
 
-  // Resolve cost basis for live PnL computation
+  // Bug 5 fix: cost basis must use the entry-time SOL price, not the live price.
+  // Using liveSolPriceUsd here inflates cost basis when SOL has pumped since entry,
+  // understating PnL and preventing stop-loss from firing.
+  // Priority: explicit metadata deposit USD → entry-time sol_price_usd * deployedSol.
+  // liveSolPriceUsd is intentionally excluded from cost basis derivation.
   const costBasisUsd = firstNumber(
     metadata.meteora_total_deposit_usd,
     metadata.total_deposit_usd,
     metadata.deposit_usd,
     metadata.cost_basis_usd,
   ) ?? (() => {
-    const solUsd = liveSolPriceUsd ?? firstNumber(metadata.sol_price_usd, metadata.current_sol_price_usd)
-    return solUsd !== null && deployedSol > 0 ? deployedSol * solUsd : null
+    const entrySolPriceUsd = firstNumber(metadata.sol_price_usd, metadata.current_sol_price_usd)
+    return entrySolPriceUsd !== null && deployedSol > 0 ? deployedSol * entrySolPriceUsd : null
   })()
 
-  // Try on-chain live PnL first; fall back to DB row only if on-chain call fails
+  // Try on-chain live PnL first.
   const livePnlPct = await fetchDammLivePnl(
     row.pool_address ?? poolAddress,
     row.position_pubkey ?? positionPubkey,
@@ -971,18 +989,10 @@ async function fetchDammPositionState(
     liveSolPriceUsd,
   )
 
-  const pnlPct = livePnlPct ?? (
-    row.pnl_pct !== null && row.pnl_pct !== undefined
-      ? roundPct(row.pnl_pct)
-      : (() => firstNumber(
-          metadata.pnl_pct,
-          metadata.position_pnl_pct,
-          metadata.position_pnl_percentage,
-          metadata.pnl_percentage,
-          metadata.total_pnl_pct,
-          metadata.total_pnl_percentage,
-        ))()
-  )
+  // Bug 4 fix: if on-chain call fails (livePnlPct === null), return null — do NOT
+  // fall back to the DB pnl_pct column. A stale DB value would silently drive exit
+  // decisions. null_pnl_ticks will increment and eventually force an exit.
+  const pnlPct = livePnlPct
 
   const positionValueUsd = row.position_value_usd !== null ? roundMoney(row.position_value_usd) : null
   const ageHours = (Date.now() - new Date(row.opened_at).getTime()) / (1000 * 60 * 60)
