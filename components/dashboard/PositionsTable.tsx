@@ -11,6 +11,9 @@ const STRATEGY_LABELS: Record<string, string> = {
   'meteora-live': 'Meteora Live',
 }
 
+// Must match METEORA_IL_STOP_PCT env var (default -5)
+const IL_STOP_PCT = -5
+
 function formatAge(openedAt: string): string {
   const ms = Date.now() - new Date(openedAt).getTime()
   if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`
@@ -22,6 +25,36 @@ function fmtUsd(val: unknown): string {
   const n = Number(val)
   if (!val || isNaN(n)) return '—'
   return `$${n.toFixed(2)}`
+}
+
+function PnlPctCell({ value }: { value: unknown }) {
+  const n = Number(value)
+  if (value === null || value === undefined || isNaN(n)) {
+    return <span className="text-slate-600">—</span>
+  }
+
+  const atStop = n <= IL_STOP_PCT
+  const color = atStop
+    ? 'text-red-400 font-bold'
+    : n > 0
+    ? 'text-emerald-400'
+    : n < 0
+    ? 'text-red-400'
+    : 'text-slate-400'
+
+  return (
+    <span className={`font-mono tabular-nums ${color}`}>
+      {n > 0 ? '+' : ''}{n.toFixed(2)}%
+      {atStop && (
+        <span
+          className="ml-1 text-red-500"
+          title={`IL stop triggered at ${IL_STOP_PCT}%`}
+        >
+          ⚠
+        </span>
+      )}
+    </span>
+  )
 }
 
 export function PositionsTable({ positions }: { positions: any[] }) {
@@ -39,7 +72,7 @@ export function PositionsTable({ positions }: { positions: any[] }) {
           <table className="w-full text-xs">
             <thead>
               <tr className="text-slate-500 border-b border-surface-border">
-                {['Token', 'Strategy', 'Deployed', 'Claimable $', 'Value $', 'Range', 'Age', 'Max Duration'].map(
+                {['Token', 'Strategy', 'Deployed', 'Claimable $', 'Value $', 'P&L %', 'Range', 'Age', 'Max Duration'].map(
                   (h) => (
                     <th key={h} className="text-left py-2 pr-4 font-medium">
                       {h}
@@ -53,6 +86,7 @@ export function PositionsTable({ positions }: { positions: any[] }) {
                 const deployedSol: number = p.sol_deposited ?? 0
                 const claimableFeesUsd = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
                 const positionValueUsd = p.position_value_usd ?? p.metadata?.position_value_usd
+                const pnlPct = p.pnlPct ?? p.pnl_pct ?? p.metadata?.pnl_pct ?? null
 
                 return (
                   <tr
@@ -84,6 +118,11 @@ export function PositionsTable({ positions }: { positions: any[] }) {
                     {/* Position value — live from Meteora API */}
                     <td className="py-3 pr-4 font-mono text-slate-300 tabular-nums">
                       {fmtUsd(positionValueUsd)}
+                    </td>
+
+                    {/* P&L % — live from Meteora API pnl_pct */}
+                    <td className="py-3 pr-4">
+                      <PnlPctCell value={pnlPct} />
                     </td>
 
                     {/* Range status */}
