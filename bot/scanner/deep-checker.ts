@@ -52,6 +52,8 @@ import {
 
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
+const JUP_PRICE_URL = 'https://price.jup.ag/v6/price?ids=So11111111111111111111111111111111111111112'
+
 const PRE_FILTER = {
   minLiquidityUsd: 20_000,
   maxLiquidityUsd: 500_000_000,
@@ -423,13 +425,16 @@ async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): 
   }
 }
 
-/** Resolve SOL price in USD from metrics. Falls back to 150 if unavailable. */
-function resolveSolPriceUsd(metrics: TokenMetrics): number {
-  // If the quote token is SOL, token.price is denominated in USD per token.
-  // We don't have an explicit SOL/USD oracle here — use the last known value
-  // stored in the bot or fall back to a conservative default.
-  // moonboy-executor already has its own DexScreener price fetch per position,
-  // so this value only affects the dry-run sol_spent estimate.
+/** Resolve SOL price in USD — now uses live Jupiter (same source as monitor) with env fallback. */
+async function resolveSolPriceUsd(): Promise<number> {
+  try {
+    const res = await fetch(JUP_PRICE_URL, { signal: AbortSignal.timeout(4_000) })
+    if (res.ok) {
+      const json = await res.json() as { data?: Record<string, { price?: number }> }
+      const price = json.data?.['So11111111111111111111111111111111111111112']?.price
+      if (typeof price === 'number' && price > 0) return price
+    }
+  } catch {}
   const envSolPrice = parseFloat(process.env.SOL_PRICE_USD ?? '')
   return Number.isFinite(envSolPrice) && envSolPrice > 0 ? envSolPrice : 150
 }
@@ -672,6 +677,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     return true
   }
 
+  // Pre-fetch live SOL price once per tick for accurate MC and position sizing
+  const liveSolPriceUsd = await resolveSolPriceUsd()
+
   for (const { pool: representativePool, mcUsd, ageHours, lane } of survivors) {
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
 
@@ -762,21 +770,23 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStepDisplay}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)}`)
     }
 
+    // Improved MC: always try DexScreener for scalp-spike candidates or when Meteora MC is low/stale
     let resolvedMc = mcUsd
-    if (!resolvedMc || resolvedMc < 1) {
+    const isScalpSpikeCandidate = lane === 'momentum' || (strategy && strategy.id === 'scalp-spike')
+    if (!resolvedMc || resolvedMc < 1 || (isScalpSpikeCandidate && resolvedMc < 500_000)) {
       resolvedMc = await withTimeout(
         fetchMcFromDexScreener(tokenAddress, token.price),
         EXTERNAL_CALL_TIMEOUT_MS,
         `fetchMcFromDexScreener ${symbol}`,
       ).then(v => v ?? 0)
-      if (!resolvedMc || resolvedMc < 1) {
-        if (lane !== 'fresh') {
-          console.log(`[scanner] ${symbol} — skip: no market_cap`)
-          continue
-        }
-        resolvedMc = 0
-        console.log(`[scanner] ${symbol} — no market_cap yet; fresh lane will rely on liquidity + Rugcheck`)
+    }
+    if (!resolvedMc || resolvedMc < 1) {
+      if (lane !== 'fresh') {
+        console.log(`[scanner] ${symbol} — skip: no market_cap`)
+        continue
       }
+      resolvedMc = 0
+      console.log(`[scanner] ${symbol} — no market_cap yet; fresh lane will rely on liquidity + Rugcheck`)
     }
 
     let holderCount  = 0
@@ -902,7 +912,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
                 dailyLossLimitHit = null
                 openedMintsThisTick.add(tokenAddress)
                 // Moonboy hook — fire-and-forget after successful DAMM open
-                void maybeTriggerMoonboy(metrics, resolveSolPriceUsd(metrics))
+                void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
                 await sendAlert({
                   type:          'position_opened',
                   symbol,
@@ -1078,7 +1088,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         dailyLossLimitHit = null
         openedMintsThisTick.add(tokenAddress)
         // Moonboy hook — fire-and-forget after successful DLMM open
-        void maybeTriggerMoonboy(metrics, resolveSolPriceUsd(metrics))
+        void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
         await sendAlert({
           type: 'position_opened',
           symbol,
