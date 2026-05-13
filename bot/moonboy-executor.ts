@@ -16,6 +16,12 @@ const MOONBOY_MAX_TOKEN_AGE_MINUTES = parseFloat(
 )
 const DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex/tokens'
 
+const JUPITER_PRICE_API = 'https://api.jup.ag/price/v2'
+
+const PNL_UNAVAILABLE_ALERT_TICKS = 3
+const PNL_UNAVAILABLE_FORCE_EXIT_TICKS = 10
+const _moonboyNullPnlTicks = new Map<string, number>()
+
 type MoonboyRow = {
   id: string
   mint: string
@@ -53,6 +59,20 @@ async function getDexScreenerData(mint: string): Promise<DexScreenerResult> {
     }
   } catch {
     return { priceUsd: null, pairCreatedAt: null }
+  }
+}
+
+async function getJupiterPriceUsd(mint: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${JUPITER_PRICE_API}?ids=${mint}`, {
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    const price = data?.data?.[mint]?.price
+    return typeof price === 'number' && price > 0 ? price : null
+  } catch {
+    return null
   }
 }
 
@@ -215,21 +235,46 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
     stats.checked++
     const label = `[moonboy][${pos.symbol}]`
 
-    const currentPriceUsd = await getTokenPriceUsd(pos.mint)
-    if (currentPriceUsd === null) {
-      console.warn(`${label} price unavailable — skipping tick`)
-      continue
-    }
-
-    const entryPriceUsd = pos.entry_price_usd
-    const pnlPct = entryPriceUsd > 0
-      ? ((currentPriceUsd - entryPriceUsd) / entryPriceUsd) * 100
-      : 0
+    const currentPriceUsd = await getJupiterPriceUsd(pos.mint)
+    const previousNullPnlTicks = _moonboyNullPnlTicks.get(pos.id) ?? 0
+    let currentNullPnlTicks = previousNullPnlTicks
+    let closeReason: string | null = null
 
     const ageHours = (now - new Date(pos.opened_at).getTime()) / 3_600_000
 
+    if (currentPriceUsd === null) {
+      currentNullPnlTicks = previousNullPnlTicks + 1
+      _moonboyNullPnlTicks.set(pos.id, currentNullPnlTicks)
+      if (currentNullPnlTicks >= PNL_UNAVAILABLE_ALERT_TICKS) {
+        if (currentNullPnlTicks === PNL_UNAVAILABLE_ALERT_TICKS || currentNullPnlTicks % PNL_UNAVAILABLE_ALERT_TICKS === 0) {
+          await sendAlert({
+            type: 'pnl_unavailable_warning',
+            symbol: pos.symbol,
+            strategy: 'moonboy',
+            positionId: pos.id,
+            reason: `moonboy_pnl_unavailable_${currentNullPnlTicks}ticks`,
+            ageHours: Math.round(ageHours * 10) / 10,
+          }).catch(() => {})
+        }
+        console.warn(`${label} Moonboy PnL unavailable ${currentNullPnlTicks} consecutive ticks`)
+      }
+      if (currentNullPnlTicks >= PNL_UNAVAILABLE_FORCE_EXIT_TICKS) {
+        closeReason = `pnl_unavailable_${PNL_UNAVAILABLE_FORCE_EXIT_TICKS}ticks`
+      } else {
+        continue
+      }
+    } else {
+      currentNullPnlTicks = 0
+      _moonboyNullPnlTicks.set(pos.id, 0)
+    }
+
+    const entryPriceUsd = pos.entry_price_usd
+    const pnlPct = entryPriceUsd > 0 && currentPriceUsd !== null
+      ? ((currentPriceUsd - entryPriceUsd) / entryPriceUsd) * 100
+      : 0
+
     console.log(
-      `${label} price=$${currentPriceUsd.toFixed(6)} entry=$${entryPriceUsd.toFixed(6)} ` +
+      `${label} price=$${currentPriceUsd ? currentPriceUsd.toFixed(6) : 'n/a'} entry=$${entryPriceUsd.toFixed(6)} ` +
       `pnl=${pnlPct.toFixed(1)}% age=${ageHours.toFixed(1)}h`,
     )
 
@@ -241,13 +286,14 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
         .eq('id', pos.id),
     ).catch(() => {})
 
-    let closeReason: string | null = null
-    if (pnlPct >= moonboyStrategy.exits.takeProfitPct) {
-      closeReason = `takeprofit_${pnlPct.toFixed(1)}pct`
-    } else if (pnlPct <= moonboyStrategy.exits.stopLossPct) {
-      closeReason = `stoploss_${pnlPct.toFixed(1)}pct`
-    } else if (ageHours >= moonboyStrategy.exits.maxDurationHours) {
-      closeReason = `max_duration_${Math.round(ageHours)}h`
+    if (!closeReason) {
+      if (pnlPct >= moonboyStrategy.exits.takeProfitPct) {
+        closeReason = `takeprofit_${pnlPct.toFixed(1)}pct`
+      } else if (pnlPct <= moonboyStrategy.exits.stopLossPct) {
+        closeReason = `stoploss_${pnlPct.toFixed(1)}pct`
+      } else if (ageHours >= moonboyStrategy.exits.maxDurationHours) {
+        closeReason = `max_duration_${Math.round(ageHours)}h`
+      }
     }
 
     if (!closeReason) continue
