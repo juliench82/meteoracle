@@ -5,10 +5,11 @@ import { summarizeError } from '@/lib/logging'
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM = 'https://dlmm-api.meteora.ag'
 
-// Simple in-process cache — pools change slowly; scanner ticks every 15 min
+// Simple in-process cache — pools change slowly.
+// Reduced to 5min default to keep momentum signals (vol5m, feeTvl5m) fresher for scalp-spike / evil-panda triggers.
 let meteoraPoolsCache: { pools: MeteoraPool[]; ts: number } | null = null
 const METEORA_CACHE_TTL_MS = parseInt(
-  process.env.METEORA_POOLS_CACHE_TTL_MS ?? '600000',
+  process.env.METEORA_POOLS_CACHE_TTL_MS ?? '300000',
   10,
 )
 
@@ -381,8 +382,7 @@ async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchC
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.warn(`[scanner] ${baseUrl}/pools newest-first fetch failed: ${message}`)
-  }
-  for (const pool of newestPools) poolMap.set(pool.address, pool)
+  } for (const pool of newestPools) poolMap.set(pool.address, pool)
 
   const momentumPages = await Promise.allSettled([
     fetchMeteoraPoolsPage(baseUrl, 'volume_1h', config),
