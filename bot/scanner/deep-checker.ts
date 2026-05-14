@@ -743,7 +743,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const feeTvl24hPct  = getFeeTvlPct(bestPool, '24h')
     const feeTvl1hPct   = getFeeTvlPct(bestPool, '1h')
     const feeTvl5mPct   = getFeeTvlPct(bestPool, '5m')
-    const volumeTvl1hRatio = getVolumeTvlRatio(bestPool, '1h')
+    const volumeTvl1hRatio = getVolumeTvlRatio(bestPool)
     const volumeGrowth1h = getRecentVolumeGrowth(bestPool)
     const momentumScore = scoreMeteoraMomentum(bestPool)
 
@@ -772,7 +772,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     // Improved MC: always try DexScreener for scalp-spike candidates or when Meteora MC is low/stale
     let resolvedMc = mcUsd
-    const isScalpSpikeCandidate = lane === 'momentum' || (strategy && strategy.id === 'scalp-spike')
+    const forcedStrategyId = lane === 'momentum' ? 'scalp-spike' : 'evil-panda'
+    const isScalpSpikeCandidate = lane === 'momentum' || forcedStrategyId === 'scalp-spike'
     if (!resolvedMc || resolvedMc < 1 || (isScalpSpikeCandidate && resolvedMc < 500_000)) {
       resolvedMc = await withTimeout(
         fetchMcFromDexScreener(tokenAddress, token.price),
@@ -954,7 +955,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       feeTvl24hPct:   metrics.feeTvl24hPct,
     })
 
-    const forcedStrategyId = lane === 'momentum' ? 'scalp-spike' : 'evil-panda'
     const momentumRegain = lane === 'momentum' && passesMomentumRegain(bestPool)
     const strategy =
       getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
