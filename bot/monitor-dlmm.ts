@@ -36,7 +36,6 @@ export async function checkDlmmPosition(
 
   if (externallyClosed) {
     console.warn(`${label} position missing on-chain — marking closed in DB`)
-    // (full external close logic preserved in original — see monitor.ts for full)
     stats.closed++
     return
   }
@@ -89,7 +88,7 @@ export async function checkDlmmPosition(
   }
 
   if (justWentOOR) {
-    await sendAlert({ type: 'position_oor', symbol: position.symbol, strategy: strategy.id, currentPrice: currentPriceSol })
+    await sendAlert({ type: 'position_oor', symbol: position.symbol, strategy: strategy.id, currentPrice: currentPriceSol, binRangeLower: 0, binRangeUpper: 0, oorExitMinutes: strategy.exits?.outOfRangeMinutes ?? 0 })
   }
 
   const openedAt = new Date(position.opened_at).getTime()
