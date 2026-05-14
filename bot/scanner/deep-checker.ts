@@ -200,7 +200,7 @@ export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'in
         .upsert(payload, { onConflict: 'service' }),
       SUPABASE_TIMEOUT_MS,
       'bot_health upsert scanner',
-    )
+    }
     if (upsertResult && 'error' in upsertResult && upsertResult.error) {
       console.warn('[scanner] bot_health upsert failed:', upsertResult.error.message)
     }
@@ -547,7 +547,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     freshMaxAgeMinutes: FRESH_MAX_AGE_MINUTES,
     freshMinLiquidityUsd: FRESH_MIN_LIQUIDITY_USD,
     momentumPoolLimit: MOMENTUM_POOL_LIMIT,
-    momentumMinVolume5mUSD: MOMENTUM_MIN_VOLUME_5M_USD,
+    momentumMinVolume5mUsd: MOMENTUM_MIN_VOLUME_5M_USD,
     momentumMinFeeTvl5mPct: MOMENTUM_MIN_FEE_TVL_5M_PCT,
     scalpSpikeVolRatio: SCALP_SPIKE_VOL_RATIO,
     maxFreshDeepChecks: MAX_FRESH_DEEP_CHECKS,
