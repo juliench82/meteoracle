@@ -7,6 +7,14 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+export const EVIL_PANDA_SCANNER_SCORE_WEIGHTS = {
+  freshness: 0.25,
+  rugcheck: 0.25,
+  holders: 0.20,
+  feeTvl1h: 0.15,
+  volumeTvl1h: 0.15,
+}
+
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
   version: 'v1.1',
