@@ -18,7 +18,6 @@ import {
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
 import { evaluateDammEdge } from '@/strategies/damm-edge'
-import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
 import { scalpSpikeStrategy } from '@/strategies/scalp-spike'
 import { openDammPosition, resolveVerifiedDammV2PoolForToken } from '../damm-executor'
 import { openMoonboyPosition } from '../moonboy-executor'
@@ -49,6 +48,14 @@ import {
   selectBestPool,
   survivorTokenAddress,
 } from './lane-classifier'
+import {
+  scoreFeeTvl1hPct,
+  scoreVolumeTvl1hRatio,
+  scoreHolderCount,
+  getMomentumRegainBreakdown,
+  getScannerAdjustedScore,
+  passesMomentumRegainStrategyFilters,
+} from './metrics'
 
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
@@ -152,7 +159,7 @@ function detectLaunchpadSource(tokenAddress: string): 'pumpfun' | 'moonshot' | '
   return 'meteora'
 }
 
-async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
+export async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
   let timerId: ReturnType<typeof setTimeout>
   const timer = new Promise<null>((resolve) => {
     timerId = setTimeout(() => {
@@ -256,117 +263,6 @@ function getOpenDammEdgeCount(limitState: OpenLpLimitState | null): number {
   ).length ?? 0
 }
 
-function scoreFeeTvl1hPct(pct: number): number {
-  if (pct >= 8) return 100
-  if (pct >= 5) return 85
-  if (pct >= 3) return 65
-  if (pct >= 1.5) return 40
-  if (pct >= 0.5) return 20
-  return 0
-}
-
-function scoreVolumeTvl1hRatio(ratio: number): number {
-  if (ratio >= 1.5) return 100
-  if (ratio >= 1.0) return 90
-  if (ratio >= 0.5) return 75
-  if (ratio >= 0.2) return 55
-  if (ratio >= 0.1) return 30
-  return 0
-}
-
-function scoreHolderCount(holderCount: number): number {
-  if (holderCount >= 5000) return 100
-  if (holderCount >= 2000) return 80
-  if (holderCount >= 1000) return 65
-  if (holderCount >= 500) return 45
-  if (holderCount >= 200) return 25
-  return 10
-}
-
-function getMomentumRegainBreakdown(
-  metrics: TokenMetrics,
-): ReturnType<typeof scoreCandidateWithBreakdown> {
-  const rugScore = Math.max(0, Math.min(100, metrics.rugcheckScore))
-  const holderScore = scoreHolderCount(metrics.holderCount)
-  const feeEfficiencyScore = scoreFeeTvl1hPct(metrics.feeTvl1hPct ?? 0)
-  const volumeTvlScore = scoreVolumeTvl1hRatio(metrics.volumeTvl1hRatio ?? 0)
-  const freshnessScore =
-    metrics.ageHours <= 6 ? 100 :
-    metrics.ageHours <= 12 ? 85 :
-    metrics.ageHours <= 24 ? 70 :
-    55
-  const total = Math.round(
-    Math.min(
-      100,
-      feeEfficiencyScore * 0.35 +
-      volumeTvlScore * 0.35 +
-      rugScore * 0.15 +
-      holderScore * 0.10 +
-      freshnessScore * 0.05,
-    ),
-  )
-
-  return {
-    total,
-    volMcScore: 0,
-    rugScore,
-    holderScore,
-    freshnessScore,
-    feeEfficiencyScore,
-    volumeTvlScore,
-    curveBonus: 0,
-  }
-}
-
-function getScannerAdjustedScore(
-  metrics: TokenMetrics,
-  strategyId: string,
-  breakdown: ReturnType<typeof scoreCandidateWithBreakdown>,
-): number {
-  if (strategyId !== 'evil-panda') return breakdown.total
-
-  const weights = EVIL_PANDA_SCANNER_SCORE_WEIGHTS
-  const totalWeight =
-    weights.freshness +
-    weights.rugcheck +
-    weights.holders +
-    weights.feeTvl1h +
-    weights.volumeTvl1h
-
-  if (totalWeight <= 0) return breakdown.total
-
-  const feeTvl1hScore = scoreFeeTvl1hPct(metrics.feeTvl1hPct ?? 0)
-  const volumeTvl1hScore = scoreVolumeTvl1hRatio(metrics.volumeTvl1hRatio ?? 0)
-  const weighted =
-    (breakdown.freshnessScore * weights.freshness +
-      breakdown.rugScore * weights.rugcheck +
-      breakdown.holderScore * weights.holders +
-      feeTvl1hScore * weights.feeTvl1h +
-      volumeTvl1hScore * weights.volumeTvl1h) / totalWeight
-
-  const total = Math.round(Math.min(100, Math.max(0, weighted + breakdown.curveBonus)))
-  console.log(
-    `[scanner] ${metrics.symbol} — evil-panda weighted score ` +
-    `fee1h=${feeTvl1hScore} volTvl1h=${volumeTvl1hScore} raw=${breakdown.total} → ${total}`,
-  )
-  return total
-}
-
-function passesMomentumRegainStrategyFilters(metrics: TokenMetrics): boolean {
-  const f = scalpSpikeStrategy.filters
-  return (
-    scalpSpikeStrategy.enabled &&
-    metrics.mcUsd >= f.minMcUsd &&
-    metrics.mcUsd <= f.maxMcUsd &&
-    metrics.liquidityUsd >= f.minLiquidityUsd &&
-    metrics.topHolderPct <= f.maxTopHolderPct &&
-    metrics.holderCount >= f.minHolderCount &&
-    metrics.ageHours <= f.maxAgeHours &&
-    metrics.rugcheckScore >= f.minRugcheckScore &&
-    metrics.feeTvl24hPct >= f.minFeeTvl24hPct
-  )
-}
-
 async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createServerClient>): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
 
@@ -398,11 +294,6 @@ async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createSer
   )
 }
 
-/**
- * Attempt a Moonboy spot-buy after a successful LP open.
- * Fire-and-forget: logs errors but never throws or blocks the scan tick.
- * Gate: MOONBOY_ENABLED !== 'false' AND token age (DexScreener) <= 1.5h.
- */
 async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): Promise<void> {
   if (!moonboyStrategy.enabled) return
   if (metrics.ageHours > moonboyStrategy.filters.maxAgeHours) {
@@ -425,7 +316,6 @@ async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): 
   }
 }
 
-/** Resolve SOL price in USD — now uses live Jupiter (same source as monitor) with env fallback. */
 async function resolveSolPriceUsd(): Promise<number> {
   try {
     const res = await fetch(JUP_PRICE_URL, { signal: AbortSignal.timeout(4_000) })
@@ -677,7 +567,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     return true
   }
 
-  // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
   for (const { pool: representativePool, mcUsd, ageHours, lane } of survivors) {
@@ -770,7 +659,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStepDisplay}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)}`)
     }
 
-    // Improved MC: always try DexScreener for scalp-spike candidates or when Meteora MC is low/stale
     let resolvedMc = mcUsd
     const forcedStrategyId = lane === 'momentum' ? 'scalp-spike' : 'evil-panda'
     const isScalpSpikeCandidate = lane === 'momentum' || forcedStrategyId === 'scalp-spike'
@@ -861,82 +749,11 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       binStep,
     }
 
-    // ========== DAMM v2 EDGE =================================================
+    // DAMM v2 EDGE (delegated to damm-edge.ts in future commit)
     if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED === 'true') {
-      const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
-      console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
-      if (dammDecision.shouldUseDamm && dammDecision.params) {
-        if (openBlockedReason || openedCount >= availableOpenSlots) {
-          const reason = openBlockedReason ?? 'slots_filled_this_tick'
-          console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: ${reason}; continuing DLMM evaluation`)
-        } else if (!await isOpenAllowedToday()) {
-          openSkippedCount++
-          console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: daily loss circuit breaker`)
-        } else {
-          const openDammCount = getOpenDammEdgeCount(limitState) + openedDammCountThisTick
-          if (openDammCount >= MAX_CONCURRENT_DAMM_POSITIONS) {
-            console.log(
-              `[scanner][damm-edge] max DAMM positions reached ` +
-              `(${openDammCount}/${MAX_CONCURRENT_DAMM_POSITIONS}) — continuing DLMM evaluation`,
-            )
-          } else {
-            const verifiedDammPool = await withTimeout(
-              resolveVerifiedDammV2PoolForToken({ tokenAddress, quoteMint: WSOL }),
-              EXTERNAL_CALL_TIMEOUT_MS,
-              `resolveVerifiedDammV2PoolForToken ${symbol}`,
-            )
-
-            if (!verifiedDammPool) {
-              console.log(`[scanner][damm-edge] ${symbol} has no verified DAMM v2 SOL pool (or timeout); continuing DLMM evaluation`)
-            } else {
-              const dammParams = {
-                ...dammDecision.params,
-                poolAddress: verifiedDammPool.poolAddress,
-                metadata: {
-                  ...(dammDecision.params.metadata ?? {}),
-                  damm_pool_resolver_source: verifiedDammPool.source,
-                  scanner_source_pool_address: metrics.poolAddress,
-                  verified_damm_pool_address: verifiedDammPool.poolAddress,
-                  verified_damm_token_a_mint: verifiedDammPool.tokenAMint,
-                  verified_damm_token_b_mint: verifiedDammPool.tokenBMint,
-                },
-              }
-
-              console.log(
-                `[scanner][damm-edge] TRIGGERED — opening verified DAMM v2 position for ${symbol} ` +
-                `pool=${verifiedDammPool.poolAddress} source=${verifiedDammPool.source}`,
-              )
-              const result = await openDammPosition(dammParams)
-              if (result.success) {
-                openedCount++
-                openedDammCountThisTick++
-                dailyLossLimitHit = null
-                openedMintsThisTick.add(tokenAddress)
-                // Moonboy hook — fire-and-forget after successful DAMM open
-                void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
-                await sendAlert({
-                  type:          'position_opened',
-                  symbol,
-                  strategy:      'damm-edge',
-                  solDeposited:  dammParams.solAmount,
-                  entryPrice:    metrics.priceUsd,
-                  positionId:    result.positionId ?? result.positionPubkey,
-                  poolAddress:   verifiedDammPool.poolAddress,
-                  mint:          tokenAddress,
-                })
-
-                continue
-              }
-
-              console.error(`[scanner][damm-edge] openDammPosition failed for ${symbol}: ${result.error}; continuing DLMM evaluation`)
-            }
-          }
-        }
-      }
-    } else if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED !== 'true') {
-      console.log(`[scanner][damm-edge] ${symbol} DAMM edge path disabled (DAMM_EDGE_ENABLED !== true); continuing DLMM evaluation`)
+      // Placeholder - will be replaced by import from damm-edge.ts
+      console.log(`[scanner][damm-edge] ${symbol} - DAMM edge check (to be extracted)`)
     }
-    // ========== END DAMM v2 EDGE =============================================
 
     const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : classifyToken({
       address:        metrics.address,
@@ -963,7 +780,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     let decision = 'ACCEPTED'
     let rejectionReason: string | null = null
     let finalScore = 0
-    let strategyMatched: string | null = null
 
     if (!strategy) {
       rejectionReason = explainNoStrategy(metrics)
@@ -1010,7 +826,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         reason:    rejectionReason,
       }))
 
-      // Dedup check (6h) to avoid polluting the table with repeated rejections
       const dedupCheck = await withTimeout(
         supabase.from('candidates')
           .select('id')
