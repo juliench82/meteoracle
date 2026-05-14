@@ -7,6 +7,8 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+export const SCALP_SPIKE_MOMENTUM_REGAIN = true
+
 export const scalpSpikeStrategy: Strategy = {
   id: 'scalp-spike',
   version: 'v1.1',
