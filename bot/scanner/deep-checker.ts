@@ -200,7 +200,7 @@ export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'in
         .upsert(payload, { onConflict: 'service' }),
       SUPABASE_TIMEOUT_MS,
       'bot_health upsert scanner',
-    }
+    )
     if (upsertResult && 'error' in upsertResult && upsertResult.error) {
       console.warn('[scanner] bot_health upsert failed:', upsertResult.error.message)
     }
@@ -850,7 +850,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       dexId:          'meteora',
       feeTvl24hPct,
       feeTvl1hPct,
-      feeTvl5mPct,
+      feeTvl5mPct:    feeTvl5mPct,
       volume1h:       vol1h,
       volume5m:       vol5m,
       volumeTvl1hRatio,
