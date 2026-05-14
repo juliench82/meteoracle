@@ -92,7 +92,7 @@ async function runTick(): Promise<{ checked: number; closed: number; claimed: nu
 
   // Sync DB from live snapshot
   if (snapshot) {
-    await syncAllMeteoraPositions(livePositions).catch(err =>
+    await syncAllMeteoraPositions().catch(err =>
       console.error('[monitor] syncAllMeteoraPositions failed:', err),
     )
   }
@@ -100,7 +100,7 @@ async function runTick(): Promise<{ checked: number; closed: number; claimed: nu
   // ── Orphan detection (every N ticks) ─────────────────────────────────────
   if (tickCount % ORPHAN_CHECK_EVERY_N === 0) {
     console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
-    await detectAllOrphanedPositions(livePositions).catch(err =>
+    await detectAllOrphanedPositions().catch(err =>
       console.error('[monitor] orphan detection failed:', err),
     )
   }
