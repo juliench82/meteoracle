@@ -1,4 +1,4 @@
-import { getPoolAgeMinutes, getPoolTvl, getPoolVolume, getFeeTvlPct, getVolumeTvlRatio, getRecentVolumeGrowth, scoreMeteoraMomentum } from './pool-fetcher'
+import { getPoolAgeMinutes, getPoolTvl, getPoolVolume, getFeeTvlPct, getVolumeTvlRatio, getRecentVolumeGrowth, scoreMeteoraMomentum, getTradableToken } from './pool-fetcher'
 
 const SCALP_SPIKE_MOMENTUM_REGAIN = {
   minAgeHours: 0,
@@ -145,6 +145,12 @@ export function pickDeepCheckSurvivors(
   return survivors
 }
 
+/**
+ * Find the best pool for a given tradable token address within a lane's pool list.
+ * Meteora pools store tokens as token_x and token_y — match on either side.
+ * If multiple pools match (same token, different bin_step), prefer the one with
+ * the highest feeTvl 1h (most active right now).
+ */
 export function selectBestPool(pools: any[], tokenAddress: string, lane: string): any | null {
   const matching = pools.filter(p => p.token_x?.address === tokenAddress || p.token_y?.address === tokenAddress)
   if (matching.length === 0) return null
@@ -153,6 +159,15 @@ export function selectBestPool(pools: any[], tokenAddress: string, lane: string)
   return matching.reduce((best, p) => getFeeTvlPct(p, '1h') >= getFeeTvlPct(best, '1h') ? p : best)
 }
 
+/**
+ * Returns the tradable token address (non-quote side) for a survivor entry.
+ * Used for OOR recheck dedup — must match the mint stored in lp_positions.
+ */
 export function survivorTokenAddress(survivor: any): string {
-  return survivor.pool?.token_mint || survivor.pool?.address || ''
+  if (!survivor.pool) return ''
+  try {
+    return getTradableToken(survivor.pool)?.address ?? survivor.pool?.address ?? ''
+  } catch {
+    return survivor.pool?.address ?? ''
+  }
 }
