@@ -23,7 +23,7 @@ export async function getBotState(): Promise<BotState> {
     const supabase = createServerClient()
     const { data, error } = await supabase
       .from('bot_state')
-      .select('enabled, dry_run, is_running, running_since, sync_fail_count, paused')
+      .select('enabled, dry_run, is_running, running_since, sync_fail_count')
       .eq('id', 1)
       .single()
 
@@ -38,7 +38,7 @@ export async function getBotState(): Promise<BotState> {
       is_running:      data.is_running ?? false,
       running_since:   data.running_since ?? null,
       sync_fail_count: typeof data.sync_fail_count === 'number' ? data.sync_fail_count : 0,
-      paused:          typeof data.paused === 'boolean' ? data.paused : false,
+      paused:          false,
     }
   } catch (error) {
     console.error('[botState] Supabase error, failing closed:', error)
