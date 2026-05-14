@@ -743,7 +743,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const feeTvl24hPct  = getFeeTvlPct(bestPool, '24h')
     const feeTvl1hPct   = getFeeTvlPct(bestPool, '1h')
     const feeTvl5mPct   = getFeeTvlPct(bestPool, '5m')
-    const volumeTvl1hRatio = getVolumeTvlRatio(bestPool)
+    const volumeTvl1hRatio = getVolumeTvlRatio(bestPool, '1h')
     const volumeGrowth1h = getRecentVolumeGrowth(bestPool)
     const momentumScore = scoreMeteoraMomentum(bestPool)
 
@@ -1033,7 +1033,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         liquidity_usd:     metrics.liquidityUsd,
         fee_tvl_24h_pct:   feeTvl24hPct,
         fee_tvl_1h_pct:    feeTvl1hPct,
-        fee_tvl_5m_pct:    feeTvl5mPct,
+        fee_tvl_5mPct:    feeTvl5mPct,
         holder_count:      metrics.holderCount,
         rugcheck_score:    metrics.rugcheckScore,
         top_holder_pct:    metrics.topHolderPct,
