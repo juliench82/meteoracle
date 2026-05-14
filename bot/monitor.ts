@@ -116,7 +116,9 @@ async function runTick(): Promise<{ checked: number; closed: number; claimed: nu
   const merged = mergeDbAndLiveLpPositions(openRows, livePositions)
 
   // ── RPC cooldown refresh ──────────────────────────────────────────────────
-  refreshRpcProviderCooldown()
+  await refreshRpcProviderCooldown('helius').catch(err =>
+    console.error('[monitor] refreshRpcProviderCooldown failed:', err),
+  )
 
   // ── Per-position checks ───────────────────────────────────────────────────
   for (const position of merged) {
@@ -170,17 +172,16 @@ async function runTick(): Promise<{ checked: number; closed: number; claimed: nu
 
   console.log(
     `[lp-monitor] tick done — checked=${stats.checked} closed=${stats.closed} ` +
-    `claimed=${stats.claimed} rebalanced=${stats.rebalanced} elapsed=${Date.now() - (Date.now() - MONITOR_INTERVAL_MS)}ms`,
+    `claimed=${stats.claimed} rebalanced=${stats.rebalanced}`,
   )
 
   return stats
 }
 
-// ── Main loop ─────────────────────────────────────────────────────────────────
+// ── Main loop ───────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   await sendStartupAlert('lp-monitor-dlmm')
 
-  // Immediate first tick, then interval
   await runTick().catch(err => console.error('[lp-monitor] first tick failed:', err))
 
   setInterval(() => {
