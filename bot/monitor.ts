@@ -590,7 +590,7 @@ async function checkDammEdgePosition(
 
   console.log(`${label} EXIT triggered → ${closeReason}`)
   const closeResult = await closeDammPosition(position.id, closeReason)
-  const closed = closeResult.success && !closeResult.skipped
+  const closed = closeResult.success
   if (closed) {
     stats.closed++
     await sendAlert({
