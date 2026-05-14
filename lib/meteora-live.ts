@@ -27,6 +27,7 @@ export type LiveMeteoraPosition = {
   token_amount?: number
   claimable_fees_usd?: number | null
   position_value_usd?: number | null
+  dry_run?: boolean | null
   metadata: Record<string, unknown>
   _source?: string
 }
