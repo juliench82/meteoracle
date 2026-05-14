@@ -43,7 +43,14 @@ let tickCount = 0
 async function runTick(): Promise<{ checked: number; closed: number; claimed: number; rebalanced: number }> {
   const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
 
-  const botState = await getBotState().catch(() => ({ paused: false }))
+  const botState = await getBotState().catch(() => ({
+    enabled: false,
+    dry_run: true,
+    is_running: false,
+    running_since: null,
+    sync_fail_count: 0,
+    paused: false
+  }))
   if (botState.paused) {
     console.log('[lp-monitor] bot is paused — skipping tick')
     return stats
