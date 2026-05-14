@@ -629,7 +629,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     getOpenLpLimitState('market'),
     METEORA_FETCH_TIMEOUT_MS,
     'live Meteora position limit state',
-  }
+  )
   let openCount: number | undefined
   let availableOpenSlots = 0
   let openBlockedReason: string | undefined
