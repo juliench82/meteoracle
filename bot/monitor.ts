@@ -20,6 +20,7 @@ import { syncAllMeteoraPositions, type MeteoraPositionSyncResult } from '@/lib/p
 import { getSupabaseRestHeaders, getSupabaseUrl } from '@/lib/supabase'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import type { Strategy } from '@/lib/types'
+import { getDammV2PositionValue } from '@/lib/damm-v2'
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -378,7 +379,7 @@ export async function monitorPositions(): Promise<{
 
   tickCount++
   let reconcile: MeteoraPositionSyncResult | null = null
-  if (ORPHAN_CHECK_EVERY_N > 0 && tickCount % ORPHAN_CHECK_EVERY_N === 0) {
+  if (ORPHON_CHECK_EVERY_N > 0 && tickCount % ORPHAN_CHECK_EVERY_N === 0) {
     console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
     try {
       reconcile = await detectAllOrphanedPositions()
@@ -947,7 +948,6 @@ async function fetchDammLivePnl(
   if (liveSolPriceUsd === null || liveSolPriceUsd <= 0) return null
 
   try {
-    const { getDammV2PositionValue } from '@/lib/damm-v2'
     const valueUsd = await getDammV2PositionValue(poolAddress, positionPubkey, liveSolPriceUsd)
     if (valueUsd === null) return null
     return roundPct(((valueUsd - costBasisUsd) / costBasisUsd) * 100)
