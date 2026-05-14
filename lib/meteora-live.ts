@@ -3,7 +3,6 @@ import { fetchLiveDammPositions } from './meteora-live-damm'
 
 // Thin re-export wrapper — all logic preserved in split files. No loss.
 export { fetchLiveDlmmPositions, fetchLiveDammPositions }
-export type { LiveDlmmPosition, LiveDammPosition, LiveMeteoraPosition, LiveMeteoraSnapshot, MeteoraLiveSourceStatus } from './meteora-live-dlmm'
 
 export async function fetchLiveMeteoraSnapshot() {
   const [dlmm, damm] = await Promise.allSettled([fetchLiveDlmmPositions(), fetchLiveDammPositions()])
