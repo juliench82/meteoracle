@@ -852,6 +852,7 @@ export async function closeDammPosition(
   reason: string,
 ): Promise<{
   success: boolean
+  skipped?: boolean
   realizedPnlUsd: number | null
   totalFeeEarnedUsd: number | null
   txSignature: string
@@ -867,7 +868,11 @@ export async function closeDammPosition(
     .single()
 
   if (fetchError || !position) {
-    return { success: false, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: '', error: `position not found: ${fetchError?.message ?? 'null row'}` }
+    return { success: false, skipped: true, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: '', error: `position not found: ${fetchError?.message ?? 'null row'}` }
+  }
+
+  if (!CLOSEABLE_DAMM_STATUSES.includes(position.status)) {
+    return { success: false, skipped: true, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: '', error: `not_closeable_status: ${position.status}` }
   }
 
   const previousMetadata = (position.metadata ?? {}) as Record<string, unknown>
@@ -888,7 +893,7 @@ export async function closeDammPosition(
 
   if (!position.position_pubkey) {
     console.error(`${label} position_pubkey is null — cannot close on-chain`)
-    return { success: false, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: '', error: 'missing_position_pubkey' }
+    return { success: false, skipped: true, realizedPnlUsd: null, totalFeeEarnedUsd: null, txSignature: '', error: 'missing_position_pubkey' }
   }
 
   try {

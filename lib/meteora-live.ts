@@ -21,12 +21,12 @@ export type LiveMeteoraPosition = {
   in_range: boolean
   opened_at: string
   sol_deposited: number
-  token_amount?: number
   current_price: number
+  pnl_usd: number | null
+  pnl_pct: number | null
+  token_amount?: number
   claimable_fees_usd?: number | null
   position_value_usd?: number | null
-  pnl_usd?: number | null
-  pnl_pct?: number | null
   metadata: Record<string, unknown>
   _source?: string
 }
