@@ -146,11 +146,11 @@ export function pickDeepCheckSurvivors(
 }
 
 export function selectBestPool(pools: any[], tokenAddress: string, lane: string): any | null {
-  return pools.find(p => 
-    p.token_x?.address === tokenAddress || 
-    p.token_y?.address === tokenAddress ||
-    p.address === tokenAddress
-  ) || null
+  const matching = pools.filter(p => p.token_x?.address === tokenAddress || p.token_y?.address === tokenAddress)
+  if (matching.length === 0) return null
+  if (matching.length === 1) return matching[0]
+  // Plusieurs pools pour le même token → prendre celui avec le feeTvl 1h le plus élevé
+  return matching.reduce((best, p) => getFeeTvlPct(p, '1h') >= getFeeTvlPct(best, '1h') ? p : best)
 }
 
 export function survivorTokenAddress(survivor: any): string {
