@@ -265,11 +265,6 @@ export function getTradableToken(pool: MeteoraPool): MeteoraToken {
 
 // ─── Supabase persistent cache ────────────────────────────────────────────────
 
-/**
- * Read scanner_pool_cache rows fresher than the in-memory TTL and seed the
- * in-memory cache from them. Called once on cold start before hitting Meteora.
- * Returns the pool list if usable, null otherwise.
- */
 async function loadDbPoolCache(): Promise<MeteoraPool[] | null> {
   try {
     const cutoff = new Date(Date.now() - METEORA_CACHE_TTL_MS).toISOString()
@@ -296,10 +291,6 @@ async function loadDbPoolCache(): Promise<MeteoraPool[] | null> {
   }
 }
 
-/**
- * Bulk-upsert fetched pools into scanner_pool_cache. Fire-and-forget —
- * errors are logged but never propagate to the scan tick.
- */
 function persistDbPoolCache(pools: MeteoraPool[]): void {
   if (pools.length === 0) return
 
@@ -332,7 +323,6 @@ function persistDbPoolCache(pools: MeteoraPool[]): void {
     }
   })
 
-  // Chunk to avoid hitting Supabase's 1 MB request limit on large pool sets
   const CHUNK = 200
   const chunks: typeof rows[] = []
   for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK))
@@ -404,26 +394,29 @@ async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchC
 }
 
 export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pools: MeteoraPool[]; error?: string }> {
-  let allPools: MeteoraPool[] = []
-
-  // 1. In-process memory cache (fastest, same process lifetime)
+  // 1. In-process memory cache — always apply JS pre-filter so callers with
+  //    different configs (e.g. telegram-bot vs lp-scanner) see consistent output.
   const cached = getCachedMeteoraPools()
   if (cached) {
-    console.log(`[scanner] using in-memory cached Meteora pools (${cached.length} entries, TTL ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min)`)
-    return { pools: cached }
+    const pools = applyJsPreFilter(cached, config)
+    console.log(
+      `[scanner] using in-memory cached Meteora pools (${cached.length} entries, TTL ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min)` +
+      `; ${pools.length} passed JS pre-filter`,
+    )
+    return { pools }
   }
 
   // 2. Persistent DB cache (warm across restarts, same TTL window)
   const dbPools = await loadDbPoolCache()
   if (dbPools && dbPools.length > 0) {
     meteoraPoolsCache = { pools: dbPools, ts: Date.now() }
-    // Still return filtered view so caller behaviour is unchanged
     const pools = applyJsPreFilter(dbPools, config)
     console.log(`[scanner] warm-start: ${dbPools.length} pools from DB; ${pools.length} passed JS pre-filter`)
     return { pools }
   }
 
   // 3. Live fetch from Meteora API
+  let allPools: MeteoraPool[] = []
   for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
     try {
       console.log(`[scanner] trying Meteora endpoint: ${endpoint}`)
@@ -446,7 +439,6 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
   meteoraPoolsCache = { pools: allPools, ts: Date.now() }
   console.log(`[scanner] cached ${allPools.length} Meteora pools for ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min`)
 
-  // Persist to DB asynchronously — never blocks the tick
   persistDbPoolCache(allPools)
 
   const pools = applyJsPreFilter(allPools, config)
