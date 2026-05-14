@@ -629,7 +629,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     getOpenLpLimitState('market'),
     METEORA_FETCH_TIMEOUT_MS,
     'live Meteora position limit state',
-  )
+  }
   let openCount: number | undefined
   let availableOpenSlots = 0
   let openBlockedReason: string | undefined
@@ -909,7 +909,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
               const result = await openDammPosition(dammParams)
               if (result.success) {
                 openedCount++
-                openedDammCountThisTick++n                dailyLossLimitHit = null
+                openedDammCountThisTick++
+                dailyLossLimitHit = null
                 openedMintsThisTick.add(tokenAddress)
                 // Moonboy hook — fire-and-forget after successful DAMM open
                 void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
