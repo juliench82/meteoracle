@@ -95,6 +95,7 @@ type AlertPayload =
       ageHours: number
       swapSig: string
     }
+  | { type: 'warning'; message: string }
   | { type: 'error'; message: string }
 
 export async function sendAlert(payload: AlertPayload): Promise<void> {
@@ -326,6 +327,9 @@ function formatMessage(payload: AlertPayload): string {
         `📈 ${dexUrl}`,
       ].join('\n')
     }
+
+    case 'warning':
+      return `⚠️ *Warning*\n${payload.message}`
 
     case 'error':
       return `❌ *Bot Error*\n${payload.message}`
