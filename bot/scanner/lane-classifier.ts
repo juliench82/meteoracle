@@ -146,7 +146,11 @@ export function pickDeepCheckSurvivors(
 }
 
 export function selectBestPool(pools: any[], tokenAddress: string, lane: string): any | null {
-  return pools.find(p => p.token_mint === tokenAddress || p.address === tokenAddress) || null
+  return pools.find(p => 
+    p.token_x?.address === tokenAddress || 
+    p.token_y?.address === tokenAddress ||
+    p.address === tokenAddress
+  ) || null
 }
 
 export function survivorTokenAddress(survivor: any): string {
