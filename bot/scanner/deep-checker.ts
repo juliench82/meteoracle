@@ -547,7 +547,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     freshMaxAgeMinutes: FRESH_MAX_AGE_MINUTES,
     freshMinLiquidityUsd: FRESH_MIN_LIQUIDITY_USD,
     momentumPoolLimit: MOMENTUM_POOL_LIMIT,
-    momentumMinVolume5mUsd: MOMENTUM_MIN_VOLUME_5M_USD,
+    momentumMinVolume5mUSD: MOMENTUM_MIN_VOLUME_5M_USD,
     momentumMinFeeTvl5mPct: MOMENTUM_MIN_FEE_TVL_5M_PCT,
     scalpSpikeVolRatio: SCALP_SPIKE_VOL_RATIO,
     maxFreshDeepChecks: MAX_FRESH_DEEP_CHECKS,
