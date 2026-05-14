@@ -1,27 +1,16 @@
-import { SCALP_SPIKE_MOMENTUM_REGAIN } from '@/strategies/scalp-spike'
-import {
-  QUOTE_ASSETS,
-  getFeeTvlPct,
-  getFeeTvlRatio,
-  getPoolAgeMinutes,
-  getPoolTvl,
-  getPoolVolume,
-  getTradableToken,
-  scoreMeteoraMomentum,
-  type MeteoraPool,
-} from './pool-fetcher'
+import { getPoolAgeMinutes, getPoolTvl, getPoolVolume, getFeeTvlPct, getVolumeTvlRatio, getRecentVolumeGrowth, scoreMeteoraMomentum } from './pool-fetcher'
 
-export type ScannerLane = 'fresh' | 'momentum'
-
-export type LaneSurvivor = {
-  pool: MeteoraPool
-  mcUsd: number
-  ageHours: number
-  momentumScore: number
-  lane: ScannerLane
+const SCALP_SPIKE_MOMENTUM_REGAIN = {
+  minAgeHours: 0,
+  maxAgeHours: 24,
+  minVolumeTvl1hRatio: 0.5,
+  minFeeTvl1hPct: 1,
 }
 
-export type LaneClassifierConfig = {
+const MOMENTUM_SPIKE_THRESHOLD = 2.5
+const MOMENTUM_REGain_THRESHOLD = 1.5
+
+export interface LaneClassifierConfig {
   scannerEarlyMaxAgeMinutes: number
   freshMaxAgeMinutes: number
   freshMinLiquidityUsd: number
@@ -33,188 +22,63 @@ export type LaneClassifierConfig = {
   maxMomentumDeepChecks: number
 }
 
-export type LaneClassificationResult = {
-  pools: MeteoraPool[]
-  earlyAgePools: MeteoraPool[]
-  momentumSpikePools: MeteoraPool[]
-  momentumRegainPools: MeteoraPool[]
-  freshPools: MeteoraPool[]
-  momentumPools: MeteoraPool[]
-  freshSurvivors: LaneSurvivor[]
-  momentumSurvivors: LaneSurvivor[]
-  allSurvivors: LaneSurvivor[]
-  freshRejectedAge: number
-  freshRejectedLiquidity: number
-  momentumRejectedSpike: number
-}
+export function classifyPoolsIntoLanes(pools: any[], config: LaneClassifierConfig) {
+  const earlyAgePools: any[] = []
+  const momentumSpikePools: any[] = []
+  const momentumRegainPools: any[] = []
+  const freshPools: any[] = []
+  const momentumPools: any[] = []
+  const freshSurvivors: any[] = []
+  const momentumSurvivors: any[] = []
+  const allSurvivors: any[] = []
+  const freshRejectedAge: number[] = []
+  const freshRejectedLiquidity: number[] = []
+  const momentumRejectedSpike: number[] = []
 
-const POOL_MIN_TVL_USD = 20_000
-const BIN_STEP_SCORE: Record<number, number> = { 50: 4, 100: 3, 200: 2, 300: 1 }
-
-export function getFiveMinuteVolumeSpike(pool: MeteoraPool): number {
-  const volume5m = getPoolVolume(pool, '5m')
-  const volume1h = getPoolVolume(pool, '1h')
-  const oneHourPerFiveMinutes = volume1h / 12
-  return oneHourPerFiveMinutes > 0 ? volume5m / oneHourPerFiveMinutes : 0
-}
-
-export function getOneHourVolumeVs24hAverage(pool: MeteoraPool): number {
-  const volume24hAvg = getPoolVolume(pool, '24h') / 24
-  if (volume24hAvg <= 0) return getPoolVolume(pool, '1h') > 0 ? Number.POSITIVE_INFINITY : 0
-  return getPoolVolume(pool, '1h') / volume24hAvg
-}
-
-export function getOneHourFeeTvlVs24hAverage(pool: MeteoraPool): number {
-  const feeTvl24hAvg = getFeeTvlPct(pool, '24h') / 24
-  if (feeTvl24hAvg <= 0) return getFeeTvlPct(pool, '1h') > 0 ? Number.POSITIVE_INFINITY : 0
-  return getFeeTvlPct(pool, '1h') / feeTvl24hAvg
-}
-
-export function passesMomentumRegain(pool: MeteoraPool): boolean {
-  const ageHours = getPoolAgeMinutes(pool) / 60
-  if (
-    ageHours < SCALP_SPIKE_MOMENTUM_REGAIN.minAgeHours ||
-    ageHours > SCALP_SPIKE_MOMENTUM_REGAIN.maxAgeHours
-  ) {
-    return false
-  }
-
-  const volumeRegain =
-    getPoolVolume(pool, '1h') >= SCALP_SPIKE_MOMENTUM_REGAIN.minVolume1hUsd &&
-    getOneHourVolumeVs24hAverage(pool) >= SCALP_SPIKE_MOMENTUM_REGAIN.minVolume1hTo24hAvgRatio
-  const feeRegain =
-    getFeeTvlPct(pool, '1h') >= SCALP_SPIKE_MOMENTUM_REGAIN.minFeeTvl1hPct &&
-    getOneHourFeeTvlVs24hAverage(pool) >= SCALP_SPIKE_MOMENTUM_REGAIN.minFeeTvl1hTo24hAvgRatio
-
-  return volumeRegain || feeRegain
-}
-
-export function passesMomentumSpike(pool: MeteoraPool, config: LaneClassifierConfig): boolean {
-  return (
-    getPoolVolume(pool, '5m') >= config.momentumMinVolume5mUsd &&
-    getFiveMinuteVolumeSpike(pool) >= config.scalpSpikeVolRatio &&
-    getFeeTvlPct(pool, '5m') >= config.momentumMinFeeTvl5mPct
-  )
-}
-
-export function passesMomentumLane(pool: MeteoraPool, config: LaneClassifierConfig): boolean {
-  return passesMomentumSpike(pool, config) || passesMomentumRegain(pool)
-}
-
-export function survivorTokenAddress(item: { pool: MeteoraPool }): string {
-  return getTradableToken(item.pool).address
-}
-
-function pushBestSurvivor(
-  map: Map<string, LaneSurvivor>,
-  pool: MeteoraPool,
-  lane: ScannerLane,
-  momentumScore: number,
-): void {
-  const token = getTradableToken(pool)
-  const existing = map.get(token.address)
-  if (!existing || momentumScore > existing.momentumScore) {
-    map.set(token.address, {
-      pool,
-      mcUsd: token.market_cap ?? 0,
-      ageHours: getPoolAgeMinutes(pool) / 60,
-      momentumScore,
-      lane,
-    })
-  }
-}
-
-export function selectBestPool(
-  allPools: MeteoraPool[],
-  mintAddress: string,
-  lane: ScannerLane = 'fresh',
-): MeteoraPool | null {
-  const candidates = allPools.filter(pool => {
-    if (pool.is_blacklisted) return false
-    if (getPoolTvl(pool) < POOL_MIN_TVL_USD) return false
-    const hasMint = pool.token_x.address === mintAddress || pool.token_y.address === mintAddress
-    if (!hasMint) return false
-    const hasQuote = QUOTE_ASSETS.has(pool.token_x.address) || QUOTE_ASSETS.has(pool.token_y.address)
-    return hasQuote
-  })
-
-  if (candidates.length === 0) return null
-  if (candidates.length === 1) return candidates[0]
-
-  const feeWindow = lane === 'momentum' ? '5m' : '24h'
-  const maxFeeTvl = Math.max(...candidates.map(pool => getFeeTvlRatio(pool, feeWindow)))
-  let best: MeteoraPool | null = null
-  let bestScore = -Infinity
-
-  for (const pool of candidates) {
-    const feeTvlNorm = maxFeeTvl > 0 ? (getFeeTvlRatio(pool, feeWindow) / maxFeeTvl) * 10 : 0
-    const binStep = pool.pool_config?.bin_step ?? 999
-    const binStepBonus = BIN_STEP_SCORE[binStep] ?? 0
-    const score = feeTvlNorm + binStepBonus + scoreMeteoraMomentum(pool)
-    if (score > bestScore) { bestScore = score; best = pool }
-  }
-
-  return best
-}
-
-export function classifyPoolsIntoLanes(
-  fetchedPools: MeteoraPool[],
-  config: LaneClassifierConfig,
-): LaneClassificationResult {
-  const earlyAgePools = fetchedPools.filter(pool => getPoolAgeMinutes(pool) <= config.scannerEarlyMaxAgeMinutes)
-  const momentumSpikePools = fetchedPools.filter(pool => passesMomentumSpike(pool, config))
-  const momentumRegainPools = fetchedPools.filter(passesMomentumRegain)
-  const pools = Array.from(
-    new Map([...earlyAgePools, ...momentumSpikePools, ...momentumRegainPools].map(pool => [pool.address, pool])).values(),
-  )
-
-  const freshPools = pools.filter(pool => getPoolAgeMinutes(pool) <= config.freshMaxAgeMinutes)
-  const momentumPools = pools
-    .filter(pool => !pool.is_blacklisted)
-    .filter(pool => passesMomentumLane(pool, config))
-    .sort((a, b) => scoreMeteoraMomentum(b) - scoreMeteoraMomentum(a))
-    .slice(0, config.momentumPoolLimit)
-
-  const freshBestMap = new Map<string, LaneSurvivor>()
-  const momentumBestMap = new Map<string, LaneSurvivor>()
-  let freshRejectedAge = 0
-  let freshRejectedLiquidity = 0
-  let momentumRejectedSpike = 0
-
-  for (const pool of freshPools) {
-    const token = getTradableToken(pool)
+  for (const pool of pools) {
+    const ageHours = getPoolAgeMinutes(pool) / 60
     const liqUsd = getPoolTvl(pool)
-    const ageMinutes = getPoolAgeMinutes(pool)
+    const vol5m = getPoolVolume(pool, '5m')
+    const feeTvl5mPct = getFeeTvlPct(pool, '5m')
+    const volumeTvl1hRatio = getVolumeTvlRatio(pool, '1h')
+    const feeTvl1hPct = getFeeTvlPct(pool, '1h')
 
-    if (ageMinutes > config.freshMaxAgeMinutes) {
-      freshRejectedAge++
-      console.log(`[scanner] REJECT - ${pool.name ?? token.symbol} is ${ageMinutes.toFixed(1)}min old (max ${config.freshMaxAgeMinutes}min)`)
-      continue
-    }
-    if (liqUsd < config.freshMinLiquidityUsd) {
-      freshRejectedLiquidity++
-      continue
+    if (ageHours < config.scannerEarlyMaxAgeMinutes / 60) {
+      earlyAgePools.push(pool)
     }
 
-    pushBestSurvivor(freshBestMap, pool, 'fresh', scoreMeteoraMomentum(pool))
+    const isMomentumSpike = vol5m > 0 && liqUsd > 0 && (vol5m / liqUsd) >= config.scalpSpikeVolRatio
+    if (isMomentumSpike) {
+      momentumSpikePools.push(pool)
+    }
+
+    const isMomentumRegain = volumeTvl1hRatio >= SCALP_SPIKE_MOMENTUM_REGAIN.minVolumeTvl1hRatio &&
+      feeTvl1hPct >= SCALP_SPIKE_MOMENTUM_REGAIN.minFeeTvl1hPct &&
+      ageHours >= SCALP_SPIKE_MOMENTUM_REGAIN.minAgeHours &&
+      ageHours <= SCALP_SPIKE_MOMENTUM_REGAIN.maxAgeHours
+
+    if (isMomentumRegain) {
+      momentumRegainPools.push(pool)
+    }
+
+    if (ageHours <= config.freshMaxAgeMinutes / 60 && liqUsd >= config.freshMinLiquidityUsd) {
+      freshPools.push(pool)
+    }
+
+    if (vol5m >= config.momentumMinVolume5mUsd && feeTvl5mPct >= config.momentumMinFeeTvl5mPct) {
+      momentumPools.push(pool)
+    }
+
+    if (ageHours <= config.freshMaxAgeMinutes / 60 && liqUsd >= config.freshMinLiquidityUsd) {
+      freshSurvivors.push(pool)
+    }
+
+    if (vol5m >= config.momentumMinVolume5mUsd && feeTvl5mPct >= config.momentumMinFeeTvl5mPct) {
+      momentumSurvivors.push(pool)
+    }
+
+    allSurvivors.push(pool)
   }
-
-  for (const pool of momentumPools) {
-    const liqUsd = getPoolTvl(pool)
-    if (liqUsd < 30_000) continue
-    if (!passesMomentumLane(pool, config)) {
-      momentumRejectedSpike++
-      continue
-    }
-    pushBestSurvivor(momentumBestMap, pool, 'momentum', scoreMeteoraMomentum(pool))
-  }
-
-  const freshSurvivors = Array.from(freshBestMap.values()).sort((a, b) => b.momentumScore - a.momentumScore)
-  const momentumSurvivors = Array.from(momentumBestMap.values()).sort((a, b) => {
-    const volumeDiff = getPoolVolume(b.pool, '5m') - getPoolVolume(a.pool, '5m')
-    return volumeDiff !== 0 ? volumeDiff : b.momentumScore - a.momentumScore
-  })
-  const allSurvivors = [...freshSurvivors, ...momentumSurvivors]
 
   return {
     pools,
@@ -232,24 +96,59 @@ export function classifyPoolsIntoLanes(
   }
 }
 
+export function getOneHourFeeTvlVs24hAverage(pool: any): number {
+  const fee1h = getFeeTvlPct(pool, '1h')
+  const fee24h = getFeeTvlPct(pool, '24h')
+  return fee24h > 0 ? fee1h / fee24h : 0
+}
+
+export function getOneHourVolumeVs24hAverage(pool: any): number {
+  const vol1h = getPoolVolume(pool, '1h')
+  const vol24h = getPoolVolume(pool, '24h')
+  return vol24h > 0 ? vol1h / vol24h : 0
+}
+
+export function passesMomentumRegain(pool: any): boolean {
+  const ageHours = getPoolAgeMinutes(pool) / 60
+  if (
+    ageHours < SCALP_SPIKE_MOMENTUM_REGAIN.minAgeHours ||
+    ageHours > SCALP_SPIKE_MOMENTUM_REGAIN.maxAgeHours
+  ) {
+    return false
+  }
+  const volumeTvl1hRatio = getVolumeTvlRatio(pool, '1h')
+  const feeTvl1hPct = getFeeTvlPct(pool, '1h')
+  return (
+    volumeTvl1hRatio >= SCALP_SPIKE_MOMENTUM_REGAIN.minVolumeTvl1hRatio &&
+    feeTvl1hPct >= SCALP_SPIKE_MOMENTUM_REGAIN.minFeeTvl1hPct
+  )
+}
+
 export function pickDeepCheckSurvivors(
-  freshSurvivors: LaneSurvivor[],
-  momentumSurvivors: LaneSurvivor[],
+  freshSurvivors: any[],
+  momentumSurvivors: any[],
   recentlyClosedOorMints: Set<string>,
   config: LaneClassifierConfig,
-): LaneSurvivor[] {
-  const pickLaneSurvivors = (laneSurvivors: LaneSurvivor[], maxDeepChecks: number): LaneSurvivor[] => {
-    const priority = laneSurvivors.filter(item => recentlyClosedOorMints.has(survivorTokenAddress(item)))
-    const priorityMintSet = new Set(priority.map(survivorTokenAddress))
-    const ranked = laneSurvivors.filter(item => !priorityMintSet.has(survivorTokenAddress(item)))
-    return [
-      ...priority,
-      ...ranked.slice(0, Math.max(0, maxDeepChecks - priority.length)),
-    ]
+): any[] {
+  const survivors: any[] = []
+  const freshLimit = Math.min(config.maxFreshDeepChecks, freshSurvivors.length)
+  const momentumLimit = Math.min(config.maxMomentumDeepChecks, momentumSurvivors.length)
+
+  for (let i = 0; i < freshLimit; i++) {
+    survivors.push({ pool: freshSurvivors[i], mcUsd: 0, ageHours: getPoolAgeMinutes(freshSurvivors[i]) / 60, lane: 'fresh' })
   }
 
-  return [
-    ...pickLaneSurvivors(freshSurvivors, config.maxFreshDeepChecks),
-    ...pickLaneSurvivors(momentumSurvivors, config.maxMomentumDeepChecks),
-  ]
+  for (let i = 0; i < momentumLimit; i++) {
+    survivors.push({ pool: momentumSurvivors[i], mcUsd: 0, ageHours: getPoolAgeMinutes(momentumSurvivors[i]) / 60, lane: 'momentum' })
+  }
+
+  return survivors
+}
+
+export function selectBestPool(pools: any[], tokenAddress: string, lane: string): any | null {
+  return pools.find(p => p.token_mint === tokenAddress || p.address === tokenAddress) || null
+}
+
+export function survivorTokenAddress(survivor: any): string {
+  return survivor.pool?.token_mint || survivor.pool?.address || ''
 }
