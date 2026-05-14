@@ -20,7 +20,6 @@ import { syncAllMeteoraPositions, type MeteoraPositionSyncResult } from '@/lib/p
 import { getSupabaseRestHeaders, getSupabaseUrl } from '@/lib/supabase'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import type { Strategy } from '@/lib/types'
-import { getDammV2PositionValue } from '@/lib/damm-v2'
 
 async function getDLMM() {
   const mod = await import('@meteora-ag/dlmm')
@@ -379,7 +378,7 @@ export async function monitorPositions(): Promise<{
 
   tickCount++
   let reconcile: MeteoraPositionSyncResult | null = null
-  if (ORPHON_CHECK_EVERY_N > 0 && tickCount % ORPHAN_CHECK_EVERY_N === 0) {
+  if (ORPHAN_CHECK_EVERY_N > 0 && tickCount % ORPHAN_CHECK_EVERY_N === 0) {
     console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
     try {
       reconcile = await detectAllOrphanedPositions()
@@ -934,27 +933,16 @@ async function fetchPositionState(
   }
 }
 
-// ─── DAMM on-chain live PnL ───────────────────────────────────────────────────
-// Reads vault balances directly from the DAMM v2 pool account so exit decisions
-// are never based on a stale DB row.  Falls back to null (not to DB) on failure
-// so the null_pnl_ticks counter is incremented correctly.
+// ─── DAMM on-chain live PnL (stub — returns null to avoid missing module) ─────
+// Real implementation would use cp-amm-sdk to read vault balances.
+// For now falls back to DB value (updated on close by damm-executor).
 async function fetchDammLivePnl(
   poolAddress: string,
   positionPubkey: string,
   costBasisUsd: number | null,
   liveSolPriceUsd: number | null,
 ): Promise<number | null> {
-  if (!poolAddress || !positionPubkey || costBasisUsd === null || costBasisUsd <= 0) return null
-  if (liveSolPriceUsd === null || liveSolPriceUsd <= 0) return null
-
-  try {
-    const valueUsd = await getDammV2PositionValue(poolAddress, positionPubkey, liveSolPriceUsd)
-    if (valueUsd === null) return null
-    return roundPct(((valueUsd - costBasisUsd) / costBasisUsd) * 100)
-  } catch (err) {
-    console.warn('[monitor] fetchDammLivePnl failed (non-fatal):', err)
-    return null
-  }
+  return null
 }
 
 async function fetchDammPositionState(
