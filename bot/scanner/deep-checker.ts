@@ -5,7 +5,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
-import { getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
+import { getStrategyForToken, getStrategyClassForToken, classifyToken, explainNoStrategy } from '@/strategies'
 import { scoreCandidateWithBreakdown } from '../scorer'
 import { openPosition } from '../executor'
 import { sendAlert } from '../alerter'
@@ -766,7 +766,17 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     })
 
     const momentumRegain = lane === 'momentum' && passesMomentumRegain(bestPool)
-    const strategy =
+
+    // Classification-only strategy: used for candidate logging and scoring.
+    // No passesTokenFilters gates — every token that reaches this point gets a
+    // strategy_id and a real score inserted into candidates.
+    const classStrategy =
+      getStrategyClassForToken({ ...metrics, address: metrics.address, volume1h: vol1h, volume5m: vol5m }) ??
+      (momentumRegain && passesMomentumRegainStrategyFilters(metrics) ? scalpSpikeStrategy : null)
+
+    // Execution-only strategy: applies passesTokenFilters (holder count, rugcheck,
+    // binStep, etc.). Only used to decide whether to actually open a position.
+    const openStrategy =
       getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
       (momentumRegain && passesMomentumRegainStrategyFilters(metrics) ? scalpSpikeStrategy : null)
 
@@ -774,76 +784,14 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     let rejectionReason: string | null = null
     let finalScore = 0
 
-    if (!strategy) {
+    if (!classStrategy) {
+      // Token class is UNKNOWN (non-SOL-quoted, no qualifying class).
+      // Log REJECTED with score=0 — no scoring possible without a strategy.
       rejectionReason = explainNoStrategy(metrics)
       decision = 'REJECTED'
-      console.log(`[scanner] ${symbol} — no strategy in ${lane} lane (class=${tokenClass}, quote=${quoteTokenMint}): ${rejectionReason}`)
-
-      // Dedup 6h + insert REJECTED (même si pas de stratégie)
-      const dedupCheck = await withTimeout(
-        supabase.from('candidates')
-          .select('id')
-          .eq('token_address', tokenAddress)
-          .gte('scanned_at', new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())
-          .limit(1),
-        SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
-      )
-      if (dedupCheck?.data && dedupCheck.data.length > 0) {
-        console.log(`[scanner] ${symbol} — already evaluated in last 6h, skipping insert`)
-        continue
-      }
-
-      console.log(`[scanner] >>> ATTEMPTING REJECTED INSERT for ${symbol}`)
-      const insertResult = await withTimeout(
-        supabase.from('candidates').insert({
-          token_address:     metrics.address,
-          symbol:            metrics.symbol,
-          score:             0,
-          strategy_matched:  null,
-          strategy_id:       null,
-          token_class:       tokenClass,
-          scanner_lane:      lane,
-          pool_address:      metrics.poolAddress,
-          mc_at_scan:        metrics.mcUsd,
-          volume_24h:        metrics.volume24h,
-          volume_1h:         vol1h,
-          volume_5m:         vol5m,
-          liquidity_usd:     metrics.liquidityUsd,
-          fee_tvl_24h_pct:   feeTvl24hPct,
-          fee_tvl_1h_pct:    feeTvl1hPct,
-          fee_tvl_5m_pct:    feeTvl5mPct,
-          holder_count:      metrics.holderCount,
-          rugcheck_score:    metrics.rugcheckScore,
-          top_holder_pct:    metrics.topHolderPct,
-          bin_step:          binStep,
-          scanned_at:        new Date().toISOString(),
-          score_volmc:       0,
-          score_holders:     0,
-          score_freshness:   0,
-          score_fee_efficiency: 0,
-          score_volume_tvl:  0,
-          score_curve_bonus: 0,
-          launchpad_source:  launchpadSource,
-          decision:          'REJECTED',
-          rejection_reason:  rejectionReason,
-        }),
-        SUPABASE_TIMEOUT_MS, `candidates insert REJECTED ${symbol}`
-      )
-
-      const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
-      if (!insertOk) {
-        const errMsg = insertResult && 'error' in insertResult ? insertResult.error?.message : 'timeout'
-        console.error(`[scanner] candidates insert REJECTED failed for ${symbol}:`, errMsg)
-        if (insertResult && 'error' in insertResult && insertResult.error) {
-          console.error(`[scanner] FULL SUPABASE ERROR (REJECTED):`, insertResult.error)
-        }
-      } else {
-        console.log(`[scanner] >>> REJECTED INSERT SUCCESS for ${symbol}`)
-      }
-
-      continue
+      console.log(`[scanner] ${symbol} — no strategy class in ${lane} lane (class=${tokenClass}, quote=${quoteTokenMint}): ${rejectionReason}`)
     } else {
-      if (strategy.id === 'scalp-spike' && momentumRegain) {
+      if (classStrategy.id === 'scalp-spike' && momentumRegain) {
         console.log(
           `[scanner] ${symbol} — scalp-spike momentum-regain ` +
           `vol1h/24hAvg=${getOneHourVolumeVs24hAverage(bestPool).toFixed(2)}x ` +
@@ -851,15 +799,20 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         )
       }
 
-      const breakdown = strategy.id === 'scalp-spike' && momentumRegain
+      const breakdown = classStrategy.id === 'scalp-spike' && momentumRegain
         ? getMomentumRegainBreakdown(metrics)
-        : scoreCandidateWithBreakdown(metrics, strategy)
-      finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
+        : scoreCandidateWithBreakdown(metrics, classStrategy)
+      finalScore = getScannerAdjustedScore(metrics, classStrategy.id, breakdown)
       const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
-      const accepted = lane === 'fresh' ? finalScore > 0 : finalScore >= MIN_SCORE_TO_OPEN
-      if (!accepted) {
-        rejectionReason = lane === 'fresh' ? 'fresh safety check failed' : `score ${finalScore} < threshold ${MIN_SCORE_TO_OPEN}`
+      // Determine open-eligibility: requires openStrategy (passesTokenFilters) AND score threshold.
+      const passesScoreThreshold = lane === 'fresh' ? finalScore > 0 : finalScore >= MIN_SCORE_TO_OPEN
+      if (!openStrategy || !passesScoreThreshold) {
+        if (!openStrategy) {
+          rejectionReason = explainNoStrategy(metrics)
+        } else {
+          rejectionReason = lane === 'fresh' ? 'fresh safety check failed' : `score ${finalScore} < threshold ${MIN_SCORE_TO_OPEN}`
+        }
         decision = 'REJECTED'
       }
 
@@ -882,114 +835,123 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         decision,
         reason:    rejectionReason,
       }))
+    }
 
-      const dedupCheck = await withTimeout(
-        supabase.from('candidates')
-          .select('id')
-          .eq('token_address', tokenAddress)
-          .gte('scanned_at', new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())
-          .limit(1),
-        SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
-      )
-      if (dedupCheck?.data && dedupCheck.data.length > 0) {
-        console.log(`[scanner] ${symbol} — already evaluated in last 6h, skipping insert`)
+    // Single 6h dedup check — covers both REJECTED and ACCEPTED paths.
+    const dedupCheck = await withTimeout(
+      supabase.from('candidates')
+        .select('id')
+        .eq('token_address', tokenAddress)
+        .gte('scanned_at', new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())
+        .limit(1),
+      SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
+    )
+    if (dedupCheck?.data && dedupCheck.data.length > 0) {
+      console.log(`[scanner] ${symbol} — already evaluated in last 6h, skipping insert`)
+      continue
+    }
+
+    const breakdown = classStrategy
+      ? (classStrategy.id === 'scalp-spike' && momentumRegain
+          ? getMomentumRegainBreakdown(metrics)
+          : scoreCandidateWithBreakdown(metrics, classStrategy))
+      : null
+
+    console.log(`[scanner] >>> ATTEMPTING INSERT for ${symbol} (decision=${decision})`)
+    const insertResult = await withTimeout(
+      supabase.from('candidates').insert({
+        token_address:        metrics.address,
+        symbol:               metrics.symbol,
+        score:                finalScore,
+        strategy_matched:     classStrategy?.id ?? null,
+        strategy_id:          classStrategy?.id ?? null,
+        token_class:          tokenClass,
+        scanner_lane:         lane,
+        pool_address:         metrics.poolAddress,
+        mc_at_scan:           metrics.mcUsd,
+        volume_24h:           metrics.volume24h,
+        volume_1h:            vol1h,
+        volume_5m:            vol5m,
+        liquidity_usd:        metrics.liquidityUsd,
+        fee_tvl_24h_pct:      feeTvl24hPct,
+        fee_tvl_1h_pct:       feeTvl1hPct,
+        fee_tvl_5m_pct:       feeTvl5mPct,
+        holder_count:         metrics.holderCount,
+        rugcheck_score:       metrics.rugcheckScore,
+        top_holder_pct:       metrics.topHolderPct,
+        bin_step:             binStep,
+        scanned_at:           new Date().toISOString(),
+        score_volmc:          breakdown?.volMcScore ?? 0,
+        score_holders:        breakdown?.holderScore ?? 0,
+        score_freshness:      breakdown?.freshnessScore ?? 0,
+        score_fee_efficiency: breakdown?.feeEfficiencyScore ?? 0,
+        score_volume_tvl:     breakdown?.volumeTvlScore ?? 0,
+        score_curve_bonus:    breakdown?.curveBonus ?? 0,
+        launchpad_source:     launchpadSource,
+        decision:             decision,
+        rejection_reason:     rejectionReason,
+      }),
+      SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
+    )
+
+    const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
+    if (!insertOk) {
+      const errMsg = insertResult && 'error' in insertResult ? insertResult.error?.message : 'timeout'
+      console.error(`[scanner] candidates insert failed for ${symbol}:`, errMsg)
+      if (insertResult && 'error' in insertResult && insertResult.error) {
+        console.error(`[scanner] FULL SUPABASE ERROR:`, insertResult.error)
+      }
+      continue
+    }
+
+    console.log(`[scanner] >>> INSERT SUCCESS for ${symbol} (decision=${decision})`)
+
+    if (decision === 'ACCEPTED') {
+      candidateCount++
+      console.log(`[scanner] CANDIDATE: ${symbol} → ${classStrategy!.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingInfo})`)
+      await sendAlert({ type: 'candidate_found', symbol, strategy: classStrategy!.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
+
+      const disabledReason = getDisabledStrategyReason(classStrategy!.id)
+      if (disabledReason) {
+        openSkippedCount++
+        console.log(`[scanner] ${symbol} qualifies for ${classStrategy!.id} but open skipped: ${disabledReason}`)
         continue
       }
 
-      console.log(`[scanner] >>> ATTEMPTING INSERT for ${symbol} (decision=${decision})`)
-      const insertResult = await withTimeout(
-        supabase.from('candidates').insert({
-          token_address:     metrics.address,
-          symbol:            metrics.symbol,
-          score:             finalScore,
-          strategy_matched:  strategy ? strategy.id : null,
-          strategy_id:       strategy ? strategy.id : null,
-          token_class:       tokenClass,
-          scanner_lane:      lane,
-          pool_address:      metrics.poolAddress,
-          mc_at_scan:        metrics.mcUsd,
-          volume_24h:        metrics.volume24h,
-          volume_1h:         vol1h,
-          volume_5m:         vol5m,
-          liquidity_usd:     metrics.liquidityUsd,
-          fee_tvl_24h_pct:   feeTvl24hPct,
-          fee_tvl_1h_pct:    feeTvl1hPct,
-          fee_tvl_5m_pct:    feeTvl5mPct,
-          holder_count:      metrics.holderCount,
-          rugcheck_score:    metrics.rugcheckScore,
-          top_holder_pct:    metrics.topHolderPct,
-          bin_step:          binStep,
-          scanned_at:        new Date().toISOString(),
-          score_volmc:       breakdown.volMcScore,
-          score_holders:     breakdown.holderScore,
-          score_freshness:   breakdown.freshnessScore,
-          score_fee_efficiency: breakdown.feeEfficiencyScore,
-          score_volume_tvl:  breakdown.volumeTvlScore,
-          score_curve_bonus: breakdown.curveBonus,
-          launchpad_source:  launchpadSource,
-          decision:          decision,
-          rejection_reason:  rejectionReason,
-        }),
-        SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
-      )
-
-      const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
-      if (!insertOk) {
-        const errMsg = insertResult && 'error' in insertResult ? insertResult.error?.message : 'timeout'
-        console.error(`[scanner] candidates insert failed for ${symbol} — skipping:`, errMsg)
-        if (insertResult && 'error' in insertResult && insertResult.error) {
-          console.error(`[scanner] FULL SUPABASE ERROR:`, insertResult.error)
-        }
+      if (openBlockedReason || openedCount >= availableOpenSlots) {
+        openSkippedCount++
+        const reason = openBlockedReason ?? 'slots_filled_this_tick'
+        console.log(`[scanner] ${symbol} qualifies but open skipped: ${reason}`)
         continue
       }
 
-      console.log(`[scanner] >>> INSERT SUCCESS for ${symbol} (decision=${decision})`)
+      if (!await isOpenAllowedToday()) {
+        openSkippedCount++
+        console.log(`[scanner] ${symbol} qualifies but open skipped: daily loss circuit breaker`)
+        continue
+      }
 
-      if (decision === 'ACCEPTED') {
-        candidateCount++
-        console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingInfo})`)
-        await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
-
-        if (accepted) {
-          const disabledReason = getDisabledStrategyReason(strategy.id)
-          if (disabledReason) {
-            openSkippedCount++
-            console.log(`[scanner] ${symbol} qualifies for ${strategy.id} but open skipped: ${disabledReason}`)
-            continue
-          }
-
-          if (openBlockedReason || openedCount >= availableOpenSlots) {
-            openSkippedCount++
-            const reason = openBlockedReason ?? 'slots_filled_this_tick'
-            console.log(`[scanner] ${symbol} qualifies but open skipped: ${reason}`)
-            continue
-          }
-
-          if (!await isOpenAllowedToday()) {
-            openSkippedCount++
-            console.log(`[scanner] ${symbol} qualifies but open skipped: daily loss circuit breaker`)
-            continue
-          }
-
-          const positionId = await openPosition(metrics, strategy)
-          if (positionId) {
-            openedCount++
-            dailyLossLimitHit = null
-            openedMintsThisTick.add(tokenAddress)
-            void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
-            await sendAlert({
-              type: 'position_opened',
-              symbol,
-              strategy: strategy.id,
-              solDeposited: MARKET_LP_SOL_PER_POSITION,
-              entryPrice: metrics.priceUsd,
-              entryPriceUsd: metrics.priceUsd,
-              meteoracleScore: finalScore,
-              poolAddress: metrics.poolAddress,
-              mint: metrics.address,
-              positionId,
-            })
-          }
+      // Use openStrategy (passesTokenFilters) for the actual position open.
+      // If openStrategy is null here, the token already has decision=REJECTED above.
+      if (openStrategy) {
+        const positionId = await openPosition(metrics, openStrategy)
+        if (positionId) {
+          openedCount++
+          dailyLossLimitHit = null
+          openedMintsThisTick.add(tokenAddress)
+          void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
+          await sendAlert({
+            type: 'position_opened',
+            symbol,
+            strategy: openStrategy.id,
+            solDeposited: MARKET_LP_SOL_PER_POSITION,
+            entryPrice: metrics.priceUsd,
+            entryPriceUsd: metrics.priceUsd,
+            meteoracleScore: finalScore,
+            poolAddress: metrics.poolAddress,
+            mint: metrics.address,
+            positionId,
+          })
         }
       }
     }
