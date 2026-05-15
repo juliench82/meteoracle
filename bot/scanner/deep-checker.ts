@@ -518,7 +518,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     getOpenLpLimitState('market'),
     METEORA_FETCH_TIMEOUT_MS,
     'live Meteora position limit state',
-  }
+  )
   let openCount: number | undefined
   let availableOpenSlots = 0
   let openBlockedReason: string | undefined
@@ -816,7 +816,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           liquidity_usd:     metrics.liquidityUsd,
           fee_tvl_24h_pct:   feeTvl24hPct,
           fee_tvl_1h_pct:    feeTvl1hPct,
-          fee_tvl_5mPct:    feeTvl5mPct,
+          fee_tvl_5m_pct:    feeTvl5mPct,
           holder_count:      metrics.holderCount,
           rugcheck_score:    metrics.rugcheckScore,
           top_holder_pct:    metrics.topHolderPct,
@@ -919,7 +919,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           liquidity_usd:     metrics.liquidityUsd,
           fee_tvl_24h_pct:   feeTvl24hPct,
           fee_tvl_1h_pct:    feeTvl1hPct,
-          fee_tvl_5mPct:    feeTvl5mPct,
+          fee_tvl_5m_pct:    feeTvl5mPct,
           holder_count:      metrics.holderCount,
           rugcheck_score:    metrics.rugcheckScore,
           top_holder_pct:    metrics.topHolderPct,
