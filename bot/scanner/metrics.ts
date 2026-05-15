@@ -2,6 +2,7 @@ import type { TokenMetrics } from '@/lib/types'
 import { scoreCandidateWithBreakdown } from '../scorer'
 import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
 import { scalpSpikeStrategy } from '@/strategies/scalp-spike'
+import type { OpenLpLimitState } from '@/lib/position-limits'
 
 export function scoreFeeTvl1hPct(pct: number): number {
   if (pct >= 8) return 100
@@ -112,4 +113,10 @@ export function passesMomentumRegainStrategyFilters(metrics: TokenMetrics): bool
     metrics.rugcheckScore >= f.minRugcheckScore &&
     metrics.feeTvl24hPct >= f.minFeeTvl24hPct
   )
+}
+
+export function getOpenDammEdgeCount(limitState: OpenLpLimitState | null): number {
+  return limitState?.livePositions.filter(position =>
+    position.position_type === 'damm-edge' || position.strategy_id === 'damm-edge',
+  ).length ?? 0
 }
