@@ -336,8 +336,8 @@ function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
     scanned: 0,
     survivors: 0,
     deepChecked: 0,
-    candidates: number
-    opened: number
+    candidates: 0,
+    opened: 0,
     openSkipped: number
     openSlots: number
     maxOpen: MAX_CONCURRENT_MARKET_LP_POSITIONS,
