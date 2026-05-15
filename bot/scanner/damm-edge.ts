@@ -4,7 +4,7 @@ import { getOpenDammEdgeCount } from './metrics'
 import { evaluateDammEdge } from '@/strategies/damm-edge'
 import { openDammPosition, resolveVerifiedDammV2PoolForToken } from '../damm-executor'
 import { sendAlert } from '../alerter'
-import { maybeTriggerMoonboy } from './moonboy'
+import { maybeTriggerMoonboy } from '../moonboy-executor'
 import { WSOL } from './pool-fetcher'
 import type { TokenMetrics } from '@/lib/types'
 
