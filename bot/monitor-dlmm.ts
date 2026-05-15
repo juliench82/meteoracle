@@ -19,7 +19,11 @@ export async function checkDlmmPosition(
   let claimableFeesSolEquivalent = 0
   let externallyClosed = false
 
-  if (currentPriceSol === 0 || position.claimable_fees_usd === undefined || position.claimable_fees_usd === null) {
+  const hasLivePrice = typeof position.current_price === 'number' && position.current_price > 0
+  const hasLiveFees = position.claimable_fees_usd != null
+
+  if (!hasLivePrice || !hasLiveFees) {
+    // Fallback to direct on-chain read (rare now that merge + sync provide live data)
     const state = await fetchPositionState(position.pool_address, position.position_pubkey)
     if (!state.ok) {
       console.warn(`${label} position state read failed — skipping exit checks this tick`)
@@ -30,6 +34,8 @@ export async function checkDlmmPosition(
     claimableFeesSolEquivalent = state.claimableFeesSolEquivalent
     externallyClosed = state.externallyClosed
   } else {
+    inRange = position.in_range !== false
+    currentPriceSol = position.current_price
     const solPrice = liveSolPriceUsd ?? firstNumber(position.metadata?.sol_price_usd, position.metadata?.current_sol_price_usd) ?? 0
     claimableFeesSolEquivalent = solPrice > 0 ? (position.claimable_fees_usd ?? 0) / solPrice : 0
   }

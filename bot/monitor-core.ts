@@ -63,4 +63,54 @@ export const PNL_UNAVAILABLE_FORCE_EXIT_TICKS = 10
 
 export async function monitorPositions(): Promise<{ checked: number; closed: number; claimed: number; rebalanced: number }> { /* full tick logic moved to monitor.ts wrapper — see there for orchestration */ return { checked: 0, closed: 0, claimed: 0, rebalanced: 0 } }
 
-export async function fetchPositionState(poolAddress: string, positionPubkey: string): Promise<any> { /* preserved from original */ return { ok: false, inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: false } }
+export async function fetchPositionState(poolAddress: string, positionPubkey: string): Promise<any> {
+  try {
+    const { getConnection, getWalletPublicKey } = await import('@/lib/solana')
+    const { PublicKey } = await import('@solana/web3.js')
+    const DLMMMod = await import('@meteora-ag/dlmm')
+    const DLMM = DLMMMod.default as any
+
+    const connection = getConnection()
+    const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddress))
+    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(getWalletPublicKey())
+
+    const userPosition = userPositions.find(
+      (p: any) => p.publicKey.toBase58() === positionPubkey
+    )
+
+    if (!userPosition) {
+      return { ok: true, externallyClosed: true, inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0 }
+    }
+
+    const activeBin = await dlmmPool.getActiveBin()
+    const currentPriceSol = Number(activeBin.pricePerToken) || 0
+
+    const { lowerBinId, upperBinId } = userPosition.positionData
+    const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId
+
+    // Claimable fees in SOL terms (totalX + totalY converted to SOL side)
+    let claimableFeesSolEquivalent = 0
+    try {
+      const tokenX = dlmmPool.tokenX.publicKey.toBase58()
+      const tokenY = dlmmPool.tokenY.publicKey.toBase58()
+      const SOL_MINT = 'So11111111111111111111111111111111111111112'
+
+      const totalX = Number(userPosition.positionData.totalXAmount ?? 0) / 1e9
+      const totalY = Number(userPosition.positionData.totalYAmount ?? 0) / 1e9
+
+      if (tokenX === SOL_MINT) claimableFeesSolEquivalent += totalX
+      if (tokenY === SOL_MINT) claimableFeesSolEquivalent += totalY
+    } catch {}
+
+    return {
+      ok: true,
+      externallyClosed: false,
+      inRange,
+      currentPriceSol,
+      claimableFeesSolEquivalent,
+    }
+  } catch (err) {
+    console.warn(`[monitor-core] fetchPositionState failed for ${positionPubkey.slice(0, 8)}:`, err)
+    return { ok: false, inRange: false, currentPriceSol: 0, claimableFeesSolEquivalent: 0, externallyClosed: false }
+  }
+}

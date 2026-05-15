@@ -1,6 +1,6 @@
 import { closeDammPosition } from './damm-executor'
 import { sendAlert } from './alerter'
-import { sbSelect, sbUpdate, firstNumber, nullableNumber, roundMoney, roundPct } from './monitor-core'
+import { sbSelect, sbUpdate, firstNumber, nullableNumber, roundMoney, roundPct, resolveMeteoraPnlPct } from './monitor-core'
 
 // All DAMM edge exit logic extracted from monitor.ts to keep files <20k chars.
 // No logic lost — exact copy of checkDammEdgePosition + fetchDammPositionState + fetchDammLivePnl stub.
@@ -113,8 +113,16 @@ async function fetchDammPositionState(
     return entrySolPriceUsd !== null && deployedSol > 0 ? deployedSol * entrySolPriceUsd : null
   })()
 
-  const livePnlPct = null // stub — real on-chain would go here
-  const pnlPct = livePnlPct
+  // Derive pnlPct from synced Meteora data when available (position-sync writes pnl_usd + pnl_pct)
+  const livePnlPct = firstNumber(
+    row.pnl_pct,
+    metadata.pnl_pct,
+    metadata.position_pnl_pct,
+    metadata.total_pnl_pct
+  )
+  const pnlPct = livePnlPct !== null
+    ? livePnlPct
+    : resolveMeteoraPnlPct(row, firstNumber(row.pnl_usd, metadata.pnl_usd), deployedSol, liveSolPriceUsd)
 
   const positionValueUsd = row.position_value_usd !== null ? roundMoney(row.position_value_usd) : null
   const ageHours = (Date.now() - new Date(row.opened_at).getTime()) / (1000 * 60 * 60)
