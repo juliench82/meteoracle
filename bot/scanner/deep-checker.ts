@@ -338,8 +338,8 @@ function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
     deepChecked: 0,
     candidates: 0,
     opened: 0,
-    openSkipped: number
-    openSlots: number
+    openSkipped: 0,
+    openSlots: 0,
     maxOpen: MAX_CONCURRENT_MARKET_LP_POSITIONS,
     ...result,
   }
@@ -417,7 +417,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       .order('score', { ascending: false })
       .limit(5)
 
-    const topSymbols = (recentCandidates ?? []).map(c => `${c.symbol}(${c.score})`).join(', ')
+    const topSymbols = (recentCandidates ?? []).map(c => `${c.symbol}({c.score})`).join(', ')
     console.log(`[scanner] tickMode — recent candidates (1h): ${topSymbols || 'none'}`)
     return finish({
       scanned: 0,
