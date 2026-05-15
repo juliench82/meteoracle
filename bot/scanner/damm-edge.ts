@@ -4,13 +4,36 @@ import { getOpenDammEdgeCount } from './metrics'
 import { evaluateDammEdge } from '@/strategies/damm-edge'
 import { openDammPosition, resolveVerifiedDammV2PoolForToken } from '../damm-executor'
 import { sendAlert } from '../alerter'
-import { maybeTriggerMoonboy } from '../moonboy-executor'
+import { openMoonboyPosition } from '../moonboy-executor'
+import { moonboyStrategy } from '@/strategies/moonboy'
 import { WSOL } from './pool-fetcher'
 import type { TokenMetrics } from '@/lib/types'
 
 const SUPABASE_TIMEOUT_MS = 10_000
 const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const MAX_CONCURRENT_DAMM_POSITIONS = 2
+
+async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): Promise<void> {
+  if (!moonboyStrategy.enabled) return
+  if (metrics.ageHours > moonboyStrategy.filters.maxAgeHours) {
+    console.log(
+      `[moonboy] ${metrics.symbol} — skip: age ${metrics.ageHours.toFixed(1)}h > ` +
+      `${moonboyStrategy.filters.maxAgeHours}h gate`,
+    )
+    return
+  }
+  try {
+    const moonboyId = await openMoonboyPosition(metrics, solPriceUsd)
+    if (moonboyId) {
+      console.log(`[moonboy] ${metrics.symbol} — spot-buy opened alongside LP (id=${moonboyId})`)
+    }
+  } catch (err) {
+    console.warn(
+      `[moonboy] ${metrics.symbol} — openMoonboyPosition threw (non-fatal):`,
+      err instanceof Error ? err.message : String(err),
+    )
+  }
+}
 
 export async function handleDammEdge(
   lane: string,
