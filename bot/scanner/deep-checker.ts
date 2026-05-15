@@ -90,8 +90,7 @@ const CONFIGURED_SCANNER_TICK_TIMEOUT_MS = parseInt(
   process.env.LP_SCANNER_TICK_TIMEOUT_MS ??
   process.env.SCANNER_TICK_TIMEOUT_MS ??
   String(DEFAULT_SCANNER_TICK_TIMEOUT_MS),
-  10,
-)
+  10)
 const SCANNER_TICK_TIMEOUT_MS = Number.isFinite(CONFIGURED_SCANNER_TICK_TIMEOUT_MS)
   ? Math.max(60_000, CONFIGURED_SCANNER_TICK_TIMEOUT_MS)
   : DEFAULT_SCANNER_TICK_TIMEOUT_MS
@@ -337,10 +336,10 @@ function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
     scanned: 0,
     survivors: 0,
     deepChecked: 0,
-    candidates: 0,
-    opened: 0,
-    openSkipped: 0,
-    openSlots: 0,
+    candidates: number
+    opened: number
+    openSkipped: number
+    openSlots: number
     maxOpen: MAX_CONCURRENT_MARKET_LP_POSITIONS,
     ...result,
   }
@@ -364,7 +363,7 @@ export async function runScanner(opts: RunScannerOptions = {}): Promise<ScannerR
     if (scannerRunPromise === run) {
       scannerRunPromise = null
       scannerRunStartedAt = 0
-    }
+    })
   })
   scannerRunPromise = run
 
@@ -749,8 +748,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       binStep,
     }
 
-    // DAMM v2 EDGE (delegated to damm-edge.ts in future commit)
-    if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED === 'true') {
+    // DAMM v2 EDGE (delegated to damm-edge.ts in future commit
+) {
       console.log(`[scanner][damm-edge] ${symbol} - DAMM edge check (to be extracted)`)
     }
 
@@ -799,6 +798,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         continue
       }
 
+      console.log(`[scanner] >>> ATTEMPTING REJECTED INSERT for ${symbol}`)
       const insertResult = await withTimeout(
         supabase.from('candidates').insert({
           token_address:     metrics.address,
@@ -839,6 +839,11 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       if (!insertOk) {
         const errMsg = insertResult && 'error' in insertResult ? insertResult.error?.message : 'timeout'
         console.error(`[scanner] candidates insert REJECTED failed for ${symbol}:`, errMsg)
+        if (insertResult && 'error' in insertResult && insertResult.error) {
+          console.error(`[scanner] FULL SUPABASE ERROR (REJECTED):`, insertResult.error)
+        }
+      } else {
+        console.log(`[scanner] >>> REJECTED INSERT SUCCESS for ${symbol}`)
       }
 
       continue
@@ -896,6 +901,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         continue
       }
 
+      console.log(`[scanner] >>> ATTEMPTING INSERT for ${symbol} (decision=${decision})`)
       const insertResult = await withTimeout(
         supabase.from('candidates').insert({
           token_address:     metrics.address,
@@ -936,8 +942,13 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       if (!insertOk) {
         const errMsg = insertResult && 'error' in insertResult ? insertResult.error?.message : 'timeout'
         console.error(`[scanner] candidates insert failed for ${symbol} — skipping:`, errMsg)
+        if (insertResult && 'error' in insertResult && insertResult.error) {
+          console.error(`[scanner] FULL SUPABASE ERROR:`, insertResult.error)
+        }
         continue
       }
+
+      console.log(`[scanner] >>> INSERT SUCCESS for ${symbol} (decision=${decision})`)
 
       if (decision === 'ACCEPTED') {
         candidateCount++
