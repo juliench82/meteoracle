@@ -748,11 +748,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       binStep,
     }
 
-    // DAMM v2 EDGE (delegated to damm-edge.ts in future commit
-) {
-      console.log(`[scanner][damm-edge] ${symbol} - DAMM edge check (to be extracted)`)
-    }
-
     const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : classifyToken({
       address:        metrics.address,
       mcUsd:          metrics.mcUsd,
