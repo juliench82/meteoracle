@@ -224,6 +224,22 @@ function passesBinStepFilter(strategy: Strategy, binStep?: number): boolean {
   return binStep >= min
 }
 
+/**
+ * Returns the strategy assigned to this token purely by classification —
+ * no position-opening filter gates applied.
+ *
+ * Use this for candidate logging/scoring. The token will always get a
+ * strategy_id as long as it has a known class (not UNKNOWN).
+ * Use getStrategyForToken (which adds passesTokenFilters) only when
+ * deciding whether to actually open a position.
+ */
+export function getStrategyClassForToken(token: StrategyToken & { address: string }): Strategy | null {
+  const tokenClass = classifyToken(token)
+  if (tokenClass === 'UNKNOWN') return null
+  const strategy = CLASS_STRATEGY[tokenClass]
+  return strategy.enabled ? strategy : null
+}
+
 export function getStrategyForToken(token: {
   address?:       string
   mcUsd:          number
