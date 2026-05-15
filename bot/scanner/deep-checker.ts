@@ -337,7 +337,7 @@ function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
     scanned: 0,
     survivors: 0,
     deepChecked: 0,
-    candidates: number,
+    candidates: 0,
     opened: 0,
     openSkipped: 0,
     openSlots: 0,
@@ -751,7 +751,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     // DAMM v2 EDGE (delegated to damm-edge.ts in future commit)
     if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED === 'true') {
-      // Placeholder - will be replaced by import from damm-edge.ts
       console.log(`[scanner][damm-edge] ${symbol} - DAMM edge check (to be extracted)`)
     }
 
