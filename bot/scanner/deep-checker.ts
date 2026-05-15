@@ -363,7 +363,7 @@ export async function runScanner(opts: RunScannerOptions = {}): Promise<ScannerR
     if (scannerRunPromise === run) {
       scannerRunPromise = null
       scannerRunStartedAt = 0
-    })
+    }
   })
   scannerRunPromise = run
 
@@ -518,7 +518,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     getOpenLpLimitState('market'),
     METEORA_FETCH_TIMEOUT_MS,
     'live Meteora position limit state',
-  )
+  }
   let openCount: number | undefined
   let availableOpenSlots = 0
   let openBlockedReason: string | undefined
