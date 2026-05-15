@@ -11,6 +11,7 @@ import { openPosition } from '../executor'
 import { sendAlert } from '../alerter'
 import { checkHolders } from '@/lib/helius'
 import { getRugscore, getRugcheckCacheSize } from '../rugcheck-cache'
+import { DEEP_CHECK_DELAY_MS } from '@/lib/strategy-config'
 import {
   fetchBondingCurve,
   isPumpFunToken,
@@ -67,7 +68,7 @@ const PRE_FILTER = {
 }
 
 const MAX_DEEP_CHECKS          = parseInt(process.env.MAX_DEEP_CHECKS          ?? '6')
-const DEEP_CHECK_DELAY_MS      = parseInt(process.env.DEEP_CHECK_DELAY_MS      ?? '3000')
+
 
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 export const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
@@ -568,8 +569,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
+  // P1 improvement: significantly reduced per-item delay (was 3000ms).
+  // Deep checks are now much faster when there are many lane survivors.
   for (const { pool: representativePool, mcUsd, ageHours, lane } of survivors) {
-    await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
+    await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS)) 
 
     const token = getTradableToken(representativePool)
     const tokenAddress = token.address

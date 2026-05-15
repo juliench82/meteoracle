@@ -56,18 +56,13 @@ const SOL_QUOTE_MINTS = new Set([
   'So11111111111111111111111111111111111111111', // native SOL variant
 ])
 
-function envNumber(name: string, fallback: number): number {
-  const value = process.env[name]
-  if (value === undefined) return fallback
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : fallback
-}
-
-// Tunable via env — default 2.5× current 5m volume versus the observed 1h per-5m average.
-const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.5)
-const SCALP_SPIKE_MIN_FEE_TVL_1H_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_1H_PCT', 1)
-const SCALP_SPIKE_MIN_FEE_TVL_5M_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_5M_PCT', 0.1)
-const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)
+import {
+  envNumber,
+  SCALP_SPIKE_VOL_RATIO,
+  SCALP_SPIKE_MIN_FEE_TVL_1H_PCT,
+  SCALP_SPIKE_MIN_FEE_TVL_5M_PCT,
+  EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M,
+} from '@/lib/strategy-config'
 
 type StrategyId = Strategy['id']
 

@@ -42,16 +42,7 @@ export function scoreCandidate(token: TokenMetrics, strategy: Strategy): number 
   return scoreCandidateWithBreakdown(token, strategy).total
 }
 
-function envNumber(name: string, fallback: number): number {
-  const value = process.env[name]
-  if (value === undefined) return fallback
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : fallback
-}
-
-const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.5)
-const SCALP_SPIKE_MIN_FEE_TVL_1H_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_1H_PCT', 1)
-const SCALP_SPIKE_MIN_FEE_TVL_5M_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_5M_PCT', 0.1)
+import { envNumber, SCALP_SPIKE_VOL_RATIO, SCALP_SPIKE_MIN_FEE_TVL_1H_PCT, SCALP_SPIKE_MIN_FEE_TVL_5M_PCT } from '@/lib/strategy-config'
 
 export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strategy): ScoreBreakdown {
   const zero = (reason: string): ScoreBreakdown => {

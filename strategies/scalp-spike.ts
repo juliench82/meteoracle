@@ -1,11 +1,6 @@
 import type { Strategy } from '@/lib/types'
 
-function envNumber(name: string, fallback: number): number {
-  const value = process.env[name]
-  if (value === undefined) return fallback
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : fallback
-}
+import { envNumber } from '@/lib/strategy-config'
 
 export const SCALP_SPIKE_MOMENTUM_REGAIN = true
 

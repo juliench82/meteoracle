@@ -27,6 +27,7 @@ import {
   Transaction,
   ComputeBudgetProgram,
 } from '@solana/web3.js'
+import { applyPriorityFee, sendLegacyTx, simulateAndCheck } from '@/lib/solana-tx'
 import { TOKEN_PROGRAM_ID, NATIVE_MINT } from '@solana/spl-token'
 import BN from 'bn.js'
 import bs58 from 'bs58'
