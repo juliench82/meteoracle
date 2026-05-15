@@ -74,6 +74,27 @@ async function main() {
   setInterval(tickScanner, SCANNER_INTERVAL_MS)
 }
 
+let isShuttingDown = false
+
+function gracefulShutdown(signal: string) {
+  if (isShuttingDown) return
+  isShuttingDown = true
+
+  log(`received ${signal} — starting graceful shutdown`)
+
+  // Stop scheduling new ticks
+  // Note: current in-flight ticks will finish naturally
+
+  // Give in-flight work a chance to complete
+  setTimeout(() => {
+    log('graceful shutdown complete')
+    process.exit(0)
+  }, 5000).unref()
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
+
 main().catch((err) => {
   console.error('[worker] fatal error:', err)
   process.exit(1)

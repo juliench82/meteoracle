@@ -341,6 +341,38 @@ function persistDbPoolCache(pools: MeteoraPool[]): void {
   }).catch(() => { /* never throws */ })
 }
 
+/**
+ * Cleans up old rows from scanner_pool_cache to protect Supabase free tier resources.
+ * Keeps rows seen in the last RETENTION_HOURS (default 48).
+ * Should be called periodically (e.g. once per scanner tick).
+ */
+const POOL_CACHE_RETENTION_HOURS = parseInt(
+  process.env.SCANNER_POOL_CACHE_RETENTION_HOURS ?? '48',
+  10
+)
+
+export async function cleanupOldPoolCache(): Promise<number> {
+  try {
+    const cutoff = new Date(Date.now() - POOL_CACHE_RETENTION_HOURS * 60 * 60 * 1000).toISOString()
+
+    const { error, count } = await createServerClient()
+      .from('scanner_pool_cache')
+      .delete({ count: 'exact' })
+      .lt('last_seen_at', cutoff)
+
+    if (error) throw error
+
+    const deleted = count ?? 0
+    if (deleted > 0) {
+      console.log(`[scanner] cleaned ${deleted} old rows from scanner_pool_cache (retention=${POOL_CACHE_RETENTION_HOURS}h)`)
+    }
+    return deleted
+  } catch (err) {
+    console.warn(`[scanner] scanner_pool_cache cleanup failed: ${summarizeError(err)}`)
+    return 0
+  }
+}
+
 // ─── Meteora API fetchers ─────────────────────────────────────────────────────
 
 async function fetchMeteoraPoolsPage(

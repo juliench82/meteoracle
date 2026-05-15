@@ -119,7 +119,9 @@ export async function checkDlmmPosition(
     closeReason = `out_of_range_${Math.round(oorSince)}min`
   } else if (pnlPct === null) {
     if (currentNullPnlTicks >= 3) {
-      if (currentNullPnlTicks === 3 || currentNullPnlTicks % 3 === 0) {
+      // P2: throttle PnL unavailable alerts to reduce noise on free tiers
+      const shouldAlert = currentNullPnlTicks === 3 || currentNullPnlTicks % 6 === 0
+      if (shouldAlert) {
         await sendAlert({ type: 'pnl_unavailable_warning', symbol: position.symbol, strategy: strategy.id, positionId: position.id, reason: `pnl_unavailable_${currentNullPnlTicks}ticks`, ageHours: Math.round(ageHours * 10) / 10 })
       }
       console.warn(`${label} DLMM PnL unavailable ${currentNullPnlTicks} consecutive ticks`)

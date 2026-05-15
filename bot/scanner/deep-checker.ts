@@ -57,6 +57,7 @@ import {
   getScannerAdjustedScore,
   passesMomentumRegainStrategyFilters,
 } from './metrics'
+import { cleanupOldPoolCache } from './pool-fetcher'
 
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
@@ -406,6 +407,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   }
 
   await refreshRpcProviderCooldown('helius')
+
+  // P2: Protect Supabase free tier by cleaning old pool cache (48h default)
+  cleanupOldPoolCache().catch(() => {})
 
   if (tickMode) {
     console.log('[scanner] tickMode=true — skipping pool-fetcher, reporting last 1h candidates')

@@ -46,7 +46,9 @@ export async function checkDammEdgePosition(
     closeReason = `max_duration_${Math.round(ageHours)}h`
   } else if (pnlPct === null) {
     if (currentNullPnlTicks >= 3) {
-      if (currentNullPnlTicks === 3 || currentNullPnlTicks % 3 === 0) {
+      // P2: throttle PnL unavailable alerts
+      const shouldAlert = currentNullPnlTicks === 3 || currentNullPnlTicks % 6 === 0
+      if (shouldAlert) {
         await sendAlert({
           type: 'pnl_unavailable_warning',
           symbol: position.symbol,
