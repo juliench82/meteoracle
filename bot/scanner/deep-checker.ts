@@ -908,7 +908,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     if (decision === 'ACCEPTED') {
       candidateCount++
-      console.log(`[scanner] CANDIDATE: ${symbol} → ${classStrategy!.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingInfo})`)
+      console.log(`[scanner] CANDIDATE: ${symbol} → ${classStrategy!.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''})`)
       await sendAlert({ type: 'candidate_found', symbol, strategy: classStrategy!.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
       const disabledReason = getDisabledStrategyReason(classStrategy!.id)
