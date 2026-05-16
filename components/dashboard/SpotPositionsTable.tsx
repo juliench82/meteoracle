@@ -231,7 +231,7 @@ export function SpotPositionsTable({ openPositions, closedPositions }: Props) {
             {tab === 'open' ? 'No open positions' : 'No closed trades yet'}
           </p>
         ) : (
-          <table className="w-full text-sm">
+          <table className="retro-table w-full text-sm">
             <thead>
               <tr className="text-zinc-500 text-xs uppercase border-b border-zinc-800">
                 <th className="text-left px-4 py-3">Token</th>

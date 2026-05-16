@@ -69,7 +69,7 @@ export function PositionsTable({ positions }: { positions: any[] }) {
         <p className="text-slate-600 text-sm py-8 text-center">No open positions</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-xs">
+          <table className="retro-table w-full text-xs">
             <thead>
               <tr className="text-slate-500 border-b border-surface-border">
                 {['Token', 'Strategy', 'Deployed', 'Claimable $', 'Value $', 'P&L %', 'Range', 'Age', 'Max Duration'].map(

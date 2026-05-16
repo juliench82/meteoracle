@@ -40,7 +40,7 @@ function ProgressBar({ pct, tp, sl }: { pct: number | null; tp: number | null; s
 export function MoonboyPanel({ positions }: { positions: MoonboyLivePosition[] }) {
   if (!positions.length) {
     return (
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+      <div className="retro-card">
         <h2 className="text-sm font-semibold text-zinc-300 mb-3">🌙 Moonboy Positions</h2>
         <p className="text-xs text-zinc-500">No open moonboy positions.</p>
       </div>
@@ -56,7 +56,7 @@ export function MoonboyPanel({ positions }: { positions: MoonboyLivePosition[] }
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
-            <tr className="text-zinc-500 border-b border-zinc-800">
+            <tr className="text-retro-cyan border-b border-retro-border font-mono text-xs tracking-wider">
               <th className="text-left pb-2 pr-4 font-medium">Token</th>
               <th className="text-right pb-2 pr-4 font-medium">Entry</th>
               <th className="text-right pb-2 pr-4 font-medium">Price</th>
@@ -68,7 +68,7 @@ export function MoonboyPanel({ positions }: { positions: MoonboyLivePosition[] }
           </thead>
           <tbody>
             {positions.map((pos) => (
-              <tr key={pos.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
+              <tr key={pos.id} className="border-b border-retro-border hover:bg-white/5 transition-colors">
                 <td className="py-2 pr-4">
                   <div className="flex items-center gap-1.5">
                     <span className="font-medium text-zinc-100">{pos.symbol}</span>

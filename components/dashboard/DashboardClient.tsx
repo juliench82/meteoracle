@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { SpotKPIBar } from '@/components/dashboard/SpotKPIBar'
 import { SpotPositionsTable } from '@/components/dashboard/SpotPositionsTable'
 import { MoonboyPanel } from '@/components/dashboard/MoonboyPanel'
+import { RetroPnLChart } from '@/components/dashboard/RetroPnLChart'
 import type { MoonboyLivePosition } from '@/lib/moonboy-live'
 
 const POLL_INTERVAL_MS = 30_000
@@ -129,18 +130,75 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
           )}
         </div>
       )}
-      <SpotKPIBar
-        solDeployed={solDeployed}
-        openPositions={allOpen.length}
-        totalTrades={allClosed.length}
-        walletSol={data.wallet?.sol ?? null}
-        portfolio={data.portfolio}
-      />
-      <SpotPositionsTable
-        openPositions={allOpen}
-        closedPositions={allClosed.slice(0, 20)}
-      />
-      <MoonboyPanel positions={data.moonboy ?? []} />
+      {/* Retro Section: Portfolio Overview */}
+      <div className="mt-8 px-6">
+        <div className="flex items-center gap-3 mb-3">
+          <div className="h-px flex-1 bg-gradient-to-r from-retro-pink to-transparent" />
+          <span className="font-mono text-xs tracking-[2px] text-retro-pink">PORTFOLIO // LIVE</span>
+          <div className="h-px flex-1 bg-gradient-to-l from-retro-cyan to-transparent" />
+        </div>
+      </div>
+
+      <div className="px-6">
+        <SpotKPIBar
+          solDeployed={solDeployed}
+          openPositions={allOpen.length}
+          totalTrades={allClosed.length}
+          walletSol={data.wallet?.sol ?? null}
+          portfolio={data.portfolio}
+        />
+      </div>
+
+      {/* Positions */}
+      <div className="mt-8 px-6">
+        <div className="flex items-center gap-3 mb-3">
+          <div className="h-px flex-1 bg-gradient-to-r from-retro-cyan to-transparent" />
+          <span className="font-mono text-xs tracking-[2px] text-retro-cyan">OPEN &amp; CLOSED POSITIONS</span>
+          <div className="h-px flex-1 bg-gradient-to-l from-retro-pink to-transparent" />
+        </div>
+      </div>
+
+      <div className="px-6">
+        <SpotPositionsTable
+          openPositions={allOpen}
+          closedPositions={allClosed.slice(0, 20)}
+        />
+      </div>
+
+      <div className="px-6 mt-8">
+        <MoonboyPanel positions={data.moonboy ?? []} />
+      </div>
+
+      {/* Ultra Retro PnL Chart Section */}
+      <div className="mt-8 px-6">
+        <div className="flex items-center gap-3 mb-3">
+          <div className="h-px flex-1 bg-gradient-to-r from-retro-lime to-transparent" />
+          <span className="font-mono text-xs tracking-[2px] text-retro-lime">HIGH SCORE • PERFORMANCE LOG</span>
+          <div className="h-px flex-1 bg-gradient-to-l from-retro-orange to-transparent" />
+        </div>
+      </div>
+
+      <div className="px-6">
+        <RetroPnLChart />
+      </div>
+
+      {/* Classic 1986 Arcade Status Bar */}
+      <div className="mt-10 border-t-2 border-retro-border bg-retro-surface py-2 px-6">
+        <div className="flex items-center justify-between text-[10px] font-mono tracking-[1.5px] text-retro-text-dim">
+          <div className="flex items-center gap-4">
+            <span className="text-retro-lime">● SYSTEM ONLINE</span>
+            <span>1986</span>
+            <span>METEORACLE v1.0</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <span>SOL LIVE FEED: <span className="text-retro-cyan">ACTIVE</span></span>
+            <span>CRT MODE: <span className="text-retro-pink">ENABLED</span></span>
+          </div>
+          <div>
+            READY PLAYER ONE
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

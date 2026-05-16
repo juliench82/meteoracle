@@ -44,13 +44,13 @@ export function KPIBar({
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
       {kpis.map((kpi) => (
         <Card key={kpi.label}>
-          <p className="text-xs text-slate-500 mb-1">{kpi.label}</p>
-          <p className={`text-2xl font-bold font-mono tabular-nums ${kpi.color}`}>
+          <div className="label">{kpi.label}</div>
+          <div className={`value ${kpi.color.includes('brand') ? 'neon-purple' : 'neon-cyan'}`}>
             {kpi.value}
             {kpi.unit && (
-              <span className="text-sm ml-1 text-slate-500">{kpi.unit}</span>
+              <span className="text-sm ml-1.5 text-retro-text-dim">{kpi.unit}</span>
             )}
-          </p>
+          </div>
         </Card>
       ))}
     </div>

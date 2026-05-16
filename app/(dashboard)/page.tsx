@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { DashboardClient } from '@/components/dashboard/DashboardClient'
+import { RetroLogo } from '@/components/dashboard/RetroLogo'
 
 export default function DashboardPage() {
   const [data, setData] = useState<any>(null)
@@ -38,24 +39,27 @@ export default function DashboardPage() {
   }
 
   return (
-    <div>
-      <div className="flex justify-between items-center px-6 pt-6 mb-2">
-        <h1 className="text-2xl font-bold text-white">Dashboard</h1>
-        <div className="flex items-center gap-3">
+    <div className="dashboard-container min-h-screen">
+      {/* Ultra Retro Header */}
+      <div className="border-b-2 border-retro-border bg-retro-surface px-6 py-5 flex items-center justify-between">
+        <RetroLogo />
+
+        <div className="flex items-center gap-5">
           {lastFetch && (
-            <span className="text-xs text-zinc-500">
-              Updated {lastFetch.toLocaleTimeString()}
-            </span>
+            <div className="font-mono text-xs text-retro-text-dim tracking-widest">
+              LAST SYNC: {lastFetch.toLocaleTimeString()}
+            </div>
           )}
           <button
             onClick={fetchData}
             disabled={isRefreshing}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm text-white disabled:opacity-50 transition-colors"
+            className="retro-btn font-mono tracking-widest"
           >
-            {isRefreshing ? 'Refreshing…' : '↻ Refresh'}
+            {isRefreshing ? 'SYNCING...' : 'PRESS START TO REFRESH'}
           </button>
         </div>
       </div>
+
       <DashboardClient initialData={data} />
     </div>
   )

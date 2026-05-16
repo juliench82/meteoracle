@@ -112,10 +112,12 @@ export function SpotKPIBar({
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
       {cards.map(card => (
-        <div key={card.label} className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 min-h-[104px]">
-          <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">{card.label}</p>
-          <p className={`text-2xl font-bold leading-tight ${card.color}`}>{card.value}</p>
-          <p className="text-xs text-zinc-500 mt-1">{card.sub}</p>
+        <div key={card.label} className="retro-card min-h-[104px]">
+          <div className="label">{card.label}</div>
+          <div className={`value ${card.label.includes('PnL') || card.label.includes('Win') ? 'neon-lime' : 'neon-cyan'}`}>
+            {card.value}
+          </div>
+          <p className="text-[10px] text-retro-text-dim mt-1 font-mono">{card.sub}</p>
         </div>
       ))}
     </div>
