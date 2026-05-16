@@ -142,8 +142,3 @@ export default function ConfigPage() {
     </div>
   )
 }
-```
-
-This gives a decent starting point. The UI is grouped by strategy, uses simple text inputs (we can improve to number inputs later), and has a big "Save & Restart Bot" button that calls the apply endpoint.
-
-I should also add the route to the sidebar.
