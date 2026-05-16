@@ -34,7 +34,11 @@ A token can only be deployed into one active strategy at a time.
 
 See existing strategies for reference on filter values and exit rules.
 
-> **2026-05 update (Option A):** DAMM Edge loosened (25min age / 5% feeTvl default) and made fully env-configurable. Evil Panda relaxed to 3h max age + 250 rugcheck default. All key thresholds now centralized in `lib/strategy-config.ts`.
+> **May 2026 – Option A Strategy Review**
+> - DAMM Edge: age ceiling raised from 15min → **25min**, fee/TVL lowered from 8% → **5%**, all thresholds now env-configurable via `DAMM_EDGE_*` variables.
+> - Evil Panda: maxAgeHours 2h → **3h**, minRugcheckScore 300 → **250**.
+> - All strategy and scanner tuning centralized in `lib/strategy-config.ts`.
+> - `.env.local.example` now documents every tunable parameter.
 
 ---
 

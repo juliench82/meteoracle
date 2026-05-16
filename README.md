@@ -21,30 +21,41 @@ Built and operated as a solo project. Production-grade, self-hosted.
 
 ## Architecture
 
+The system is split into several focused modules for maintainability:
+
 ```
 VPS (PM2)
   │
-  ├── bot/scanner.ts          ← pool scanner + classifier + position opener (DLMM)
-  ├── bot/monitor.ts          ← DLMM position monitor + exit engine
-  ├── bot/damm-executor.ts    ← DAMM v2 open + close (Zap Out) + PnL fetch
-  ├── bot/alerter.ts          ← Telegram alert dispatcher
-  ├── bot/telegram-bot.ts     ← bidirectional Telegram command interface
-  └── start-dashboard.sh      ← Next.js dashboard (port 3000)
+  ├── bot/scanner.ts              ← high-frequency pool scanning + lane classification
+  ├── bot/scanner/deep-checker.ts ← deep analysis, scoring, strategy selection
+  ├── bot/monitor.ts              ← orchestrator for DLMM + DAMM monitoring ticks
+  ├── bot/monitor-*.ts            ← specialized monitors (dlmm, damm, core helpers)
+  ├── bot/executor/               ← modular DLMM execution (open / close / add-liquidity / utils)
+  ├── bot/damm-executor.ts        ← DAMM v2 open + Zap Out close + PnL
+  ├── bot/alerter.ts              ← Telegram alerts
+  ├── bot/telegram-bot.ts         ← inbound command handler
+  └── start-dashboard.sh          ← Next.js dashboard (port 3000)
 
 lib/
-  ├── pre-grad.ts             ← DAMM v2 monitor loop + exit handler
-  └── types.ts                ← shared types
+  ├── strategy-config.ts          ← single source of truth for all strategy & scanner tuning
+  ├── get-dashboard-data.ts       ← live-first Meteora snapshot + 45s cache (dashboard)
+  ├── meteora-live.ts             ← merges live Meteora positions with DB
+  ├── solana-tx.ts                ← shared transaction simulation + sending
+  └── ...
 
-Next.js Dashboard
+strategies/
+  ├── evil-panda.ts
+  ├── scalp-spike.ts
+  ├── damm-edge.ts                ← very fresh DAMM v2 edge detector (loosened May 2026)
+  └── ...
+
+Next.js Dashboard (live-first)
   └── app/(dashboard)/
-      ├── page.tsx            ← live KPIs, P&L chart, open positions table
-      └── strategies/page.tsx ← strategy reference + per-strategy performance
+      ├── page.tsx                ← open positions + PnL from live Meteora snapshot
+      └── strategies/page.tsx     ← strategy reference
 
-Supabase (Postgres)
-  ├── lp_positions            ← all positions, open and closed
-  ├── candidates              ← scored strategy matches from scanner deep checks
-  ├── bot_logs                ← structured event log, including scanner_tick heartbeat rows
-  └── bot_state               ← killswitch + runtime flags (dry_run)
+Supabase
+  ├── lp_positions, candidates, bot_logs, bot_state
 ```
 
 ---
@@ -70,12 +81,20 @@ All USD money fields (claimable fees, position value, realized PnL) come from th
 
 ## Strategies
 
-Strategy selection is fully automatic — the classifier routes each token to the correct strategy based on real-time on-chain data. Strategy parameters (entry filters, position sizing, range config, exit rules) are not published.
+All strategy parameters are centralized in `lib/strategy-config.ts` and fully tunable via environment variables (see `.env.local.example`).
 
-| Track | Target |
-|---|---|
-| DLMM strategies | Various risk profiles — early-stage to established pairs |
-| DAMM v2 / pre-grad | Pre-graduation tokens on the DAMM v2 bonding curve |
+**Current strategies (May 2026 Option A tuning):**
+
+| Strategy       | Target                                      | Key Defaults                          | Notes |
+|----------------|---------------------------------------------|---------------------------------------|-------|
+| **Evil Panda** | Fresh SOL-paired memes                      | 3h max age, 250 rugcheck, wide range  | Main workhorse (loosened in Option A) |
+| **Scalp Spike**| High-conviction 5m volume surges (≥500k MC) | 6h max duration, tight range          | High conviction, lower frequency |
+| **DAMM Edge**  | Extremely fresh DAMM v2 pools               | 25min age, 5% fee/TVL (loosened)      | Isolated high-risk edge track |
+| **Stable Farm**| Stablecoin pairs                            | Very tight range, long hold           | Low risk |
+| **Bluechip**   | Large-cap USDC/USDT quoted pairs            | Conservative                            | Disabled by default |
+| **Moonboy**    | Ultra-early aggressive entries              | 1.5h max age                            | Separate high-risk bucket |
+
+The classifier (`strategies/index.ts`) automatically routes tokens using on-chain signals (age, volume, holders, rugcheck, fee/TVL, bonding curve). DAMM Edge is evaluated first for very fresh tokens.
 
 ---
 
@@ -111,30 +130,26 @@ The bot also accepts inbound commands:
 
 ```
 meteoracle/
-├── app/(dashboard)/           ← Next.js dashboard
+├── app/(dashboard)/                 ← Next.js dashboard (live-first from Meteora)
 ├── bot/
-│   ├── scanner.ts             ← pool scanner + classifier + opener (DLMM)
-│   ├── monitor.ts             ← DLMM position monitor + exit engine
-│   ├── executor.ts            ← DLMM on-chain transaction execution
-│   ├── damm-executor.ts       ← DAMM v2 open + close (Zap Out) + PnL API
-│   ├── alerter.ts             ← Telegram alert dispatcher
-│   ├── scorer.ts              ← candidate scoring
-│   ├── telegram-bot.ts        ← inbound command handler
-│   ├── startup-alert.ts       ← crash-restart notification
-│   └── orphan-detector.ts     ← reconciles DB vs on-chain state
-├── strategies/
-│   └── index.ts               ← classifier + strategy registry
+│   ├── scanner.ts
+│   ├── scanner/                     ← deep-checker, lane classification, pool fetching
+│   ├── monitor*.ts                  ← monitor orchestration + DLMM/DAMM implementations
+│   ├── executor/                    ← split execution (open/close/add-liquidity/utils/persistence)
+│   ├── damm-executor.ts
+│   ├── alerter.ts
+│   ├── telegram-bot.ts
+│   └── orphan-detector.ts
+├── strategies/                      ← Evil Panda, Scalp Spike, DAMM Edge, Stable, Bluechip, Moonboy
 ├── lib/
-│   ├── pre-grad.ts            ← DAMM v2 monitor loop + exit handler
-│   ├── supabase.ts
-│   ├── solana.ts
-│   ├── helius.ts
-│   ├── rugcheck.ts
-│   ├── pumpfun.ts
-│   └── types.ts
-├── supabase/migrations/       ← versioned schema migrations
-├── ecosystem.config.cjs       ← PM2 process definitions
-└── .env.local.example         ← all required env vars (no secrets)
+│   ├── strategy-config.ts           ← single source of truth for all env-driven tuning
+│   ├── get-dashboard-data.ts        ← live Meteora snapshot + unstable_cache (dashboard)
+│   ├── meteora-live.ts              ← live position state + PnL derivation
+│   ├── solana-tx.ts                 ← shared tx simulation & sending
+│   └── ...
+├── supabase/migrations/
+├── ecosystem.config.cjs
+└── .env.local.example               ← comprehensive strategy & scanner tuning reference
 ```
 
 ---
