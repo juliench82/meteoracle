@@ -1,6 +1,6 @@
 import type { Strategy } from '@/lib/types'
 
-import { envNumber } from '@/lib/strategy-config'
+import { envNumber, SCALP_SPIKE_MIN_RUGCHECK_SCORE } from '@/lib/strategy-config'
 
 export const SCALP_SPIKE_MOMENTUM_REGAIN = true
 
@@ -18,7 +18,7 @@ export const scalpSpikeStrategy: Strategy = {
     maxTopHolderPct: envNumber('SCALP_SPIKE_MAX_TOP_HOLDER_PCT', 25),
     minHolderCount: envNumber('SCALP_SPIKE_MIN_HOLDER_COUNT', 200),
     maxAgeHours: Number.MAX_SAFE_INTEGER,
-    minRugcheckScore: envNumber('SCALP_SPIKE_MIN_RUGCHECK_SCORE', 400),
+    minRugcheckScore: SCALP_SPIKE_MIN_RUGCHECK_SCORE,
     requireSocialSignal: false,
     minFeeTvl24hPct: 0,
   },
