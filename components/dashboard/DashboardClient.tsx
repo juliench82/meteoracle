@@ -134,6 +134,11 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
       <div className="mt-8 px-6">
         <div className="flex items-center gap-3 mb-3">
           <div className="h-px flex-1 bg-gradient-to-r from-retro-pink to-transparent" />
+          <pre className="font-mono text-[8px] leading-[7px] text-retro-pink opacity-90">
+{`   /\\  
+  /  \\ 
+ /____\\`}
+          </pre>
           <span className="font-mono text-xs tracking-[2px] text-retro-pink">PORTFOLIO // LIVE</span>
           <div className="h-px flex-1 bg-gradient-to-l from-retro-cyan to-transparent" />
         </div>
@@ -153,6 +158,11 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
       <div className="mt-8 px-6">
         <div className="flex items-center gap-3 mb-3">
           <div className="h-px flex-1 bg-gradient-to-r from-retro-cyan to-transparent" />
+          <pre className="font-mono text-[8px] text-retro-cyan opacity-80 leading-[6px]">
+{`  *  *  
+ / \\ / \\ 
+*   *   *`}
+          </pre>
           <span className="font-mono text-xs tracking-[2px] text-retro-cyan">OPEN &amp; CLOSED POSITIONS</span>
           <div className="h-px flex-1 bg-gradient-to-l from-retro-pink to-transparent" />
         </div>
@@ -173,7 +183,12 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
       <div className="mt-8 px-6">
         <div className="flex items-center gap-3 mb-3">
           <div className="h-px flex-1 bg-gradient-to-r from-retro-lime to-transparent" />
-          <span className="font-mono text-xs tracking-[2px] text-retro-lime">HIGH SCORE • PERFORMANCE LOG</span>
+          <pre className="font-mono text-[9px] leading-[8px] text-retro-lime tracking-wider">
+{`╔═══════════════╗
+║ HIGH SCORE    ║
+╚═══════════════╝`}
+          </pre>
+          <span className="font-mono text-xs tracking-[2px] text-retro-lime">PERFORMANCE LOG</span>
           <div className="h-px flex-1 bg-gradient-to-l from-retro-orange to-transparent" />
         </div>
       </div>
@@ -182,19 +197,29 @@ export function DashboardClient({ initialData }: { initialData: InitialData }) {
         <RetroPnLChart />
       </div>
 
-      {/* Classic 1986 Arcade Status Bar */}
+      {/* Classic 2026 Arcade Status Bar — Maximum 80s Flair */}
       <div className="mt-10 border-t-2 border-retro-border bg-retro-surface py-2 px-6">
         <div className="flex items-center justify-between text-[10px] font-mono tracking-[1.5px] text-retro-text-dim">
           <div className="flex items-center gap-4">
             <span className="text-retro-lime">● SYSTEM ONLINE</span>
-            <span>1986</span>
+            <span className="text-retro-orange">2026</span>
             <span>METEORACLE v1.0</span>
           </div>
+
+          {/* ASCII Art Meteor */}
+          <pre className="font-mono text-[8px] leading-[6px] text-retro-pink opacity-80">
+{`   *  
+  / \\ 
+ /   \\
+*     *`}
+          </pre>
+
           <div className="flex items-center gap-4">
             <span>SOL LIVE FEED: <span className="text-retro-cyan">ACTIVE</span></span>
             <span>CRT MODE: <span className="text-retro-pink">ENABLED</span></span>
           </div>
-          <div>
+
+          <div className="text-retro-lime">
             READY PLAYER ONE
           </div>
         </div>
