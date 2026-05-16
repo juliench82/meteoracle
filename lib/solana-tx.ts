@@ -45,7 +45,7 @@ export function addPriorityFeeAndPreserveComputeLimit(
 export function applyPriorityFee(
   tx: Transaction,
   priorityFee: number,
-  fallbackUnits: number,
+  fallbackUnits: number = 1_400_000,
 ): Transaction {
   tx.instructions = addPriorityFeeAndPreserveComputeLimit(tx.instructions, priorityFee, fallbackUnits)
   return tx
