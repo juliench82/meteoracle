@@ -591,28 +591,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     })
   }
 
-    if (CANDIDATE_DEDUP_HOURS > 0) {
-      const recentResult = await withTimeout(
-        supabase.from('candidates').select('id').eq('token_address', tokenAddress)
-          .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString()).limit(1),
-        SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
-      )
-      if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last ${CANDIDATE_DEDUP_HOURS}h`); continue }
-    }
 
-    if (liveOpenPosition) {
-      console.log(`[scanner] ${symbol} — skip: live Meteora position already exists (${liveOpenPosition.position_pubkey})`)
-      continue
-    }
 
-    if (!limitState?.liveFetchOk) {
-      const posResult = await withTimeout(
-        supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
-          .in('status', OPEN_LP_STATUSES).limit(1),
-        SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
-      )
-      if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: cached open LP position exists (live fallback mode)`); continue }
-    }
+
 
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
       const curve = await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
@@ -1022,10 +1003,9 @@ async function processDeepCheckCandidate(
     isOpenAllowedToday: () => Promise<boolean>
   },
 ) {
-  const {
-    limitState,
-    freshPools,
-    momentumPools,
+  const { symbol = 'unknown' } = context as any;
+  console.log(`[scanner] processDeepCheckCandidate called for ${symbol} (full logic extraction in progress)`);
+}
     openedMintsThisTick,
     dailyLossLimitHit,
     liveSolPriceUsd,
