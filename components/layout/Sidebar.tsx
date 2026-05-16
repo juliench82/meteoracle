@@ -2,11 +2,10 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { BarChart2, BookOpen } from 'lucide-react'
+import { BarChart2 } from 'lucide-react'
 
 const nav = [
-  { href: '/',           icon: BarChart2, label: 'Dashboard' },
-  { href: '/strategies', icon: BookOpen,  label: 'Strategies' },
+  { href: '/', icon: BarChart2, label: 'Dashboard' },
 ]
 
 export function Sidebar() {

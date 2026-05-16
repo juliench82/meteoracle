@@ -53,25 +53,7 @@ export function RetroLogo() {
           >
             METEORACLE
           </div>
-          <div className="font-mono text-[10px] text-retro-cyan tracking-[4px] pl-1 -mt-1">
-            2026 • OUTRUN EDITION
-          </div>
         </div>
-
-        {/* ASCII Palm Tree (80s Miami Vice vibes) */}
-        <pre className="ml-3 text-[8px] leading-[7px] text-retro-orange font-mono opacity-70 select-none">
-{`   /\\  
-  /  \\ 
- /    \\
-/      \\
-   ||   
-   ||   `}
-        </pre>
-      </div>
-
-      {/* Tagline */}
-      <div className="ml-[60px] mt-1 text-[9px] font-mono tracking-[3px] text-retro-lime">
-        SOLANA LIQUIDITY • SYNTHWAVE MODE
       </div>
     </div>
   )
