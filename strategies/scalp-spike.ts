@@ -1,6 +1,6 @@
 import type { Strategy } from '@/lib/types'
 
-import { envNumber, SCALP_SPIKE_MIN_RUGCHECK_SCORE } from '@/lib/strategy-config'
+import { envNumber, SCALP_SPIKE_MIN_RUGCHECK_SCORE, SCALP_SPIKE_MIN_HOLDER_COUNT } from '@/lib/strategy-config'
 
 export const SCALP_SPIKE_MOMENTUM_REGAIN = true
 
@@ -16,7 +16,7 @@ export const scalpSpikeStrategy: Strategy = {
     minVolume24h: 0,
     minLiquidityUsd: envNumber('SCALP_SPIKE_MIN_LIQUIDITY_USD', 10_000),
     maxTopHolderPct: envNumber('SCALP_SPIKE_MAX_TOP_HOLDER_PCT', 25),
-    minHolderCount: envNumber('SCALP_SPIKE_MIN_HOLDER_COUNT', 200),
+    minHolderCount: SCALP_SPIKE_MIN_HOLDER_COUNT,
     maxAgeHours: Number.MAX_SAFE_INTEGER,
     minRugcheckScore: SCALP_SPIKE_MIN_RUGCHECK_SCORE,
     requireSocialSignal: false,

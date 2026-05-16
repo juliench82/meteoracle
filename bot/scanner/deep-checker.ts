@@ -809,8 +809,11 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         holderCount  = holderData.holderCount
         topHolderPct = holderData.topHolderPct
         holderReliable = holderData.reliable
-        if (!holderData.reliable && token.holders) {
-          holderCount = Math.max(holderCount, token.holders)
+        if (!holderData.reliable) {
+          console.log(`[scanner] ${symbol} — using unreliable holder data (holder score contribution disabled)`)
+          if (token.holders) {
+            holderCount = Math.max(holderCount, token.holders)
+          }
         }
       } else {
         holderCount  = token.holders ?? 0
@@ -824,6 +827,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       holderReliable = false
       console.log(`[scanner] ${symbol} — using Meteora holders (Helius disabled)`)
     }
+
+
 
     console.log(`[scanner] ${symbol} — calling Rugcheck`)
     const rugScore = await withTimeout(

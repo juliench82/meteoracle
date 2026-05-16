@@ -4,6 +4,7 @@ import {
   envNumber,
   EVIL_PANDA_MAX_AGE_HOURS,
   EVIL_PANDA_MIN_RUGCHECK_SCORE,
+  EVIL_PANDA_MIN_HOLDER_COUNT,
 } from '@/lib/strategy-config'
 
 export const EVIL_PANDA_SCANNER_SCORE_WEIGHTS = {
@@ -26,7 +27,7 @@ export const evilPandaStrategy: Strategy = {
     minVolume24h: 0,
     minLiquidityUsd: envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 5_000),
     maxTopHolderPct: envNumber('EVIL_PANDA_MAX_TOP_HOLDER_PCT', 30),
-    minHolderCount: envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 100),
+    minHolderCount: EVIL_PANDA_MIN_HOLDER_COUNT,
     maxAgeHours: EVIL_PANDA_MAX_AGE_HOURS,
     minRugcheckScore: EVIL_PANDA_MIN_RUGCHECK_SCORE,
     requireSocialSignal: false,
