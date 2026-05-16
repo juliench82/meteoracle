@@ -1,0 +1,373 @@
+/**
+ * bot/executor/open.ts
+ *
+ * DLMM position opening logic extracted from the monolithic executor.ts.
+ */
+
+import {
+  Keypair, PublicKey, Transaction,
+  ComputeBudgetProgram,
+  TransactionInstruction,
+} from '@solana/web3.js'
+import {
+  getAssociatedTokenAddressSync,
+  createAssociatedTokenAccountIdempotentInstruction,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  NATIVE_MINT,
+} from '@solana/spl-token'
+import BN from 'bn.js'
+import type { StrategyType } from '@meteora-ag/dlmm'
+import type { ZapInDlmmResponse } from '@meteora-ag/zap-sdk'
+
+
+import {
+  getDLMM,
+  getStrategyType,
+  getZap,
+  strategyTypeForDistribution,
+  findStrategyForPosition,
+  getTotalDeployedSolForCap,
+  getTokenProgramId,
+  getDecimalAdjustedPrice,
+  NATIVE_MINT_STR,
+  METEORA_RENT_RESERVE_SOL,
+  ADD_LIQUIDITY_FALLBACK_CU,
+  DLMM_ZAP_SWAP_SLIPPAGE_BPS,
+  DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE,
+  DLMM_ZAP_MAX_ACCOUNTS,
+  DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
+  MAX_BINS_BY_STRATEGY,
+  MAX_BINS_DEFAULT,
+  MARKET_LP_SOL_PER_POSITION,
+  MAX_CONCURRENT_MARKET_LP_POSITIONS,
+  MAX_MARKET_LP_SOL_DEPLOYED,
+  WALLET_MIN_SOL_RESERVE,
+} from './utils'
+
+import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
+import { createServerClient } from '@/lib/supabase'
+import { getBotState } from '@/lib/botState'
+import { sendAlert } from '@/bot/alerter'
+import type { Strategy, TokenMetrics } from '@/lib/types'
+import {
+  OPEN_LP_STATUSES,
+  assertCanOpenLpPosition,
+  getOpenLpLimitState,
+  type OpenLpLimitState,
+} from '@/lib/position-limits'
+import { STRATEGIES } from '@/strategies'
+import { openMoonboyPosition } from './moonboy-executor'
+
+import {
+  simulateAndCheck,
+  sendLegacyTx,
+  applyPriorityFee,
+  addPriorityFeeAndPreserveComputeLimit,
+} from '@/lib/solana-tx'
+
+import {
+  persistPosition,
+  sendOpenAlert,
+} from './persistence'
+
+const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
+
+
+
+
+
+
+
+
+
+
+
+
+
+export async function openPosition(
+  metrics: TokenMetrics,
+  strategy: Strategy,
+  options: { rebalanceFromPositionId?: string } = {},
+): Promise<string | null> {
+  const label = `[executor][${strategy.id}][${metrics.symbol}]`
+  console.log(`${label} opening position`)
+
+  const botState = await getBotState()
+  const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
+  const supabase = createServerClient()
+
+  if (DRY_RUN) {
+    console.log(`${label} DRY RUN — skipping on-chain tx`)
+    const envCap = MARKET_LP_SOL_PER_POSITION
+    const dryRunSolAmount = strategy.position.maxSolPerPosition
+      ? Math.min(strategy.position.maxSolPerPosition, envCap)
+      : envCap
+    return await persistPosition(metrics, strategy, 'dry-run-sig', metrics.priceUsd ?? 0, 0, dryRunSolAmount, undefined, 0, DRY_RUN)
+  }
+
+  const connection = getConnection()
+  const wallet = getWallet()
+
+  try {
+    const envCap = MARKET_LP_SOL_PER_POSITION
+    const solAmount = strategy.position.maxSolPerPosition
+      ? Math.min(strategy.position.maxSolPerPosition, envCap)
+      : envCap
+
+    const limitState = options.rebalanceFromPositionId
+      ? await getOpenLpLimitState('market')
+      : await assertCanOpenLpPosition(MAX_CONCURRENT_MARKET_LP_POSITIONS, label, 'market')
+
+    const effectiveOpenCountForCap = options.rebalanceFromPositionId
+      ? Math.max(0, limitState.effectiveOpenCount - 1)
+      : limitState.effectiveOpenCount
+
+    if (options.rebalanceFromPositionId) {
+      if (effectiveOpenCountForCap >= MAX_CONCURRENT_MARKET_LP_POSITIONS) {
+        throw new Error(
+          `${label} max LP positions reached after rebalance adjustment ` +
+          `(${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS}; source=${limitState.countSource}, ` +
+          `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+        )
+      }
+    }
+
+    console.log(
+      `${label} market LP cap ok (${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS}; ` +
+      `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+    )
+
+    const maxTotalDeployed = MAX_MARKET_LP_SOL_DEPLOYED
+    const { totalDeployed, source: exposureSource } = await getTotalDeployedSolForCap(supabase, limitState)
+
+    if (totalDeployed + solAmount > maxTotalDeployed) {
+      console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed (${exposureSource})`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn', event: 'open_position_skipped_exposure_cap',
+        payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed, source: exposureSource },
+      })
+      return null
+    }
+
+    const balanceLamports = await connection.getBalance(wallet.publicKey)
+    const balanceSol = balanceLamports / 1e9
+    console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`)
+
+    const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL + WALLET_MIN_SOL_RESERVE
+
+    if (balanceSol < requiredSol) {
+      console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)}`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn', event: 'open_position_skipped_insufficient_balance',
+        payload: {
+          symbol: metrics.symbol,
+          balanceSol,
+          requiredSol,
+          solAmount,
+          meteoraRentReserveSol: METEORA_RENT_RESERVE_SOL,
+          walletMinSolReserve: WALLET_MIN_SOL_RESERVE,
+        },
+      })
+      return null
+    }
+
+    const poolPubkey = new PublicKey(metrics.poolAddress)
+    const DLMM = await getDLMM()
+    const dlmmPool = await DLMM.create(connection, poolPubkey)
+    const activeBin = await dlmmPool.getActiveBin()
+    const activeBinId = activeBin.binId
+
+    const entryPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin)
+    console.log(`${label} entry price: ${entryPriceSol.toFixed(9)} SOL/token (bin ${activeBinId})`)
+
+    const binStep = dlmmPool.lbPair.binStep
+    const mintX = dlmmPool.tokenX.publicKey
+    const mintY = dlmmPool.tokenY.publicKey
+
+    const ataIxs: TransactionInstruction[] = []
+    for (const [lbl, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
+      if (mint.toBase58() === NATIVE_MINT_STR) {
+        console.log(`${label} token ${lbl} is native SOL — skipping ATA`)
+        continue
+      }
+      const tokenProgramId = await getTokenProgramId(mint)
+      const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID)
+      if (!(await connection.getAccountInfo(ata))) {
+        console.log(`${label} creating ATA for token ${lbl} (${mint.toBase58().slice(0, 8)}…)`)
+        ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
+          wallet.publicKey, ata, wallet.publicKey, mint, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
+        ))
+      }
+    }
+    if (ataIxs.length > 0) {
+      const ataTx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }), ...ataIxs
+      )
+      const ataSig = await sendLegacyTx(ataTx, [wallet], label)
+      console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
+    }
+
+    const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
+    const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
+    const minBinId = activeBinId - binsDown
+    const maxBinId = activeBinId + binsUp
+    const binRange = binsDown + binsUp
+
+    const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
+    if (binRange > maxBins) {
+      console.warn(`${label} bin range too wide — rejecting`, { binRange, maxBins, binStep })
+      await supabase.from('bot_logs').insert({
+        level: 'warn', event: 'open_position_skipped_bin_range_cap',
+        payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
+      })
+      return null
+    }
+    console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
+
+    const solIsTokenX = mintX.toBase58() === NATIVE_MINT_STR
+    const solIsTokenY = mintY.toBase58() === NATIVE_MINT_STR
+    if (!solIsTokenX && !solIsTokenY) {
+      console.warn(`${label} pool has no SOL side — rejecting one-sided SOL zap-in`)
+      await supabase.from('bot_logs').insert({
+        level: 'warn',
+        event: 'open_position_skipped_non_sol_pair',
+        payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },
+      })
+      return null
+    }
+
+    const StrategyTypeEnum = await getStrategyType()
+    const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
+
+    const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
+    console.log(`${label} priority fee: ${priorityFee} microlamports`)
+
+    const amountIn = new BN(Math.floor(solAmount * 1e9))
+    const minDeltaId = minBinId - activeBinId
+    const maxDeltaId = maxBinId - activeBinId
+    const favorXInActiveId = solIsTokenX
+
+    const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk')
+    const directSwapEstimate = await estimateDlmmDirectSwap({
+      amountIn,
+      inputTokenMint: NATIVE_MINT,
+      lbPair: poolPubkey,
+      connection,
+      swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
+      minDeltaId,
+      maxDeltaId,
+      strategy: strategyType,
+    })
+
+    console.log(
+      `${label} DLMM zap-in estimate: input=${amountIn.toString()} lamports ` +
+      `solSide=${solIsTokenX ? 'X' : 'Y'} swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
+      `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
+    )
+
+    const zap = await getZap()
+    const zapParams = await zap.getZapInDlmmDirectParams({
+      user: wallet.publicKey,
+      lbPair: poolPubkey,
+      inputTokenMint: NATIVE_MINT,
+      amountIn,
+      maxActiveBinSlippage: DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE,
+      minDeltaId,
+      maxDeltaId,
+      strategy: strategyType,
+      favorXInActiveId,
+      maxAccounts: DLMM_ZAP_MAX_ACCOUNTS,
+      swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
+      maxTransferAmountExtendPercentage: DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
+      directSwapEstimate: directSwapEstimate.result,
+    })
+
+    const positionKeypair = new Keypair()
+    const zapResponse: ZapInDlmmResponse = await zap.buildZapInDlmmTransaction({
+      ...zapParams,
+      position: positionKeypair.publicKey,
+    })
+
+    const sendZapTx = async (
+      tx: Transaction | undefined,
+      signers: import('@solana/web3.js').Signer[],
+      stage: string,
+    ): Promise<string | null> => {
+      if (!tx || tx.instructions.length === 0) return null
+      const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), signers, label)
+      console.log(`${label} zap-in ${stage} confirmed ✔ sig: ${sig}`)
+      return sig
+    }
+
+    let cleanupSent = false
+    const sendCleanup = async (stage: string): Promise<void> => {
+      if (cleanupSent) return
+      cleanupSent = true
+      try {
+        await sendZapTx(zapResponse.cleanUpTransaction, [wallet], stage)
+      } catch (cleanupErr) {
+        console.warn(`${label} zap-in cleanup failed after ${stage}:`, cleanupErr)
+      }
+    }
+
+    let openSig = ''
+    try {
+      await sendZapTx(zapResponse.setupTransaction, [wallet], 'setup')
+      for (let i = 0; i < zapResponse.swapTransactions.length; i++) {
+        await sendZapTx(zapResponse.swapTransactions[i], [wallet], `swap ${i + 1}/${zapResponse.swapTransactions.length}`)
+      }
+      await sendZapTx(zapResponse.ledgerTransaction, [wallet], 'ledger')
+      openSig = await sendZapTx(zapResponse.zapInTransaction, [wallet, positionKeypair], 'position') ?? ''
+      await sendCleanup('cleanup')
+    } catch (zapErr) {
+      await sendCleanup('failed-open')
+      throw zapErr
+    }
+
+    let tokenAmountDeposited = 0
+    try {
+      const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
+      const userPos = userPositions.find(
+        p => p.publicKey.toBase58() === positionKeypair.publicKey.toBase58()
+      )
+      if (userPos) {
+        const rawAmount = userPos.positionData.totalXAmount
+        tokenAmountDeposited = typeof rawAmount === 'object'
+          ? (rawAmount as BN).toNumber() / 1e6
+          : Number(rawAmount) / 1e6
+        console.log(`${label} token amount deposited: ${tokenAmountDeposited.toFixed(4)}`)
+      }
+    } catch (err) {
+      console.warn(`${label} could not fetch token amount:`, err)
+    }
+
+    console.log(`${label} position opened ✔`)
+    const positionId = await persistPosition(
+      metrics, strategy, openSig,
+      metrics.priceUsd ?? 0, entryPriceSol, solAmount,
+      positionKeypair.publicKey.toBase58(), tokenAmountDeposited, DRY_RUN
+    )
+    await sendOpenAlert(metrics, strategy, positionId, solAmount, entryPriceSol)
+
+    // Moonboy companion buy — fire-and-forget
+    const solPriceUsd = entryPriceSol > 0 && (metrics.priceUsd ?? 0) > 0
+      ? (metrics.priceUsd ?? 0) / entryPriceSol
+      : 0
+    openMoonboyPosition(metrics, solPriceUsd).catch(err =>
+      console.warn('[executor] openMoonboyPosition non-fatal error:', err?.message ?? err)
+    )
+
+    return positionId
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`${label} failed:`, message)
+    await createServerClient().from('bot_logs').insert({
+      level: 'error', event: 'open_position_failed',
+      payload: { symbol: metrics.symbol, strategy: strategy.id, error: message },
+    })
+    return null
+  }
+}
