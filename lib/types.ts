@@ -59,6 +59,8 @@ export interface TokenMetrics {
   liquidityUsd: number
   topHolderPct: number
   holderCount: number
+  /** Whether the holderCount came from reliable Helius DAS data (true) or heuristic/fallback (false) */
+  holderReliable?: boolean
   ageHours: number
   rugcheckScore: number
   priceUsd: number

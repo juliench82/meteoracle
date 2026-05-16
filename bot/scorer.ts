@@ -96,7 +96,7 @@ export function scoreCandidateWithBreakdown(token: TokenMetrics, strategy: Strat
 
   const rugScore     = scoreRugcheck(token.rugcheckScore)
   const volMcScore   = scoreVolumeMcRatio(volMcRatio, isPumpFun)
-  const holderScore  = scoreHolders(token.holderCount)
+  const holderScore  = scoreHolders(token.holderCount, token.holderReliable ?? true)
   const freshnessScore = scoreFreshness(token.ageHours, isLargeCap, isMemecoin)
   const feeEfficiencyScore = scoreFeeEfficiency(token)
   const volumeTvlScore = scoreRecentVolumeEfficiency(token)
@@ -225,7 +225,11 @@ function scoreRugcheck(rugcheckScore: number): number {
   return 10
 }
 
-function scoreHolders(holderCount: number): number {
+function scoreHolders(holderCount: number, reliable: boolean = true): number {
+  if (!reliable) {
+    return 0 // Do not contribute holder score if data is unreliable (e.g. Helius DAS capped/fallback)
+  }
+
   if (holderCount >= 5000) return 100
   if (holderCount >= 2000) return 80
   if (holderCount >= 1000) return 65

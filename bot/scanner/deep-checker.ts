@@ -274,7 +274,11 @@ function scoreVolumeTvl1hRatio(ratio: number): number {
   return 0
 }
 
-function scoreHolderCount(holderCount: number): number {
+function scoreHolderCount(holderCount: number, reliable: boolean = true): number {
+  if (!reliable) {
+    return 0 // Do not contribute holder score if data is unreliable (Helius DAS fallback / capped)
+  }
+
   if (holderCount >= 5000) return 100
   if (holderCount >= 2000) return 80
   if (holderCount >= 1000) return 65
@@ -287,7 +291,7 @@ function getMomentumRegainBreakdown(
   metrics: TokenMetrics,
 ): ReturnType<typeof scoreCandidateWithBreakdown> {
   const rugScore = Math.max(0, Math.min(100, metrics.rugcheckScore))
-  const holderScore = scoreHolderCount(metrics.holderCount)
+  const holderScore = scoreHolderCount(metrics.holderCount, metrics.holderReliable ?? true)
   const feeEfficiencyScore = scoreFeeTvl1hPct(metrics.feeTvl1hPct ?? 0)
   const volumeTvlScore = scoreVolumeTvl1hRatio(metrics.volumeTvl1hRatio ?? 0)
   const freshnessScore =
@@ -792,6 +796,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     let holderCount  = 0
     let topHolderPct = 0
+    let holderReliable = false
 
     if (USE_HELIUS) {
       console.log(`[scanner] ${symbol} — calling Helius`)
@@ -803,17 +808,20 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       if (holderData) {
         holderCount  = holderData.holderCount
         topHolderPct = holderData.topHolderPct
+        holderReliable = holderData.reliable
         if (!holderData.reliable && token.holders) {
           holderCount = Math.max(holderCount, token.holders)
         }
       } else {
         holderCount  = token.holders ?? 0
         topHolderPct = 0
+        holderReliable = false
         console.warn(`[scanner] ${symbol} — Helius timeout, falling back to Meteora holders (${holderCount})`)
       }
     } else {
       holderCount  = token.holders ?? 0
       topHolderPct = 0
+      holderReliable = false
       console.log(`[scanner] ${symbol} — using Meteora holders (Helius disabled)`)
     }
 
@@ -843,6 +851,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       liquidityUsd:   liqUsd,
       topHolderPct,
       holderCount:    holderCountForFilter,
+      holderReliable,
       ageHours,
       rugcheckScore:  rugScore,
       priceUsd:       token.price,
