@@ -6,7 +6,7 @@ import axios from 'axios'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import { getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
-import { scoreCandidateWithBreakdown } from '../scorer'
+import { scoreCandidateWithBreakdown, type ScoreBreakdown } from '../scorer'
 import { openPosition } from '../executor'
 import { sendAlert } from '../alerter'
 import { checkHolders } from '@/lib/helius'
@@ -960,10 +960,20 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
       (momentumRegain && passesMomentumRegainStrategyFilters(metrics) ? scalpSpikeStrategy : null)
 
-    let decision = 'ACCEPTED'
+    let decision = 'REJECTED'
     let rejectionReason: string | null = null
     let finalScore = 0
     let strategyMatched: string | null = null
+    let breakdown: ScoreBreakdown = {
+      total: 0,
+      volMcScore: 0,
+      rugScore: 0,
+      holderScore: 0,
+      freshnessScore: 0,
+      feeEfficiencyScore: 0,
+      volumeTvlScore: 0,
+      curveBonus: 0,
+    }
 
     if (!strategy) {
       rejectionReason = explainNoStrategy(metrics)
@@ -978,7 +988,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         )
       }
 
-      const breakdown = strategy.id === 'scalp-spike' && momentumRegain
+      breakdown = strategy.id === 'scalp-spike' && momentumRegain
         ? getMomentumRegainBreakdown(metrics)
         : scoreCandidateWithBreakdown(metrics, strategy)
       finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
@@ -988,6 +998,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       if (!accepted) {
         rejectionReason = lane === 'fresh' ? 'fresh safety check failed' : `score ${finalScore} < threshold ${MIN_SCORE_TO_OPEN}`
         decision = 'REJECTED'
+      } else {
+        decision = 'ACCEPTED'
       }
 
       console.log(JSON.stringify({
@@ -1009,119 +1021,117 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         decision,
         reason:    rejectionReason,
       }))
+    }
 
-      // Dedup check to avoid polluting the table with repeated rejections
-      if (CANDIDATE_DEDUP_HOURS > 0) {
-        const dedupCheck = await withTimeout(
-          supabase.from('candidates')
-            .select('id')
-            .eq('token_address', tokenAddress)
-            .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString())
-            .limit(1),
-          SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
-        )
-        if (dedupCheck?.data && dedupCheck.data.length > 0) {
-          console.log(`[scanner] ${symbol} — already evaluated in last ${CANDIDATE_DEDUP_HOURS}h, skipping insert`)
-          continue
-        }
-      }
-
-      const insertResult = await withTimeout(
-        supabase.from('candidates').insert({
-          token_address:     metrics.address,
-          symbol:            metrics.symbol,
-          score:             finalScore,
-          strategy_matched:  strategy ? strategy.id : null,
-          strategy_id:       strategy ? strategy.id : null,
-          token_class:       tokenClass,
-          scanner_lane:      lane,
-          pool_address:      metrics.poolAddress,
-          mc_at_scan:        metrics.mcUsd,
-          volume_24h:        metrics.volume24h,
-          volume_1h:         vol1h,
-          volume_5m:         vol5m,
-          liquidity_usd:     metrics.liquidityUsd,
-          fee_tvl_24h_pct:   feeTvl24hPct,
-          fee_tvl_1h_pct:    feeTvl1hPct,
-          fee_tvl_5m_pct:   feeTvl5mPct,
-          holder_count:      metrics.holderCount,
-          rugcheck_score:    metrics.rugcheckScore,
-          top_holder_pct:    metrics.topHolderPct,
-          bin_step:          binStep,
-          scanned_at:        new Date().toISOString(),
-          score_volmc:       breakdown.volMcScore,
-          score_holders:     breakdown.holderScore,
-          score_freshness:   breakdown.freshnessScore,
-          score_fee_efficiency: breakdown.feeEfficiencyScore,
-          score_volume_tvl:  breakdown.volumeTvlScore,
-          score_curve_bonus: breakdown.curveBonus,
-          launchpad_source:  launchpadSource,
-          decision:          decision,
-          rejection_reason:  rejectionReason,
-          metadata:          {},
-        }),
-        SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
+    // Dedup check to avoid polluting the table with repeated rejections
+    if (CANDIDATE_DEDUP_HOURS > 0) {
+      const dedupCheck = await withTimeout(
+        supabase.from('candidates')
+          .select('id')
+          .eq('token_address', tokenAddress)
+          .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString())
+          .limit(1),
+        SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
       )
+      if (dedupCheck?.data && dedupCheck.data.length > 0) {
+        console.log(`[scanner] ${symbol} — already evaluated in last ${CANDIDATE_DEDUP_HOURS}h, skipping insert`)
+        continue
+      }
+    }
 
-      const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
-      if (!insertOk) {
-        const errorDetails = insertResult && 'error' in insertResult ? insertResult.error : null
-        console.error(`[scanner] candidates insert failed for ${symbol}:`, {
-          error: errorDetails,
-          rawResult: insertResult,
-          symbol,
-          tokenAddress: metrics.address,
-          decision,
-        })
+    const insertResult = await withTimeout(
+      supabase.from('candidates').insert({
+        token_address:     metrics.address,
+        symbol:            metrics.symbol,
+        score:             finalScore,
+        strategy_matched:  strategy ? strategy.id : null,
+        strategy_id:       strategy ? strategy.id : null,
+        token_class:       tokenClass,
+        scanner_lane:      lane,
+        pool_address:      metrics.poolAddress,
+        mc_at_scan:        metrics.mcUsd,
+        volume_24h:        metrics.volume24h,
+        volume_1h:         vol1h,
+        volume_5m:         vol5m,
+        liquidity_usd:     metrics.liquidityUsd,
+        fee_tvl_24h_pct:   feeTvl24hPct,
+        fee_tvl_1h_pct:    feeTvl1hPct,
+        fee_tvl_5m_pct:   feeTvl5mPct,
+        holder_count:      metrics.holderCount,
+        rugcheck_score:    metrics.rugcheckScore,
+        top_holder_pct:    metrics.topHolderPct,
+        bin_step:          binStep,
+        scanned_at:        new Date().toISOString(),
+        score_volmc:       breakdown.volMcScore,
+        score_holders:     breakdown.holderScore,
+        score_freshness:   breakdown.freshnessScore,
+        score_fee_efficiency: breakdown.feeEfficiencyScore,
+        score_volume_tvl:  breakdown.volumeTvlScore,
+        score_curve_bonus: breakdown.curveBonus,
+        launchpad_source:  launchpadSource,
+        decision:          decision,
+        rejection_reason:  rejectionReason,
+        metadata:          {},
+      }),
+      SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
+    )
+
+    const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
+    if (!insertOk) {
+      const errorDetails = insertResult && 'error' in insertResult ? insertResult.error : null
+      console.error(`[scanner] candidates insert failed for ${symbol}:`, {
+        error: errorDetails,
+        rawResult: insertResult,
+        symbol,
+        tokenAddress: metrics.address,
+        decision,
+      })
+      continue
+    }
+
+    if (decision === 'ACCEPTED' && strategy) {
+      candidateCount++
+      console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay})`)
+      await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
+
+      const disabledReason = getDisabledStrategyReason(strategy.id)
+      if (disabledReason) {
+        openSkippedCount++
+        console.log(`[scanner] ${symbol} qualifies for ${strategy.id} but open skipped: ${disabledReason}`)
         continue
       }
 
-      if (decision === 'ACCEPTED') {
-        candidateCount++
-        console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay}${bondingInfo})`)
-        await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
+      if (openBlockedReason || openedCount >= availableOpenSlots) {
+        openSkippedCount++
+        const reason = openBlockedReason ?? 'slots_filled_this_tick'
+        console.log(`[scanner] ${symbol} qualifies but open skipped: ${reason}`)
+        continue
+      }
 
-        if (accepted) {
-          const disabledReason = getDisabledStrategyReason(strategy.id)
-          if (disabledReason) {
-            openSkippedCount++
-            console.log(`[scanner] ${symbol} qualifies for ${strategy.id} but open skipped: ${disabledReason}`)
-            continue
-          }
+      if (!await isOpenAllowedToday()) {
+        openSkippedCount++
+        console.log(`[scanner] ${symbol} qualifies but open skipped: daily loss circuit breaker`)
+        continue
+      }
 
-          if (openBlockedReason || openedCount >= availableOpenSlots) {
-            openSkippedCount++
-            const reason = openBlockedReason ?? 'slots_filled_this_tick'
-            console.log(`[scanner] ${symbol} qualifies but open skipped: ${reason}`)
-            continue
-          }
-
-          if (!await isOpenAllowedToday()) {
-            openSkippedCount++
-            console.log(`[scanner] ${symbol} qualifies but open skipped: daily loss circuit breaker`)
-            continue
-          }
-
-          const positionId = await openPosition(metrics, strategy)
-          if (positionId) {
-            openedCount++
-            dailyLossLimitHit = null
-            openedMintsThisTick.add(tokenAddress)
-            void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
-            await sendAlert({
-              type: 'position_opened',
-              symbol,
-              strategy: strategy.id,
-              solDeposited: MARKET_LP_SOL_PER_POSITION,
-              entryPrice: metrics.priceUsd,
-              entryPriceUsd: metrics.priceUsd,
-              meteoracleScore: finalScore,
-              poolAddress: metrics.poolAddress,
-              mint: metrics.address,
-              positionId,
-            })
-          }
-        }
+      const positionId = await openPosition(metrics, strategy)
+      if (positionId) {
+        openedCount++
+        dailyLossLimitHit = null
+        openedMintsThisTick.add(tokenAddress)
+        void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
+        await sendAlert({
+          type: 'position_opened',
+          symbol,
+          strategy: strategy.id,
+          solDeposited: MARKET_LP_SOL_PER_POSITION,
+          entryPrice: metrics.priceUsd,
+          entryPriceUsd: metrics.priceUsd,
+          meteoracleScore: finalScore,
+          poolAddress: metrics.poolAddress,
+          mint: metrics.address,
+          positionId,
+        })
       }
     }
   }
