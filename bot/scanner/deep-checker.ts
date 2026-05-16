@@ -1040,52 +1040,64 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
 
     const insertResult = await withTimeout(
-      supabase.from('candidates').insert({
-        token_address:     metrics.address,
-        symbol:            metrics.symbol,
-        score:             finalScore,
-        strategy_matched:  strategy ? strategy.id : null,
-        strategy_id:       strategy ? strategy.id : null,
-        token_class:       tokenClass,
-        scanner_lane:      lane,
-        pool_address:      metrics.poolAddress,
-        mc_at_scan:        metrics.mcUsd,
-        volume_24h:        metrics.volume24h,
-        volume_1h:         vol1h,
-        volume_5m:         vol5m,
-        liquidity_usd:     metrics.liquidityUsd,
-        fee_tvl_24h_pct:   feeTvl24hPct,
-        fee_tvl_1h_pct:    feeTvl1hPct,
-        fee_tvl_5m_pct:   feeTvl5mPct,
-        holder_count:      metrics.holderCount,
-        rugcheck_score:    metrics.rugcheckScore,
-        top_holder_pct:    metrics.topHolderPct,
-        bin_step:          binStep,
-        scanned_at:        new Date().toISOString(),
-        score_volmc:       breakdown.volMcScore,
-        score_holders:     breakdown.holderScore,
-        score_freshness:   breakdown.freshnessScore,
-        score_fee_efficiency: breakdown.feeEfficiencyScore,
-        score_volume_tvl:  breakdown.volumeTvlScore,
-        score_curve_bonus: breakdown.curveBonus,
-        launchpad_source:  launchpadSource,
-        decision:          decision,
-        rejection_reason:  rejectionReason,
-        metadata:          {},
-      }),
+      supabase
+        .from('candidates')
+        .upsert(
+          {
+            token_address:     metrics.address,
+            symbol:            metrics.symbol,
+            score:             finalScore,
+            strategy_matched:  strategy ? strategy.id : null,
+            strategy_id:       strategy ? strategy.id : null,
+            token_class:       tokenClass,
+            scanner_lane:      lane,
+            pool_address:      metrics.poolAddress,
+            mc_at_scan:        metrics.mcUsd,
+            volume_24h:        metrics.volume24h,
+            volume_1h:         vol1h,
+            volume_5m:         vol5m,
+            liquidity_usd:     metrics.liquidityUsd,
+            fee_tvl_24h_pct:   feeTvl24hPct,
+            fee_tvl_1h_pct:    feeTvl1hPct,
+            fee_tvl_5m_pct:   feeTvl5mPct,
+            holder_count:      metrics.holderCount,
+            rugcheck_score:    metrics.rugcheckScore,
+            top_holder_pct:    metrics.topHolderPct,
+            bin_step:          binStep,
+            scanned_at:        new Date().toISOString(),
+            score_volmc:       breakdown.volMcScore,
+            score_holders:     breakdown.holderScore,
+            score_freshness:   breakdown.freshnessScore,
+            score_fee_efficiency: breakdown.feeEfficiencyScore,
+            score_volume_tvl:  breakdown.volumeTvlScore,
+            score_curve_bonus: breakdown.curveBonus,
+            launchpad_source:  launchpadSource,
+            decision:          decision,
+            rejection_reason:  rejectionReason,
+            metadata:          {},
+          },
+          {
+            onConflict: 'token_address',
+            ignoreDuplicates: true,
+          }
+        ),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
 
     const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
     if (!insertOk) {
       const errorDetails = insertResult && 'error' in insertResult ? insertResult.error : null
-      console.error(`[scanner] candidates insert failed for ${symbol}:`, {
-        error: errorDetails,
-        rawResult: insertResult,
-        symbol,
-        tokenAddress: metrics.address,
-        decision,
-      })
+
+      // Only log real errors — ignore duplicate key conflicts (we use ignoreDuplicates: true)
+      if (errorDetails?.code !== '23505') {
+        console.error(`[scanner] candidates insert failed for ${symbol}:`, {
+          error: errorDetails,
+          rawResult: insertResult,
+          symbol,
+          tokenAddress: metrics.address,
+          decision,
+        })
+      }
       continue
     }
 
