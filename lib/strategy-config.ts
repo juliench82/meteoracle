@@ -25,6 +25,10 @@ export const SCALP_SPIKE_MIN_FEE_TVL_5M_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL
 
 export const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)
 
+// Evil Panda relaxed defaults (Option A strategy review)
+export const EVIL_PANDA_MAX_AGE_HOURS = envNumber('EVIL_PANDA_MAX_AGE_HOURS', 3)
+export const EVIL_PANDA_MIN_RUGCHECK_SCORE = envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 250)
+
 // Re-export for convenience in deep-checker / scorer
 export const MOMENTUM_MIN_VOLUME_5M_USD = envNumber('MOMENTUM_MIN_VOLUME_5M_USD', 5000)
 export const MOMENTUM_MIN_FEE_TVL_5M_PCT = envNumber('MOMENTUM_MIN_FEE_TVL_5M_PCT', 0.1)
@@ -61,5 +65,13 @@ export const FRESH_MIN_LIQUIDITY_USD = envNumber(
 // Misc
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 0)
 export const HARD_MAX_TOKEN_AGE_MINUTES = envNumber('HARD_MAX_TOKEN_AGE_MINUTES', 120) as number
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAMM Edge (isolated track) — loosened in Option A strategy review
+// ─────────────────────────────────────────────────────────────────────────────
+export const DAMM_EDGE_MAX_AGE_MINUTES = envNumber('DAMM_EDGE_MAX_AGE_MINUTES', 25)
+export const DAMM_EDGE_MIN_FEE_TVL_PCT = envNumber('DAMM_EDGE_MIN_FEE_TVL_PCT', 5)
+export const DAMM_EDGE_MIN_LIQUIDITY_USD = envNumber('DAMM_EDGE_MIN_LIQUIDITY_USD', 25_000)
+export const DAMM_EDGE_MAX_MC_USD = envNumber('DAMM_EDGE_MAX_MC_USD', 5_000_000)
 
 console.log('[strategy-config] centralized env configuration loaded')

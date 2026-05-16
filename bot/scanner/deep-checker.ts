@@ -111,10 +111,10 @@ const METEORA_FILTERED_FETCH = {
   limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '800'),
 }
 
-// Strict 15-min gate for new Meteora listings (0.25h)
-const METEORA_NEW_LISTING_AGE_H   = 0.25
+// New Meteora listing detection (aligned with loosened DAMM Edge in Option A)
+const METEORA_NEW_LISTING_AGE_H   = 0.4   // ~24 minutes
 const METEORA_NEW_LISTING_LIQ_USD = 25_000
-const METEORA_NEW_LISTING_FEETVL  = 8   // %
+const METEORA_NEW_LISTING_FEETVL  = 5     // % (was 8%)
 
 const SUPABASE_TIMEOUT_MS      = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
@@ -753,8 +753,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       Math.max(feeTvl1hPct, feeTvl5mPct * 12) >= METEORA_NEW_LISTING_FEETVL
     ) {
       console.log(
-        `[scanner] ${symbol} — new Meteora listing ` +
-        `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, recentFeeTvl=${Math.max(feeTvl1hPct, feeTvl5mPct * 12).toFixed(1)}%) — scoring normally`
+        `[scanner] ${symbol} — new Meteora listing (DAMM Edge candidate) ` +
+        `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, recentFeeTvl=${Math.max(feeTvl1hPct, feeTvl5mPct * 12).toFixed(1)}%)`
       )
     }
 

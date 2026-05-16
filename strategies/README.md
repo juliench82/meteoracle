@@ -9,7 +9,7 @@ Each strategy is a self-contained TypeScript file exporting a `Strategy` object.
 | Strategy | Risk | Duration | Target | Range | Bin Step | SOL Bias |
 |---|---|---|---|---|---|---|
 | **Scalp Spike** | 🔴 High | < 12h | New launches, CT pumps | ±20% | 50 bps | 60% SOL |
-| **Evil Panda** | 🟠 Medium | < 48h | Memecoins $200K–$50M MC | −80% / +20% | 100 bps | 80% SOL |
+| **Evil Panda** | 🟠 Medium | < 12h (max) | Fresh memecoins (now up to ~3h old by default) | −50% / +100% | 100 bps | 100% SOL |
 | **Stable Farm** | 🟢 Low | Up to 7d | SOL/USDC, deep pairs | ±10% Curve | 5 bps | 50/50 |
 
 ---
@@ -33,6 +33,8 @@ A token can only be deployed into one active strategy at a time.
 3. Set `enabled: true` when ready to go live
 
 See existing strategies for reference on filter values and exit rules.
+
+> **2026-05 update (Option A):** DAMM Edge loosened (25min age / 5% feeTvl default) and made fully env-configurable. Evil Panda relaxed to 3h max age + 250 rugcheck default. All key thresholds now centralized in `lib/strategy-config.ts`.
 
 ---
 
