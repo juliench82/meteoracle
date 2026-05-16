@@ -986,7 +986,6 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
  * Processes a single candidate from the lane survivors.
  * Extracted from the main loop in runScannerOnce to keep deep-checker.ts cleaner.
  */
-
 async function processDeepCheckCandidate(
   representativePool: any,
   mcUsd: number,
@@ -1004,8 +1003,79 @@ async function processDeepCheckCandidate(
     isOpenAllowedToday: () => Promise<boolean>
   },
 ) {
-  // TODO: Move the full deep check logic from the old loop body into this function.
-  // For now this is a clean stub so the file compiles.
   const { symbol = 'unknown' } = context as any;
-  console.log(`[scanner] processDeepCheckCandidate called for ${symbol} (full extraction pending)`);
+  console.log(`[scanner] processDeepCheckCandidate called for ${symbol} (full logic extraction in progress)`);
+}
+    openedMintsThisTick,
+    dailyLossLimitHit,
+    liveSolPriceUsd,
+    heliusRpcUrl,
+    supabase,
+    isOpenAllowedToday,
+  } = context
+
+  const token = getTradableToken(representativePool)
+  const tokenAddress = token.address
+  const symbol = representativePool.name ?? token.symbol
+  const launchpadSource = detectLaunchpadSource(tokenAddress)
+  const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address)
+
+  if (openedMintsThisTick.has(tokenAddress)) {
+    console.log(`[scanner] ${symbol} — skip ${lane} lane: position already opened earlier this tick`)
+    return
+  }
+
+  if (CANDIDATE_DEDUP_HOURS > 0) {
+    const recentResult = await withTimeout(
+      supabase.from('candidates').select('id').eq('token_address', tokenAddress)
+        .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString()).limit(1),
+      SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
+    )
+    if (recentResult?.data && recentResult.data.length > 0) {
+      console.log(`[scanner] ${symbol} — skip: scanned in last ${CANDIDATE_DEDUP_HOURS}h`)
+      return
+    }
+  }
+
+  if (liveOpenPosition) {
+    console.log(`[scanner] ${symbol} — skip: live Meteora position already exists (${liveOpenPosition.position_pubkey})`)
+    return
+  }
+
+  if (!limitState?.liveFetchOk) {
+    const posResult = await withTimeout(
+      supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
+        .in('status', OPEN_LP_STATUSES).limit(1),
+      SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
+    )
+    if (posResult?.data && posResult.data.length > 0) {
+      console.log(`[scanner] ${symbol} — skip: cached open LP position exists (live fallback mode)`)
+      return
+    }
+  }
+
+  if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
+    const curve = await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
+    const progress = curve?.progressPct ?? 0
+    if (progress >= PUMPFUN_HIGHCURVE_THRESHOLD && curve?.complete === false) {
+      console.log(`[scanner] ${symbol} — pump.fun high-curve ${progress.toFixed(1)}% — scoring normally (+curveBonus)`)
+    } else {
+      console.log(`[scanner] ${symbol} — pump.fun curve ${progress.toFixed(1)}% (complete=${curve?.complete ?? 'unknown'})`)
+    }
+  }
+
+  const bestPool = selectBestPool(lane === 'fresh' ? freshPools : momentumPools, tokenAddress, lane)
+  if (!bestPool) {
+    console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
+    return
+  }
+
+  const liveBestPoolPosition = findLiveOpenPosition(limitState, tokenAddress, bestPool.address)
+  if (liveBestPoolPosition) {
+    console.log(`[scanner] ${symbol} — skip: live Meteora position already exists for best pool (${liveBestPoolPosition.position_pubkey})`)
+    return
+  }
+
+  // ... (rest of the deep check logic would continue here in a full extraction)
+  console.log(`[scanner] processDeepCheckCandidate called for ${symbol} (extraction in progress)`)
 }
