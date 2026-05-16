@@ -1010,18 +1010,20 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         reason:    rejectionReason,
       }))
 
-      // Dedup check (6h) to avoid polluting the table with repeated rejections
-      const dedupCheck = await withTimeout(
-        supabase.from('candidates')
-          .select('id')
-          .eq('token_address', tokenAddress)
-          .gte('scanned_at', new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())
-          .limit(1),
-        SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
-      )
-      if (dedupCheck?.data && dedupCheck.data.length > 0) {
-        console.log(`[scanner] ${symbol} — already evaluated in last 6h, skipping insert`)
-        continue
+      // Dedup check to avoid polluting the table with repeated rejections
+      if (CANDIDATE_DEDUP_HOURS > 0) {
+        const dedupCheck = await withTimeout(
+          supabase.from('candidates')
+            .select('id')
+            .eq('token_address', tokenAddress)
+            .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString())
+            .limit(1),
+          SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
+        )
+        if (dedupCheck?.data && dedupCheck.data.length > 0) {
+          console.log(`[scanner] ${symbol} — already evaluated in last ${CANDIDATE_DEDUP_HOURS}h, skipping insert`)
+          continue
+        }
       }
 
       const insertResult = await withTimeout(
@@ -1041,7 +1043,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           liquidity_usd:     metrics.liquidityUsd,
           fee_tvl_24h_pct:   feeTvl24hPct,
           fee_tvl_1h_pct:    feeTvl1hPct,
-          fee_tvl_5mPct:    feeTvl5mPct,
+          fee_tvl_5m_pct:   feeTvl5mPct,
           holder_count:      metrics.holderCount,
           rugcheck_score:    metrics.rugcheckScore,
           top_holder_pct:    metrics.topHolderPct,
