@@ -1058,14 +1058,21 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           launchpad_source:  launchpadSource,
           decision:          decision,
           rejection_reason:  rejectionReason,
+          metadata:          {},
         }),
         SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
       )
 
       const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
       if (!insertOk) {
-        const errMsg = insertResult && 'error' in insertResult ? insertResult.error?.message : 'timeout'
-        console.error(`[scanner] candidates insert failed for ${symbol} — skipping:`, errMsg)
+        const errorDetails = insertResult && 'error' in insertResult ? insertResult.error : null
+        console.error(`[scanner] candidates insert failed for ${symbol}:`, {
+          error: errorDetails,
+          rawResult: insertResult,
+          symbol,
+          tokenAddress: metrics.address,
+          decision,
+        })
         continue
       }
 
