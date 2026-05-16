@@ -58,7 +58,7 @@ import {
   type OpenLpLimitState,
 } from '@/lib/position-limits'
 import { STRATEGIES } from '@/strategies'
-import { openMoonboyPosition } from './moonboy-executor'
+import { openMoonboyPosition } from '../moonboy-executor'
 
 import {
   simulateAndCheck,
@@ -355,7 +355,7 @@ export async function openPosition(
     const solPriceUsd = entryPriceSol > 0 && (metrics.priceUsd ?? 0) > 0
       ? (metrics.priceUsd ?? 0) / entryPriceSol
       : 0
-    openMoonboyPosition(metrics, solPriceUsd).catch(err =>
+    openMoonboyPosition(metrics, solPriceUsd).catch((err: any) =>
       console.warn('[executor] openMoonboyPosition non-fatal error:', err?.message ?? err)
     )
 
