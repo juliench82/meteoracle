@@ -189,7 +189,49 @@ export async function openPosition(
     const binStep = dlmmPool.lbPair.binStep
     const mintX = dlmmPool.tokenX.publicKey
     const mintY = dlmmPool.tokenY.publicKey
+    const solIsTokenX = mintX.toBase58() === NATIVE_MINT_STR
+    const solIsTokenY = mintY.toBase58() === NATIVE_MINT_STR
 
+    // Early Token-2022 detection — this must happen BEFORE any ATA creation
+    // so we never build a wrong ATA instruction for Token-2022 mints.
+    const outputMint = solIsTokenX ? mintY : mintX
+    const outputTokenProgram = await getTokenProgramId(outputMint)
+    const isToken2022 = outputTokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
+
+    if (isToken2022) {
+      console.log(`${label} Token-2022 output mint detected early — skipping common ATA creation and using manual path`)
+      // Basic validations that the manual path also needs
+      const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
+      const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
+      const minBinId = activeBinId - binsDown
+      const maxBinId = activeBinId + binsUp
+      const binRange = binsDown + binsUp
+      const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
+
+      if (binRange > maxBins) {
+        console.warn(`${label} bin range too wide — rejecting`, { binRange, maxBins, binStep })
+        return null
+      }
+
+      return openPositionToken2022(
+        metrics,
+        strategy,
+        dlmmPool,
+        outputMint,
+        outputTokenProgram,
+        solAmount,
+        minBinId,
+        maxBinId,
+        solIsTokenX,
+        label,
+        await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
+        supabase,
+        DRY_RUN,
+        new Keypair()
+      )
+    }
+
+    // Only reach here for normal (legacy Token) pairs — safe to create ATAs
     const ataIxs: TransactionInstruction[] = []
     for (const [lbl, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
@@ -230,8 +272,6 @@ export async function openPosition(
     }
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
 
-    const solIsTokenX = mintX.toBase58() === NATIVE_MINT_STR
-    const solIsTokenY = mintY.toBase58() === NATIVE_MINT_STR
     if (!solIsTokenX && !solIsTokenY) {
       console.warn(`${label} pool has no SOL side — rejecting one-sided SOL zap-in`)
       await supabase.from('bot_logs').insert({
@@ -288,36 +328,11 @@ export async function openPosition(
       try {
         console.log(`${attemptLabel} building fresh zap quote...`)
 
-        // Re-fetch active bin for a fresh quote on retry
+        // Re-fetch active bin for a fresh quote on retry (Token-2022 is already handled before this loop)
         const activeBin = await dlmmPool.getActiveBin()
         const currentActiveBinId = activeBin.binId
         const currentMinDeltaId = minBinId - currentActiveBinId
         const currentMaxDeltaId = maxBinId - currentActiveBinId
-
-        // Check if the output token is Token-2022 (must be done inside the loop because variables are per-attempt)
-        const outputMint = solIsTokenX ? mintY : mintX
-        const outputTokenProgram = await getTokenProgramId(outputMint)
-        const isToken2022 = outputTokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
-
-        if (isToken2022) {
-          console.log(`${attemptLabel} Token-2022 output mint detected — using manual open path`)
-          return openPositionToken2022(
-            metrics,
-            strategy,
-            dlmmPool,
-            outputMint,
-            outputTokenProgram,
-            solAmount,
-            minBinId,
-            maxBinId,
-            solIsTokenX,
-            attemptLabel,
-            priorityFee,
-            supabase,
-            DRY_RUN,
-            positionKeypair
-          )
-        }
 
         const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk')
         const directSwapEstimate = await estimateDlmmDirectSwap({
@@ -492,6 +507,36 @@ async function openPositionToken2022(
 
     if (tokenAmountOut.isZero()) {
       throw new Error(`${label} Jupiter swap returned zero tokens`)
+    }
+
+    // Small safety improvement: explicitly ensure the ATA for the Token-2022 output mint exists
+    // using the correct token program ID (passed from the caller).
+    const outputAta = getAssociatedTokenAddressSync(
+      outputMint,
+      wallet.publicKey,
+      false,
+      outputTokenProgram,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    )
+
+    if (!(await connection.getAccountInfo(outputAta))) {
+      console.log(`${label} creating ATA for Token-2022 token (${outputMint.toBase58().slice(0, 8)}…)`)
+      const ataIx = createAssociatedTokenAccountIdempotentInstruction(
+        wallet.publicKey,
+        outputAta,
+        wallet.publicKey,
+        outputMint,
+        outputTokenProgram,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      )
+
+      const ataTx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }),
+        ataIx
+      )
+
+      const ataSig = await sendLegacyTx(ataTx, [wallet], label)
+      console.log(`${label} Token-2022 ATA created ✔ sig: ${ataSig}`)
     }
 
     // 2. Add liquidity using the DLMM SDK (one-sided on the token side)

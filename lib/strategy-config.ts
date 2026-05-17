@@ -65,7 +65,8 @@ export const MAX_DEEP_CHECKS = envNumber('MAX_DEEP_CHECKS', 6) as number
 export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', MAX_DEEP_CHECKS) as number
 export const MAX_MOMENTUM_DEEP_CHECKS = envNumber('MAX_MOMENTUM_DEEP_CHECKS', MAX_DEEP_CHECKS) as number
 
-// Fresh lane
+// Fresh / Snipe lane
+export const FRESH_SNIPE_MAX_AGE_MINUTES = envNumber('FRESH_SNIPE_MAX_AGE_MINUTES', 30)
 export const FRESH_MIN_LIQUIDITY_USD = envNumber(
   'FRESH_MIN_LIQUIDITY_USD',
   envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 20000)
@@ -76,6 +77,9 @@ export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
 export const HARD_MAX_TOKEN_AGE_MINUTES = envNumber('HARD_MAX_TOKEN_AGE_MINUTES', 120) as number
 export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
 export const SCANNER_EARLY_MAX_AGE_MINUTES = envNumber('SCANNER_EARLY_MAX_AGE_MINUTES', 90)
+
+// Two-track system (snipe vs mature)
+export const MATURE_MIN_SCORE_TO_OPEN = envNumber('MATURE_MIN_SCORE_TO_OPEN', 80)
 
 // ── Scanner core timing (single source of truth) ────────────────────────────
 export const LP_SCAN_INTERVAL_SEC = envNumber('LP_SCAN_INTERVAL_SEC', 900)

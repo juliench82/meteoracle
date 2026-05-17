@@ -17,10 +17,10 @@ import {
   isMoonshotToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
-import { evaluateDammEdge } from '@/strategies/damm-edge'
+// DAMM Edge scoring import removed (logic fully disabled)
 import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
 import { scalpSpikeStrategy } from '@/strategies/scalp-spike'
-import { openDammPosition, resolveVerifiedDammV2PoolForToken } from '../damm-executor'
+// openDammPosition / resolveVerifiedDammV2PoolForToken imports removed (DAMM scoring deleted)
 import { openMoonboyPosition } from '../moonboy-executor'
 import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
@@ -34,6 +34,7 @@ import {
   OOR_RECHECK_HOURS,
   HARD_MAX_TOKEN_AGE_MINUTES,
   SCANNER_EARLY_MAX_AGE_MINUTES,
+  FRESH_SNIPE_MAX_AGE_MINUTES,
   FRESH_MAX_AGE_MINUTES,
   FRESH_MIN_LIQUIDITY_USD,
   MOMENTUM_MIN_VOLUME_5M_USD,
@@ -44,11 +45,12 @@ import {
   MAX_FRESH_DEEP_CHECKS,
   MAX_MOMENTUM_DEEP_CHECKS,
   MIN_SCORE_TO_OPEN,
+  MATURE_MIN_SCORE_TO_OPEN,
   MOMENTUM_POOL_LIMIT,
   LP_SCANNER_ENABLED,
   EVIL_PANDA_ENABLED,
   SCALP_SPIKE_ENABLED,
-  DAMM_EDGE_ENABLED,
+  // DAMM_EDGE_ENABLED removed (scoring logic deleted)
 } from '@/lib/strategy-config'
 import {
   WSOL,
@@ -101,10 +103,7 @@ const METEORA_FILTERED_FETCH = {
   limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '800'),
 }
 
-// New Meteora listing detection (aligned with loosened DAMM Edge in Option A)
-const METEORA_NEW_LISTING_AGE_H   = 0.4   // ~24 minutes
-const METEORA_NEW_LISTING_LIQ_USD = 25_000
-const METEORA_NEW_LISTING_FEETVL  = 5     // % (was 8%)
+// (DAMM-related new listing constants removed)
 
 const SUPABASE_TIMEOUT_MS      = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
@@ -243,11 +242,7 @@ function getDisabledStrategyReason(strategyId: string): string | null {
   return null
 }
 
-function getOpenDammEdgeCount(limitState: OpenLpLimitState | null): number {
-  return limitState?.livePositions.filter(position =>
-    position.position_type === 'damm-edge' || position.strategy_id === 'damm-edge',
-  ).length ?? 0
-}
+// getOpenDammEdgeCount removed (DAMM Edge scoring deleted)
 
 function scoreFeeTvl1hPct(pct: number): number {
   if (pct >= 8) return 100
@@ -585,9 +580,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     `${pools.length} lane-eligible`,
   )
   console.log(
-    `[scanner] early age gate — kept ${earlyAgePools.length}/${fetchedPools.length} ` +
-    `<=${SCANNER_EARLY_MAX_AGE_MINUTES}min + ${momentumSpikePools.length} momentum-spike ` +
-    `+ ${momentumRegainPools.length} momentum-regain exception(s)`,
+    `[scanner] early age gate — snipe(<=${FRESH_SNIPE_MAX_AGE_MINUTES}min): ${earlyAgePools.length} + ` +
+    `momentum exceptions: ${momentumSpikePools.length + momentumRegainPools.length}`,
   )
 
   console.log(
@@ -744,16 +738,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const volumeGrowth1h = getRecentVolumeGrowth(bestPool)
     const momentumScore = scoreMeteoraMomentum(bestPool)
 
-    if (
-      poolAgeHours < METEORA_NEW_LISTING_AGE_H &&
-      liqUsd >= METEORA_NEW_LISTING_LIQ_USD &&
-      Math.max(feeTvl1hPct, feeTvl5mPct * 12) >= METEORA_NEW_LISTING_FEETVL
-    ) {
-      console.log(
-        `[scanner] ${symbol} — new Meteora listing (DAMM Edge candidate) ` +
-        `(${(poolAgeHours * 60).toFixed(0)}min old, liq=$${liqUsd.toFixed(0)}, recentFeeTvl=${Math.max(feeTvl1hPct, feeTvl5mPct * 12).toFixed(1)}%)`
-      )
-    }
+    // (Old DAMM Edge new-listing detection removed)
 
     const quoteTokenMint = getQuoteTokenMint(bestPool)
 
@@ -868,82 +853,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       binStep,
     }
 
-    // ========== DAMM v2 EDGE =================================================
-    if (lane === 'fresh' && launchpadSource === 'meteora' && DAMM_EDGE_ENABLED) {
-      const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
-      console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
-      if (dammDecision.shouldUseDamm && dammDecision.params) {
-        if (openBlockedReason || openedCount >= availableOpenSlots) {
-          const reason = openBlockedReason ?? 'slots_filled_this_tick'
-          console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: ${reason}; continuing DLMM evaluation`)
-        } else if (!await isOpenAllowedToday()) {
-          openSkippedCount++
-          console.log(`[scanner][damm-edge] ${symbol} qualifies but DAMM open skipped: daily loss circuit breaker`)
-        } else {
-          const openDammCount = getOpenDammEdgeCount(limitState) + openedDammCountThisTick
-          if (openDammCount >= MAX_CONCURRENT_DAMM_POSITIONS) {
-            console.log(
-              `[scanner][damm-edge] max DAMM positions reached ` +
-              `(${openDammCount}/${MAX_CONCURRENT_DAMM_POSITIONS}) — continuing DLMM evaluation`,
-            )
-          } else {
-            const verifiedDammPool = await withTimeout(
-              resolveVerifiedDammV2PoolForToken({ tokenAddress, quoteMint: WSOL }),
-              EXTERNAL_CALL_TIMEOUT_MS,
-              `resolveVerifiedDammV2PoolForToken ${symbol}`,
-            )
-
-            if (!verifiedDammPool) {
-              console.log(`[scanner][damm-edge] ${symbol} has no verified DAMM v2 SOL pool (or timeout); continuing DLMM evaluation`)
-            } else {
-              const dammParams = {
-                ...dammDecision.params,
-                poolAddress: verifiedDammPool.poolAddress,
-                metadata: {
-                  ...(dammDecision.params.metadata ?? {}),
-                  damm_pool_resolver_source: verifiedDammPool.source,
-                  scanner_source_pool_address: metrics.poolAddress,
-                  verified_damm_pool_address: verifiedDammPool.poolAddress,
-                  verified_damm_token_a_mint: verifiedDammPool.tokenAMint,
-                  verified_damm_token_b_mint: verifiedDammPool.tokenBMint,
-                },
-              }
-
-              console.log(
-                `[scanner][damm-edge] TRIGGERED — opening verified DAMM v2 position for ${symbol} ` +
-                `pool=${verifiedDammPool.poolAddress} source=${verifiedDammPool.source}`,
-              )
-              const result = await openDammPosition(dammParams)
-              if (result.success) {
-                openedCount++
-                openedDammCountThisTick++
-                dailyLossLimitHit = null
-                openedMintsThisTick.add(tokenAddress)
-                // Moonboy hook — fire-and-forget after successful DAMM open
-                void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
-                await sendAlert({
-                  type:          'position_opened',
-                  symbol,
-                  strategy:      'damm-edge',
-                  solDeposited:  dammParams.solAmount,
-                  entryPrice:    metrics.priceUsd,
-                  positionId:    result.positionId ?? result.positionPubkey,
-                  poolAddress:   verifiedDammPool.poolAddress,
-                  mint:          tokenAddress,
-                })
-
-                continue
-              }
-
-              console.error(`[scanner][damm-edge] openDammPosition failed for ${symbol}: ${result.error}; continuing DLMM evaluation`)
-            }
-          }
-        }
-      }
-    } else if (lane === 'fresh' && launchpadSource === 'meteora' && !DAMM_EDGE_ENABLED) {
-      console.log(`[scanner][damm-edge] ${symbol} DAMM edge path disabled (DAMM_EDGE_ENABLED !== true); continuing DLMM evaluation`)
-    }
-    // ========== END DAMM v2 EDGE =============================================
+    // (DAMM Edge scoring logic has been fully removed)
+    // ========== END DAMM v2 EDGE (SCORING REMOVED) ============================
 
     const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : classifyToken({
       address:        metrics.address,
@@ -1001,9 +912,18 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
       const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
-      const accepted = lane === 'fresh' ? finalScore > 0 : finalScore >= MIN_SCORE_TO_OPEN
+      // Two-track system
+      const ageMinutes = metrics.ageHours * 60
+      const isSnipe = ageMinutes <= FRESH_SNIPE_MAX_AGE_MINUTES
+      const track = isSnipe ? 'snipe' : 'mature'
+
+      const threshold = isSnipe ? 0 : MATURE_MIN_SCORE_TO_OPEN
+      const accepted = finalScore >= threshold
+
       if (!accepted) {
-        rejectionReason = lane === 'fresh' ? 'fresh safety check failed' : `score ${finalScore} < threshold ${MIN_SCORE_TO_OPEN}`
+        rejectionReason = isSnipe
+          ? 'snipe safety check failed'
+          : `score ${finalScore} < mature threshold ${MATURE_MIN_SCORE_TO_OPEN}`
         decision = 'REJECTED'
       } else {
         decision = 'ACCEPTED'
@@ -1025,6 +945,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         },
         launchpad: launchpadSource,
         lane,
+        track: isSnipe ? 'snipe' : 'mature',
         decision,
         reason:    rejectionReason,
       }))
@@ -1108,7 +1029,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     if (decision === 'ACCEPTED' && strategy) {
       candidateCount++
-      console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay})`)
+      const candidateTrack = (ageHours * 60) <= FRESH_SNIPE_MAX_AGE_MINUTES ? 'snipe' : 'mature';
+      console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, ${candidateTrack} track, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay})`)
       await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
       const disabledReason = getDisabledStrategyReason(strategy.id)
