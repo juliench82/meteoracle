@@ -197,7 +197,7 @@ export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'in
     const upsertResult = await withTimeout(
       createServerClient()
         .from('bot_health')
-        .upsert(payload, { onConflict: 'service' }),
+        .upsert(payload, { onConflict: 'token_address' }),
       SUPABASE_TIMEOUT_MS,
       'bot_health upsert scanner',
     )
@@ -1056,7 +1056,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const insertResult = await withTimeout(
       supabase
         .from('candidates')
-        .insert({
+        .upsert({
           token_address:     metrics.address,
           symbol:            metrics.symbol,
           score:             finalScore,
@@ -1088,6 +1088,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           decision:          decision,
           rejection_reason:  rejectionReason,
           metadata:          {},
+        },
+        {
+          onConflict: 'token_address',
+          ignoreDuplicates: false,
         }),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
     )
