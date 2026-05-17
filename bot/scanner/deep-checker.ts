@@ -1091,7 +1091,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
             metadata:          {},
           },
           {
-            onConflict: 'candidates_token_hour_unique',
+            onConflict: 'token_address,scanned_at',
             ignoreDuplicates: false,   // update existing row with fresh data on re-evaluation within the same hour
           }
         ),
