@@ -4,8 +4,9 @@ import {
   heliusAxiosPost,
   isRpcProviderCooldownError,
 } from '@/lib/rpc-rate-limit'
+import { HELIUS_ENABLED, HELIUS_HOLDER_MAX_PAGES } from '@/lib/strategy-config'
 
-const DAS_MAX_PAGES  = parseInt(process.env.HELIUS_HOLDER_MAX_PAGES ?? '1') // default 1 page = 1000 holders
+const DAS_MAX_PAGES = HELIUS_HOLDER_MAX_PAGES
 
 const DAS_CACHE_TTL_MS       = 8 * 60 * 1_000  // 8 min — reliable DAS result
 const HEURISTIC_CACHE_TTL_MS = 4 * 60 * 1_000  // 4 min — heuristic fallback
@@ -42,7 +43,7 @@ export async function checkHolders(mintAddress: string): Promise<HolderData> {
 }
 
 async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
-  if (process.env.HELIUS_ENABLED !== 'true') {
+  if (!HELIUS_ENABLED) {
     return { holderCount: 0, topHolderPct: 0, reliable: false }
   }
   const heliusRpcUrl = getHeliusRpcEndpoint()

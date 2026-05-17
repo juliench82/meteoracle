@@ -15,6 +15,13 @@ export function envNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+export function envBool(name: string, fallback = false): boolean {
+  const value = process.env[name]
+  if (value === undefined) return fallback
+  const normalized = value.toLowerCase().trim()
+  return normalized === 'true' || normalized === '1' || normalized === 'yes'
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Common Scanner / Strategy Tuning Constants (with env overrides)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,5 +103,25 @@ export const DAMM_EDGE_MAX_AGE_MINUTES = envNumber('DAMM_EDGE_MAX_AGE_MINUTES', 
 export const DAMM_EDGE_MIN_FEE_TVL_PCT = envNumber('DAMM_EDGE_MIN_FEE_TVL_PCT', 5)
 export const DAMM_EDGE_MIN_LIQUIDITY_USD = envNumber('DAMM_EDGE_MIN_LIQUIDITY_USD', 25_000)
 export const DAMM_EDGE_MAX_MC_USD = envNumber('DAMM_EDGE_MAX_MC_USD', 5_000_000)
+
+// ── Feature flags / enabled switches ────────────────────────────────────────
+export const SCANNER_ENABLED = envBool('SCANNER_ENABLED', true)
+export const LP_SCANNER_ENABLED = envBool('LP_SCANNER_ENABLED', true) && SCANNER_ENABLED
+export const EVIL_PANDA_ENABLED = envBool('EVIL_PANDA_ENABLED', true)
+export const SCALP_SPIKE_ENABLED = envBool('SCALP_SPIKE_ENABLED', true)
+export const DAMM_EDGE_ENABLED = envBool('DAMM_EDGE_ENABLED', false)
+export const STABLE_FARM_ENABLED = envBool('STABLE_FARM_ENABLED', true)
+export const BLUECHIP_FARM_ENABLED = envBool('BLUECHIP_FARM_ENABLED', false)
+export const MOONBOY_ENABLED = envBool('MOONBOY_ENABLED', true)
+
+// ── Scoring & deep-check tuning ─────────────────────────────────────────────
+export const MIN_SCORE_TO_OPEN = envNumber('MIN_SCORE_TO_OPEN', 65)
+
+// ── Advanced scanner knobs ──────────────────────────────────────────────────
+export const MOMENTUM_POOL_LIMIT = envNumber('MOMENTUM_POOL_LIMIT', 500)
+export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 1)
+
+// Re-export HELIUS_ENABLED for convenience (used in helius.ts)
+export const HELIUS_ENABLED = envBool('HELIUS_ENABLED', false)
 
 console.log('[strategy-config] centralized env configuration loaded')

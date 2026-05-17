@@ -43,6 +43,12 @@ import {
   DEEP_CHECK_DELAY_MS,
   MAX_FRESH_DEEP_CHECKS,
   MAX_MOMENTUM_DEEP_CHECKS,
+  MIN_SCORE_TO_OPEN,
+  MOMENTUM_POOL_LIMIT,
+  LP_SCANNER_ENABLED,
+  EVIL_PANDA_ENABLED,
+  SCALP_SPIKE_ENABLED,
+  DAMM_EDGE_ENABLED,
 } from '@/lib/strategy-config'
 import {
   WSOL,
@@ -76,7 +82,6 @@ const PRE_FILTER = {
   maxLiquidityUsd: 500_000_000,
 }
 
-const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 export const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
   process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',
 )
@@ -87,11 +92,7 @@ const MARKET_LP_SOL_PER_POSITION = parseFloat(
   process.env.MAX_SOL_PER_POSITION ??
   '0.1',
 )
-const SCALP_SPIKE_ENABLED = process.env.SCALP_SPIKE_ENABLED === 'true'
-const EVIL_PANDA_ENABLED = process.env.EVIL_PANDA_ENABLED === 'true'
-const LP_SCANNER_ENABLED = process.env.LP_SCANNER_ENABLED !== 'false' &&
-  process.env.SCANNER_ENABLED !== 'false'
-const MOMENTUM_POOL_LIMIT      = parseInt(process.env.MOMENTUM_POOL_LIMIT ?? '500')
+
 
 const METEORA_FILTERED_FETCH = {
   minTvlUsd: parseFloat(process.env.METEORA_MIN_TVL_USD ?? '8000'),
@@ -868,7 +869,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
 
     // ========== DAMM v2 EDGE =================================================
-    if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED === 'true') {
+    if (lane === 'fresh' && launchpadSource === 'meteora' && DAMM_EDGE_ENABLED) {
       const dammDecision = await evaluateDammEdge(tokenAddress, metrics)
       console.log(`[scanner][damm-edge] ${symbol}: ${dammDecision.reason}`)
       if (dammDecision.shouldUseDamm && dammDecision.params) {
@@ -939,7 +940,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           }
         }
       }
-    } else if (lane === 'fresh' && launchpadSource === 'meteora' && process.env.DAMM_EDGE_ENABLED !== 'true') {
+    } else if (lane === 'fresh' && launchpadSource === 'meteora' && !DAMM_EDGE_ENABLED) {
       console.log(`[scanner][damm-edge] ${symbol} DAMM edge path disabled (DAMM_EDGE_ENABLED !== true); continuing DLMM evaluation`)
     }
     // ========== END DAMM v2 EDGE =============================================
