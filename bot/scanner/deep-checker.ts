@@ -1078,7 +1078,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
             rugcheck_score:    metrics.rugcheckScore,
             top_holder_pct:    metrics.topHolderPct,
             bin_step:          binStep,
-            scanned_at:        new Date().toISOString(),
+            scanned_at:        new Date(new Date().setMinutes(0, 0, 0, 0)).toISOString(),  // truncate to the hour to match the unique constraint
             score_volmc:       breakdown.volMcScore,
             score_holders:     breakdown.holderScore,
             score_freshness:   breakdown.freshnessScore,
@@ -1091,8 +1091,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
             metadata:          {},
           },
           {
-            onConflict: 'candidates_token_hour_unique',
-            ignoreDuplicates: false,   // update existing row with fresh data on re-evaluation
+            onConflict: 'token_address,scanned_at',
+            ignoreDuplicates: false,   // update existing row with fresh data on re-evaluation within the same hour
           }
         ),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
@@ -1102,7 +1102,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     if (!insertOk) {
       const errorDetails = insertResult && 'error' in insertResult ? insertResult.error : null
 
-      // Only log real errors — ignore duplicate key conflicts (we use ignoreDuplicates: true)
+      // Only log real errors — ignore duplicate key conflicts (we use ignoreDuplicates: false)
       if (errorDetails?.code !== '23505') {
         console.error(`[scanner] candidates insert failed for ${symbol}:`, {
           error: errorDetails,
