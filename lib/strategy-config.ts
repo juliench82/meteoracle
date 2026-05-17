@@ -66,7 +66,7 @@ export const FRESH_MIN_LIQUIDITY_USD = envNumber(
 )
 
 // Misc
-export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 0)
+export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
 export const HARD_MAX_TOKEN_AGE_MINUTES = envNumber('HARD_MAX_TOKEN_AGE_MINUTES', 120) as number
 
 // ─────────────────────────────────────────────────────────────────────────────

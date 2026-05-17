@@ -1092,7 +1092,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           },
           {
             onConflict: 'candidates_token_hour_unique',
-            ignoreDuplicates: true,
+            ignoreDuplicates: false,   // update existing row with fresh data on re-evaluation
           }
         ),
       SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
