@@ -310,6 +310,10 @@ export async function openPosition(
           `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
         )
 
+        // Resolve the correct token program for the output mint (critical for Token-2022 / pump.fun tokens)
+        const outputTokenProgram = await getTokenProgramId(new PublicKey(metrics.address))
+        console.log(`${attemptLabel} using output token program: ${outputTokenProgram.toBase58()} for ${metrics.symbol}`)
+
         const zap = await getZap()
         const zapParams = await zap.getZapInDlmmDirectParams({
           user: wallet.publicKey,
@@ -325,6 +329,7 @@ export async function openPosition(
           swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
           maxTransferAmountExtendPercentage: DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
           directSwapEstimate: directSwapEstimate.result,
+          tokenProgram: outputTokenProgram,       // Required for Token-2022 output tokens (pump.fun graduations etc.)
         })
 
         const zapResponse: ZapInDlmmResponse = await zap.buildZapInDlmmTransaction({
