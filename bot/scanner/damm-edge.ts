@@ -14,14 +14,30 @@ const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const MAX_CONCURRENT_DAMM_POSITIONS = 2
 
 async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): Promise<void> {
-  if (!moonboyStrategy.enabled) return
-  if (metrics.ageHours > moonboyStrategy.filters.maxAgeHours) {
-    console.log(
-      `[moonboy] ${metrics.symbol} — skip: age ${metrics.ageHours.toFixed(1)}h > ` +
-      `${moonboyStrategy.filters.maxAgeHours}h gate`,
-    )
+  const isDryRun = process.env.BOT_DRY_RUN === 'true'
+
+  if (!moonboyStrategy.enabled) {
+    if (isDryRun) {
+      console.log(`[moonboy] ${metrics.symbol} — DRY RUN would have considered Moonboy but strategy is disabled`)
+    }
     return
   }
+
+  if (metrics.ageHours > moonboyStrategy.filters.maxAgeHours) {
+    if (isDryRun) {
+      console.log(
+        `[moonboy] ${metrics.symbol} — DRY RUN would have considered Moonboy but skipped: ` +
+        `age ${metrics.ageHours.toFixed(1)}h > ${moonboyStrategy.filters.maxAgeHours}h gate`,
+      )
+    } else {
+      console.log(
+        `[moonboy] ${metrics.symbol} — skip: age ${metrics.ageHours.toFixed(1)}h > ` +
+        `${moonboyStrategy.filters.maxAgeHours}h gate`,
+      )
+    }
+    return
+  }
+
   try {
     const moonboyId = await openMoonboyPosition(metrics, solPriceUsd)
     if (moonboyId) {

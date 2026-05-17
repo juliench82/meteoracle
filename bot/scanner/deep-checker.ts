@@ -396,14 +396,30 @@ async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createSer
  * Gate: MOONBOY_ENABLED !== 'false' AND token age (DexScreener) <= 1.5h.
  */
 async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): Promise<void> {
-  if (!moonboyStrategy.enabled) return
-  if (metrics.ageHours > moonboyStrategy.filters.maxAgeHours) {
-    console.log(
-      `[moonboy] ${metrics.symbol} — skip: age ${metrics.ageHours.toFixed(1)}h > ` +
-      `${moonboyStrategy.filters.maxAgeHours}h gate`,
-    )
+  const isDryRun = process.env.BOT_DRY_RUN === 'true'
+
+  if (!moonboyStrategy.enabled) {
+    if (isDryRun) {
+      console.log(`[moonboy] ${metrics.symbol} — DRY RUN would have considered Moonboy but strategy is disabled`)
+    }
     return
   }
+
+  if (metrics.ageHours > moonboyStrategy.filters.maxAgeHours) {
+    if (isDryRun) {
+      console.log(
+        `[moonboy] ${metrics.symbol} — DRY RUN would have considered Moonboy but skipped: ` +
+        `age ${metrics.ageHours.toFixed(1)}h > ${moonboyStrategy.filters.maxAgeHours}h gate`,
+      )
+    } else {
+      console.log(
+        `[moonboy] ${metrics.symbol} — skip: age ${metrics.ageHours.toFixed(1)}h > ` +
+        `${moonboyStrategy.filters.maxAgeHours}h gate`,
+      )
+    }
+    return
+  }
+
   try {
     const moonboyId = await openMoonboyPosition(metrics, solPriceUsd)
     if (moonboyId) {
@@ -917,13 +933,18 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       const isSnipe = ageMinutes <= FRESH_SNIPE_MAX_AGE_MINUTES
       const track = isSnipe ? 'snipe' : 'mature'
 
-      const threshold = isSnipe ? 0 : MATURE_MIN_SCORE_TO_OPEN
-      const accepted = finalScore >= threshold
+      // Insert threshold (what gets recorded in candidates table)
+      const insertThreshold = isSnipe ? 0 : MIN_SCORE_TO_OPEN
+      // Open threshold (what actually triggers trying to open a position)
+      const openThreshold   = isSnipe ? 0 : MATURE_MIN_SCORE_TO_OPEN
 
-      if (!accepted) {
+      const meetsInsert = finalScore >= insertThreshold
+      const meetsOpen   = finalScore >= openThreshold
+
+      if (!meetsInsert) {
         rejectionReason = isSnipe
           ? 'snipe safety check failed'
-          : `score ${finalScore} < mature threshold ${MATURE_MIN_SCORE_TO_OPEN}`
+          : `score ${finalScore} < insert threshold ${MIN_SCORE_TO_OPEN}`
         decision = 'REJECTED'
       } else {
         decision = 'ACCEPTED'
@@ -1032,6 +1053,14 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       const candidateTrack = (ageHours * 60) <= FRESH_SNIPE_MAX_AGE_MINUTES ? 'snipe' : 'mature';
       console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, ${candidateTrack} track, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay})`)
       await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
+
+      // For mature track, we only attempt to open if score >= 80 (even if we recorded it at 65+)
+      const canOpenThisCandidate = (ageHours * 60) <= FRESH_SNIPE_MAX_AGE_MINUTES || finalScore >= MATURE_MIN_SCORE_TO_OPEN
+      if (!canOpenThisCandidate) {
+        openSkippedCount++
+        console.log(`[scanner] ${symbol} recorded (score ${finalScore}) but below open threshold ${MATURE_MIN_SCORE_TO_OPEN} on mature track`)
+        continue
+      }
 
       const disabledReason = getDisabledStrategyReason(strategy.id)
       if (disabledReason) {
