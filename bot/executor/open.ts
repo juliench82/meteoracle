@@ -251,81 +251,125 @@ export async function openPosition(
     const maxDeltaId = maxBinId - activeBinId
     const favorXInActiveId = solIsTokenX
 
-    const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk')
-    const directSwapEstimate = await estimateDlmmDirectSwap({
-      amountIn,
-      inputTokenMint: NATIVE_MINT,
-      lbPair: poolPubkey,
-      connection,
-      swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
-      minDeltaId,
-      maxDeltaId,
-      strategy: strategyType,
-    })
-
-    console.log(
-      `${label} DLMM zap-in estimate: input=${amountIn.toString()} lamports ` +
-      `solSide=${solIsTokenX ? 'X' : 'Y'} swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
-      `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
-    )
-
-    const zap = await getZap()
-    const zapParams = await zap.getZapInDlmmDirectParams({
-      user: wallet.publicKey,
-      lbPair: poolPubkey,
-      inputTokenMint: NATIVE_MINT,
-      amountIn,
-      maxActiveBinSlippage: DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE,
-      minDeltaId,
-      maxDeltaId,
-      strategy: strategyType,
-      favorXInActiveId,
-      maxAccounts: DLMM_ZAP_MAX_ACCOUNTS,
-      swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
-      maxTransferAmountExtendPercentage: DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
-      directSwapEstimate: directSwapEstimate.result,
-    })
-
     const positionKeypair = new Keypair()
-    const zapResponse: ZapInDlmmResponse = await zap.buildZapInDlmmTransaction({
-      ...zapParams,
-      position: positionKeypair.publicKey,
-    })
 
     const sendZapTx = async (
       tx: Transaction | undefined,
       signers: import('@solana/web3.js').Signer[],
       stage: string,
+      attemptLabel: string,
     ): Promise<string | null> => {
       if (!tx || tx.instructions.length === 0) return null
-      const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), signers, label)
-      console.log(`${label} zap-in ${stage} confirmed ✔ sig: ${sig}`)
+      const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), signers, attemptLabel)
+      console.log(`${attemptLabel} zap-in ${stage} confirmed ✔ sig: ${sig}`)
       return sig
     }
 
-    let cleanupSent = false
-    const sendCleanup = async (stage: string): Promise<void> => {
-      if (cleanupSent) return
-      cleanupSent = true
+    let openSig = ''
+    let lastZapErr: any = null
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const attemptLabel = `${label} (attempt ${attempt}/2)`
+      let cleanupSentThisAttempt = false
+
+      const sendCleanupThisAttempt = async (stage: string) => {
+        if (cleanupSentThisAttempt) return
+        cleanupSentThisAttempt = true
+        try {
+          // We need the latest zapResponse for this attempt
+          // (it will be defined in the try block below)
+        } catch (e) {
+          console.warn(`${attemptLabel} cleanup helper error:`, e)
+        }
+      }
+
       try {
-        await sendZapTx(zapResponse.cleanUpTransaction, [wallet], stage)
-      } catch (cleanupErr) {
-        console.warn(`${label} zap-in cleanup failed after ${stage}:`, cleanupErr)
+        console.log(`${attemptLabel} building fresh zap quote...`)
+
+        // Re-fetch active bin for a fresh quote on retry
+        const activeBin = await dlmmPool.getActiveBin()
+        const currentActiveBinId = activeBin.binId
+        const currentMinDeltaId = minBinId - currentActiveBinId
+        const currentMaxDeltaId = maxBinId - currentActiveBinId
+
+        const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk')
+        const directSwapEstimate = await estimateDlmmDirectSwap({
+          amountIn,
+          inputTokenMint: NATIVE_MINT,
+          lbPair: poolPubkey,
+          connection,
+          swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
+          minDeltaId: currentMinDeltaId,
+          maxDeltaId: currentMaxDeltaId,
+          strategy: strategyType,
+        })
+
+        console.log(
+          `${attemptLabel} DLMM zap-in estimate: input=${amountIn.toString()} lamports ` +
+          `solSide=${solIsTokenX ? 'X' : 'Y'} swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
+          `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
+        )
+
+        const zap = await getZap()
+        const zapParams = await zap.getZapInDlmmDirectParams({
+          user: wallet.publicKey,
+          lbPair: poolPubkey,
+          inputTokenMint: NATIVE_MINT,
+          amountIn,
+          maxActiveBinSlippage: DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE,
+          minDeltaId: currentMinDeltaId,
+          maxDeltaId: currentMaxDeltaId,
+          strategy: strategyType,
+          favorXInActiveId,
+          maxAccounts: DLMM_ZAP_MAX_ACCOUNTS,
+          swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
+          maxTransferAmountExtendPercentage: DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
+          directSwapEstimate: directSwapEstimate.result,
+        })
+
+        const zapResponse: ZapInDlmmResponse = await zap.buildZapInDlmmTransaction({
+          ...zapParams,
+          position: positionKeypair.publicKey,
+        })
+
+        const sendCleanupThisAttemptFn = async (stage: string): Promise<void> => {
+          if (cleanupSentThisAttempt) return
+          cleanupSentThisAttempt = true
+          try {
+            await sendZapTx(zapResponse.cleanUpTransaction, [wallet], stage, attemptLabel)
+          } catch (cleanupErr) {
+            console.warn(`${attemptLabel} zap-in cleanup failed after ${stage}:`, cleanupErr)
+          }
+        }
+
+        await sendZapTx(zapResponse.setupTransaction, [wallet], 'setup', attemptLabel)
+        for (let i = 0; i < zapResponse.swapTransactions.length; i++) {
+          await sendZapTx(zapResponse.swapTransactions[i], [wallet], `swap ${i + 1}/${zapResponse.swapTransactions.length}`, attemptLabel)
+        }
+        await sendZapTx(zapResponse.ledgerTransaction, [wallet], 'ledger', attemptLabel)
+        openSig = await sendZapTx(zapResponse.zapInTransaction, [wallet, positionKeypair], 'position', attemptLabel) ?? ''
+        await sendZapTx(zapResponse.cleanUpTransaction, [wallet], 'cleanup', attemptLabel)
+
+        console.log(`${attemptLabel} position opened successfully`)
+        break // success — exit retry loop
+
+      } catch (zapErr) {
+        lastZapErr = zapErr
+        console.warn(`${label} attempt ${attempt}/2 failed:`, zapErr)
+
+        if (attempt === 2) {
+          // Final attempt failed — re-throw so existing error handling runs
+          throw zapErr
+        }
+
+        // Small delay before retrying with a fresh quote
+        await new Promise((r) => setTimeout(r, 1200))
       }
     }
 
-    let openSig = ''
-    try {
-      await sendZapTx(zapResponse.setupTransaction, [wallet], 'setup')
-      for (let i = 0; i < zapResponse.swapTransactions.length; i++) {
-        await sendZapTx(zapResponse.swapTransactions[i], [wallet], `swap ${i + 1}/${zapResponse.swapTransactions.length}`)
-      }
-      await sendZapTx(zapResponse.ledgerTransaction, [wallet], 'ledger')
-      openSig = await sendZapTx(zapResponse.zapInTransaction, [wallet, positionKeypair], 'position') ?? ''
-      await sendCleanup('cleanup')
-    } catch (zapErr) {
-      await sendCleanup('failed-open')
-      throw zapErr
+    // If we reach here on attempt 2 without breaking, the error was already thrown above
+    if (!openSig && lastZapErr) {
+      throw lastZapErr
     }
 
     let tokenAmountDeposited = 0
