@@ -197,7 +197,7 @@ export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'in
     const upsertResult = await withTimeout(
       createServerClient()
         .from('bot_health')
-        .upsert(payload, { onConflict: 'token_address' }),
+        .upsert(payload),  // uses primary key (service) automatically
       SUPABASE_TIMEOUT_MS,
       'bot_health upsert scanner',
     )
