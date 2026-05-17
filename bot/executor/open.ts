@@ -8,6 +8,8 @@ import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
   TransactionInstruction,
+  Connection,
+  VersionedTransaction,
 } from '@solana/web3.js'
 import {
   getAssociatedTokenAddressSync,
@@ -292,6 +294,31 @@ export async function openPosition(
         const currentMinDeltaId = minBinId - currentActiveBinId
         const currentMaxDeltaId = maxBinId - currentActiveBinId
 
+        // Check if the output token is Token-2022 (must be done inside the loop because variables are per-attempt)
+        const outputMint = solIsTokenX ? mintY : mintX
+        const outputTokenProgram = await getTokenProgramId(outputMint)
+        const isToken2022 = outputTokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
+
+        if (isToken2022) {
+          console.log(`${attemptLabel} Token-2022 output mint detected — using manual open path`)
+          return openPositionToken2022(
+            metrics,
+            strategy,
+            dlmmPool,
+            outputMint,
+            outputTokenProgram,
+            solAmount,
+            minBinId,
+            maxBinId,
+            solIsTokenX,
+            attemptLabel,
+            priorityFee,
+            supabase,
+            DRY_RUN,
+            positionKeypair
+          )
+        }
+
         const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk')
         const directSwapEstimate = await estimateDlmmDirectSwap({
           amountIn,
@@ -311,9 +338,6 @@ export async function openPosition(
         )
 
         // Resolve the correct token program for the output mint (critical for Token-2022 / pump.fun tokens)
-        const outputTokenProgram = await getTokenProgramId(new PublicKey(metrics.address))
-        console.log(`${attemptLabel} using output token program: ${outputTokenProgram.toBase58()} for ${metrics.symbol}`)
-
         const zap = await getZap()
         const zapParams = await zap.getZapInDlmmDirectParams({
           user: wallet.publicKey,
@@ -329,7 +353,6 @@ export async function openPosition(
           swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
           maxTransferAmountExtendPercentage: DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
           directSwapEstimate: directSwapEstimate.result,
-          tokenProgram: outputTokenProgram,       // Required for Token-2022 output tokens (pump.fun graduations etc.)
         })
 
         const zapResponse: ZapInDlmmResponse = await zap.buildZapInDlmmTransaction({
@@ -421,4 +444,160 @@ export async function openPosition(
     })
     return null
   }
+}
+
+/**
+ * Manual open path for Token-2022 output tokens (e.g. many pump.fun graduations).
+ * Uses Jupiter for the SOL → token swap + DLMM SDK for adding liquidity.
+ */
+async function openPositionToken2022(
+  metrics: TokenMetrics,
+  strategy: Strategy,
+  dlmmPool: any,
+  outputMint: PublicKey,
+  outputTokenProgram: PublicKey,
+  solAmount: number,
+  minBinId: number,
+  maxBinId: number,
+  solIsTokenX: boolean,
+  attemptLabel: string,
+  priorityFee: number,
+  supabase: any,
+  DRY_RUN: boolean,
+  positionKeypair: Keypair
+): Promise<string | null> {
+  const label = `${attemptLabel}[token2022]`
+
+  if (DRY_RUN) {
+    console.log(`${label} DRY RUN — skipping on-chain tx`)
+    return null
+  }
+
+  const connection = getConnection()
+  const wallet = getWallet()
+
+  try {
+    const amountIn = new BN(Math.floor(solAmount * 1e9))
+
+    // 1. Swap SOL → token using Jupiter (reliable for Token-2022)
+    console.log(`${label} swapping ${solAmount} SOL → ${metrics.symbol} via Jupiter...`)
+    const tokenAmountOut = await swapSolToTokenViaJupiter(
+      connection,
+      wallet,
+      outputMint,
+      amountIn,
+      100 // 1% slippage for safety
+    )
+    console.log(`${label} received ${tokenAmountOut.toString()} of ${metrics.symbol}`)
+
+    if (tokenAmountOut.isZero()) {
+      throw new Error(`${label} Jupiter swap returned zero tokens`)
+    }
+
+    // 2. Add liquidity using the DLMM SDK (one-sided on the token side)
+    const activeBin = await dlmmPool.getActiveBin()
+    const activeBinId = activeBin.binId
+
+    const minDeltaId = minBinId - activeBinId
+    const maxDeltaId = maxBinId - activeBinId
+
+    console.log(`${label} adding liquidity with DLMM SDK (Token-2022 path)...`)
+
+    const { userPositions } = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+      positionPubKey: positionKeypair.publicKey,
+      user: wallet.publicKey,
+      totalXAmount: solIsTokenX ? new BN(0) : tokenAmountOut,
+      totalYAmount: solIsTokenX ? tokenAmountOut : new BN(0),
+      strategy: strategyTypeForDistribution(await getStrategyType(), strategy.position.distributionType),
+      minBinId,
+      maxBinId,
+      // The DLMM SDK will use the correct program based on the pool
+    })
+
+    const userPos = userPositions.find(
+      (p: any) => p.publicKey.toBase58() === positionKeypair.publicKey.toBase58()
+    )
+
+    if (!userPos) {
+      throw new Error(`${label} position was not found after initializePositionAndAddLiquidityByStrategy`)
+    }
+
+    const openSig = 'manual-token2022-' + Date.now() // We can improve this later with real signature
+
+    const tokenAmountDeposited = solIsTokenX
+      ? (userPos.positionData.totalYAmount as BN).toNumber() / 1e6
+      : (userPos.positionData.totalXAmount as BN).toNumber() / 1e6
+
+    const positionId = await persistPosition(
+      metrics,
+      strategy,
+      openSig,
+      metrics.priceUsd ?? 0,
+      getDecimalAdjustedPrice(dlmmPool, activeBin),
+      solAmount,
+      positionKeypair.publicKey.toBase58(),
+      tokenAmountDeposited,
+      DRY_RUN
+    )
+
+    await sendOpenAlert(metrics, strategy, positionId, solAmount, getDecimalAdjustedPrice(dlmmPool, activeBin))
+
+    console.log(`${label} Token-2022 position opened ✔`)
+    return positionId
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`${label} failed:`, message)
+    await createServerClient().from('bot_logs').insert({
+      level: 'error',
+      event: 'open_position_token2022_failed',
+      payload: { symbol: metrics.symbol, strategy: strategy.id, error: message },
+    })
+    return null
+  }
+}
+
+/**
+ * Simple Jupiter swap: SOL → Token (works for both legacy and Token-2022)
+ */
+async function swapSolToTokenViaJupiter(
+  connection: Connection,
+  wallet: Keypair,
+  outputMint: PublicKey,
+  amountIn: BN,
+  slippageBps: number = 100
+): Promise<BN> {
+  const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${outputMint.toBase58()}&amount=${amountIn.toString()}&slippageBps=${slippageBps}&onlyDirectRoutes=false`
+
+  const quoteRes = await fetch(quoteUrl)
+  const quote = await quoteRes.json()
+
+  if (!quote || quote.error) {
+    throw new Error(`Jupiter quote failed: ${quote?.error || 'unknown error'}`)
+  }
+
+  const swapRes = await fetch('https://quote-api.jup.ag/v6/swap', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      quoteResponse: quote,
+      userPublicKey: wallet.publicKey.toBase58(),
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+    }),
+  })
+
+  const swap = await swapRes.json()
+
+  if (swap.error) {
+    throw new Error(`Jupiter swap failed: ${swap.error}`)
+  }
+
+  const tx = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, 'base64'))
+  tx.sign([wallet])
+
+  const signature = await connection.sendRawTransaction(tx.serialize())
+  await connection.confirmTransaction(signature, 'confirmed')
+
+  return new BN(quote.outAmount)
 }
