@@ -28,6 +28,23 @@ import { getHeliusRpcEndpoint } from '@/lib/solana'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import {
+  SCAN_INTERVAL_MS,
+  SCANNER_TICK_TIMEOUT_MS,
+  CANDIDATE_DEDUP_HOURS,
+  OOR_RECHECK_HOURS,
+  HARD_MAX_TOKEN_AGE_MINUTES,
+  SCANNER_EARLY_MAX_AGE_MINUTES,
+  FRESH_MAX_AGE_MINUTES,
+  FRESH_MIN_LIQUIDITY_USD,
+  MOMENTUM_MIN_VOLUME_5M_USD,
+  MOMENTUM_MIN_FEE_TVL_5M_PCT,
+  SCALP_SPIKE_VOL_RATIO,
+  MAX_DEEP_CHECKS,
+  DEEP_CHECK_DELAY_MS,
+  MAX_FRESH_DEEP_CHECKS,
+  MAX_MOMENTUM_DEEP_CHECKS,
+} from '@/lib/strategy-config'
+import {
   WSOL,
   fetchMeteoraPools,
   getFeeTvlPct,
@@ -59,9 +76,6 @@ const PRE_FILTER = {
   maxLiquidityUsd: 500_000_000,
 }
 
-const MAX_DEEP_CHECKS          = parseInt(process.env.MAX_DEEP_CHECKS          ?? '6')
-const DEEP_CHECK_DELAY_MS      = parseInt(process.env.DEEP_CHECK_DELAY_MS      ?? '3000')
-
 const MIN_SCORE_TO_OPEN        = parseInt(process.env.MIN_SCORE_TO_OPEN        ?? '65')
 export const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
   process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',
@@ -77,32 +91,7 @@ const SCALP_SPIKE_ENABLED = process.env.SCALP_SPIKE_ENABLED === 'true'
 const EVIL_PANDA_ENABLED = process.env.EVIL_PANDA_ENABLED === 'true'
 const LP_SCANNER_ENABLED = process.env.LP_SCANNER_ENABLED !== 'false' &&
   process.env.SCANNER_ENABLED !== 'false'
-export const SCAN_INTERVAL_MS         = parseInt(process.env.LP_SCAN_INTERVAL_SEC     ?? '900') * 1_000
-const DEFAULT_SCANNER_TICK_TIMEOUT_MS = Math.max(60_000, SCAN_INTERVAL_MS - 30_000)
-const CONFIGURED_SCANNER_TICK_TIMEOUT_MS = parseInt(
-  process.env.LP_SCANNER_TICK_TIMEOUT_MS ??
-  process.env.SCANNER_TICK_TIMEOUT_MS ??
-  String(DEFAULT_SCANNER_TICK_TIMEOUT_MS),
-  10,
-)
-const SCANNER_TICK_TIMEOUT_MS = Number.isFinite(CONFIGURED_SCANNER_TICK_TIMEOUT_MS)
-  ? Math.max(60_000, CONFIGURED_SCANNER_TICK_TIMEOUT_MS)
-  : DEFAULT_SCANNER_TICK_TIMEOUT_MS
-const CANDIDATE_DEDUP_HOURS    = parseFloat(process.env.CANDIDATE_DEDUP_HOURS  ?? '0')
-const OOR_RECHECK_HOURS        = parseInt(process.env.OOR_RECHECK_HOURS        ?? '24')
-const HARD_MAX_TOKEN_AGE_MINUTES = parseInt(process.env.HARD_MAX_TOKEN_AGE_MINUTES ?? '120')
-const SCANNER_EARLY_MAX_AGE_MINUTES = parseInt(process.env.SCANNER_EARLY_MAX_AGE_MINUTES ?? '90', 10)
-const FRESH_MAX_AGE_MINUTES    = Math.min(
-  parseInt(process.env.FRESH_SCANNER_MAX_AGE_MINUTES ?? `${HARD_MAX_TOKEN_AGE_MINUTES}`),
-  SCANNER_EARLY_MAX_AGE_MINUTES,
-)
-const FRESH_MIN_LIQUIDITY_USD  = parseFloat(process.env.FRESH_MIN_LIQUIDITY_USD ?? process.env.EVIL_PANDA_MIN_LIQUIDITY_USD ?? '20000')
-const MOMENTUM_MIN_VOLUME_5M_USD = parseFloat(process.env.MOMENTUM_MIN_VOLUME_5M_USD ?? '5000')
 const MOMENTUM_POOL_LIMIT      = parseInt(process.env.MOMENTUM_POOL_LIMIT ?? '500')
-const MOMENTUM_MIN_FEE_TVL_5M_PCT = parseFloat(process.env.MOMENTUM_MIN_FEE_TVL_5M_PCT ?? process.env.SCALP_SPIKE_MIN_FEE_TVL_5M_PCT ?? '0.1')
-const SCALP_SPIKE_VOL_RATIO    = parseFloat(process.env.SCALP_SPIKE_VOL_RATIO ?? '2.5')
-const MAX_FRESH_DEEP_CHECKS    = parseInt(process.env.MAX_FRESH_DEEP_CHECKS ?? `${MAX_DEEP_CHECKS}`)
-const MAX_MOMENTUM_DEEP_CHECKS = parseInt(process.env.MAX_MOMENTUM_DEEP_CHECKS ?? `${MAX_DEEP_CHECKS}`)
 
 const METEORA_FILTERED_FETCH = {
   minTvlUsd: parseFloat(process.env.METEORA_MIN_TVL_USD ?? '8000'),
@@ -120,6 +109,9 @@ const SUPABASE_TIMEOUT_MS      = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
+
+// Re-export central scanner timing so bot/scanner.ts keeps working without changes
+export { SCAN_INTERVAL_MS } from '@/lib/strategy-config'
 
 const _bondingCurveCache = new Map<string, { pct: number; complete: boolean | null; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000

@@ -59,7 +59,6 @@ export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', MAX_DEEP
 export const MAX_MOMENTUM_DEEP_CHECKS = envNumber('MAX_MOMENTUM_DEEP_CHECKS', MAX_DEEP_CHECKS) as number
 
 // Fresh lane
-export const FRESH_MAX_AGE_MINUTES = envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 90) as number
 export const FRESH_MIN_LIQUIDITY_USD = envNumber(
   'FRESH_MIN_LIQUIDITY_USD',
   envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 20000)
@@ -68,6 +67,27 @@ export const FRESH_MIN_LIQUIDITY_USD = envNumber(
 // Misc
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
 export const HARD_MAX_TOKEN_AGE_MINUTES = envNumber('HARD_MAX_TOKEN_AGE_MINUTES', 120) as number
+export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
+export const SCANNER_EARLY_MAX_AGE_MINUTES = envNumber('SCANNER_EARLY_MAX_AGE_MINUTES', 90)
+
+// ── Scanner core timing (single source of truth) ────────────────────────────
+export const LP_SCAN_INTERVAL_SEC = envNumber('LP_SCAN_INTERVAL_SEC', 900)
+export const SCAN_INTERVAL_MS = LP_SCAN_INTERVAL_SEC * 1000
+
+const DEFAULT_SCANNER_TICK_TIMEOUT_MS = Math.max(60_000, SCAN_INTERVAL_MS - 30_000)
+export const SCANNER_TICK_TIMEOUT_MS = Math.max(
+  60_000,
+  envNumber(
+    'LP_SCANNER_TICK_TIMEOUT_MS',
+    envNumber('SCANNER_TICK_TIMEOUT_MS', DEFAULT_SCANNER_TICK_TIMEOUT_MS)
+  )
+)
+
+// Fresh age gate respects both user setting and the early-age hard limit
+export const FRESH_MAX_AGE_MINUTES = Math.min(
+  envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', HARD_MAX_TOKEN_AGE_MINUTES),
+  SCANNER_EARLY_MAX_AGE_MINUTES
+) as number
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DAMM Edge (isolated track) — loosened in Option A strategy review
