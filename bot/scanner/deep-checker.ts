@@ -1091,7 +1091,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
             metadata:          {},
           },
           {
-            onConflict: 'token_address',
+            onConflict: 'candidates_token_hour_unique',
             ignoreDuplicates: true,
           }
         ),
