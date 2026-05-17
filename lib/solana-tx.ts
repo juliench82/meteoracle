@@ -17,6 +17,7 @@ import {
   Connection,
 } from '@solana/web3.js'
 import { getConnection } from './solana'
+import { createServerClient } from './supabase'
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 const COMPUTE_BUDGET_SET_UNIT_LIMIT = 2
@@ -60,10 +61,26 @@ export async function simulateAndCheck(tx: Transaction, label: string): Promise<
   try {
     const sim = await connection.simulateTransaction(tx)
     if (sim.value.err) {
-      console.error(`${label} ⚠ simulation FAILED — aborting send`, {
+      const errorPayload = {
+        label,
         err: sim.value.err,
-        logs: sim.value.logs?.slice(-5),
-      })
+        logs: sim.value.logs?.slice(-10) ?? [],
+        unitsConsumed: sim.value.unitsConsumed ?? null,
+      }
+
+      console.error(`${label} ⚠ simulation FAILED — aborting send`, errorPayload)
+
+      // Persist to bot_logs so we can actually debug these failures later
+      try {
+        await createServerClient().from('bot_logs').insert({
+          level: 'error',
+          event: 'tx_simulation_failed',
+          payload: errorPayload,
+        })
+      } catch (logErr) {
+        console.error(`[simulateAndCheck] failed to write simulation failure to bot_logs`, logErr)
+      }
+
       return false
     }
     console.log(`${label} simulation OK (units: ${sim.value.unitsConsumed ?? 'n/a'})`)
