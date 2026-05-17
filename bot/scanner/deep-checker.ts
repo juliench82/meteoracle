@@ -1078,7 +1078,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
             rugcheck_score:    metrics.rugcheckScore,
             top_holder_pct:    metrics.topHolderPct,
             bin_step:          binStep,
-            scanned_at:        new Date(new Date().setMinutes(0, 0, 0, 0)).toISOString(),  // truncate to the hour to match the unique constraint
+            scanned_at:        new Date(new Date().setMinutes(0, 0, 0)).toISOString(),  // truncate to the hour to match the unique constraint
             score_volmc:       breakdown.volMcScore,
             score_holders:     breakdown.holderScore,
             score_freshness:   breakdown.freshnessScore,
