@@ -124,26 +124,30 @@ export async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
   const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1KLm5i');
   const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
-  // Try up to 3 times — getAccountInfo can be flaky right after a new mint appears
+  // Try up to 3 times — getAccountInfo can be flaky right after a new mint appears (especially pump.fun graduates)
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const info = await connection.getAccountInfo(mint);
-      if (info && info.owner.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()) {
-        return TOKEN_2022_PROGRAM_ID;
-      }
-      // If we got a response and it's clearly the legacy program, return early
-      if (info && info.owner.toBase58() === TOKEN_PROGRAM_ID.toBase58()) {
-        return TOKEN_PROGRAM_ID;
+      if (info) {
+        const owner = info.owner.toBase58();
+        if (owner === TOKEN_2022_PROGRAM_ID.toBase58()) {
+          console.log(`[getTokenProgramId] ${mint.toBase58().slice(0, 8)} → Token-2022 (owner match on attempt ${attempt})`);
+          return TOKEN_2022_PROGRAM_ID;
+        }
+        if (owner === TOKEN_PROGRAM_ID.toBase58()) {
+          return TOKEN_PROGRAM_ID;
+        }
       }
     } catch (e) {
       console.warn(`[getTokenProgramId] attempt ${attempt} failed for ${mint.toBase58().slice(0, 8)}:`, e);
     }
     if (attempt < 3) {
-      await new Promise(r => setTimeout(r, 250 * attempt)); // small backoff
+      await new Promise(r => setTimeout(r, 300 * attempt));
     }
   }
 
-  // Final fallback — assume legacy (safer than guessing Token-2022)
+  // Final fallback — assume legacy (most common case)
+  console.log(`[getTokenProgramId] ${mint.toBase58().slice(0, 8)} → assuming legacy Token program (detection exhausted)`);
   return TOKEN_PROGRAM_ID;
 }
 

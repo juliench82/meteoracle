@@ -48,7 +48,7 @@ import {
   WALLET_MIN_SOL_RESERVE,
 } from './utils'
 
-import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
+import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '@/lib/solana'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import { sendAlert } from '@/bot/alerter'
@@ -192,14 +192,35 @@ export async function openPosition(
     const solIsTokenX = mintX.toBase58() === NATIVE_MINT_STR
     const solIsTokenY = mintY.toBase58() === NATIVE_MINT_STR
 
-    // Early Token-2022 detection — this must happen BEFORE any ATA creation
-    // so we never build a wrong ATA instruction for Token-2022 mints.
     const outputMint = solIsTokenX ? mintY : mintX
     const outputTokenProgram = await getTokenProgramId(outputMint)
     const isToken2022 = outputTokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
 
-    if (isToken2022) {
-      console.log(`${label} Token-2022 output mint detected early — skipping common ATA creation and using manual path`)
+    console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`);
+
+    // Additional reliable signal: pump.fun graduated tokens are frequently Token-2022
+    // and the Zap SDK is still unreliable with them. Force the manual path.
+    let forceManualPath = isToken2022;
+
+    const launchpad = (metrics as any).launchpadSource || (metrics as any).launchpad;
+    if (!forceManualPath && launchpad === 'pumpfun') {
+      try {
+        const { fetchBondingCurve } = await import('@/lib/pumpfun');
+        const heliusUrl = getHeliusRpcEndpoint ? getHeliusRpcEndpoint() : '';
+        const curve = await fetchBondingCurve(outputMint.toBase58(), heliusUrl || '');
+        if (curve && curve.complete) {
+          forceManualPath = true;
+          console.log(`${label} pump.fun graduated token detected (bonding curve 100% complete) — forcing manual Jupiter + DLMM path (safer)`);
+        } else if (curve) {
+          console.log(`${label} pump.fun token still on bonding curve (${curve.progressPct.toFixed(1)}%) — continuing with normal flow`);
+        }
+      } catch (e) {
+        console.warn(`${label} could not re-check pump.fun bonding curve status:`, e);
+      }
+    }
+
+    if (forceManualPath) {
+      console.log(`${label} → FINAL DECISION: Manual open path (bypassing Zap SDK entirely + skipping early ATA creation)`);
       // Basic validations that the manual path also needs
       const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
       const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
@@ -494,6 +515,8 @@ async function openPositionToken2022(
   try {
     const amountIn = new BN(Math.floor(solAmount * 1e9))
 
+    console.log(`${label} ENTERING manual Token-2022 / pump.fun graduate path`);
+
     // 1. Swap SOL → token using Jupiter (reliable for Token-2022)
     console.log(`${label} swapping ${solAmount} SOL → ${metrics.symbol} via Jupiter...`)
     const tokenAmountOut = await swapSolToTokenViaJupiter(
@@ -508,6 +531,8 @@ async function openPositionToken2022(
     if (tokenAmountOut.isZero()) {
       throw new Error(`${label} Jupiter swap returned zero tokens`)
     }
+
+    console.log(`${label} Jupiter swap successful — proceeding to direct DLMM SDK liquidity addition (manual path)`);
 
     // Small safety improvement: explicitly ensure the ATA for the Token-2022 output mint exists
     // using the correct token program ID (passed from the caller).
@@ -587,7 +612,7 @@ async function openPositionToken2022(
 
     await sendOpenAlert(metrics, strategy, positionId, solAmount, getDecimalAdjustedPrice(dlmmPool, activeBin))
 
-    console.log(`${label} Token-2022 position opened ✔`)
+    console.log(`${label} Token-2022 / pump.fun graduate position opened successfully via manual path ✔`)
     return positionId
 
   } catch (err) {
