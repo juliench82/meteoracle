@@ -86,6 +86,8 @@ export interface TokenMetrics {
   binStep?: number
   /** Score assigned by the scorer — set by scanner before passing to executor. */
   score?: number
+  /** Detected launchpad for the token (pumpfun tokens may need special manual open path) */
+  launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora'
 }
 
 export interface TokenFilters {

@@ -867,6 +867,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       bondingCurvePct,
       quoteTokenMint,
       binStep,
+      launchpadSource,
     }
 
     // (DAMM Edge scoring logic has been fully removed)

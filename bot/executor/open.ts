@@ -177,7 +177,37 @@ export async function openPosition(
       return null
     }
 
-    const poolPubkey = new PublicKey(metrics.poolAddress)
+    let poolPubkey: PublicKey
+    try {
+      poolPubkey = new PublicKey(metrics.poolAddress || '')
+    } catch (e: any) {
+      console.error(`${label} invalid poolAddress "${metrics.poolAddress}": ${e?.message || e}`)
+      await supabase.from('bot_logs').insert({
+        level: 'error', event: 'open_position_skipped_bad_pool_address',
+        payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress, error: e?.message || String(e) },
+      })
+      return null
+    }
+
+    // Validate that this is a real on-chain DLMM pair (defensive: datapi sometimes lists
+    // uninitialized / non-DLMM addresses for fresh pump.fun tokens, which later cause
+    // "Invalid public key input" deep inside the Zap/DLMM SDK parser).
+    try {
+      const poolAccount = await connection.getAccountInfo(poolPubkey)
+      const DLMM_PROGRAM_ID = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'
+      if (!poolAccount || poolAccount.owner.toBase58() !== DLMM_PROGRAM_ID) {
+        console.warn(`${label} pool ${metrics.poolAddress} not a valid DLMM lb pair (owner=${poolAccount?.owner.toBase58() ?? 'missing'}) — skipping`)
+        await supabase.from('bot_logs').insert({
+          level: 'warn', event: 'open_position_skipped_non_dlmm_pool',
+          payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },
+        })
+        return null
+      }
+    } catch (e: any) {
+      console.warn(`${label} pool account lookup failed for ${metrics.poolAddress}: ${e?.message || e} — skipping open`)
+      return null
+    }
+
     const DLMM = await getDLMM()
     const dlmmPool = await DLMM.create(connection, poolPubkey)
     const activeBin = await dlmmPool.getActiveBin()
@@ -474,9 +504,12 @@ export async function openPosition(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} failed:`, message)
+    if (err instanceof Error && err.stack) {
+      console.error(err.stack)
+    }
     await createServerClient().from('bot_logs').insert({
       level: 'error', event: 'open_position_failed',
-      payload: { symbol: metrics.symbol, strategy: strategy.id, error: message },
+      payload: { symbol: metrics.symbol, strategy: strategy.id, error: message, stack: err instanceof Error ? err.stack : undefined },
     })
     return null
   }
@@ -618,10 +651,13 @@ async function openPositionToken2022(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} failed:`, message)
+    if (err instanceof Error && err.stack) {
+      console.error(err.stack)
+    }
     await createServerClient().from('bot_logs').insert({
       level: 'error',
       event: 'open_position_token2022_failed',
-      payload: { symbol: metrics.symbol, strategy: strategy.id, error: message },
+      payload: { symbol: metrics.symbol, strategy: strategy.id, error: message, stack: err instanceof Error ? err.stack : undefined },
     })
     return null
   }
