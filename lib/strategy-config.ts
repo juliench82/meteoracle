@@ -35,9 +35,9 @@ export const SCALP_SPIKE_MIN_HOLDER_COUNT = envNumber('SCALP_SPIKE_MIN_HOLDER_CO
 export const EVIL_PANDA_MIN_HOLDER_COUNT = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 50)
 export const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)
 
-// Evil Panda relaxed defaults (Option A strategy review)
-export const EVIL_PANDA_MAX_AGE_HOURS = envNumber('EVIL_PANDA_MAX_AGE_HOURS', 3)
-export const EVIL_PANDA_MIN_RUGCHECK_SCORE = envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 50)
+// Evil Panda defaults (Option A - middle ground for actual trade volume while keeping reasonable quality)
+export const EVIL_PANDA_MAX_AGE_HOURS = envNumber('EVIL_PANDA_MAX_AGE_HOURS', 8)
+export const EVIL_PANDA_MIN_RUGCHECK_SCORE = envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 40)
 
 // Re-export for convenience in deep-checker / scorer
 export const MOMENTUM_MIN_VOLUME_5M_USD = envNumber('MOMENTUM_MIN_VOLUME_5M_USD', 5000)

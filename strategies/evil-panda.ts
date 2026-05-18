@@ -32,7 +32,7 @@ export const evilPandaStrategy: Strategy = {
     minRugcheckScore: EVIL_PANDA_MIN_RUGCHECK_SCORE,
     requireSocialSignal: false,
     minFeeTvl24hPct: 0,
-    minBinStep: envNumber('EVIL_PANDA_MIN_BIN_STEP', 80),
+    minBinStep: envNumber('EVIL_PANDA_MIN_BIN_STEP', 25),
   },
   position: {
     binStep: envNumber('EVIL_PANDA_BIN_STEP', 100),
