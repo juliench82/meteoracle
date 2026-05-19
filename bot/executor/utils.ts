@@ -119,35 +119,53 @@ export async function getTotalDeployedSolForCap(
   return { totalDeployed, source: 'supabase-cache' as const };
 }
 
-export async function getTokenProgramId(mint: PublicKey): Promise<PublicKey> {
+export async function getTokenProgramId(mint: PublicKey | string): Promise<PublicKey> {
   const connection = getConnection();
-  const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1KLm5i');
+
+  // Safely convert input to PublicKey (handles both string and PublicKey)
+  let mintPubkey: PublicKey;
+  try {
+    mintPubkey = typeof mint === 'string' ? new PublicKey(mint) : mint;
+  } catch (e) {
+    console.error(`[getTokenProgramId] Invalid mint address provided:`, mint);
+    throw new Error(`Invalid mint address: ${mint}`);
+  }
+
   const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+  const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1KLm5i');
 
   // Try up to 3 times — getAccountInfo can be flaky right after a new mint appears (especially pump.fun graduates)
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const info = await connection.getAccountInfo(mint);
-      if (info) {
-        const owner = info.owner.toBase58();
-        if (owner === TOKEN_2022_PROGRAM_ID.toBase58()) {
-          console.log(`[getTokenProgramId] ${mint.toBase58().slice(0, 8)} → Token-2022 (owner match on attempt ${attempt})`);
-          return TOKEN_2022_PROGRAM_ID;
+      const info = await connection.getAccountInfo(mintPubkey);
+
+      if (info?.owner) {
+        const ownerStr = info.owner.toBase58();
+
+        if (ownerStr === TOKEN_2022_PROGRAM_ID.toBase58()) {
+          console.log(`[getTokenProgramId] ${mintPubkey.toBase58().slice(0, 8)} → Token-2022 (attempt ${attempt})`);
+          return info.owner;
         }
-        if (owner === TOKEN_PROGRAM_ID.toBase58()) {
-          return TOKEN_PROGRAM_ID;
+
+        if (ownerStr === TOKEN_PROGRAM_ID.toBase58()) {
+          return info.owner;
         }
+
+        // Generic case: return whatever program actually owns this mint
+        console.log(`[getTokenProgramId] ${mintPubkey.toBase58().slice(0, 8)} → Custom/Unknown program: ${ownerStr} (attempt ${attempt})`);
+        return info.owner;
       }
     } catch (e) {
-      console.warn(`[getTokenProgramId] attempt ${attempt} failed for ${mint.toBase58().slice(0, 8)}:`, e);
+      console.warn(`[getTokenProgramId] attempt ${attempt} failed for ${mintPubkey.toBase58().slice(0, 8)}:`, e);
     }
+
     if (attempt < 3) {
       await new Promise(r => setTimeout(r, 300 * attempt));
     }
   }
 
-  // Final fallback — assume legacy (most common case)
-  console.log(`[getTokenProgramId] ${mint.toBase58().slice(0, 8)} → assuming legacy Token program (detection exhausted)`);
+  // Final fallback — assume legacy Token (most common case)
+  console.warn(`[getTokenProgramId] ${mintPubkey.toBase58().slice(0, 8)} → Could not determine owner, assuming legacy Token`);
   return TOKEN_PROGRAM_ID;
 }
 
