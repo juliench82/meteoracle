@@ -1055,7 +1055,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, ${candidateTrack} track, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay})`)
       await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
-      // For mature track, we only attempt to open if score >= 80 (even if we recorded it at 65+)
+      // For mature track, we only attempt to open if score >= MATURE_MIN_SCORE_TO_OPEN (even if we recorded it at MIN_SCORE_TO_OPEN+)
       const canOpenThisCandidate = (ageHours * 60) <= FRESH_SNIPE_MAX_AGE_MINUTES || finalScore >= MATURE_MIN_SCORE_TO_OPEN
       if (!canOpenThisCandidate) {
         openSkippedCount++
