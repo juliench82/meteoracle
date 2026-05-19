@@ -47,8 +47,12 @@ async function inspectPool(label: string, poolAddress: string) {
   try {
     const dlmmPool = await DLMM.create(connection, poolPubkey);
 
-    const tokenX = dlmmPool.tokenX;
-    const tokenY = dlmmPool.tokenY;
+    // Use 'any' for debug output because the DLMM SDK types are complex
+    // and change between versions. This is a temporary diagnostic tool.
+    const debugPool: any = dlmmPool;
+
+    const tokenX = debugPool.tokenX;
+    const tokenY = debugPool.tokenY;
 
     const xPub = tokenX?.publicKey;
     const yPub = tokenY?.publicKey;
@@ -56,7 +60,7 @@ async function inspectPool(label: string, poolAddress: string) {
     console.log('\nDLMM SDK returned:');
     console.dir(
       {
-        binStep: dlmmPool.lbPair.binStep,
+        binStep: debugPool.lbPair?.binStep,
         tokenX: {
           publicKey: typeof xPub === 'string' ? xPub : xPub?.toBase58?.() ?? xPub,
           constructorName: xPub?.constructor?.name ?? typeof xPub,
@@ -70,14 +74,14 @@ async function inspectPool(label: string, poolAddress: string) {
           isPublicKeyInstance: yPub instanceof PublicKey,
         },
         lbPair: {
-          mintX: dlmmPool.lbPair.mintX?.toBase58?.() ?? dlmmPool.lbPair.mintX,
-          mintY: dlmmPool.lbPair.mintY?.toBase58?.() ?? dlmmPool.lbPair.mintY,
+          mintX: debugPool.lbPair?.mintX?.toBase58?.() ?? debugPool.lbPair?.mintX,
+          mintY: debugPool.lbPair?.mintY?.toBase58?.() ?? debugPool.lbPair?.mintY,
           tokenProgramX:
-            dlmmPool.lbPair.tokenProgramX?.toBase58?.() ??
-            dlmmPool.lbPair.tokenProgramX,
+            debugPool.lbPair?.tokenProgramX?.toBase58?.() ??
+            debugPool.lbPair?.tokenProgramX,
           tokenProgramY:
-            dlmmPool.lbPair.tokenProgramY?.toBase58?.() ??
-            dlmmPool.lbPair.tokenProgramY,
+            debugPool.lbPair?.tokenProgramY?.toBase58?.() ??
+            debugPool.lbPair?.tokenProgramY,
         },
       },
       { depth: 4 }
