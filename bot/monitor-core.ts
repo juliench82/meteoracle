@@ -28,14 +28,15 @@ export const LIVE_CACHE_ALERT_INTERVAL_MS = parseInt(process.env.MONITOR_LIVE_CA
 export const _unmanagedLiveAlertAt = new Map<string, number>()
 
 export const SOL_MINT = 'So11111111111111111111111111111111111111112'
-export const JUP_PRICE_URL = `https://price.jup.ag/v6/price?ids=${SOL_MINT}`
+export const JUP_PRICE_URL = `https://api.jup.ag/price/v2?ids=${SOL_MINT}`
 
 export async function fetchLiveSolPriceUsd(): Promise<number | null> {
   try {
     const res = await fetch(JUP_PRICE_URL, { signal: AbortSignal.timeout(5_000) })
     if (!res.ok) return null
-    const json = await res.json() as { data?: Record<string, { price?: number }> }
-    const price = json.data?.[SOL_MINT]?.price
+    const json = await res.json() as { data?: Record<string, { price?: string | number }> }
+    const rawPrice = json.data?.[SOL_MINT]?.price
+    const price = typeof rawPrice === 'string' ? parseFloat(rawPrice) : rawPrice
     return typeof price === 'number' && price > 0 ? price : null
   } catch { return null }
 }

@@ -673,16 +673,31 @@ async function swapSolToTokenViaJupiter(
   amountIn: BN,
   slippageBps: number = 100
 ): Promise<BN> {
-  const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${outputMint.toBase58()}&amount=${amountIn.toString()}&slippageBps=${slippageBps}&onlyDirectRoutes=false`
+  // Updated to current Jupiter Swap API v1 (https://dev.jup.ag/docs/swap/v1/get-quote)
+  const quoteParams = new URLSearchParams({
+    inputMint: 'So11111111111111111111111111111111111111112',
+    outputMint: outputMint.toBase58(),
+    amount: amountIn.toString(),
+    slippageBps: slippageBps.toString(),
+    onlyDirectRoutes: 'false',
+  });
 
-  const quoteRes = await fetch(quoteUrl)
-  const quote = await quoteRes.json()
+  const quoteUrl = `https://api.jup.ag/swap/v1/quote?${quoteParams.toString()}`;
 
-  if (!quote || quote.error) {
-    throw new Error(`Jupiter quote failed: ${quote?.error || 'unknown error'}`)
+  const quoteRes = await fetch(quoteUrl);
+
+  if (!quoteRes.ok) {
+    const text = await quoteRes.text();
+    throw new Error(`Jupiter quote failed with ${quoteRes.status}: ${text}`);
   }
 
-  const swapRes = await fetch('https://quote-api.jup.ag/v6/swap', {
+  const quote = await quoteRes.json();
+
+  if (quote.error) {
+    throw new Error(`Jupiter quote error: ${quote.error}`);
+  }
+
+  const swapRes = await fetch('https://api.jup.ag/swap/v1/swap', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -691,19 +706,24 @@ async function swapSolToTokenViaJupiter(
       wrapAndUnwrapSol: true,
       dynamicComputeUnitLimit: true,
     }),
-  })
+  });
 
-  const swap = await swapRes.json()
-
-  if (swap.error) {
-    throw new Error(`Jupiter swap failed: ${swap.error}`)
+  if (!swapRes.ok) {
+    const text = await swapRes.text();
+    throw new Error(`Jupiter swap failed with ${swapRes.status}: ${text}`);
   }
 
-  const tx = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, 'base64'))
-  tx.sign([wallet])
+  const swap = await swapRes.json();
 
-  const signature = await connection.sendRawTransaction(tx.serialize())
-  await connection.confirmTransaction(signature, 'confirmed')
+  if (swap.error) {
+    throw new Error(`Jupiter swap error: ${swap.error}`);
+  }
 
-  return new BN(quote.outAmount)
+  const tx = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, 'base64'));
+  tx.sign([wallet]);
+
+  const signature = await connection.sendRawTransaction(tx.serialize());
+  await connection.confirmTransaction(signature, 'confirmed');
+
+  return new BN(quote.outAmount);
 }

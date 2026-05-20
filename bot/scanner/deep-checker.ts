@@ -77,7 +77,7 @@ import {
 
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
-const JUP_PRICE_URL = 'https://price.jup.ag/v6/price?ids=So11111111111111111111111111111111111111112'
+const JUP_PRICE_URL = 'https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112'
 
 const PRE_FILTER = {
   minLiquidityUsd: 20_000,
@@ -438,8 +438,9 @@ async function resolveSolPriceUsd(): Promise<number> {
   try {
     const res = await fetch(JUP_PRICE_URL, { signal: AbortSignal.timeout(4_000) })
     if (res.ok) {
-      const json = await res.json() as { data?: Record<string, { price?: number }> }
-      const price = json.data?.['So11111111111111111111111111111111111111112']?.price
+      const json = await res.json() as { data?: Record<string, { price?: string | number }> }
+      const rawPrice = json.data?.['So11111111111111111111111111111111111111112']?.price
+      const price = typeof rawPrice === 'string' ? parseFloat(rawPrice) : rawPrice
       if (typeof price === 'number' && price > 0) return price
     }
   } catch {}
