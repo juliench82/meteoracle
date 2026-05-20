@@ -26,17 +26,18 @@ export function envBool(name: string, fallback = false): boolean {
 // Common Scanner / Strategy Tuning Constants (with env overrides)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.5)
+export const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 2.0)
 export const SCALP_SPIKE_MIN_FEE_TVL_1H_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_1H_PCT', 1)
-export const SCALP_SPIKE_MIN_FEE_TVL_5M_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_5M_PCT', 0.1)
-export const SCALP_SPIKE_MIN_RUGCHECK_SCORE = envNumber('SCALP_SPIKE_MIN_RUGCHECK_SCORE', 60)
+export const SCALP_SPIKE_MIN_FEE_TVL_5M_PCT = envNumber('SCALP_SPIKE_MIN_FEE_TVL_5M_PCT', 0.05)
+export const SCALP_SPIKE_MIN_RUGCHECK_SCORE = envNumber('SCALP_SPIKE_MIN_RUGCHECK_SCORE', 50)
 export const SCALP_SPIKE_MIN_HOLDER_COUNT = envNumber('SCALP_SPIKE_MIN_HOLDER_COUNT', 150)
 
 export const EVIL_PANDA_MIN_HOLDER_COUNT = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 50)
 export const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)
 
-// Evil Panda defaults (Option A - middle ground for actual trade volume while keeping reasonable quality)
-export const EVIL_PANDA_MAX_AGE_HOURS = envNumber('EVIL_PANDA_MAX_AGE_HOURS', 8)
+// Evil Panda defaults — raised max age to 48h (from the 24h candidates analysis) so pump.fun graduates
+// that take time to surface in DLMM feeds or are 1-2 days old with strong rug/binStep still get considered.
+export const EVIL_PANDA_MAX_AGE_HOURS = envNumber('EVIL_PANDA_MAX_AGE_HOURS', 48)
 export const EVIL_PANDA_MIN_RUGCHECK_SCORE = envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 40)
 
 // Re-export for convenience in deep-checker / scorer

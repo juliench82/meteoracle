@@ -11,7 +11,8 @@ export const scalpSpikeStrategy: Strategy = {
   description: 'SOL-paired tokens with a live 5m/1h volume spike. Tight range, hard exit.',
   enabled: true,
   filters: {
-    minMcUsd: envNumber('SCALP_SPIKE_MIN_MC_USD', 500_000),
+    // lowered minMc + relaxed spike/fee5m/rug (per 24h candidates analysis) to let more active pumpfun momentum tokens qualify
+    minMcUsd: envNumber('SCALP_SPIKE_MIN_MC_USD', 200_000),
     maxMcUsd: Number.MAX_SAFE_INTEGER,
     minVolume24h: 0,
     minLiquidityUsd: envNumber('SCALP_SPIKE_MIN_LIQUIDITY_USD', 10_000),

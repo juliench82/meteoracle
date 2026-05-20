@@ -180,12 +180,12 @@ export function classifyToken(token: StrategyToken & { address: string }): Token
     return 'UNKNOWN'
   }
 
-  // New pools are Evil Panda only; filters decide whether they are safe enough.
+  // New-ish pools (now <=48h) are Evil Panda only; filters decide whether they are safe enough.
   if (ageHours <= evilPandaStrategy.filters.maxAgeHours) {
     return 'MEME_SHITCOIN'
   }
 
-  // SCALP_SPIKE: any non-new SOL-paired token with MC>=500K and a real 5m/1h surge.
+  // SCALP_SPIKE: any non-new SOL-paired token with MC>=200K and real 5m/1h surge (relaxed thresholds).
   if (
     mcUsd >= scalpSpikeStrategy.filters.minMcUsd &&
     hasScalpSpikeSignals(token)

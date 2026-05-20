@@ -7,6 +7,10 @@
 
 import { PublicKey } from '@solana/web3.js';
 import BN from 'bn.js';
+import {
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+} from '@solana/spl-token';
 
 import { getConnection } from '@/lib/solana';
 import { createServerClient } from '@/lib/supabase';
@@ -131,9 +135,6 @@ export async function getTokenProgramId(mint: PublicKey | string): Promise<Publi
     throw new Error(`Invalid mint address: ${mint}`);
   }
 
-  const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-  const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1KLm5i');
-
   // Try up to 3 times — getAccountInfo can be flaky right after a new mint appears (especially pump.fun graduates)
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -141,17 +142,19 @@ export async function getTokenProgramId(mint: PublicKey | string): Promise<Publi
 
       if (info?.owner) {
         const ownerStr = info.owner.toBase58();
+        const t22 = TOKEN_2022_PROGRAM_ID.toBase58();
+        const t1 = TOKEN_PROGRAM_ID.toBase58();
 
-        if (ownerStr === TOKEN_2022_PROGRAM_ID.toBase58()) {
+        if (ownerStr === t22) {
           console.log(`[getTokenProgramId] ${mintPubkey.toBase58().slice(0, 8)} → Token-2022 (attempt ${attempt})`);
           return info.owner;
         }
 
-        if (ownerStr === TOKEN_PROGRAM_ID.toBase58()) {
+        if (ownerStr === t1) {
           return info.owner;
         }
 
-        // Generic case: return whatever program actually owns this mint
+        // Generic case: return whatever program actually owns this mint (including the 3rd program used by some pump.fun DLMM pairs)
         console.log(`[getTokenProgramId] ${mintPubkey.toBase58().slice(0, 8)} → Custom/Unknown program: ${ownerStr} (attempt ${attempt})`);
         return info.owner;
       }
