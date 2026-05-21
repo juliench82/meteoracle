@@ -228,58 +228,19 @@ export async function openPosition(
 
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`);
 
-    // Additional reliable signal: pump.fun graduated tokens are frequently Token-2022
-    // and the Zap SDK is still unreliable with them. Force the manual path.
-    let forceManualPath = isToken2022;
+    // Zap is now the default path for everything (per latest Meteora docs).
+    // Manual path (Jupiter + direct DLMM) is only attempted once as fallback if Zap fails.
 
-    const launchpad = (metrics as any).launchpadSource || (metrics as any).launchpad;
-    if (!forceManualPath && launchpad === 'pumpfun') {
-      try {
-        const { fetchBondingCurve } = await import('@/lib/pumpfun');
-        const heliusUrl = getHeliusRpcEndpoint ? getHeliusRpcEndpoint() : '';
-        const curve = await fetchBondingCurve(outputMint.toBase58(), heliusUrl || '');
-        if (curve && curve.complete) {
-          forceManualPath = true;
-          console.log(`${label} pump.fun graduated token detected (bonding curve 100% complete) — forcing manual Jupiter + DLMM path (safer)`);
-        } else if (curve) {
-          console.log(`${label} pump.fun token still on bonding curve (${curve.progressPct.toFixed(1)}%) — continuing with normal flow`);
-        }
-      } catch (e) {
-        console.warn(`${label} could not re-check pump.fun bonding curve status:`, e);
-      }
-    }
+    const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
+    const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
+    const minBinId = activeBinId - binsDown
+    const maxBinId = activeBinId + binsUp
+    const binRange = binsDown + binsUp
+    const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
 
-    if (forceManualPath) {
-      console.log(`${label} → FINAL DECISION: Manual open path (bypassing Zap SDK entirely + skipping early ATA creation)`);
-      // Basic validations that the manual path also needs
-      const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
-      const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
-      const minBinId = activeBinId - binsDown
-      const maxBinId = activeBinId + binsUp
-      const binRange = binsDown + binsUp
-      const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
-
-      if (binRange > maxBins) {
-        console.warn(`${label} bin range too wide — rejecting`, { binRange, maxBins, binStep })
-        return null
-      }
-
-      return openPositionToken2022(
-        metrics,
-        strategy,
-        dlmmPool,
-        outputMint,
-        outputTokenProgram,
-        solAmount,
-        minBinId,
-        maxBinId,
-        solIsTokenX,
-        label,
-        await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-        supabase,
-        DRY_RUN,
-        new Keypair()
-      )
+    if (binRange > maxBins) {
+      console.warn(`${label} bin range too wide — rejecting`, { binRange, maxBins, binStep })
+      return null
     }
 
     // Only reach here for normal (legacy Token) pairs — safe to create ATAs
@@ -463,7 +424,28 @@ export async function openPosition(
 
     // If we reach here on attempt 2 without breaking, the error was already thrown above
     if (!openSig && lastZapErr) {
-      throw lastZapErr
+      console.warn(`${label} Zap path failed after 2 attempts. Trying manual fallback once (Jupiter + direct DLMM)...`);
+      try {
+        return await openPositionToken2022(
+          metrics,
+          strategy,
+          dlmmPool,
+          outputMint,
+          outputTokenProgram,
+          solAmount,
+          minBinId,
+          maxBinId,
+          solIsTokenX,
+          label,
+          await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
+          supabase,
+          DRY_RUN,
+          new Keypair()
+        )
+      } catch (manualErr) {
+        console.error(`${label} Manual fallback also failed. Giving up on ${metrics.symbol}.`);
+        throw manualErr;
+      }
     }
 
     let tokenAmountDeposited = 0
