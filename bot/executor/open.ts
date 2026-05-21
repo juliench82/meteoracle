@@ -267,13 +267,7 @@ export async function openPosition(
       console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
     }
 
-    const binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)))
-    const binsUp = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000))
-    const minBinId = activeBinId - binsDown
-    const maxBinId = activeBinId + binsUp
-    const binRange = binsDown + binsUp
-
-    const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
+    // Reuse the bin range calculated earlier (single source of truth)
     if (binRange > maxBins) {
       console.warn(`${label} bin range too wide — rejecting`, { binRange, maxBins, binStep })
       await supabase.from('bot_logs').insert({
