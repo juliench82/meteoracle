@@ -225,6 +225,36 @@ export async function openPosition(
 
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
+    // === TOKEN-2022 / pump.fun GRADUATE PATH (primary for these tokens) ===
+    // Historical note (from git history):
+    // The direct Jupiter + raw DLMM SDK path using initializePositionAndAddLiquidityByStrategy
+    // (sometimes with split transactions, skipPreflight, and retries) was the reliable way
+    // to consistently open positions on pump.fun graduates for a long time.
+    // The Zap SDK path has shown repeated late-stage simulation failures on the final
+    // position-creation transaction for Token-2022 mints.
+    // → We now route Token-2022 tokens to the direct path as the primary route.
+    if (isToken2022) {
+      console.log(`${label} Token-2022 / pump.fun graduate — routing to direct Jupiter + DLMM SDK path (primary for these tokens)`);
+
+      return await openPositionToken2022(
+        metrics,
+        strategy,
+        dlmmPool,
+        outputMint,
+        outputTokenProgram,
+        solAmount,
+        minBinId,
+        maxBinId,
+        solIsTokenX,
+        label,
+        await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
+        supabase,
+        DRY_RUN,
+        new Keypair()
+      );
+    }
+    // === END TOKEN-2022 PRIMARY PATH ===
+
     // === EARLY BIN RANGE VALIDATION (before any Jupiter/Zap work) ===
     // We calculate how many bins the strategy's intended % range actually requires
     // on this specific pool's binStep. If it exceeds the strategy's max, we proportionally
@@ -415,8 +445,9 @@ export async function openPosition(
         console.warn(`${label} attempt ${attempt}/2 failed:`, zapErr)
 
         if (attempt === 2) {
-          // Final attempt failed — re-throw so existing error handling runs
-          throw zapErr
+          // Final attempt failed — do NOT re-throw here.
+          // Let execution fall through to the manual fallback block below.
+          break
         }
 
         // Small delay before retrying with a fresh quote
@@ -424,9 +455,10 @@ export async function openPosition(
       }
     }
 
-    // If we reach here on attempt 2 without breaking, the error was already thrown above
+    // Reached after Zap attempts (either success or both failed).
+    // This block is now primarily a safety net for legacy (non-Token-2022) tokens.
     if (!openSig && lastZapErr) {
-      console.warn(`${label} Zap path exhausted after 2 attempts — trying one manual fallback (Jupiter + DLMM SDK)`)
+      console.warn(`${label} Zap path exhausted after 2 attempts — trying ONE manual fallback (Jupiter + DLMM SDK)`)
       try {
         return await openPositionToken2022(
           metrics,
@@ -492,9 +524,15 @@ export async function openPosition(
 }
 
 /**
- * One-time manual fallback for Token-2022 / pump.fun tokens when the Zap path fails.
- * Performs a plain Jupiter SOL→token swap then uses the raw DLMM SDK to open the position.
- * The bin range (minBinId/maxBinId) was already validated + possibly shrunk in the caller.
+ * Primary open path for Token-2022 / pump.fun graduates (and safety fallback for legacy tokens).
+ *
+ * Aggressive robustness version (based on historically working patterns):
+ *   1. Jupiter SOL → token swap
+ *   2. Split DLMM operations: initializePosition (separate) → addLiquidityByStrategy (with retry + backoff)
+ *
+ * This split + retry approach was repeatedly proven in older commits to avoid the
+ * simulation / InvalidRealloc / transient failures that the combined SDK call often hit
+ * on pump.fun Token-2022 graduates.
  */
 async function openPositionToken2022(
   metrics: TokenMetrics,
@@ -542,7 +580,7 @@ async function openPositionToken2022(
       throw new Error(`${label} Jupiter swap returned zero tokens`)
     }
 
-    console.log(`${label} Jupiter swap successful — proceeding to direct DLMM SDK add-liquidity`)
+    console.log(`${label} Jupiter swap successful — proceeding to direct DLMM SDK (split init + add liquidity for robustness)`)
 
     // Small safety improvement: explicitly ensure the ATA for the Token-2022 output mint exists
     // using the correct token program ID (passed from the caller).
@@ -574,32 +612,78 @@ async function openPositionToken2022(
       console.log(`${label} Token-2022 ATA created ✔ sig: ${ataSig}`)
     }
 
-    // 2. Add liquidity using the DLMM SDK (one-sided on the token side)
+    // 2. Direct DLMM SDK — SPLIT INIT + ADD LIQUIDITY (historical robust pattern)
+    // Old commits repeatedly showed that splitting these two operations (instead of the combined
+    // initializePositionAndAddLiquidityByStrategy) avoided InvalidRealloc, simulation failures,
+    // and other transient SDK issues on pump.fun Token-2022 graduates.
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
 
     const minDeltaId = minBinId - activeBinId
     const maxDeltaId = maxBinId - activeBinId
 
-    console.log(`${label} adding liquidity via DLMM SDK (manual fallback)`)
+    const strategyType = strategyTypeForDistribution(await getStrategyType(), strategy.position.distributionType)
 
-    const { userPositions } = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
-      positionPubKey: positionKeypair.publicKey,
-      user: wallet.publicKey,
-      totalXAmount: solIsTokenX ? new BN(0) : tokenAmountOut,
-      totalYAmount: solIsTokenX ? tokenAmountOut : new BN(0),
-      strategy: strategyTypeForDistribution(await getStrategyType(), strategy.position.distributionType),
-      minBinId,
-      maxBinId,
-      // The DLMM SDK will use the correct program based on the pool
-    })
+    // --- Step 2a: Initialize the position first ---
+    console.log(`${label} [direct] step 2a/2 — initializing position (separate tx)`)
+    try {
+      await dlmmPool.initializePosition({
+        positionPubKey: positionKeypair.publicKey,
+        user: wallet.publicKey,
+      })
+      console.log(`${label} [direct] position initialized successfully`)
+    } catch (initErr: any) {
+      console.error(`${label} [direct] initializePosition failed:`, initErr?.message || initErr)
+      throw initErr
+    }
+
+    // Small delay between the two operations (common in old robust implementations)
+    await new Promise(r => setTimeout(r, 1200))
+
+    // --- Step 2b: Add liquidity with retry (aggressive robustness) ---
+    // Old working commits used retries + backoff around the add liquidity step
+    // because the DLMM SDK can have transient simulation / realloc issues even on split calls.
+    console.log(`${label} [direct] step 2b/2 — adding liquidity via addLiquidityByStrategy (with retry)`)
+    let userPositions: any[] = []
+    const maxRetries = 2
+    let lastAddErr: any = null
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const addResult = await dlmmPool.addLiquidityByStrategy({
+          positionPubKey: positionKeypair.publicKey,
+          user: wallet.publicKey,
+          totalXAmount: solIsTokenX ? new BN(0) : tokenAmountOut,
+          totalYAmount: solIsTokenX ? tokenAmountOut : new BN(0),
+          strategy: strategyType,
+          minBinId,
+          maxBinId,
+        })
+        userPositions = addResult?.userPositions ?? []
+        console.log(`${label} [direct] addLiquidityByStrategy succeeded on attempt ${attempt}`)
+        break
+      } catch (addErr: any) {
+        lastAddErr = addErr
+        console.warn(`${label} [direct] addLiquidityByStrategy attempt ${attempt}/${maxRetries} failed:`, addErr?.message || addErr)
+
+        if (attempt < maxRetries) {
+          const backoffMs = 1500 * attempt
+          console.log(`${label} [direct] waiting ${backoffMs}ms before retry...`)
+          await new Promise(r => setTimeout(r, backoffMs))
+        }
+      }
+    }
+
+    if (userPositions.length === 0 && lastAddErr) {
+      throw lastAddErr
+    }
 
     const userPos = userPositions.find(
       (p: any) => p.publicKey.toBase58() === positionKeypair.publicKey.toBase58()
     )
 
     if (!userPos) {
-      throw new Error(`${label} position was not found after initializePositionAndAddLiquidityByStrategy`)
+      throw new Error(`${label} position was not found after split initialize + addLiquidityByStrategy`)
     }
 
     const openSig = 'manual-token2022-' + Date.now() // We can improve this later with real signature
@@ -622,7 +706,7 @@ async function openPositionToken2022(
 
     await sendOpenAlert(metrics, strategy, positionId, solAmount, getDecimalAdjustedPrice(dlmmPool, activeBin))
 
-    console.log(`${label} position opened successfully via manual fallback ✔`)
+    console.log(`${label} position opened successfully via direct Token-2022 path ✔`)
     return positionId
 
   } catch (err) {

@@ -1142,7 +1142,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         dailyLossLimitHit = null
         openedMintsThisTick.add(tokenAddress)
 
-        console.log(`[scanner] ${symbol} — LP position opened, triggering Moonboy companion buy (if eligible)`)
+        console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId}), triggering Moonboy companion buy (if eligible)`)
         void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
 
         await sendAlert({
@@ -1157,6 +1157,12 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           mint: metrics.address,
           positionId,
         })
+      } else {
+        openSkippedCount++
+        console.warn(
+          `[scanner] ${symbol} — openPosition returned null (candidate was ACCEPTED but executor did not open). ` +
+          `Check recent [executor][${strategy.id}][${symbol}] logs and bot_logs table for 'open_position_failed' or 'open_position_skipped_*' events.`
+        )
       }
     }
   }
