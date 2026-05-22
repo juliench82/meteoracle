@@ -228,30 +228,48 @@ export async function openPosition(
 
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`);
 
-    // Zap is now the default path for everything (per latest Meteora docs).
-    // Manual path (Jupiter + direct DLMM) is only attempted once as fallback if Zap fails.
+    // === EARLY BIN RANGE VALIDATION (before ANY Jupiter or Zap interaction) ===
+    // Calculate bins using the pool's real binStep + the strategy's intended % range.
+    // If it exceeds the strategy's max bins, proportionally shrink the range.
+    // Only reject early if still invalid after shrinking.
+    let binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)));
+    let binsUp   = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000));
+    let binRange = binsDown + binsUp;
 
-    // Fixed bin-range calculation to prevent InvalidPositionWidth errors on DLMM
-    const pctDown = Math.abs(strategy.position.rangeDownPct) / 100
-    const pctUp = strategy.position.rangeUpPct / 100
+    const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT;
 
-    const binsDown = Math.max(1, Math.round(pctDown / (binStep / 10000)))
-    const binsUp = Math.max(1, Math.round(pctUp / (binStep / 10000)))
+    if (binRange > maxBins) {
+      const shrinkRatio = maxBins / binRange;
+      binsDown = Math.floor(binsDown * shrinkRatio);
+      binsUp   = maxBins - binsDown;
 
-    const minBinId = activeBinId - binsDown
-    const maxBinId = activeBinId + binsUp
-    const binRange = binsDown + binsUp
-    const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT
+      binRange = binsDown + binsUp;
+
+      console.log(
+        `${label} bin range shrunk to fit strategy limit (${binRange} bins instead of ${Math.round(binRange / shrinkRatio)} bins)`
+      );
+    }
+
+    const minBinId = activeBinId - binsDown;
+    const maxBinId = activeBinId + binsUp;
 
     if (binRange < 2 || binRange > maxBins) {
-      console.warn(`${label} invalid bin range — rejecting`, { binRange, maxBins, binStep })
+      console.warn(`${label} bin range still invalid after adjustment — rejecting early (no swap attempted)`, {
+        binRange,
+        maxBins,
+        binStep,
+        strategy: strategy.id,
+      });
       await supabase.from('bot_logs').insert({
         level: 'warn',
         event: 'open_position_skipped_invalid_bin_range',
         payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
-      })
-      return null
+      });
+      return null;
     }
+
+    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`);
+    // === END EARLY VALIDATION ===
 
     // Only reach here for normal (legacy Token) pairs — safe to create ATAs
     const ataIxs: TransactionInstruction[] = []
@@ -277,15 +295,7 @@ export async function openPosition(
       console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
     }
 
-    // Reuse the bin range calculated earlier (single source of truth)
-    if (binRange > maxBins) {
-      console.warn(`${label} bin range too wide — rejecting`, { binRange, maxBins, binStep })
-      await supabase.from('bot_logs').insert({
-        level: 'warn', event: 'open_position_skipped_bin_range_cap',
-        payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
-      })
-      return null
-    }
+    // Bin range already validated earlier — just log for visibility
     console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
 
     if (!solIsTokenX && !solIsTokenY) {
