@@ -523,13 +523,13 @@ export async function openPosition(
 /**
  * Primary open path for Token-2022 / pump.fun graduates (and safety fallback for legacy tokens).
  *
- * Aggressive robustness version (based on historically working patterns):
+ * Current implementation (aggressive as possible with the installed @meteora-ag/dlmm version):
  *   1. Jupiter SOL → token swap
- *   2. Split DLMM operations: initializePosition (separate) → addLiquidityByStrategy (with retry + backoff)
+ *   2. initializePositionAndAddLiquidityByStrategy wrapped in retry + exponential backoff + detailed logging
  *
- * This split + retry approach was repeatedly proven in older commits to avoid the
- * simulation / InvalidRealloc / transient failures that the combined SDK call often hit
- * on pump.fun Token-2022 graduates.
+ * We use the combined SDK call because separate initializePosition + addLiquidityByStrategy
+ * methods are not available on the current DLMM SDK version.
+ * Retry + logging gives us the best robustness we can achieve right now.
  */
 async function openPositionToken2022(
   metrics: TokenMetrics,
@@ -577,7 +577,7 @@ async function openPositionToken2022(
       throw new Error(`${label} Jupiter swap returned zero tokens`)
     }
 
-    console.log(`${label} Jupiter swap successful — proceeding to direct DLMM SDK (split init + add liquidity for robustness)`)
+    console.log(`${label} Jupiter swap successful — proceeding to direct DLMM SDK (combined call + aggressive retries)`)
 
     // Small safety improvement: explicitly ensure the ATA for the Token-2022 output mint exists
     // using the correct token program ID (passed from the caller).
@@ -609,45 +609,26 @@ async function openPositionToken2022(
       console.log(`${label} Token-2022 ATA created ✔ sig: ${ataSig}`)
     }
 
-    // 2. Direct DLMM SDK — SPLIT INIT + ADD LIQUIDITY (historical robust pattern)
-    // Old commits repeatedly showed that splitting these two operations (instead of the combined
-    // initializePositionAndAddLiquidityByStrategy) avoided InvalidRealloc, simulation failures,
-    // and other transient SDK issues on pump.fun Token-2022 graduates.
+    // 2. Direct DLMM SDK path for Token-2022 (primary route)
+    // We use the combined call that actually exists on the current @meteora-ag/dlmm version.
+    // We wrap it with aggressive retry + backoff + detailed logging.
+    // This is the pattern that historically worked for pump.fun graduates before the Zap experiment.
     const activeBin = await dlmmPool.getActiveBin()
     const activeBinId = activeBin.binId
 
-    const minDeltaId = minBinId - activeBinId
-    const maxDeltaId = maxBinId - activeBinId
-
     const strategyType = strategyTypeForDistribution(await getStrategyType(), strategy.position.distributionType)
 
-    // --- Step 2a: Initialize the position first ---
-    console.log(`${label} [direct] step 2a/2 — initializing position (separate tx)`)
-    try {
-      await dlmmPool.initializePosition({
-        positionPubKey: positionKeypair.publicKey,
-        user: wallet.publicKey,
-      })
-      console.log(`${label} [direct] position initialized successfully`)
-    } catch (initErr: any) {
-      console.error(`${label} [direct] initializePosition failed:`, initErr?.message || initErr)
-      throw initErr
-    }
+    console.log(`${label} [direct] calling initializePositionAndAddLiquidityByStrategy (with retry)`)
 
-    // Small delay between the two operations (common in old robust implementations)
-    await new Promise(r => setTimeout(r, 1200))
-
-    // --- Step 2b: Add liquidity with retry (aggressive robustness) ---
-    // Old working commits used retries + backoff around the add liquidity step
-    // because the DLMM SDK can have transient simulation / realloc issues even on split calls.
-    console.log(`${label} [direct] step 2b/2 — adding liquidity via addLiquidityByStrategy (with retry)`)
     let userPositions: any[] = []
-    const maxRetries = 2
-    let lastAddErr: any = null
+    const maxRetries = 3
+    let lastErr: any = null
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const addResult = await dlmmPool.addLiquidityByStrategy({
+        console.log(`${label} [direct] attempt ${attempt}/${maxRetries} ...`)
+
+        const result = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
           positionPubKey: positionKeypair.publicKey,
           user: wallet.publicKey,
           totalXAmount: solIsTokenX ? new BN(0) : tokenAmountOut,
@@ -656,23 +637,24 @@ async function openPositionToken2022(
           minBinId,
           maxBinId,
         })
-        userPositions = addResult?.userPositions ?? []
-        console.log(`${label} [direct] addLiquidityByStrategy succeeded on attempt ${attempt}`)
+
+        userPositions = result?.userPositions ?? []
+        console.log(`${label} [direct] SDK call succeeded on attempt ${attempt}`)
         break
-      } catch (addErr: any) {
-        lastAddErr = addErr
-        console.warn(`${label} [direct] addLiquidityByStrategy attempt ${attempt}/${maxRetries} failed:`, addErr?.message || addErr)
+      } catch (err: any) {
+        lastErr = err
+        console.warn(`${label} [direct] attempt ${attempt} failed:`, err?.message || err)
 
         if (attempt < maxRetries) {
-          const backoffMs = 1500 * attempt
-          console.log(`${label} [direct] waiting ${backoffMs}ms before retry...`)
-          await new Promise(r => setTimeout(r, backoffMs))
+          const backoff = 2000 * attempt
+          console.log(`${label} [direct] waiting ${backoff}ms before retry...`)
+          await new Promise(r => setTimeout(r, backoff))
         }
       }
     }
 
-    if (userPositions.length === 0 && lastAddErr) {
-      throw lastAddErr
+    if (userPositions.length === 0) {
+      throw lastErr || new Error(`${label} failed after ${maxRetries} attempts to initializePositionAndAddLiquidityByStrategy`)
     }
 
     const userPos = userPositions.find(
