@@ -225,36 +225,6 @@ export async function openPosition(
 
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
-    // === TOKEN-2022 / pump.fun GRADUATE PATH (primary for these tokens) ===
-    // Historical note (from git history):
-    // The direct Jupiter + raw DLMM SDK path using initializePositionAndAddLiquidityByStrategy
-    // (sometimes with split transactions, skipPreflight, and retries) was the reliable way
-    // to consistently open positions on pump.fun graduates for a long time.
-    // The Zap SDK path has shown repeated late-stage simulation failures on the final
-    // position-creation transaction for Token-2022 mints.
-    // → We now route Token-2022 tokens to the direct path as the primary route.
-    if (isToken2022) {
-      console.log(`${label} Token-2022 / pump.fun graduate — routing to direct Jupiter + DLMM SDK path (primary for these tokens)`);
-
-      return await openPositionToken2022(
-        metrics,
-        strategy,
-        dlmmPool,
-        outputMint,
-        outputTokenProgram,
-        solAmount,
-        minBinId,
-        maxBinId,
-        solIsTokenX,
-        label,
-        await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-        supabase,
-        DRY_RUN,
-        new Keypair()
-      );
-    }
-    // === END TOKEN-2022 PRIMARY PATH ===
-
     // === EARLY BIN RANGE VALIDATION (before any Jupiter/Zap work) ===
     // We calculate how many bins the strategy's intended % range actually requires
     // on this specific pool's binStep. If it exceeds the strategy's max, we proportionally
@@ -297,6 +267,33 @@ export async function openPosition(
 
     console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
     // === END EARLY VALIDATION ===
+
+    // === TOKEN-2022 / pump.fun GRADUATE PATH (primary for these tokens) ===
+    // Historical note (from git history):
+    // The direct Jupiter + raw DLMM SDK path (with split init + addLiquidity + retries)
+    // was the reliable way to consistently open positions on pump.fun graduates.
+    // We route Token-2022 tokens to the direct path as the primary route.
+    if (isToken2022) {
+      console.log(`${label} Token-2022 / pump.fun graduate — routing to direct Jupiter + DLMM SDK path (primary for these tokens)`);
+
+      return await openPositionToken2022(
+        metrics,
+        strategy,
+        dlmmPool,
+        outputMint,
+        outputTokenProgram,
+        solAmount,
+        minBinId,
+        maxBinId,
+        solIsTokenX,
+        label,
+        await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
+        supabase,
+        DRY_RUN,
+        new Keypair()
+      );
+    }
+    // === END TOKEN-2022 PRIMARY PATH ===
 
     // Only reach here for normal (legacy Token) pairs — safe to create ATAs
     const ataIxs: TransactionInstruction[] = []
