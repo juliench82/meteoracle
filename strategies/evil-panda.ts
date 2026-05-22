@@ -19,7 +19,7 @@ export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
   version: 'v1.1',
   name: 'Evil Panda',
-  description: 'New SOL-paired meme tokens. Wide range, short duration, fast exit.',
+  description: 'New SOL-paired meme tokens. Wide range (-50% / +100%), short duration, fast exit. Positions are capped at 150 bins max for stability.',
   enabled: true,
   filters: {
     minMcUsd: 0,

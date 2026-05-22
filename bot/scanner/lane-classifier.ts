@@ -148,15 +148,68 @@ export function pickDeepCheckSurvivors(
 /**
  * Find the best pool for a given tradable token address within a lane's pool list.
  * Meteora pools store tokens as token_x and token_y — match on either side.
- * If multiple pools match (same token, different bin_step), prefer the one with
- * the highest feeTvl 1h (most active right now).
+ *
+ * When multiple pools exist for the same token (different bin_steps), we now prefer
+ * pools whose bin_step would produce a "good" position width for the strategy's
+ * desired range (closer to ideal without exceeding the strategy's max bins).
+ *
+ * Primary sort: highest feeTvl 1h (most active)
+ * Secondary sort (when feeTvl is similar): best binStep compatibility with the range
  */
-export function selectBestPool(pools: any[], tokenAddress: string, lane: string): any | null {
-  const matching = pools.filter(p => p.token_x?.address === tokenAddress || p.token_y?.address === tokenAddress)
-  if (matching.length === 0) return null
-  if (matching.length === 1) return matching[0]
-  // Plusieurs pools pour le même token → prendre celui avec le feeTvl 1h le plus élevé
-  return matching.reduce((best, p) => getFeeTvlPct(p, '1h') >= getFeeTvlPct(best, '1h') ? p : best)
+export function selectBestPool(
+  pools: any[],
+  tokenAddress: string,
+  lane: string,
+  rangeDownPct?: number,
+  rangeUpPct?: number,
+  maxBins?: number
+): { pool: any | null; binStepPreferred: boolean } {
+  const matching = pools.filter(p =>
+    p.token_x?.address === tokenAddress || p.token_y?.address === tokenAddress
+  )
+
+  if (matching.length === 0) return { pool: null, binStepPreferred: false }
+  if (matching.length === 1) return { pool: matching[0], binStepPreferred: false }
+
+  // Compute pure fee-based best for comparison
+  const pureFeeBest = matching.reduce((best, p) =>
+    (getFeeTvlPct(p, '1h') || 0) >= (getFeeTvlPct(best, '1h') || 0) ? p : best
+  )
+
+  // Score each pool
+  const scored = matching.map(pool => {
+    const feeScore = getFeeTvlPct(pool, '1h') || 0
+
+    let binCompatibility = 0
+    if (rangeDownPct !== undefined && rangeUpPct !== undefined && pool.bin_step) {
+      const totalRange = Math.abs(rangeDownPct) + rangeUpPct
+      const estimatedBins = Math.round((totalRange * 100) / (pool.bin_step / 100))
+
+      if (maxBins && estimatedBins > maxBins) {
+        binCompatibility = 0
+      } else if (maxBins) {
+        const closeness = 1 - Math.abs(estimatedBins - maxBins * 0.85) / (maxBins * 0.85)
+        binCompatibility = Math.max(0, closeness)
+      } else {
+        binCompatibility = 0.5
+      }
+    }
+
+    const score = feeScore * 10 + binCompatibility
+    return { pool, score }
+  })
+
+  scored.sort((a, b) => b.score - a.score)
+  const chosen = scored[0].pool
+
+  const binStepPreferred = chosen !== pureFeeBest
+
+  return {
+    pool: chosen,
+    binStepPreferred,
+    chosenBinStep: chosen?.bin_step,
+    feeOnlyBinStep: pureFeeBest?.bin_step,
+  }
 }
 
 /**

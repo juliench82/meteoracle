@@ -31,8 +31,8 @@ export const DLMM_ZAP_MAX_ACCOUNTS = 48;
 export const DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE = 2;
 
 export const MAX_BINS_BY_STRATEGY: Record<string, number> = {
-  'evil-panda':    200,
-  'scalp-spike':   120,
+  'evil-panda':    150,
+  'scalp-spike':   100,
   'bluechip-farm': 100,
   'stable-farm':   100,
 };

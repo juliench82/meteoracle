@@ -671,6 +671,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   let openedCount = 0
   let openedDammCountThisTick = 0
   let openSkippedCount = 0
+  let binStepPreferredCount = 0
   let dailyLossLimitHit: boolean | null = null
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
   const openedMintsThisTick = new Set<string>()
@@ -735,7 +736,57 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       }
     }
 
-    const bestPool = selectBestPool(lane === 'fresh' ? freshPools : momentumPools, tokenAddress, lane)
+    // Pass strategy range info so selectBestPool can prefer pools whose bin_step
+    // produces a good position width for the lane's primary strategy.
+    let rangeDownPct: number | undefined
+    let rangeUpPct: number | undefined
+    let maxBinsForSelection: number | undefined
+
+    if (lane === 'fresh') {
+      // Evil Panda: wide range strategy
+      rangeDownPct = -50
+      rangeUpPct = 100
+      maxBinsForSelection = 150
+    } else {
+      // Momentum lane — improved detection
+      // Strong 5m signals (high feeTvl5m or volume5m) → prefer Scalp-Spike tight ranges
+      // Otherwise → fall back to Evil Panda wider ranges for steadier momentum
+      const hasStrong5mSignal = survivors.some(s => {
+        const p = s.pool
+        const fee5m = getFeeTvlPct(p, '5m') || 0
+        const vol5m = getPoolVolume(p, '5m') || 0
+        return fee5m > 5 || vol5m > 5000
+      })
+
+      if (hasStrong5mSignal) {
+        rangeDownPct = -20
+        rangeUpPct = 40
+        maxBinsForSelection = 100
+      } else {
+        rangeDownPct = -50
+        rangeUpPct = 100
+        maxBinsForSelection = 150
+      }
+    }
+
+    const result = selectBestPool(
+      lane === 'fresh' ? freshPools : momentumPools,
+      tokenAddress,
+      lane,
+      rangeDownPct,
+      rangeUpPct,
+      maxBinsForSelection
+    )
+
+    const bestPool = result.pool
+
+    if (result.binStepPreferred) {
+      binStepPreferredCount++
+      console.log(
+        `[scanner] ${symbol} — best pool chosen with bin_step preference for ${lane} lane ` +
+        `(chose binStep ${result.chosenBinStep} over fee-only ${result.feeOnlyBinStep})`
+      )
+    }
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
       continue
@@ -1115,7 +1166,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   console.log(
     `[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, ` +
     `deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}, ` +
-    `open-skipped: ${openSkippedCount}${openBlockedReason ? ` (${openBlockedReason})` : ''}`,
+    `open-skipped: ${openSkippedCount}${openBlockedReason ? ` (${openBlockedReason})` : ''}, ` +
+    `binStepPreferred: ${binStepPreferredCount}`,
   )
   return finish({
     scanned: fetchedPools.length,

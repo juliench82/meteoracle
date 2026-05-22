@@ -8,7 +8,7 @@ export const scalpSpikeStrategy: Strategy = {
   id: 'scalp-spike',
   version: 'v1.1',
   name: 'Scalp Spike',
-  description: 'SOL-paired tokens with a live 5m/1h volume spike. Tight range, hard exit.',
+  description: 'SOL-paired tokens with a live 5m/1h volume spike. Tight range, hard exit. Positions capped at 100 bins max.',
   enabled: true,
   filters: {
     // lowered minMc + relaxed spike/fee5m/rug (per 24h candidates analysis) to let more active pumpfun momentum tokens qualify
