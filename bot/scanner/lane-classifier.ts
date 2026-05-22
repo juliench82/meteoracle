@@ -163,13 +163,18 @@ export function selectBestPool(
   rangeDownPct?: number,
   rangeUpPct?: number,
   maxBins?: number
-): { pool: any | null; binStepPreferred: boolean } {
+): { 
+  pool: any | null; 
+  binStepPreferred: boolean;
+  chosenBinStep?: number;
+  feeOnlyBinStep?: number;
+} {
   const matching = pools.filter(p =>
     p.token_x?.address === tokenAddress || p.token_y?.address === tokenAddress
   )
 
-  if (matching.length === 0) return { pool: null, binStepPreferred: false }
-  if (matching.length === 1) return { pool: matching[0], binStepPreferred: false }
+  if (matching.length === 0) return { pool: null, binStepPreferred: false, chosenBinStep: undefined, feeOnlyBinStep: undefined }
+  if (matching.length === 1) return { pool: matching[0], binStepPreferred: false, chosenBinStep: matching[0]?.bin_step, feeOnlyBinStep: matching[0]?.bin_step }
 
   // Compute pure fee-based best for comparison
   const pureFeeBest = matching.reduce((best, p) =>

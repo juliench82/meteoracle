@@ -785,7 +785,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       binStepPreferredCount++
       console.log(
         `[scanner] ${symbol} — best pool chosen with bin_step preference for ${lane} lane ` +
-        `(chose binStep ${result.chosenBinStep} over fee-only ${result.feeOnlyBinStep})`
+        `(chose binStep ${result.chosenBinStep ?? '?'} over fee-only ${result.feeOnlyBinStep ?? '?'})`
       )
     }
     if (!bestPool) {
