@@ -1,7 +1,9 @@
 /**
  * bot/executor/open.ts
  *
- * DLMM position opening logic extracted from the monolithic executor.ts.
+ * Position opening for Meteora DLMM.
+ * Primary path: Zap SDK (with retries). One manual fallback (Jupiter + raw DLMM) for Token-2022.
+ * Early real-binStep validation + proportional shrinking protects against InvalidPositionWidth.
  */
 
 import {
@@ -60,7 +62,7 @@ import {
   type OpenLpLimitState,
 } from '@/lib/position-limits'
 import { STRATEGIES } from '@/strategies'
-import { openMoonboyPosition } from '../moonboy-executor'
+
 
 import {
   simulateAndCheck,
@@ -75,11 +77,6 @@ import {
 } from './persistence'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
-
-
-
-
-
 
 
 
@@ -226,14 +223,15 @@ export async function openPosition(
     const outputTokenProgram = await getTokenProgramId(outputMint)
     const isToken2022 = outputTokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
 
-    console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`);
+    console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
-    // === EARLY BIN RANGE VALIDATION (before ANY Jupiter or Zap interaction) ===
-    // Calculate bins using the pool's real binStep + the strategy's intended % range.
-    // If it exceeds the strategy's max bins, proportionally shrink the range.
-    // Only reject early if still invalid after shrinking.
-    let binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10_000)));
-    let binsUp   = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10_000));
+    // === EARLY BIN RANGE VALIDATION (before any Jupiter/Zap work) ===
+    // We calculate how many bins the strategy's intended % range actually requires
+    // on this specific pool's binStep. If it exceeds the strategy's max, we proportionally
+    // shrink the range to stay valid. We only reject early if the range is still invalid
+    // after shrinking.
+    let binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10000)));
+    let binsUp   = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10000));
     let binRange = binsDown + binsUp;
 
     const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT;
@@ -242,11 +240,10 @@ export async function openPosition(
       const shrinkRatio = maxBins / binRange;
       binsDown = Math.floor(binsDown * shrinkRatio);
       binsUp   = maxBins - binsDown;
-
       binRange = binsDown + binsUp;
 
       console.log(
-        `${label} bin range shrunk to fit strategy limit (${binRange} bins instead of ${Math.round(binRange / shrinkRatio)} bins)`
+        `${label} bin range auto-shrunk to respect strategy limit (${binRange} bins instead of ~${Math.round(binRange / shrinkRatio)})`
       );
     }
 
@@ -254,7 +251,7 @@ export async function openPosition(
     const maxBinId = activeBinId + binsUp;
 
     if (binRange < 2 || binRange > maxBins) {
-      console.warn(`${label} bin range still invalid after adjustment — rejecting early (no swap attempted)`, {
+      console.warn(`${label} bin range still invalid after shrinking — rejecting early`, {
         binRange,
         maxBins,
         binStep,
@@ -268,7 +265,7 @@ export async function openPosition(
       return null;
     }
 
-    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`);
+    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
     // === END EARLY VALIDATION ===
 
     // Only reach here for normal (legacy Token) pairs — safe to create ATAs
@@ -295,9 +292,6 @@ export async function openPosition(
       console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
     }
 
-    // Bin range already validated earlier — just log for visibility
-    console.log(`${label} bin range: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
-
     if (!solIsTokenX && !solIsTokenY) {
       console.warn(`${label} pool has no SOL side — rejecting one-sided SOL zap-in`)
       await supabase.from('bot_logs').insert({
@@ -321,6 +315,11 @@ export async function openPosition(
 
     const positionKeypair = new Keypair()
 
+    // === ZAP-FIRST ARCHITECTURE (with one manual fallback) ===
+    // Primary path: Meteora Zap SDK (recommended by current docs) — handles swap + initializePosition2 + add liquidity in one flow.
+    // We give it up to 2 attempts (fresh quotes on retry).
+    // On total Zap failure we do ONE manual fallback: Jupiter SOL→token swap + direct DLMM SDK initialize + addLiquidity.
+    // The early bin-range validation (real binStep + proportional shrink) protects both paths from InvalidPositionWidth (6040).
     const sendZapTx = async (
       tx: Transaction | undefined,
       signers: import('@solana/web3.js').Signer[],
@@ -339,17 +338,6 @@ export async function openPosition(
     for (let attempt = 1; attempt <= 2; attempt++) {
       const attemptLabel = `${label} (attempt ${attempt}/2)`
       let cleanupSentThisAttempt = false
-
-      const sendCleanupThisAttempt = async (stage: string) => {
-        if (cleanupSentThisAttempt) return
-        cleanupSentThisAttempt = true
-        try {
-          // We need the latest zapResponse for this attempt
-          // (it will be defined in the try block below)
-        } catch (e) {
-          console.warn(`${attemptLabel} cleanup helper error:`, e)
-        }
-      }
 
       try {
         console.log(`${attemptLabel} building fresh zap quote...`)
@@ -438,7 +426,7 @@ export async function openPosition(
 
     // If we reach here on attempt 2 without breaking, the error was already thrown above
     if (!openSig && lastZapErr) {
-      console.warn(`${label} Zap path failed after 2 attempts. Trying manual fallback once (Jupiter + direct DLMM)...`);
+      console.warn(`${label} Zap path exhausted after 2 attempts — trying one manual fallback (Jupiter + DLMM SDK)`)
       try {
         return await openPositionToken2022(
           metrics,
@@ -457,8 +445,8 @@ export async function openPosition(
           new Keypair()
         )
       } catch (manualErr) {
-        console.error(`${label} Manual fallback also failed. Giving up on ${metrics.symbol}.`);
-        throw manualErr;
+        console.error(`${label} manual fallback also failed — giving up on ${metrics.symbol}`)
+        throw manualErr
       }
     }
 
@@ -487,14 +475,6 @@ export async function openPosition(
     )
     await sendOpenAlert(metrics, strategy, positionId, solAmount, entryPriceSol)
 
-    // Moonboy companion buy — fire-and-forget
-    const solPriceUsd = entryPriceSol > 0 && (metrics.priceUsd ?? 0) > 0
-      ? (metrics.priceUsd ?? 0) / entryPriceSol
-      : 0
-    openMoonboyPosition(metrics, solPriceUsd).catch((err: any) =>
-      console.warn('[executor] openMoonboyPosition non-fatal error:', err?.message ?? err)
-    )
-
     return positionId
 
   } catch (err) {
@@ -512,8 +492,9 @@ export async function openPosition(
 }
 
 /**
- * Manual open path for Token-2022 output tokens (e.g. many pump.fun graduations).
- * Uses Jupiter for the SOL → token swap + DLMM SDK for adding liquidity.
+ * One-time manual fallback for Token-2022 / pump.fun tokens when the Zap path fails.
+ * Performs a plain Jupiter SOL→token swap then uses the raw DLMM SDK to open the position.
+ * The bin range (minBinId/maxBinId) was already validated + possibly shrunk in the caller.
  */
 async function openPositionToken2022(
   metrics: TokenMetrics,
@@ -544,7 +525,7 @@ async function openPositionToken2022(
   try {
     const amountIn = new BN(Math.floor(solAmount * 1e9))
 
-    console.log(`${label} ENTERING manual Token-2022 / pump.fun graduate path`);
+    console.log(`${label} entering manual Token-2022 / pump.fun fallback path`)
 
     // 1. Swap SOL → token using Jupiter (reliable for Token-2022)
     console.log(`${label} swapping ${solAmount} SOL → ${metrics.symbol} via Jupiter...`)
@@ -561,7 +542,7 @@ async function openPositionToken2022(
       throw new Error(`${label} Jupiter swap returned zero tokens`)
     }
 
-    console.log(`${label} Jupiter swap successful — proceeding to direct DLMM SDK liquidity addition (manual path)`);
+    console.log(`${label} Jupiter swap successful — proceeding to direct DLMM SDK add-liquidity`)
 
     // Small safety improvement: explicitly ensure the ATA for the Token-2022 output mint exists
     // using the correct token program ID (passed from the caller).
@@ -600,7 +581,7 @@ async function openPositionToken2022(
     const minDeltaId = minBinId - activeBinId
     const maxDeltaId = maxBinId - activeBinId
 
-    console.log(`${label} adding liquidity with DLMM SDK (Token-2022 path)...`)
+    console.log(`${label} adding liquidity via DLMM SDK (manual fallback)`)
 
     const { userPositions } = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
@@ -641,7 +622,7 @@ async function openPositionToken2022(
 
     await sendOpenAlert(metrics, strategy, positionId, solAmount, getDecimalAdjustedPrice(dlmmPool, activeBin))
 
-    console.log(`${label} Token-2022 / pump.fun graduate position opened successfully via manual path ✔`)
+    console.log(`${label} position opened successfully via manual fallback ✔`)
     return positionId
 
   } catch (err) {
@@ -660,7 +641,8 @@ async function openPositionToken2022(
 }
 
 /**
- * Simple Jupiter swap: SOL → Token (works for both legacy and Token-2022)
+ * Jupiter v1 swap helper: SOL → output token.
+ * Used exclusively by the manual Token-2022 fallback path.
  */
 async function swapSolToTokenViaJupiter(
   connection: Connection,

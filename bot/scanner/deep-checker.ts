@@ -391,43 +391,44 @@ async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createSer
 }
 
 /**
- * Attempt a Moonboy spot-buy after a successful LP open.
- * Fire-and-forget: logs errors but never throws or blocks the scan tick.
- * Gate: MOONBOY_ENABLED !== 'false' AND token age (DexScreener) <= 1.5h.
+ * Attempt a Moonboy companion spot-buy ($10) right after a successful LP open.
+ * This is the single authoritative trigger point for Moonboy.
+ *
+ * Fire-and-forget. Uses the tick's live SOL price and the Moonboy strategy's age gate (1.5h).
  */
 async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): Promise<void> {
   const isDryRun = process.env.BOT_DRY_RUN === 'true'
+  const label = `[moonboy][${metrics.symbol}]`
 
   if (!moonboyStrategy.enabled) {
     if (isDryRun) {
-      console.log(`[moonboy] ${metrics.symbol} — DRY RUN would have considered Moonboy but strategy is disabled`)
+      console.log(`${label} would have fired companion buy (strategy disabled)`)
     }
     return
   }
 
-  if (metrics.ageHours > moonboyStrategy.filters.maxAgeHours) {
+  const maxAge = moonboyStrategy.filters.maxAgeHours
+  if (metrics.ageHours > maxAge) {
     if (isDryRun) {
-      console.log(
-        `[moonboy] ${metrics.symbol} — DRY RUN would have considered Moonboy but skipped: ` +
-        `age ${metrics.ageHours.toFixed(1)}h > ${moonboyStrategy.filters.maxAgeHours}h gate`,
-      )
+      console.log(`${label} would have fired but age ${metrics.ageHours.toFixed(1)}h > ${maxAge}h gate`)
     } else {
-      console.log(
-        `[moonboy] ${metrics.symbol} — skip: age ${metrics.ageHours.toFixed(1)}h > ` +
-        `${moonboyStrategy.filters.maxAgeHours}h gate`,
-      )
+      console.log(`${label} skipped — age ${metrics.ageHours.toFixed(1)}h > ${maxAge}h gate`)
     }
     return
   }
+
+  console.log(`${label} triggering companion spot-buy after LP open (age=${metrics.ageHours.toFixed(1)}h)`)
 
   try {
     const moonboyId = await openMoonboyPosition(metrics, solPriceUsd)
     if (moonboyId) {
-      console.log(`[moonboy] ${metrics.symbol} — spot-buy opened alongside LP (id=${moonboyId})`)
+      console.log(`${label} companion spot-buy succeeded (id=${moonboyId})`)
+    } else {
+      console.log(`${label} companion spot-buy did not open (see moonboy logs above)`)
     }
   } catch (err) {
     console.warn(
-      `[moonboy] ${metrics.symbol} — openMoonboyPosition threw (non-fatal):`,
+      `${label} openMoonboyPosition threw (non-fatal):`,
       err instanceof Error ? err.message : String(err),
     )
   }
@@ -1140,7 +1141,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         openedCount++
         dailyLossLimitHit = null
         openedMintsThisTick.add(tokenAddress)
+
+        console.log(`[scanner] ${symbol} — LP position opened, triggering Moonboy companion buy (if eligible)`)
         void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
+
         await sendAlert({
           type: 'position_opened',
           symbol,

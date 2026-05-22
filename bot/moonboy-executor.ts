@@ -93,10 +93,10 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   const label = `[moonboy][${metrics.symbol}]`
   const supabase = createServerClient()
 
-  console.log(`${label} openMoonboyPosition called — solPriceUsd=$${solPriceUsd.toFixed(2)}`)
+  console.log(`${label} evaluating companion spot-buy ($${MOONBOY_BUY_USD} target)`)
 
   if (!moonboyStrategy.enabled) {
-    console.log(`${label} moonboy strategy disabled`)
+    console.log(`${label} strategy disabled — aborting`)
     return null
   }
 
@@ -109,12 +109,11 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     const tokenAgeMinutes = (nowMs - dexData.pairCreatedAt) / 60_000
     if (tokenAgeMinutes > MOONBOY_MAX_TOKEN_AGE_MINUTES) {
       console.log(
-        `${label} moonboy skipped — token age ${tokenAgeMinutes.toFixed(1)}m > ` +
-        `${MOONBOY_MAX_TOKEN_AGE_MINUTES}m limit`,
+        `${label} skipped — DexScreener age ${tokenAgeMinutes.toFixed(1)}m > ${MOONBOY_MAX_TOKEN_AGE_MINUTES}m limit`
       )
       return null
     }
-    console.log(`${label} moonboy age gate passed — ${tokenAgeMinutes.toFixed(1)}m old`)
+    console.log(`${label} DexScreener age gate passed (${tokenAgeMinutes.toFixed(1)}m old)`)
   } else {
     console.warn(`${label} moonboy age gate — pairCreatedAt unavailable from DexScreener, skipping to be safe`)
     return null
@@ -123,7 +122,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
 
   const openCount = await countOpenMoonboys(supabase)
   if (openCount >= MOONBOY_MAX_OPEN) {
-    console.log(`${label} moonboy cap reached (${openCount}/${MOONBOY_MAX_OPEN}) — skipping`)
+    console.log(`${label} cap reached (${openCount}/${MOONBOY_MAX_OPEN}) — skipping`)
     return null
   }
 
@@ -135,9 +134,11 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     .eq('status', 'open')
     .limit(1)
   if (existing && existing.length > 0) {
-    console.log(`${label} moonboy position already open for ${metrics.address.slice(0, 8)}… — skipping`)
+    console.log(`${label} already have open position for this mint — skipping`)
     return null
   }
+
+  console.log(`${label} all gates passed — proceeding with buy`)
 
   const isDryRun = process.env.BOT_DRY_RUN === 'true'
 
@@ -147,13 +148,14 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
 
   if (!isDryRun) {
     try {
+      console.log(`${label} executing Jupiter buy (~$${MOONBOY_BUY_USD})...`)
       const result = await buyTokenWithSol(metrics.address, solPriceUsd, MOONBOY_BUY_USD, label)
       sig = result.sig
       solSpent = result.solSpent
       tokenAmountOut = result.tokenAmountOut
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      console.error(`${label} moonboy buy failed:`, msg)
+      console.error(`${label} buy failed:`, msg)
       await supabase.from('bot_logs').insert({
         level: 'error', event: 'moonboy_buy_failed',
         payload: { symbol: metrics.symbol, mint: metrics.address, error: msg },
@@ -162,7 +164,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     }
   } else {
     solSpent = MOONBOY_BUY_USD / (solPriceUsd > 0 ? solPriceUsd : 150)
-    console.log(`${label} moonboy DRY RUN — would buy ~$${MOONBOY_BUY_USD} of ${metrics.symbol}`)
+    console.log(`${label} DRY RUN — would buy ~$${MOONBOY_BUY_USD}`)
   }
 
   const tokenAgeMinutesAtOpen = dexData.pairCreatedAt !== null
@@ -214,7 +216,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     stopLossPct: moonboyStrategy.exits.stopLossPct,
   }).catch(() => {})
 
-  console.log(`${label} moonboy position opened ✔ id=${data.id} sig=${sig.slice(0, 8)}…`)
+  console.log(`${label} position opened ✔ id=${data.id} (sig=${sig.slice(0, 8)}…)`)
   return data.id
 }
 
