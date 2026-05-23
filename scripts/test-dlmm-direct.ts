@@ -327,38 +327,29 @@ async function main() {
     }
   }
 
-  // 5. DLMM SDK call — using official Meteora helpers
-  console.log('[5/5] Preparing DLMM SDK call using buildLiquidityStrategyParameters...');
+  // 5. DLMM SDK call — using the standard, widely-used pattern
+  console.log('[5/5] Preparing DLMM SDK call...');
 
-  const binStep = dlmm.lbPair.binStep;
-  const favorX = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
+  const { StrategyType } = await import('@meteora-ag/dlmm');
 
-  // Get the builder for the chosen strategy type
-  const { getLiquidityStrategyParameterBuilder, buildLiquidityStrategyParameters, StrategyType } = await import('@meteora-ag/dlmm');
-
-  let strategyTypeEnum = StrategyType.Spot;
-  if (opts.strategy === 'scalp-spike') strategyTypeEnum = StrategyType.Spot; // or Curve if preferred
-  if (opts.strategy === 'evil-panda')   strategyTypeEnum = StrategyType.Spot;
-
-  const builder = getLiquidityStrategyParameterBuilder(strategyTypeEnum);
-
-  const liquidityParams = buildLiquidityStrategyParameters(
-    dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112' ? new BN(0) : tokenAmountOut,
-    dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112' ? new BN(0) : tokenAmountOut,
-    new BN(minBinId - activeBinIdNum),
-    new BN(maxBinId - activeBinIdNum),
-    new BN(binStep),
-    favorX,
-    new BN(activeBinIdNum),
-    builder
-  );
+  let sdkStrategyType = StrategyType.Spot;
+  if (opts.strategy === 'scalp-spike') sdkStrategyType = StrategyType.Spot;
+  if (opts.strategy === 'evil-panda')   sdkStrategyType = StrategyType.Spot;
 
   const params = {
     positionPubKey: positionKeypair.publicKey,
     user: wallet.publicKey,
-    ...liquidityParams,
-    minBinId,
-    maxBinId,
+    totalXAmount: dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
+      ? new BN(0)
+      : tokenAmountOut,
+    totalYAmount: dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
+      ? new BN(0)
+      : tokenAmountOut,
+    strategy: {
+      minBinId,
+      maxBinId,
+      strategyType: sdkStrategyType,
+    },
   };
 
   // Always print the critical parameters before calling the SDK
