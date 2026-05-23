@@ -362,12 +362,8 @@ async function main() {
     // This is the exact call used in production (with retries removed for the test)
     const result: any = await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
 
-    console.log('\n✅ SDK call returned successfully!');
+    console.log('\n✅ SDK call returned a Transaction object (but check if it actually succeeded on-chain).');
     console.log('Result keys:', Object.keys(result || {}));
-
-    if (result?.userPositions) {
-      console.log('userPositions length:', result.userPositions.length);
-    }
   } catch (err: any) {
     console.error('\n❌ DLMM SDK call FAILED');
     console.error('Error:', err?.message || err);
