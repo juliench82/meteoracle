@@ -151,7 +151,14 @@ async function main() {
   // 1. Load pool
   console.log('[1/6] Loading DLMM pool...');
   const dlmmPool = await DLMM.create(connection, poolPubkey);
-  console.log('  Active bin:', dlmmPool.lbPair.activeId.toString());
+
+  // Safe way to get activeId (some SDK versions return number, some return BN)
+  const rawActiveId = dlmmPool.lbPair.activeId;
+  const activeBinIdNum: number = typeof rawActiveId === 'number' 
+    ? rawActiveId 
+    : (rawActiveId?.toNumber ? rawActiveId.toNumber() : Number(rawActiveId));
+
+  console.log('  Active bin:', activeBinIdNum);
   console.log('  Bin step:', dlmmPool.lbPair.binStep);
 
   // 2. Token program
@@ -160,7 +167,6 @@ async function main() {
   console.log('[2/6] Output mint program:', isToken2022 ? 'Token-2022' : 'Legacy Token');
 
   // 3. Bin range
-  const activeBinId = dlmmPool.lbPair.activeId.toNumber();
   let minBinId: number, maxBinId: number;
 
   if (opts.minBin !== undefined && opts.maxBin !== undefined) {
@@ -168,8 +174,8 @@ async function main() {
     maxBinId = opts.maxBin;
   } else {
     // Reasonable default range
-    minBinId = activeBinId - 50;
-    maxBinId = activeBinId + 100;
+    minBinId = activeBinIdNum - 50;
+    maxBinId = activeBinIdNum + 100;
   }
   console.log(`[3/6] Using bin range: ${minBinId} → ${maxBinId}`);
 

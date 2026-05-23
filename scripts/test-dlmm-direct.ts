@@ -188,7 +188,14 @@ async function main() {
   // 1. Load DLMM pool
   console.log('[1/5] Loading DLMM pool...');
   const dlmm = await DLMM.create(connection, poolPubkey);
-  console.log('  Active bin:', dlmm.lbPair.activeId.toString());
+
+  // Safe way to get activeId (some SDK versions return number, some return BN)
+  const rawActiveId = dlmm.lbPair.activeId;
+  const activeBinIdNum: number = typeof rawActiveId === 'number' 
+    ? rawActiveId 
+    : (rawActiveId?.toNumber ? rawActiveId.toNumber() : Number(rawActiveId));
+
+  console.log('  Active bin:', activeBinIdNum);
   console.log('  Bin step:', dlmm.lbPair.binStep);
 
   // 2. Token program check (needed early for ATA in skip-jupiter mode)
@@ -197,7 +204,6 @@ async function main() {
   console.log('[2/5] Output mint program:', isToken2022 ? 'Token-2022' : 'Legacy Token');
 
   // 3. Determine bin range (simple default or from args)
-  const activeBinId = dlmm.lbPair.activeId.toNumber();
   let minBinId: number;
   let maxBinId: number;
 
@@ -206,8 +212,8 @@ async function main() {
     maxBinId = opts.maxBin;
   } else {
     // Default reasonable range (similar to evil-panda on binStep 100)
-    minBinId = activeBinId - 50;
-    maxBinId = activeBinId + 100;
+    minBinId = activeBinIdNum - 50;
+    maxBinId = activeBinIdNum + 100;
   }
   console.log(`[3/5] Using bin range: ${minBinId} → ${maxBinId}`);
 
