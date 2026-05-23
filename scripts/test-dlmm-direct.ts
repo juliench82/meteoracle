@@ -316,24 +316,21 @@ async function main() {
     }
   } catch (err: any) {
     console.error('\n❌ DLMM SDK call FAILED');
-    console.error('Error name:', err?.name);
-    console.error('Error message:', err?.message);
-    if (err?.stack) {
-      console.error('\nStack (truncated):');
-      console.error(err.stack.split('\n').slice(0, 8).join('\n'));
-    }
+    console.error('Error:', err?.message || err);
 
-    // Try to extract any simulation info if the error contains it
     if (err?.logs) {
-      console.error('\nLogs from error:');
+      console.error('\nProgram logs:');
       console.dir(err.logs);
     }
 
-    console.log('\n--- Common causes for this exact failure on pump.fun graduates ---');
-    console.log('- Token program mismatch on one of the accounts the SDK builds');
-    console.log('- Bin range too wide for the current SDK version');
-    console.log('- Missing or incorrect token2022 program in the instruction');
-    console.log('- Temporary account / bin array rental issues');
+    console.log('\n--- Diagnosis ---');
+    if (err?.message?.includes('InvalidPositionWidth') || err?.message?.includes('6040')) {
+      console.log('This is Error 6040 = InvalidPositionWidth');
+      console.log('The bin range requested is too wide for this pool at this moment.');
+      console.log('This is exactly what our early validation in open.ts is supposed to catch and shrink.');
+    } else {
+      console.log('Unexpected error during DLMM SDK call.');
+    }
   }
 }
 
