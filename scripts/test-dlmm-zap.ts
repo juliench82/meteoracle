@@ -31,6 +31,10 @@
  *     --simulate
  */
 
+import * as dotenvLocal from 'dotenv';
+import * as path from 'path';
+dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true });
+
 import { Keypair, PublicKey, Connection, VersionedTransaction } from '@solana/web3.js';
 import BN from 'bn.js';
 import DLMM from '@meteora-ag/dlmm';
@@ -127,6 +131,11 @@ async function main() {
 
   const connection = getConnection();
   const wallet = getWallet();
+
+  if (!connection) {
+    console.error('\n❌ No RPC configured. Make sure .env.local has HELIUS_RPC_URL or RPC_URL set.');
+    process.exit(1);
+  }
 
   console.log('=== DLMM Zap Path Tester ===');
   console.log('Wallet:', wallet.publicKey.toBase58());
