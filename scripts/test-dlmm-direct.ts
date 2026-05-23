@@ -207,7 +207,7 @@ async function main() {
   const isToken2022 = tokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58();
   console.log('[2/5] Output mint program:', isToken2022 ? 'Token-2022' : 'Legacy Token');
 
-  // 3. Determine bin range using the same logic as production open.ts
+  // 3. Determine bin range using Meteora's recommended price-based method (getBinIdFromPrice)
   let minBinId: number;
   let maxBinId: number;
 
@@ -216,42 +216,57 @@ async function main() {
     maxBinId = opts.maxBin;
     console.log(`[3/5] Using explicit bin range: ${minBinId} → ${maxBinId}`);
   } else {
-    // Production-style calculation (mirrors open.ts)
+    // === PROPER METEORA-RECOMMENDED WAY ===
+    // Instead of manual percentage math, we:
+    // 1. Get the current active bin price
+    // 2. Compute target prices from the strategy's desired % range
+    // 3. Convert target prices to bin IDs using dlmm.getBinIdFromPrice (the official way)
+    // 4. Use buildLiquidityStrategyParameters + the strategy builder for proper distribution
+
     const strategyId = opts.strategy;
+
+    // Define desired price ranges per strategy (this is what the user configures)
     let rangeDownPct = -50;
     let rangeUpPct = 100;
-    let maxBins = 150;
+    let strategyType: any = 'Spot'; // Spot | BidAsk | Curve
 
     if (strategyId === 'scalp-spike') {
       rangeDownPct = -20;
       rangeUpPct = 40;
-      maxBins = 100;
+      strategyType = 'Spot'; // or 'Curve' depending on preference
     } else if (strategyId === 'evil-panda') {
       rangeDownPct = -50;
       rangeUpPct = 100;
-      maxBins = 150;
+      strategyType = 'Spot';
     }
 
-    const binStep = dlmm.lbPair.binStep;
+    const activeBin = await dlmm.getActiveBin();
+    const currentPrice = Number(dlmm.fromPricePerLamport(activeBin.price));
 
-    let binsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
-    let binsUp   = Math.round((rangeUpPct / 100) / (binStep / 10000));
-    let binRange = binsDown + binsUp;
+    const targetLowPrice = currentPrice * (1 + rangeDownPct / 100);
+    const targetHighPrice = currentPrice * (1 + rangeUpPct / 100);
 
-    if (binRange > maxBins) {
-      const shrinkRatio = maxBins / binRange;
-      binsDown = Math.floor(binsDown * shrinkRatio);
-      binsUp   = maxBins - binsDown;
-      binRange = binsDown + binsUp;
-      console.log(`[3/5] Bin range auto-shrunk to ${binRange} bins (was ${Math.round(binRange / shrinkRatio)})`);
-    } else {
-      console.log(`[3/5] No shrinking needed — requested ${binRange} bins`);
-    }
+    // Official Meteora way to get safe bin IDs from target prices
+    const calculatedMinBin = dlmm.getBinIdFromPrice(targetLowPrice, true);   // floor for lower bound
+    const calculatedMaxBin = dlmm.getBinIdFromPrice(targetHighPrice, false); // ceil for upper bound
 
-    minBinId = activeBinIdNum - binsDown;
-    maxBinId = activeBinIdNum + binsUp;
+    minBinId = calculatedMinBin;
+    maxBinId = calculatedMaxBin;
 
-    console.log(`[3/5] Using production-style bin range for ${strategyId}: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`);
+    const binRange = maxBinId - minBinId + 1;
+
+    console.log(`[3/5] Using OFFICIAL Meteora price-based method for ${strategyId}`);
+    console.log(`      Current price: ${currentPrice.toFixed(12)}`);
+    console.log(`      Target price range: ${targetLowPrice.toFixed(12)} → ${targetHighPrice.toFixed(12)}`);
+    console.log(`      Calculated bins: ${minBinId} → ${maxBinId} (${binRange} bins)`);
+
+    // Get the proper strategy builder (this is what Meteora recommends)
+    const builder = (await import('@meteora-ag/dlmm')).getLiquidityStrategyParameterBuilder(strategyType as any);
+
+    // We will use buildLiquidityStrategyParameters later when calling the SDK
+    // For now we store what we need
+    (dlmm as any)._testStrategyBuilder = builder; // temporary for the test script
+    (dlmm as any)._testStrategyType = strategyType;
   }
 
   const positionKeypair = new Keypair();
@@ -312,22 +327,36 @@ async function main() {
     }
   }
 
-  // 5. DLMM SDK call
-  console.log('[5/5] Preparing DLMM SDK call...');
+  // 5. DLMM SDK call — using official Meteora helpers
+  console.log('[5/5] Preparing DLMM SDK call using buildLiquidityStrategyParameters...');
 
-  // Use a reasonable default strategy (spot) — same as production default
-  const strategy = 'Spot' as any; // The SDK accepts the string or the enum value here in practice
+  const binStep = dlmm.lbPair.binStep;
+  const favorX = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
+
+  // Get the builder for the chosen strategy type
+  const { getLiquidityStrategyParameterBuilder, buildLiquidityStrategyParameters, StrategyType } = await import('@meteora-ag/dlmm');
+
+  let strategyTypeEnum = StrategyType.Spot;
+  if (opts.strategy === 'scalp-spike') strategyTypeEnum = StrategyType.Spot; // or Curve if preferred
+  if (opts.strategy === 'evil-panda')   strategyTypeEnum = StrategyType.Spot;
+
+  const builder = getLiquidityStrategyParameterBuilder(strategyTypeEnum);
+
+  const liquidityParams = buildLiquidityStrategyParameters(
+    dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112' ? new BN(0) : tokenAmountOut,
+    dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112' ? new BN(0) : tokenAmountOut,
+    new BN(minBinId - activeBinIdNum),
+    new BN(maxBinId - activeBinIdNum),
+    new BN(binStep),
+    favorX,
+    new BN(activeBinIdNum),
+    builder
+  );
 
   const params = {
     positionPubKey: positionKeypair.publicKey,
     user: wallet.publicKey,
-    totalXAmount: dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-      ? new BN(0)
-      : tokenAmountOut,
-    totalYAmount: dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-      ? new BN(0)
-      : tokenAmountOut,
-    strategy,
+    ...liquidityParams,
     minBinId,
     maxBinId,
   };
