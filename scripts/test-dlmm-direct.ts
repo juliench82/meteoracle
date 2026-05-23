@@ -259,14 +259,6 @@ async function main() {
     console.log(`      Current price: ${currentPrice.toFixed(12)}`);
     console.log(`      Target price range: ${targetLowPrice.toFixed(12)} → ${targetHighPrice.toFixed(12)}`);
     console.log(`      Calculated bins: ${minBinId} → ${maxBinId} (${binRange} bins)`);
-
-    // Get the proper strategy builder (this is what Meteora recommends)
-    const builder = (await import('@meteora-ag/dlmm')).getLiquidityStrategyParameterBuilder(strategyType as any);
-
-    // We will use buildLiquidityStrategyParameters later when calling the SDK
-    // For now we store what we need
-    (dlmm as any)._testStrategyBuilder = builder; // temporary for the test script
-    (dlmm as any)._testStrategyType = strategyType;
   }
 
   const positionKeypair = new Keypair();
