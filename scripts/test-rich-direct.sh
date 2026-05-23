@@ -26,7 +26,7 @@ STRATEGY="evil-panda"
 
 # If user already passed --strategy, don't add the default
 for arg in "$@"; do
-  if [[ "$arg" == "--strategy" ]]; then
+  if [ "$arg" = "--strategy" ]; then
     STRATEGY=""
     break
   fi

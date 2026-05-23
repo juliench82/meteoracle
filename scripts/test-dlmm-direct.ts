@@ -124,6 +124,7 @@ function parseArgs() {
     tokenAmount: null, // raw units (BN friendly)
     useBalance: null,  // e.g. "50%", "0.8", "75"
     strategy: 'evil-panda',
+    execute: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -138,6 +139,7 @@ function parseArgs() {
     else if (arg === '--min-bin') opts.minBin = parseInt(args[++i]);
     else if (arg === '--max-bin') opts.maxBin = parseInt(args[++i]);
     else if (arg === '--strategy') opts.strategy = args[++i];
+    else if (arg === '--execute') opts.execute = true;
     else if (arg === '--help') {
       console.log('See top of file for usage.');
       process.exit(0);
@@ -330,13 +332,30 @@ async function main() {
     maxBinId,
   };
 
+  console.log('\n=== DLMM Call Parameters (for diagnosis) ===');
+  console.log('activeBinIdNum     :', activeBinIdNum);
+  console.log('binStep            :', dlmm.lbPair.binStep);
+  console.log('minBinId           :', minBinId);
+  console.log('maxBinId           :', maxBinId);
+  console.log('range width (bins) :', maxBinId - minBinId + 1);
+  console.log('minDeltaId         :', minBinId - activeBinIdNum);
+  console.log('maxDeltaId         :', maxBinId - activeBinIdNum);
+  console.log('strategy (range)   :', opts.strategy);
+  console.log('================================================\n');
+
   console.log('Parameters prepared. Calling initializePositionAndAddLiquidityByStrategy...');
 
   if (opts.simulate) {
     console.log('\n=== SIMULATION MODE ===');
-    console.log('The SDK will attempt to build the transaction.');
-    console.log('Full simulation of the high-level SDK method is limited.');
-    console.log('We will call it and catch any error for detailed diagnosis.\n');
+    console.log('We will still call the SDK method (it does internal simulation).');
+    console.log('Any on-chain error will be caught and printed.\n');
+  } else {
+    console.log('\n⚠️  REAL EXECUTION MODE — This will open a real position!');
+    if (opts.amount > 0.02) {
+      console.log('   For safety, amount is capped at 0.02 SOL in real mode.');
+      opts.amount = 0.02;
+    }
+    console.log('   Amount to be used:', opts.amount, 'SOL\n');
   }
 
   try {
