@@ -10,6 +10,7 @@
 #   bash scripts/test-rich-direct.sh --skip-jupiter --use-balance 10% --simulate
 #   bash scripts/test-rich-direct.sh --strategy scalp-spike --simulate
 #   bash scripts/test-rich-direct.sh --amount 0.05 --simulate
+#   bash scripts/test-rich-direct.sh --split --simulate          # Use split creation (more robust for wide ranges)
 
 POOL="BGRTiYMPfpfYANXxbAsgTW7KMPt6DTjahEytAZDvFwi3"
 MINT="5hiLgyybrAYPpUwNFa38agfZ8iEtnahWKAPixcfspump"

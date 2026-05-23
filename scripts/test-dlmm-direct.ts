@@ -41,6 +41,12 @@
  *   npx tsx scripts/test-dlmm-direct.ts \
  *     --pool ... --mint ... --amount 0.05 \
  *     --min-bin -450 --max-bin -350
+ *
+ *   # Use split creation (initializePosition first, then addLiquidityByStrategy)
+ *   # This is more robust for wider ranges or when hitting realloc limits.
+ *   npx tsx scripts/test-dlmm-direct.ts \
+ *     --pool ... --mint ... --amount 0.05 \
+ *     --split
  */
 
 import * as dotenvLocal from 'dotenv';
@@ -125,6 +131,7 @@ function parseArgs() {
     useBalance: null,  // e.g. "50%", "0.8", "75"
     strategy: 'evil-panda',
     execute: false,
+    split: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -140,6 +147,7 @@ function parseArgs() {
     else if (arg === '--max-bin') opts.maxBin = parseInt(args[++i]);
     else if (arg === '--strategy') opts.strategy = args[++i];
     else if (arg === '--execute') opts.execute = true;
+    else if (arg === '--split') opts.split = true;
     else if (arg === '--help') {
       console.log('See top of file for usage.');
       process.exit(0);
@@ -368,30 +376,74 @@ async function main() {
     console.log('   Amount:', opts.amount, 'SOL\n');
   }
 
-  console.log('Calling initializePositionAndAddLiquidityByStrategy...');
+  if (opts.split) {
+    console.log('Calling initializePosition + addLiquidityByStrategy (SPLIT MODE for robustness)...');
 
-  try {
-    // This is the exact call used in production (with retries removed for the test)
-    const result: any = await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
+    try {
+      // Step 1: Create the position account first
+      console.log('  → Step 1: initializePosition');
+      await dlmm.initializePosition({
+        positionPubKey: positionKeypair.publicKey,
+        user: wallet.publicKey,
+      });
+      console.log('  ✓ Position account created');
 
-    console.log('\n✅ SDK call returned a Transaction object (but check if it actually succeeded on-chain).');
-    console.log('Result keys:', Object.keys(result || {}));
-  } catch (err: any) {
-    console.error('\n❌ DLMM SDK call FAILED');
-    console.error('Error:', err?.message || err);
+      // Step 2: Add liquidity to the newly created position
+      console.log('  → Step 2: addLiquidityByStrategy');
+      const result: any = await dlmm.addLiquidityByStrategy({
+        positionPubKey: positionKeypair.publicKey,
+        user: wallet.publicKey,
+        totalXAmount: dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
+          ? new BN(0)
+          : tokenAmountOut,
+        totalYAmount: dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
+          ? new BN(0)
+          : tokenAmountOut,
+        strategy: {
+          minBinId,
+          maxBinId,
+          strategyType: sdkStrategyType,
+        },
+      });
 
-    if (err?.logs) {
-      console.error('\nProgram logs:');
-      console.dir(err.logs);
+      console.log('\n✅ Split creation succeeded (initialize + addLiquidity).');
+      if (result?.userPositions) {
+        console.log('userPositions length:', result.userPositions.length);
+      }
+    } catch (err: any) {
+      console.error('\n❌ SPLIT DLMM SDK call FAILED');
+      console.error('Error:', err?.message || err);
+
+      if (err?.logs) {
+        console.error('\nProgram logs:');
+        console.dir(err.logs);
+      }
     }
+  } else {
+    console.log('Calling initializePositionAndAddLiquidityByStrategy (COMBINED)...');
 
-    console.log('\n--- Diagnosis ---');
-    if (err?.message?.includes('InvalidPositionWidth') || err?.message?.includes('6040')) {
-      console.log('This is Error 6040 = InvalidPositionWidth');
-      console.log('The bin range requested is too wide for this pool at this moment.');
-      console.log('This is exactly what our early validation in open.ts is supposed to catch and shrink.');
-    } else {
-      console.log('Unexpected error during DLMM SDK call.');
+    try {
+      const result: any = await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
+
+      console.log('\n✅ SDK call returned a Transaction object (but check if it actually succeeded on-chain).');
+      console.log('Result keys:', Object.keys(result || {}));
+    } catch (err: any) {
+      console.error('\n❌ DLMM SDK call FAILED');
+      console.error('Error:', err?.message || err);
+
+      if (err?.logs) {
+        console.error('\nProgram logs:');
+        console.dir(err.logs);
+      }
+
+      console.log('\n--- Diagnosis ---');
+      if (err?.message?.includes('InvalidPositionWidth') || err?.message?.includes('6040')) {
+        console.log('This is Error 6040 = InvalidPositionWidth');
+        console.log('The bin range requested is too wide for this pool at this moment.');
+        console.log('This is exactly what our early validation in open.ts is supposed to catch and shrink.');
+      } else {
+        console.log('Unexpected error during DLMM SDK call.');
+      }
     }
   }
 }
