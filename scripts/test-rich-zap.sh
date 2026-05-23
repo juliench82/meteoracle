@@ -22,4 +22,5 @@ echo ""
 npx tsx scripts/test-dlmm-zap.ts \
   --pool "$POOL" \
   --mint "$MINT" \
+  --strategy evil-panda \
   "$@"

@@ -123,6 +123,7 @@ function parseArgs() {
     skipJupiter: false,
     tokenAmount: null, // raw units (BN friendly)
     useBalance: null,  // e.g. "50%", "0.8", "75"
+    strategy: 'evil-panda',
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -136,6 +137,7 @@ function parseArgs() {
     else if (arg === '--use-balance') opts.useBalance = args[++i];
     else if (arg === '--min-bin') opts.minBin = parseInt(args[++i]);
     else if (arg === '--max-bin') opts.maxBin = parseInt(args[++i]);
+    else if (arg === '--strategy') opts.strategy = args[++i];
     else if (arg === '--help') {
       console.log('See top of file for usage.');
       process.exit(0);
@@ -203,19 +205,52 @@ async function main() {
   const isToken2022 = tokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58();
   console.log('[2/5] Output mint program:', isToken2022 ? 'Token-2022' : 'Legacy Token');
 
-  // 3. Determine bin range (simple default or from args)
+  // 3. Determine bin range using the same logic as production open.ts
   let minBinId: number;
   let maxBinId: number;
 
   if (opts.minBin !== undefined && opts.maxBin !== undefined) {
     minBinId = opts.minBin;
     maxBinId = opts.maxBin;
+    console.log(`[3/5] Using explicit bin range: ${minBinId} → ${maxBinId}`);
   } else {
-    // Default reasonable range (similar to evil-panda on binStep 100)
-    minBinId = activeBinIdNum - 50;
-    maxBinId = activeBinIdNum + 100;
+    // Production-style calculation (mirrors open.ts)
+    const strategyId = opts.strategy;
+    let rangeDownPct = -50;
+    let rangeUpPct = 100;
+    let maxBins = 150;
+
+    if (strategyId === 'scalp-spike') {
+      rangeDownPct = -20;
+      rangeUpPct = 40;
+      maxBins = 100;
+    } else if (strategyId === 'evil-panda') {
+      rangeDownPct = -50;
+      rangeUpPct = 100;
+      maxBins = 150;
+    }
+
+    const binStep = dlmm.lbPair.binStep;
+
+    let binsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
+    let binsUp   = Math.round((rangeUpPct / 100) / (binStep / 10000));
+    let binRange = binsDown + binsUp;
+
+    if (binRange > maxBins) {
+      const shrinkRatio = maxBins / binRange;
+      binsDown = Math.floor(binsDown * shrinkRatio);
+      binsUp   = maxBins - binsDown;
+      binRange = binsDown + binsUp;
+      console.log(`[3/5] Bin range auto-shrunk to ${binRange} bins (was ${Math.round(binRange / shrinkRatio)})`);
+    } else {
+      console.log(`[3/5] No shrinking needed — requested ${binRange} bins`);
+    }
+
+    minBinId = activeBinIdNum - binsDown;
+    maxBinId = activeBinIdNum + binsUp;
+
+    console.log(`[3/5] Using production-style bin range for ${strategyId}: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`);
   }
-  console.log(`[3/5] Using bin range: ${minBinId} → ${maxBinId}`);
 
   const positionKeypair = new Keypair();
 

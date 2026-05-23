@@ -23,4 +23,5 @@ echo ""
 npx tsx scripts/test-dlmm-direct.ts \
   --pool "$POOL" \
   --mint "$MINT" \
+  --strategy evil-panda \
   "$@"
