@@ -8,6 +8,7 @@
 # Usage examples:
 #   bash scripts/test-rich-direct.sh --simulate
 #   bash scripts/test-rich-direct.sh --skip-jupiter --use-balance 10% --simulate
+#   bash scripts/test-rich-direct.sh --strategy scalp-spike --simulate
 #   bash scripts/test-rich-direct.sh --amount 0.05 --simulate
 
 POOL="BGRTiYMPfpfYANXxbAsgTW7KMPt6DTjahEytAZDvFwi3"
@@ -20,8 +21,19 @@ echo "Pool: $POOL"
 echo "Mint: $MINT"
 echo ""
 
+# Default strategy for RICH-SOL testing. Can be overridden by passing --strategy
+STRATEGY="evil-panda"
+
+# If user already passed --strategy, don't add the default
+for arg in "$@"; do
+  if [[ "$arg" == "--strategy" ]]; then
+    STRATEGY=""
+    break
+  fi
+done
+
 npx tsx scripts/test-dlmm-direct.ts \
   --pool "$POOL" \
   --mint "$MINT" \
-  --strategy evil-panda \
+  ${STRATEGY:+--strategy "$STRATEGY"} \
   "$@"

@@ -8,6 +8,7 @@
 # Usage examples:
 #   bash scripts/test-rich-zap.sh --simulate
 #   bash scripts/test-rich-zap.sh --skip-jupiter --use-balance 10% --simulate
+#   bash scripts/test-rich-zap.sh --strategy scalp-spike --simulate
 
 POOL="BGRTiYMPfpfYANXxbAsgTW7KMPt6DTjahEytAZDvFwi3"
 MINT="5hiLgyybrAYPpUwNFa38agfZ8iEtnahWKAPixcfspump"
@@ -19,8 +20,19 @@ echo "Pool: $POOL"
 echo "Mint: $MINT"
 echo ""
 
+# Default strategy for RICH-SOL testing. Can be overridden by passing --strategy
+STRATEGY="evil-panda"
+
+# If user already passed --strategy, don't add the default
+for arg in "$@"; do
+  if [[ "$arg" == "--strategy" ]]; then
+    STRATEGY=""
+    break
+  fi
+done
+
 npx tsx scripts/test-dlmm-zap.ts \
   --pool "$POOL" \
   --mint "$MINT" \
-  --strategy evil-panda \
+  ${STRATEGY:+--strategy "$STRATEGY"} \
   "$@"
