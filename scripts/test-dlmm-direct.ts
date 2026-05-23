@@ -332,6 +332,7 @@ async function main() {
     maxBinId,
   };
 
+  // Always print the critical parameters before calling the SDK
   console.log('\n=== DLMM Call Parameters (for diagnosis) ===');
   console.log('activeBinIdNum     :', activeBinIdNum);
   console.log('binStep            :', dlmm.lbPair.binStep);
@@ -343,20 +344,19 @@ async function main() {
   console.log('strategy (range)   :', opts.strategy);
   console.log('================================================\n');
 
-  console.log('Parameters prepared. Calling initializePositionAndAddLiquidityByStrategy...');
-
   if (opts.simulate) {
-    console.log('\n=== SIMULATION MODE ===');
-    console.log('We will still call the SDK method (it does internal simulation).');
-    console.log('Any on-chain error will be caught and printed.\n');
+    console.log('=== SIMULATION MODE ===');
+    console.log('Calling the SDK (it will do internal simulation). Errors will be shown.\n');
   } else {
-    console.log('\n⚠️  REAL EXECUTION MODE — This will open a real position!');
+    console.log('⚠️  REAL EXECUTION MODE — This will attempt a real on-chain open!');
     if (opts.amount > 0.02) {
-      console.log('   For safety, amount is capped at 0.02 SOL in real mode.');
+      console.log('   Amount capped at 0.02 SOL for safety.');
       opts.amount = 0.02;
     }
-    console.log('   Amount to be used:', opts.amount, 'SOL\n');
+    console.log('   Amount:', opts.amount, 'SOL\n');
   }
+
+  console.log('Calling initializePositionAndAddLiquidityByStrategy...');
 
   try {
     // This is the exact call used in production (with retries removed for the test)
