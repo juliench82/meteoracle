@@ -149,19 +149,6 @@ async function getTokenBalance(
   }
 }
 
-// Simple uniform (Spot) distribution for manual liquidity addition after split position creation
-function getSpotLiquidityDistribution(minBinId: number, maxBinId: number) {
-  const distribution: any[] = [];
-  for (let binId = minBinId; binId <= maxBinId; binId++) {
-    distribution.push({
-      binId,
-      distributionX: new BN(0),
-      distributionY: new BN(100), // relative weight per bin (uniform)
-    });
-  }
-  return distribution;
-}
-
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts: any = {
@@ -469,24 +456,45 @@ async function main() {
       const tokenAfterCreate = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
       console.log(`  Balances after position creation (before liquidity): SOL ${solAfterCreate} | Token ${tokenAfterCreate}`);
 
-      // 3. Add liquidity into the now-correctly-sized position (using lower-level addLiquidity)
-      console.log('  Adding liquidity via addLiquidity (lower-level)...');
-      const binLiquidityDistribution = getSpotLiquidityDistribution(minBinId, maxBinId);
-
-      const liqResult: any = await dlmm.addLiquidity({
+      // 3. Add liquidity into the now-correctly-sized position
+      console.log('  Adding liquidity via addLiquidityByStrategy...');
+      const liqTx: any = await dlmm.addLiquidityByStrategy({
         positionPubKey: positionKeypair.publicKey,
         user: wallet.publicKey,
         totalXAmount: dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
           ? new BN(0) : tokenAmountOut,
         totalYAmount: dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
           ? new BN(0) : tokenAmountOut,
-        binLiquidityDistribution,
+        strategy: {
+          minBinId,
+          maxBinId,
+          strategyType: sdkStrategyType,
+        },
       });
 
-      console.log('  addLiquidity result type:', typeof liqResult);
-      if (liqResult && typeof liqResult === 'object') {
-        if (liqResult.signature) console.log('  Liquidity tx signature:', liqResult.signature);
-        if (liqResult.instructions) console.log('  Returned', liqResult.instructions?.length || 0, 'instructions');
+      // Handle the returned Transaction (the high-level method sometimes returns it instead of sending automatically)
+      if (liqTx) {
+        if (Array.isArray(liqTx)) {
+          for (const tx of liqTx) {
+            tx.feePayer = wallet.publicKey;
+            const { blockhash } = await connection.getLatestBlockhash();
+            tx.recentBlockhash = blockhash;
+            tx.sign(wallet);
+            const sig = await connection.sendTransaction(tx, [wallet]);
+            await connection.confirmTransaction(sig, 'confirmed');
+            console.log('  ✓ Liquidity tx sent. Sig:', sig);
+          }
+        } else {
+          liqTx.feePayer = wallet.publicKey;
+          const { blockhash } = await connection.getLatestBlockhash();
+          liqTx.recentBlockhash = blockhash;
+          liqTx.sign(wallet);
+          const sig = await connection.sendTransaction(liqTx, [wallet]);
+          await connection.confirmTransaction(sig, 'confirmed');
+          console.log('  ✓ Liquidity tx sent. Sig:', sig);
+        }
+      } else {
+        console.log('  (addLiquidityByStrategy returned no transaction to send)');
       }
 
       const solAfterLiq = await getSolBalance(connection, wallet.publicKey);
@@ -582,24 +590,44 @@ async function main() {
         await connection.confirmTransaction(createSig, 'confirmed');
         console.log('✓ Position created + extended. Sig:', createSig);
 
-        // 2. Add liquidity (using lower-level addLiquidity after manual position creation)
-        console.log('Adding liquidity via addLiquidity (lower-level)...');
-        const binLiquidityDistribution = getSpotLiquidityDistribution(minBinId, maxBinId);
-
-        const liqResult: any = await dlmm.addLiquidity({
+        // 2. Add liquidity
+        console.log('Adding liquidity via addLiquidityByStrategy...');
+        const liqTx: any = await dlmm.addLiquidityByStrategy({
           positionPubKey: positionKeypair.publicKey,
           user: wallet.publicKey,
           totalXAmount: dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
             ? new BN(0) : tokenAmountOut,
           totalYAmount: dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
             ? new BN(0) : tokenAmountOut,
-          binLiquidityDistribution,
+          strategy: {
+            minBinId,
+            maxBinId,
+            strategyType: sdkStrategyType,
+          },
         });
 
-        if (liqResult?.signature) {
-          console.log('✓ Liquidity added. Tx:', liqResult.signature);
+        if (liqTx) {
+          if (Array.isArray(liqTx)) {
+            for (const tx of liqTx) {
+              tx.feePayer = wallet.publicKey;
+              const { blockhash } = await connection.getLatestBlockhash();
+              tx.recentBlockhash = blockhash;
+              tx.sign(wallet);
+              const sig = await connection.sendTransaction(tx, [wallet]);
+              await connection.confirmTransaction(sig, 'confirmed');
+              console.log('✓ Liquidity tx sent. Sig:', sig);
+            }
+          } else {
+            liqTx.feePayer = wallet.publicKey;
+            const { blockhash } = await connection.getLatestBlockhash();
+            liqTx.recentBlockhash = blockhash;
+            liqTx.sign(wallet);
+            const sig = await connection.sendTransaction(liqTx, [wallet]);
+            await connection.confirmTransaction(sig, 'confirmed');
+            console.log('✓ Liquidity tx sent. Sig:', sig);
+          }
         } else {
-          console.log('Liquidity step returned:', liqResult);
+          console.log('  (addLiquidityByStrategy returned no transaction to send)');
         }
 
         // 3. Final position inspection
