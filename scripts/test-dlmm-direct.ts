@@ -473,12 +473,18 @@ async function main() {
       const totalY = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
         ? new BN(0) : tokenAmountOut;
 
+      // Derive binArrayBitmapExtension (required for wider ranges that overflow the default bitmap)
+      const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
+      const [binArrayBitmapExtension] = PublicKey.findProgramAddressSync(
+        [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
+        dlmm.program.programId
+      );
+
       // Build liquidity parameters similar to what the SDK uses internally
       const liquidityParams = {
         minBinId,
         maxBinId,
         strategyType: sdkStrategyType,
-        // The SDK internally builds more detailed params; we pass the core ones here
       };
 
       try {
@@ -487,9 +493,10 @@ async function main() {
           .accountsPartial({
             position: positionKeypair.publicKey,
             lbPair: poolPubkey,
+            binArrayBitmapExtension: binArrayBitmapExtension,
             user: wallet.publicKey,
-            // Note: Full account list (bin arrays, token accounts, transfer hooks) is complex.
-            // We start minimal and will expand based on errors.
+            // Note: Still missing several accounts (bin arrays, token accounts, transfer hooks for Token-2022).
+            // We will add them based on the next error.
           })
           .instruction();
 
@@ -605,6 +612,13 @@ async function main() {
         const totalY = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
           ? new BN(0) : tokenAmountOut;
 
+        // Derive binArrayBitmapExtension (required for wider ranges)
+        const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
+        const [binArrayBitmapExtension] = PublicKey.findProgramAddressSync(
+          [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
+          dlmm.program.programId
+        );
+
         const liquidityParams = {
           minBinId,
           maxBinId,
@@ -617,6 +631,7 @@ async function main() {
             .accountsPartial({
               position: positionKeypair.publicKey,
               lbPair: poolPubkey,
+              binArrayBitmapExtension: binArrayBitmapExtension,
               user: wallet.publicKey,
             })
             .instruction();
