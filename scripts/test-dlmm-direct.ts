@@ -379,35 +379,58 @@ async function main() {
       if (err?.logs) console.error('   Logs:', err.logs);
     }
 
-    // SPLIT PATH
-    console.log('\n--- SPLIT PATH ---');
+    // SPLIT PATH — follows the exact internal pattern the Meteora SDK uses for wide ranges
+    console.log('\n--- SPLIT PATH (initializePosition2 + increasePositionLength2) ---');
     try {
-      const { SystemProgram, SYSVAR_RENT_PUBKEY } = await import('@solana/web3.js');
+      const DEFAULT_BIN_PER_POSITION = 70;
+      const MAX_RESIZE_LENGTH = 91;
 
-      // Step 1: Create position
-      const ix = await dlmm.program.methods
-        .initializePosition2()
-        .accountsStrict({
+      const desiredWidth = maxBinId - minBinId + 1;
+      const initialWidth = Math.min(DEFAULT_BIN_PER_POSITION, desiredWidth);
+
+      // 1. Initialize position with starting width (capped at 70)
+      const initIx = await dlmm.program.methods
+        .initializePosition2(minBinId, initialWidth)
+        .accountsPartial({
           payer: wallet.publicKey,
           position: positionKeypair.publicKey,
           lbPair: poolPubkey,
           owner: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-          rent: SYSVAR_RENT_PUBKEY,
         })
         .instruction();
 
-      const tx = new Transaction().add(ix);
-      tx.feePayer = wallet.publicKey;
-      const { blockhash } = await connection.getLatestBlockhash();
-      tx.recentBlockhash = blockhash;
-      tx.sign(positionKeypair);
+      // 2. Extend position length as needed (in chunks of up to 91 bins)
+      const extendIxs = [];
+      let currentEndBinId = minBinId + initialWidth - 1;
+      while (currentEndBinId < maxBinId) {
+        currentEndBinId = Math.min(currentEndBinId + MAX_RESIZE_LENGTH, maxBinId);
+        const extendIx = await dlmm.program.methods
+          .increasePositionLength2(currentEndBinId)
+          .accountsPartial({
+            lbPair: poolPubkey,
+            position: positionKeypair.publicKey,
+            funder: wallet.publicKey,
+            owner: wallet.publicKey,
+          })
+          .instruction();
+        extendIxs.push(extendIx);
+      }
 
-      const sig = await connection.sendTransaction(tx, [wallet, positionKeypair]);
-      await connection.confirmTransaction(sig, 'confirmed');
-      console.log('  ✓ Position created via split. Sig:', sig);
+      // Send position creation + extension(s) in one tx
+      const createTx = new Transaction().add(initIx, ...extendIxs);
+      createTx.feePayer = wallet.publicKey;
+      const { blockhash: bh1 } = await connection.getLatestBlockhash();
+      createTx.recentBlockhash = bh1;
+      createTx.sign(positionKeypair);
 
-      // Step 2: Add liquidity
+      const createSig = await connection.sendTransaction(createTx, [wallet, positionKeypair]);
+      await connection.confirmTransaction(createSig, 'confirmed');
+      console.log('  ✓ Position created + extended. Sig:', createSig);
+      if (extendIxs.length > 0) {
+        console.log(`    (Used ${extendIxs.length} increasePositionLength2 instruction(s))`);
+      }
+
+      // 3. Add liquidity into the now-correctly-sized position
       const result: any = await dlmm.addLiquidityByStrategy({
         positionPubKey: positionKeypair.publicKey,
         user: wallet.publicKey,
@@ -422,7 +445,7 @@ async function main() {
         },
       });
 
-      console.log('✅ Split path succeeded.');
+      console.log('✅ SPLIT path succeeded (position created + liquidity added).');
     } catch (err: any) {
       console.error('❌ SPLIT path failed:');
       console.error('   ', err?.message || err);

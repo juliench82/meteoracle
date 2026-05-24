@@ -34,6 +34,7 @@ yarn-debug.log*
 yarn-error.log*
 cron-job.txt
 
-# Local test helper scripts (RICH-SOL specific, not meant to be shared)
-scripts/test-rich-direct.sh
-scripts/test-rich-zap.sh
+# Local / ad-hoc test scripts (frequently edited on VPS, cause merge conflicts)
+scripts/test-*.sh
+scripts/test-dlmm-*.ts
+scripts/test-rich-*.sh
