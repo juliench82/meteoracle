@@ -34,7 +34,5 @@ yarn-debug.log*
 yarn-error.log*
 cron-job.txt
 
-# Tiny ad-hoc shell wrappers — frequently hand-edited directly on the VPS for quick one-off tests.
-# These are intentionally not tracked to avoid constant merge conflicts on `git pull`.
-# All real test harnesses (.ts files) remain under version control so fixes flow to the VPS.
-scripts/test-rich-*.sh
+# No entries here for the test-rich shell scripts anymore.
+# They are tracked again (per user request).
