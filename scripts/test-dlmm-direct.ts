@@ -55,6 +55,11 @@
  *   npx tsx scripts/test-dlmm-direct.ts \
  *     --pool ... --mint ... --amount 0.02 \
  *     --split
+ *
+ *   # Close an empty bin array to recover rent (advanced)
+ *   npx tsx scripts/test-dlmm-direct.ts \
+ *     --pool <LB_PAIR_ADDRESS> \
+ *     --close-bin-array <BIN_ARRAY_ADDRESS>
  */
 
 import * as dotenvLocal from 'dotenv';
@@ -162,6 +167,7 @@ function parseArgs() {
     strategy: 'evil-panda',
     execute: false,
     split: false,
+    closeBinArray: null,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -178,6 +184,7 @@ function parseArgs() {
     else if (arg === '--strategy') opts.strategy = args[++i];
     else if (arg === '--execute') opts.execute = true;
     else if (arg === '--split') opts.split = true;
+    else if (arg === '--close-bin-array') opts.closeBinArray = args[++i];
     else if (arg === '--help') {
       console.log('See top of file for usage.');
       process.exit(0);
@@ -215,6 +222,15 @@ async function main() {
   if (opts.amount > MAX_TEST_AMOUNT_SOL) {
     console.log(`⚠️  [TEST SCRIPT] Safety cap active: Amount capped at ${MAX_TEST_AMOUNT_SOL} SOL (was ${opts.amount}).`);
     opts.amount = MAX_TEST_AMOUNT_SOL;
+  }
+
+  if (opts.closeBinArray) {
+    if (!opts.pool) {
+      console.error('Error: --pool is required when using --close-bin-array');
+      process.exit(1);
+    }
+    await closeBinArray(opts.pool, opts.closeBinArray);
+    return;
   }
 
   const connection = getConnection();
@@ -369,7 +385,7 @@ async function main() {
   // 5. DLMM SDK call — using the standard, widely-used pattern
   console.log('[5/5] Preparing DLMM SDK call...');
 
-  const { StrategyType, toStrategyParameters } = await import('@meteora-ag/dlmm');
+  const { StrategyType, toStrategyParameters, getBinArrayAccountMetasCoverage } = await import('@meteora-ag/dlmm');
 
   let sdkStrategyType = StrategyType.Spot;
   if (opts.strategy === 'scalp-spike') sdkStrategyType = StrategyType.Spot;
@@ -467,8 +483,8 @@ async function main() {
       const tokenAfterCreate = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
       console.log(`  Balances after position creation (before liquidity): SOL ${solAfterCreate} | Token ${tokenAfterCreate}`);
 
-      // 3. Add liquidity — low-level using the program method (following SDK internal pattern)
-      console.log('  Adding liquidity via high-level addLiquidityByStrategy (hybrid approach)...');
+      // 3. Add liquidity — fully low-level using addLiquidityByStrategy2
+      console.log('  Adding liquidity via low-level addLiquidityByStrategy2...');
 
       const totalX = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
         ? new BN(0) : tokenAmountOut;
@@ -605,40 +621,49 @@ async function main() {
         strategyParameters,
       };
 
-      try {
-        const result: any = await dlmm.addLiquidityByStrategy({
-          positionPubKey: positionKeypair.publicKey,
-          user: wallet.publicKey,
-          totalXAmount: totalX,
-          totalYAmount: totalY,
-          strategy: {
-            minBinId,
-            maxBinId,
-            strategyType: sdkStrategyType,
-          },
-          slippage: 500, // 5% starting point for wide ranges
-        });
+      // === Fully low-level liquidity ===
+      console.log('  Adding liquidity via low-level addLiquidityByStrategy2 + bin arrays...');
 
-        if (result?.signature) {
-          console.log('  ✓ Liquidity added via high-level method. Sig:', result.signature);
-        } else if (result instanceof Transaction || (Array.isArray(result) && result[0] instanceof Transaction)) {
-          // The high-level method sometimes returns the Transaction instead of sending it.
-          // We sign and send it ourselves.
-          const txs = Array.isArray(result) ? result : [result];
-          for (const tx of txs) {
-            tx.feePayer = wallet.publicKey;
-            const { blockhash } = await connection.getLatestBlockhash();
-            tx.recentBlockhash = blockhash;
-            tx.sign(wallet);
-            const sig = await connection.sendTransaction(tx, [wallet]);
-            await connection.confirmTransaction(sig, 'confirmed');
-            console.log('  ✓ Liquidity tx sent. Sig:', sig);
-          }
-        } else {
-          console.log('  Liquidity step returned (no signature, not a Transaction):', result);
+      const binArrayAccountMetas = getBinArrayAccountMetasCoverage(
+        new BN(minBinId),
+        new BN(maxBinId),
+        poolPubkey,
+        dlmm.program.programId
+      );
+
+      try {
+        const accounts: any = {
+          position: positionKeypair.publicKey,
+          lbPair: poolPubkey,
+          sender: wallet.publicKey,
+          user: wallet.publicKey,
+          userTokenX,
+          userTokenY,
+          tokenXProgram,
+          tokenYProgram,
+        };
+        if (binArrayBitmapExtension) {
+          accounts.binArrayBitmapExtension = binArrayBitmapExtension;
         }
+
+        const addLiqIx = await dlmm.program.methods
+          .addLiquidityByStrategy2(liquidityParams, { slices: [] })
+          .accountsPartial(accounts)
+          .remainingAccounts(binArrayAccountMetas)
+          .instruction();
+
+        const allIxs = [...preInstructions, addLiqIx];
+        const liqTx = new Transaction().add(...allIxs);
+        liqTx.feePayer = wallet.publicKey;
+        const { blockhash } = await connection.getLatestBlockhash();
+        liqTx.recentBlockhash = blockhash;
+        liqTx.sign(wallet);
+
+        const sig = await connection.sendTransaction(liqTx, [wallet]);
+        await connection.confirmTransaction(sig, 'confirmed');
+        console.log('  ✓ Low-level liquidity tx sent. Sig:', sig);
       } catch (liqErr: any) {
-        console.error('  ❌ High-level liquidity addition failed:');
+        console.error('  ❌ Low-level liquidity addition failed:');
         console.error('     ', liqErr?.message || liqErr);
         if (liqErr?.logs) console.error('     Logs:', liqErr.logs);
       }
@@ -922,6 +947,73 @@ async function main() {
         console.error('❌ Real combined open failed:', err?.message || err);
       }
     }
+  }
+}
+
+/**
+ * Attempt to close a bin array to recover the rent.
+ * The bin array must be completely empty (no liquidity).
+ */
+async function closeBinArray(lbPairAddress: string, binArrayAddress: string) {
+  const connection = getConnection();
+  const wallet = getWallet();
+
+  const lbPairPubkey = new PublicKey(lbPairAddress);
+  const binArrayPubkey = new PublicKey(binArrayAddress);
+
+  console.log(`\n=== Close Bin Array ===`);
+  console.log(`LB Pair: ${lbPairAddress}`);
+  console.log(`Bin Array: ${binArrayAddress}`);
+  console.log(`Rent Receiver: ${wallet.publicKey.toBase58()}`);
+
+  try {
+    // Load the DLMM instance just to get the program
+    const dlmm = await DLMM.create(connection, lbPairPubkey);
+
+    // Optional: fetch the bin array to give the user some info
+    try {
+      const binArrayAccount = await dlmm.program.account.binArray.fetch(binArrayPubkey);
+      console.log(`Bin Array loaded. (You can inspect it further on Solscan if needed.)`);
+    } catch (e) {
+      console.log(`Could not fetch bin array state (it may already be closed or invalid).`);
+    }
+
+    const ix = await dlmm.program.methods
+      .closeBinArray()
+      .accountsPartial({
+        lbPair: lbPairPubkey,
+        binArray: binArrayPubkey,
+        rentReceiver: wallet.publicKey,
+        signer: wallet.publicKey,
+      })
+      .instruction();
+
+    const tx = new Transaction().add(ix);
+    tx.feePayer = wallet.publicKey;
+    const { blockhash } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.sign(wallet);
+
+    console.log('Sending close_bin_array transaction...');
+    const sig = await connection.sendTransaction(tx, [wallet]);
+    await connection.confirmTransaction(sig, 'confirmed');
+
+    console.log('\n✅ Bin array closed successfully!');
+    console.log('Signature:', sig);
+    console.log('Rent should now be returned to your wallet.');
+  } catch (err: any) {
+    console.error('\n❌ Failed to close bin array:');
+    console.error('   ', err?.message || err);
+
+    if (err?.logs) {
+      console.error('\nProgram Logs:');
+      console.error(err.logs);
+    }
+
+    console.log('\nCommon reasons this fails:');
+    console.log('  - The bin array still contains liquidity');
+    console.log('  - You are not authorized to close this bin array');
+    console.log('  - The bin array does not exist or was already closed');
   }
 }
 
