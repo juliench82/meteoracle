@@ -191,10 +191,17 @@ function parseArgs() {
     }
   }
 
-  if (!opts.pool || !opts.mint) {
-    console.error('Error: --pool and --mint are required');
-    console.error('Example: npx tsx scripts/test-dlmm-direct.ts --pool <addr> --mint <addr> --simulate');
-    process.exit(1);
+  if (opts.closeBinArray) {
+    if (!opts.pool) {
+      console.error('Error: --pool is required when using --close-bin-array');
+      process.exit(1);
+    }
+  } else {
+    if (!opts.pool || !opts.mint) {
+      console.error('Error: --pool and --mint are required');
+      console.error('Example: npx tsx scripts/test-dlmm-direct.ts --pool <addr> --mint <addr> --simulate');
+      process.exit(1);
+    }
   }
 
   if (opts.skipJupiter && !opts.tokenAmount && !opts.useBalance) {
@@ -225,10 +232,6 @@ async function main() {
   }
 
   if (opts.closeBinArray) {
-    if (!opts.pool) {
-      console.error('Error: --pool is required when using --close-bin-array');
-      process.exit(1);
-    }
     await closeBinArray(opts.pool, opts.closeBinArray);
     return;
   }
