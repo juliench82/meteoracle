@@ -482,23 +482,26 @@ async function main() {
       );
 
       // Derive user token accounts (correct program ID for Token-2022 vs regular)
+      const isTokenXSol = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
+      const isTokenYSol = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
+
       const userTokenX = getAssociatedTokenAddressSync(
         dlmm.tokenX.publicKey,
         wallet.publicKey,
         false,
-        dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-          ? TOKEN_PROGRAM_ID
-          : TOKEN_2022_PROGRAM_ID
+        isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
       );
 
       const userTokenY = getAssociatedTokenAddressSync(
         dlmm.tokenY.publicKey,
         wallet.publicKey,
         false,
-        dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-          ? TOKEN_PROGRAM_ID
-          : TOKEN_2022_PROGRAM_ID
+        isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
       );
+
+      // Determine the correct token programs for the instruction
+      const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
+      const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
 
       // Build liquidity parameters similar to what the SDK uses internally
       const liquidityParams = {
@@ -517,7 +520,9 @@ async function main() {
             user: wallet.publicKey,
             userTokenX,
             userTokenY,
-            // Note: Still missing bin arrays + transfer hook remaining accounts (Token-2022).
+            tokenXProgram,
+            tokenYProgram,
+            // Note: Still likely missing bin arrays + transfer hook remaining accounts.
           })
           .instruction();
 
@@ -641,23 +646,26 @@ async function main() {
         );
 
         // Derive user token accounts (correct program ID for Token-2022 vs regular)
+        const isTokenXSol = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
+        const isTokenYSol = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
+
         const userTokenX = getAssociatedTokenAddressSync(
           dlmm.tokenX.publicKey,
           wallet.publicKey,
           false,
-          dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-            ? TOKEN_PROGRAM_ID
-            : TOKEN_2022_PROGRAM_ID
+          isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
         );
 
         const userTokenY = getAssociatedTokenAddressSync(
           dlmm.tokenY.publicKey,
           wallet.publicKey,
           false,
-          dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-            ? TOKEN_PROGRAM_ID
-            : TOKEN_2022_PROGRAM_ID
+          isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
         );
+
+        // Determine the correct token programs for the instruction
+        const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
+        const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
 
         const liquidityParams = {
           minBinId,
@@ -675,6 +683,8 @@ async function main() {
               user: wallet.publicKey,
               userTokenX,
               userTokenY,
+              tokenXProgram,
+              tokenYProgram,
             })
             .instruction();
 
