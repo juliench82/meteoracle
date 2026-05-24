@@ -308,19 +308,19 @@ async function sendAddLiquidityByStrategy2(opts: {
   getBinArrayAccountMetasCoverage: any;
   toStrategyParameters: any;
   binArrayBitmapExtension: PublicKey | null;
-  isTokenXSol: boolean;
-  isTokenYSol: boolean;
+  tokenXProgramId: PublicKey;
+  tokenYProgramId: PublicKey;
   dryRun: boolean;
 }): Promise<void> {
   const {
     connection, wallet, dlmm, poolPubkey, positionPubkey,
     minBinId, maxBinId, totalX, totalY, sdkStrategyType,
     getBinArrayAccountMetasCoverage, toStrategyParameters,
-    binArrayBitmapExtension, isTokenXSol, isTokenYSol, dryRun,
+    binArrayBitmapExtension, tokenXProgramId, tokenYProgramId, dryRun,
   } = opts;
 
-  const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
-  const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
+  const tokenXProgram = tokenXProgramId;
+  const tokenYProgram = tokenYProgramId;
 
   const userTokenX = getAssociatedTokenAddressSync(
     dlmm.tokenX.publicKey,
@@ -389,6 +389,8 @@ async function sendAddLiquidityByStrategy2(opts: {
     dlmm.program.programId
   );
 
+  console.log(`  Bin arrays required for range: ${binArrayAccountMetas.length}`);
+
   // Resolve transfer hook remaining accounts for Token-2022 (if any)
   let hookSlices: any = { slices: [] };
   let hookRemainingAccounts: any[] = [];
@@ -422,6 +424,7 @@ async function sendAddLiquidityByStrategy2(opts: {
   }
 
   const allRemaining = [...binArrayAccountMetas, ...hookRemainingAccounts];
+  console.log(`  Total remainingAccounts: ${allRemaining.length} (bin arrays + transfer hooks if any)`);
 
   const addLiqIx = await dlmm.program.methods
     .addLiquidityByStrategy2(liquidityParams, hookSlices)
@@ -434,7 +437,10 @@ async function sendAddLiquidityByStrategy2(opts: {
   if (dryRun) {
     console.log('  [DRY RUN] addLiquidityByStrategy2 instruction built — not sending.');
     console.log('  Accounts:', Object.keys(accounts).join(', '));
-    console.log('  remainingAccounts (bin arrays + hooks):', allRemaining.length);
+    console.log('  remainingAccounts count:', allRemaining.length);
+    if (allRemaining.length > 0) {
+      console.log('  Sample remaining accounts:', allRemaining.slice(0, 3).map((a: any) => a.pubkey.toBase58().slice(0, 8) + '...'));
+    }
     return;
   }
 
@@ -447,7 +453,7 @@ async function sendAddLiquidityByStrategy2(opts: {
   const sig = await connection.sendTransaction(liqTx, [wallet]);
   await connection.confirmTransaction(sig, 'confirmed');
   console.log('  ✓ addLiquidityByStrategy2 sent. Sig:', sig);
-  console.log('    remainingAccounts passed:', allRemaining.length, '(bin arrays + transfer hooks if any)');
+  console.log('    remainingAccounts passed:', allRemaining.length);
 }
 
 async function main() {
@@ -536,6 +542,17 @@ async function main() {
   const isToken2022 = tokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58();
   console.log('[2/5] Output mint program:', isToken2022 ? 'Token-2022' : 'Legacy Token');
 
+  // Resolve the actual on-chain program IDs for both pool tokens
+  const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
+  const resolvedTokenXProgram = dlmm.tokenX.publicKey.equals(WSOL)
+    ? TOKEN_PROGRAM_ID
+    : await getTokenProgramId(dlmm.tokenX.publicKey);
+  const resolvedTokenYProgram = dlmm.tokenY.publicKey.equals(WSOL)
+    ? TOKEN_PROGRAM_ID
+    : await getTokenProgramId(dlmm.tokenY.publicKey);
+  console.log('  Token X program:', resolvedTokenXProgram.toBase58());
+  console.log('  Token Y program:', resolvedTokenYProgram.toBase58());
+
   // 3. Determine bin range
   let minBinId: number;
   let maxBinId: number;
@@ -561,23 +578,25 @@ async function main() {
     }
 
     const activeBin = await dlmm.getActiveBin();
-    const currentPrice = Number(dlmm.fromPricePerLamport(activeBin.price));
+    const activeBinId = activeBin.binId;
+    const binStep = dlmm.lbPair.binStep;
 
-    const targetLowPrice = currentPrice * (1 + rangeDownPct / 100);
-    const targetHighPrice = currentPrice * (1 + rangeUpPct / 100);
+    // Arithmetic method (matches production open.ts)
+    // bins = percentage / (binStep in percent)
+    const binsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
+    const binsUp   = Math.round((rangeUpPct   / 100) / (binStep / 10000));
 
-    const calculatedMinBin = dlmm.getBinIdFromPrice(targetLowPrice, true);
-    const calculatedMaxBin = dlmm.getBinIdFromPrice(targetHighPrice, false);
-
-    minBinId = calculatedMinBin;
-    maxBinId = calculatedMaxBin;
+    minBinId = activeBinId - binsDown;
+    maxBinId = activeBinId + binsUp;
 
     const binRange = maxBinId - minBinId + 1;
 
-    console.log(`[3/5] Using OFFICIAL Meteora price-based method for ${strategyId}`);
-    console.log(`      Current price: ${currentPrice.toFixed(12)}`);
-    console.log(`      Target price range: ${targetLowPrice.toFixed(12)} → ${targetHighPrice.toFixed(12)}`);
+    console.log(`[3/5] Using arithmetic bin-delta method (matches production) for ${strategyId}`);
+    console.log(`      Active bin: ${activeBinId}`);
+    console.log(`      Bin step: ${binStep}`);
+    console.log(`      Range: ${rangeDownPct}% / +${rangeUpPct}%`);
     console.log(`      Calculated bins: ${minBinId} → ${maxBinId} (${binRange} bins)`);
+    console.log(`      minDeltaId: ${minBinId - activeBinId}, maxDeltaId: ${maxBinId - activeBinId}`);
   }
 
   const positionKeypair = new Keypair();
@@ -713,7 +732,6 @@ async function main() {
       createTx.feePayer = wallet.publicKey;
       const { blockhash: bh1 } = await connection.getLatestBlockhash();
       createTx.recentBlockhash = bh1;
-      createTx.sign(positionKeypair);
 
       const createSig = await connection.sendTransaction(createTx, [wallet, positionKeypair]);
       await connection.confirmTransaction(createSig, 'confirmed');
@@ -749,8 +767,8 @@ async function main() {
         getBinArrayAccountMetasCoverage,
         toStrategyParameters,
         binArrayBitmapExtension,
-        isTokenXSol,
-        isTokenYSol,
+        tokenXProgramId: resolvedTokenXProgram,
+        tokenYProgramId: resolvedTokenYProgram,
         dryRun: dryRunOverride,
       });
     } catch (liqErr: any) {
