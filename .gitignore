@@ -34,7 +34,7 @@ yarn-debug.log*
 yarn-error.log*
 cron-job.txt
 
-# Local / ad-hoc test scripts (frequently edited on VPS, cause merge conflicts)
-scripts/test-*.sh
-scripts/test-dlmm-*.ts
+# Tiny ad-hoc shell wrappers — frequently hand-edited directly on the VPS for quick one-off tests.
+# These are intentionally not tracked to avoid constant merge conflicts on `git pull`.
+# All real test harnesses (.ts files) remain under version control so fixes flow to the VPS.
 scripts/test-rich-*.sh
