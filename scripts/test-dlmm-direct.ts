@@ -380,9 +380,9 @@ async function main() {
     console.log('Calling initializePosition + addLiquidityByStrategy (SPLIT MODE for robustness)...');
 
     try {
-      // Step 1: Create the position account first (use initializePosition2 for modern SDK / Token-2022)
-      console.log('  → Step 1: initializePosition2');
-      await dlmm.initializePosition2({
+      // Step 1: Create the position account first (modern way)
+      console.log('  → Step 1: createPosition');
+      await dlmm.createPosition({
         positionPubKey: positionKeypair.publicKey,
         user: wallet.publicKey,
       });
