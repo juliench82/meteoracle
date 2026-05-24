@@ -61,7 +61,7 @@ import * as dotenvLocal from 'dotenv';
 import * as path from 'path';
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true });
 
-import { Keypair, PublicKey, Connection, Transaction } from '@solana/web3.js';
+import { Keypair, PublicKey, Connection, Transaction, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import BN from 'bn.js';
 import DLMM from '@meteora-ag/dlmm';
 
@@ -510,9 +510,37 @@ async function main() {
         !!bitmapExtensionInfo &&
         bitmapExtensionInfo.owner.toBase58() === dlmm.program.programId.toBase58();
 
-      const binArrayBitmapExtension = includeBitmapExtension ? possibleBinArrayBitmapExtension : null;
-
       console.log(`  Bitmap extension needed? ${includeBitmapExtension} (account exists & owned by Meteora: ${!!bitmapExtensionInfo})`);
+
+      let binArrayBitmapExtension: PublicKey | null = null;
+
+      if (!includeBitmapExtension) {
+        // The range needs the extension but it hasn't been created yet → initialize it
+        console.log('  Initializing binArrayBitmapExtension...');
+        const initIx = await dlmm.program.methods
+          .initializeBinArrayBitmapExtension()
+          .accountsPartial({
+            binArrayBitmapExtension: possibleBinArrayBitmapExtension,
+            lbPair: poolPubkey,
+            funder: wallet.publicKey,
+            rent: SYSVAR_RENT_PUBKEY,
+          })
+          .instruction();
+
+        const initTx = new Transaction().add(initIx);
+        initTx.feePayer = wallet.publicKey;
+        const { blockhash: bhInit } = await connection.getLatestBlockhash();
+        initTx.recentBlockhash = bhInit;
+        initTx.sign(wallet);
+
+        const initSig = await connection.sendTransaction(initTx, [wallet]);
+        await connection.confirmTransaction(initSig, 'confirmed');
+        console.log('  ✓ binArrayBitmapExtension initialized. Sig:', initSig);
+
+        binArrayBitmapExtension = possibleBinArrayBitmapExtension;
+      } else {
+        binArrayBitmapExtension = possibleBinArrayBitmapExtension;
+      }
 
       // Build liquidity parameters similar to what the SDK uses internally
       const liquidityParams = {
@@ -688,9 +716,37 @@ async function main() {
           !!bitmapExtensionInfo &&
           bitmapExtensionInfo.owner.toBase58() === dlmm.program.programId.toBase58();
 
-        const binArrayBitmapExtension = includeBitmapExtension ? possibleBinArrayBitmapExtension : null;
-
         console.log(`  Bitmap extension needed? ${includeBitmapExtension} (account exists & owned by Meteora: ${!!bitmapExtensionInfo})`);
+
+        let binArrayBitmapExtension: PublicKey | null = null;
+
+        if (!includeBitmapExtension) {
+          // The range needs the extension but it hasn't been created yet → initialize it
+          console.log('  Initializing binArrayBitmapExtension...');
+          const initIx = await dlmm.program.methods
+            .initializeBinArrayBitmapExtension()
+            .accountsPartial({
+              binArrayBitmapExtension: possibleBinArrayBitmapExtension,
+              lbPair: poolPubkey,
+              funder: wallet.publicKey,
+              rent: SYSVAR_RENT_PUBKEY,
+            })
+            .instruction();
+
+          const initTx = new Transaction().add(initIx);
+          initTx.feePayer = wallet.publicKey;
+          const { blockhash: bhInit } = await connection.getLatestBlockhash();
+          initTx.recentBlockhash = bhInit;
+          initTx.sign(wallet);
+
+          const initSig = await connection.sendTransaction(initTx, [wallet]);
+          await connection.confirmTransaction(initSig, 'confirmed');
+          console.log('  ✓ binArrayBitmapExtension initialized. Sig:', initSig);
+
+          binArrayBitmapExtension = possibleBinArrayBitmapExtension;
+        } else {
+          binArrayBitmapExtension = possibleBinArrayBitmapExtension;
+        }
 
         const liquidityParams = {
           minBinId,
