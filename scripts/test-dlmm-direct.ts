@@ -389,6 +389,24 @@ async function sendAddLiquidityByStrategy2(opts: {
     dlmm.program.programId
   );
 
+  // Resolve transfer hook remaining accounts for Token-2022 (if any)
+  let hookSlices: any = { slices: [] };
+  let hookRemainingAccounts: any[] = [];
+
+  try {
+    const hookData = await dlmm.getPotentialToken2022IxDataAndAccounts(0 /* Liquidity */);
+    if (hookData) {
+      if (hookData.slices) hookSlices = { slices: hookData.slices };
+      if (hookData.accounts && hookData.accounts.length > 0) {
+        hookRemainingAccounts = hookData.accounts;
+        console.log(`  Adding ${hookRemainingAccounts.length} transfer hook remaining account(s)`);
+      }
+    }
+  } catch (e: any) {
+    // Many tokens don't have hooks — this is expected and fine
+    console.log('  No transfer hook accounts required for this mint (or resolution skipped)');
+  }
+
   const accounts: any = {
     position: positionPubkey,
     lbPair: poolPubkey,
@@ -403,10 +421,12 @@ async function sendAddLiquidityByStrategy2(opts: {
     accounts.binArrayBitmapExtension = binArrayBitmapExtension;
   }
 
+  const allRemaining = [...binArrayAccountMetas, ...hookRemainingAccounts];
+
   const addLiqIx = await dlmm.program.methods
-    .addLiquidityByStrategy2(liquidityParams, { slices: [] })
+    .addLiquidityByStrategy2(liquidityParams, hookSlices)
     .accountsPartial(accounts)
-    .remainingAccounts(binArrayAccountMetas)
+    .remainingAccounts(allRemaining)
     .instruction();
 
   const allIxs = [...preInstructions, addLiqIx];
@@ -414,7 +434,7 @@ async function sendAddLiquidityByStrategy2(opts: {
   if (dryRun) {
     console.log('  [DRY RUN] addLiquidityByStrategy2 instruction built — not sending.');
     console.log('  Accounts:', Object.keys(accounts).join(', '));
-    console.log('  remainingAccounts (bin arrays):', binArrayAccountMetas.length);
+    console.log('  remainingAccounts (bin arrays + hooks):', allRemaining.length);
     return;
   }
 
@@ -427,6 +447,7 @@ async function sendAddLiquidityByStrategy2(opts: {
   const sig = await connection.sendTransaction(liqTx, [wallet]);
   await connection.confirmTransaction(sig, 'confirmed');
   console.log('  ✓ addLiquidityByStrategy2 sent. Sig:', sig);
+  console.log('    remainingAccounts passed:', allRemaining.length, '(bin arrays + transfer hooks if any)');
 }
 
 async function main() {
