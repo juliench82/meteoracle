@@ -388,13 +388,13 @@ async function main() {
 
       const ix = await dlmm.program.methods
         .initializePosition2()
-        .accounts({
+        .accountsStrict({
           payer: wallet.publicKey,
           position: positionKeypair.publicKey,
           lbPair: poolPubkey,
           owner: wallet.publicKey,
           systemProgram: SystemProgram.programId,
-          // Note: some versions may require additional accounts (rent, etc.)
+          rent: (await import('@solana/web3.js')).SYSVAR_RENT_PUBKEY,
         })
         .instruction();
 
