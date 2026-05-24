@@ -1,10 +1,11 @@
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+dotenv.config({ path: path.resolve(process.cwd(), '.env.local'), override: false });
+
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import DLMM from '@meteora-ag/dlmm';
 import { BN } from '@coral-xyz/anchor';
-import fs from 'fs';
-
-const RPC_URL = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com';
-const WALLET_PATH = process.env.WALLET_PATH || '/root/.config/solana/id.json';
+import bs58 from 'bs58';
 
 const LB_PAIR = new PublicKey('BGRTiYMPfpfYANXxbAsgTW7KMPt6DTjahEytAZDvFwi3');
 
@@ -16,9 +17,16 @@ const BIN_ARRAYS: { pubkey: string; index: number }[] = [
 ];
 
 async function main() {
-  const connection = new Connection(RPC_URL, 'confirmed');
-  const secretKey = JSON.parse(fs.readFileSync(WALLET_PATH, 'utf-8'));
-  const wallet = Keypair.fromSecretKey(Uint8Array.from(secretKey));
+  const rpcUrl = process.env.HELIUS_API_KEY
+    ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`
+    : 'https://api.mainnet-beta.solana.com';
+  const connection = new Connection(rpcUrl, 'confirmed');
+
+  const raw = process.env.WALLET_PRIVATE_KEY;
+  if (!raw) throw new Error('WALLET_PRIVATE_KEY is not set in .env.local');
+  const wallet = raw.startsWith('[')
+    ? Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)))
+    : Keypair.fromSecretKey(bs58.decode(raw));
 
   console.log('Wallet:', wallet.publicKey.toBase58());
 
