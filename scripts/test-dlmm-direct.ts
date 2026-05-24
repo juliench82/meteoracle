@@ -71,7 +71,7 @@ import * as dotenvLocal from 'dotenv';
 import * as path from 'path';
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true });
 
-import { Keypair, PublicKey, Connection, Transaction, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { Keypair, PublicKey, Connection, Transaction, SYSVAR_RENT_PUBKEY, ComputeBudgetProgram } from '@solana/web3.js';
 import BN from 'bn.js';
 import DLMM from '@meteora-ag/dlmm';
 
@@ -444,12 +444,31 @@ async function sendAddLiquidityByStrategy2(opts: {
     return;
   }
 
-  const liqTx = new Transaction().add(...allIxs);
+  // Send ATA creation in its own transaction first (saves CUs for the expensive liquidity call)
+  if (preInstructions.length > 0) {
+    const ataTx = new Transaction().add(...preInstructions);
+    ataTx.feePayer = wallet.publicKey;
+    const { blockhash: ataBlockhash } = await connection.getLatestBlockhash();
+    ataTx.recentBlockhash = ataBlockhash;
+    ataTx.sign(wallet);
+
+    console.log('  Sending ATA creation transaction first...');
+    const ataSig = await connection.sendTransaction(ataTx, [wallet]);
+    await connection.confirmTransaction(ataSig, 'confirmed');
+    console.log('  ✓ Missing ATA(s) created. Sig:', ataSig);
+  }
+
+  // Liquidity transaction with high compute unit limit
+  const liqTx = new Transaction()
+    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }))
+    .add(addLiqIx);
+
   liqTx.feePayer = wallet.publicKey;
   const { blockhash } = await connection.getLatestBlockhash();
   liqTx.recentBlockhash = blockhash;
   liqTx.sign(wallet);
 
+  console.log('  Sending addLiquidityByStrategy2 with 600k CU limit...');
   const sig = await connection.sendTransaction(liqTx, [wallet]);
   await connection.confirmTransaction(sig, 'confirmed');
   console.log('  ✓ addLiquidityByStrategy2 sent. Sig:', sig);
