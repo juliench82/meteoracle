@@ -38,10 +38,22 @@ async function main() {
     const binArrayPubkey = new PublicKey(pubkey);
     console.log(`\nClosing bin array index ${index}: ${pubkey}`);
     try {
-      const tx = await dlmm.closeBinArrayIfEmpty(
-        new BN(index),
-        wallet.publicKey,
-      );
+      const { Transaction } = await import('@solana/web3.js');
+      const ix = await dlmm.program.methods
+        .closeBinArray()
+        .accountsPartial({
+          lbPair: LB_PAIR,
+          binArray: binArrayPubkey,
+          rentReceiver: wallet.publicKey,
+          signer: wallet.publicKey,
+        })
+        .instruction();
+
+      const tx = new Transaction().add(ix);
+      tx.feePayer = wallet.publicKey;
+      const { blockhash } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+
       const sig = await connection.sendTransaction(tx, [wallet], {
         skipPreflight: false,
       });
@@ -50,13 +62,7 @@ async function main() {
       recovered += 0.07143744;
     } catch (err: any) {
       console.log(`  ❌ Failed: ${err.message}`);
-      // If closeBinArrayIfEmpty doesn't exist on the SDK object,
-      // log available methods:
-      if (err.message?.includes('is not a function')) {
-        const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(dlmm))
-          .filter(m => m.toLowerCase().includes('close') || m.toLowerCase().includes('bin'));
-        console.log('  Available close/bin methods on dlmm:', methods);
-      }
+      if (err?.logs) console.log('  Logs:', err.logs);
     }
   }
 
