@@ -228,12 +228,211 @@ function parseArgs() {
   return opts;
 }
 
+// ---------------------------------------------------------------------------
+// Shared helper: resolve + optionally initialize binArrayBitmapExtension
+// Returns the PDA pubkey if it exists (or was just initialized), null if not
+// needed (i.e. the range doesn't require it and the account doesn't exist).
+// ---------------------------------------------------------------------------
+async function resolveBitmapExtension(
+  connection: Connection,
+  dlmm: any,
+  poolPubkey: PublicKey,
+  wallet: Keypair,
+  dryRun: boolean
+): Promise<PublicKey | null> {
+  const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from('bitmap');
+  const [pda] = PublicKey.findProgramAddressSync(
+    [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
+    dlmm.program.programId
+  );
+
+  const info = await connection.getAccountInfo(pda);
+  const existsAndOwned =
+    !!info && info.owner.toBase58() === dlmm.program.programId.toBase58();
+
+  console.log(
+    `  Bitmap extension PDA: ${pda.toBase58()}`,
+    existsAndOwned ? '(exists ✓)' : '(does not exist — will initialize)'
+  );
+
+  if (existsAndOwned) {
+    return pda;
+  }
+
+  // Account doesn't exist yet → initialize it
+  console.log('  ⚠️  WARNING: Initializing bitmap extension locks ~0.07+ SOL in rent (recoverable on close).');
+
+  if (dryRun) {
+    console.log('  [DRY RUN] Would send initializeBinArrayBitmapExtension — skipped.');
+    return pda; // return the PDA so downstream code can reference it even in dry-run
+  }
+
+  const initIx = await dlmm.program.methods
+    .initializeBinArrayBitmapExtension()
+    .accountsPartial({
+      binArrayBitmapExtension: pda,
+      lbPair: poolPubkey,
+      funder: wallet.publicKey,
+      rent: SYSVAR_RENT_PUBKEY,
+    })
+    .instruction();
+
+  const initTx = new Transaction().add(initIx);
+  initTx.feePayer = wallet.publicKey;
+  const { blockhash } = await connection.getLatestBlockhash();
+  initTx.recentBlockhash = blockhash;
+  initTx.sign(wallet);
+
+  const sig = await connection.sendTransaction(initTx, [wallet]);
+  await connection.confirmTransaction(sig, 'confirmed');
+  console.log('  ✓ binArrayBitmapExtension initialized. Sig:', sig);
+
+  return pda;
+}
+
+// ---------------------------------------------------------------------------
+// Shared helper: build + send the addLiquidityByStrategy2 raw transaction.
+// Used by both --simulate and --split (real) paths so they stay in sync.
+// ---------------------------------------------------------------------------
+async function sendAddLiquidityByStrategy2(opts: {
+  connection: Connection;
+  wallet: Keypair;
+  dlmm: any;
+  poolPubkey: PublicKey;
+  positionPubkey: PublicKey;
+  minBinId: number;
+  maxBinId: number;
+  totalX: BN;
+  totalY: BN;
+  sdkStrategyType: any;
+  getBinArrayAccountMetasCoverage: any;
+  toStrategyParameters: any;
+  binArrayBitmapExtension: PublicKey | null;
+  isTokenXSol: boolean;
+  isTokenYSol: boolean;
+  dryRun: boolean;
+}): Promise<void> {
+  const {
+    connection, wallet, dlmm, poolPubkey, positionPubkey,
+    minBinId, maxBinId, totalX, totalY, sdkStrategyType,
+    getBinArrayAccountMetasCoverage, toStrategyParameters,
+    binArrayBitmapExtension, isTokenXSol, isTokenYSol, dryRun,
+  } = opts;
+
+  const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
+  const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
+
+  const userTokenX = getAssociatedTokenAddressSync(
+    dlmm.tokenX.publicKey,
+    wallet.publicKey,
+    false,
+    tokenXProgram
+  );
+  const userTokenY = getAssociatedTokenAddressSync(
+    dlmm.tokenY.publicKey,
+    wallet.publicKey,
+    false,
+    tokenYProgram
+  );
+
+  // Ensure ATAs exist
+  const preInstructions: any[] = [];
+  const userTokenXInfo = await connection.getAccountInfo(userTokenX);
+  if (!userTokenXInfo) {
+    console.log('  Creating missing ATA for token X...');
+    preInstructions.push(
+      createAssociatedTokenAccountInstruction(
+        wallet.publicKey, userTokenX, wallet.publicKey,
+        dlmm.tokenX.publicKey, tokenXProgram
+      )
+    );
+  }
+  const userTokenYInfo = await connection.getAccountInfo(userTokenY);
+  if (!userTokenYInfo) {
+    console.log('  Creating missing ATA for token Y...');
+    preInstructions.push(
+      createAssociatedTokenAccountInstruction(
+        wallet.publicKey, userTokenY, wallet.publicKey,
+        dlmm.tokenY.publicKey, tokenYProgram
+      )
+    );
+  }
+
+  const currentActiveId = dlmm.lbPair.activeId;
+  const distanceToMin = Math.abs(currentActiveId - minBinId);
+  const distanceToMax = Math.abs(currentActiveId - maxBinId);
+  const maxDistanceFromActive = Math.max(distanceToMin, distanceToMax);
+  const SAFETY_BUFFER_BINS = 25;
+  const maxActiveBinSlippage = maxDistanceFromActive + SAFETY_BUFFER_BINS;
+
+  const strategyParameters = toStrategyParameters({
+    minBinId,
+    maxBinId,
+    strategyType: sdkStrategyType,
+    singleSidedX: false,
+  });
+
+  const liquidityParams = {
+    amountX: totalX,
+    amountY: totalY,
+    activeId: currentActiveId,
+    maxActiveBinSlippage,
+    strategyParameters,
+  };
+
+  console.log('  maxActiveBinSlippage:', maxActiveBinSlippage, `(distance ${maxDistanceFromActive} + buffer ${SAFETY_BUFFER_BINS})`);
+
+  const binArrayAccountMetas = getBinArrayAccountMetasCoverage(
+    new BN(minBinId),
+    new BN(maxBinId),
+    poolPubkey,
+    dlmm.program.programId
+  );
+
+  const accounts: any = {
+    position: positionPubkey,
+    lbPair: poolPubkey,
+    sender: wallet.publicKey,
+    user: wallet.publicKey,
+    userTokenX,
+    userTokenY,
+    tokenXProgram,
+    tokenYProgram,
+  };
+  if (binArrayBitmapExtension) {
+    accounts.binArrayBitmapExtension = binArrayBitmapExtension;
+  }
+
+  const addLiqIx = await dlmm.program.methods
+    .addLiquidityByStrategy2(liquidityParams, { slices: [] })
+    .accountsPartial(accounts)
+    .remainingAccounts(binArrayAccountMetas)
+    .instruction();
+
+  const allIxs = [...preInstructions, addLiqIx];
+
+  if (dryRun) {
+    console.log('  [DRY RUN] addLiquidityByStrategy2 instruction built — not sending.');
+    console.log('  Accounts:', Object.keys(accounts).join(', '));
+    console.log('  remainingAccounts (bin arrays):', binArrayAccountMetas.length);
+    return;
+  }
+
+  const liqTx = new Transaction().add(...allIxs);
+  liqTx.feePayer = wallet.publicKey;
+  const { blockhash } = await connection.getLatestBlockhash();
+  liqTx.recentBlockhash = blockhash;
+  liqTx.sign(wallet);
+
+  const sig = await connection.sendTransaction(liqTx, [wallet]);
+  await connection.confirmTransaction(sig, 'confirmed');
+  console.log('  ✓ addLiquidityByStrategy2 sent. Sig:', sig);
+}
+
 async function main() {
   const opts = parseArgs();
 
   // === TEST SCRIPT SAFETY CAP ===
-  // Hard limit for this test script only (not production code).
-  // Requested during debugging of the split position flow.
   const MAX_TEST_AMOUNT_SOL = 0.01;
   if (opts.amount > MAX_TEST_AMOUNT_SOL) {
     console.log(`⚠️  [TEST SCRIPT] Safety cap active: Amount capped at ${MAX_TEST_AMOUNT_SOL} SOL (was ${opts.amount}).`);
@@ -303,21 +502,20 @@ async function main() {
   console.log('[1/5] Loading DLMM pool...');
   const dlmm = await DLMM.create(connection, poolPubkey);
 
-  // Safe way to get activeId (some SDK versions return number, some return BN)
   const rawActiveId = dlmm.lbPair.activeId;
-  const activeBinIdNum: number = typeof rawActiveId === 'number' 
-    ? rawActiveId 
+  const activeBinIdNum: number = typeof rawActiveId === 'number'
+    ? rawActiveId
     : (rawActiveId?.toNumber ? rawActiveId.toNumber() : Number(rawActiveId));
 
   console.log('  Active bin:', activeBinIdNum);
   console.log('  Bin step:', dlmm.lbPair.binStep);
 
-  // 2. Token program check (needed early for ATA in skip-jupiter mode)
+  // 2. Token program check
   const tokenProgram = await getTokenProgramId(outputMint);
   const isToken2022 = tokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58();
   console.log('[2/5] Output mint program:', isToken2022 ? 'Token-2022' : 'Legacy Token');
 
-  // 3. Determine bin range using Meteora's recommended price-based method (getBinIdFromPrice)
+  // 3. Determine bin range
   let minBinId: number;
   let maxBinId: number;
 
@@ -326,28 +524,19 @@ async function main() {
     maxBinId = opts.maxBin;
     console.log(`[3/5] Using explicit bin range: ${minBinId} → ${maxBinId}`);
   } else {
-    // === PROPER METEORA-RECOMMENDED WAY ===
-    // Instead of manual percentage math, we:
-    // 1. Get the current active bin price
-    // 2. Compute target prices from the strategy's desired % range
-    // 3. Convert target prices to bin IDs using dlmm.getBinIdFromPrice (the official way)
-    // 4. Use buildLiquidityStrategyParameters + the strategy builder for proper distribution
-
     const strategyId = opts.strategy;
-
-    // Define desired price ranges per strategy (this is what the user configures)
     let rangeDownPct = -50;
     let rangeUpPct = 100;
-    let strategyType: any = 'Spot'; // Spot | BidAsk | Curve
+    let sdkStrategyTypeLocal: any = 'Spot';
 
     if (strategyId === 'scalp-spike') {
       rangeDownPct = -20;
       rangeUpPct = 40;
-      strategyType = 'Spot'; // or 'Curve' depending on preference
+      sdkStrategyTypeLocal = 'Spot';
     } else if (strategyId === 'evil-panda') {
       rangeDownPct = -50;
       rangeUpPct = 100;
-      strategyType = 'Spot';
+      sdkStrategyTypeLocal = 'Spot';
     }
 
     const activeBin = await dlmm.getActiveBin();
@@ -356,9 +545,8 @@ async function main() {
     const targetLowPrice = currentPrice * (1 + rangeDownPct / 100);
     const targetHighPrice = currentPrice * (1 + rangeUpPct / 100);
 
-    // Official Meteora way to get safe bin IDs from target prices
-    const calculatedMinBin = dlmm.getBinIdFromPrice(targetLowPrice, true);   // floor for lower bound
-    const calculatedMaxBin = dlmm.getBinIdFromPrice(targetHighPrice, false); // ceil for upper bound
+    const calculatedMinBin = dlmm.getBinIdFromPrice(targetLowPrice, true);
+    const calculatedMaxBin = dlmm.getBinIdFromPrice(targetHighPrice, false);
 
     minBinId = calculatedMinBin;
     maxBinId = calculatedMaxBin;
@@ -391,7 +579,6 @@ async function main() {
     console.log(`  Your current balance: ${rawBalance.toString()} raw units`);
 
     if (opts.useBalance) {
-      // Parse percentage: supports "50%", "0.5", "50", "75.5%"
       let percent = opts.useBalance;
       if (percent.endsWith('%')) percent = percent.slice(0, -1);
       const p = parseFloat(percent);
@@ -399,7 +586,7 @@ async function main() {
         console.error('Invalid --use-balance value. Use something like 50% or 0.75');
         process.exit(1);
       }
-      const factor = p > 1 ? p / 100 : p; // accept both 50 and 0.5
+      const factor = p > 1 ? p / 100 : p;
       tokenAmountOut = rawBalance.mul(new BN(Math.floor(factor * 1_000_000))).div(new BN(1_000_000));
       console.log(`  Using ${p}% of balance → ${tokenAmountOut.toString()} raw units`);
     } else if (opts.tokenAmount) {
@@ -409,11 +596,9 @@ async function main() {
         console.warn('  ⚠ Warning: Requested amount is higher than your current balance.');
       }
     } else {
-      // Should never happen due to earlier validation
       tokenAmountOut = rawBalance;
     }
   } else {
-    // Normal path: do Jupiter swap
     const amountIn = new BN(Math.floor(opts.amount * 1e9));
     try {
       console.log('[4/5] Swapping SOL → token via Jupiter...');
@@ -425,11 +610,11 @@ async function main() {
         throw e;
       }
       console.log('  (Continuing in simulate mode with dummy amount)');
-      tokenAmountOut = new BN('1000000000'); // dummy
+      tokenAmountOut = new BN('1000000000');
     }
   }
 
-  // 5. DLMM SDK call — using the standard, widely-used pattern
+  // 5. DLMM SDK call
   console.log('[5/5] Preparing DLMM SDK call...');
 
   const { StrategyType, toStrategyParameters, getBinArrayAccountMetasCoverage } = await import('@meteora-ag/dlmm');
@@ -438,23 +623,12 @@ async function main() {
   if (opts.strategy === 'scalp-spike') sdkStrategyType = StrategyType.Spot;
   if (opts.strategy === 'evil-panda')   sdkStrategyType = StrategyType.Spot;
 
-  const params = {
-    positionPubKey: positionKeypair.publicKey,
-    user: wallet.publicKey,
-    totalXAmount: dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-      ? new BN(0)
-      : tokenAmountOut,
-    totalYAmount: dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-      ? new BN(0)
-      : tokenAmountOut,
-    strategy: {
-      minBinId,
-      maxBinId,
-      strategyType: sdkStrategyType,
-    },
-  };
+  const isTokenXSol = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
+  const isTokenYSol = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
 
-  // Always print the critical parameters before calling the SDK
+  const totalX = isTokenXSol ? new BN(0) : tokenAmountOut;
+  const totalY = isTokenYSol ? new BN(0) : tokenAmountOut;
+
   console.log('\n=== DLMM Call Parameters (for diagnosis) ===');
   console.log('activeBinIdNum     :', activeBinIdNum);
   console.log('binStep            :', dlmm.lbPair.binStep);
@@ -464,58 +638,56 @@ async function main() {
   console.log('minDeltaId         :', minBinId - activeBinIdNum);
   console.log('maxDeltaId         :', maxBinId - activeBinIdNum);
   console.log('strategy (range)   :', opts.strategy);
+  console.log('totalX             :', totalX.toString());
+  console.log('totalY             :', totalY.toString());
   console.log('================================================\n');
 
-  // === Execution logic ===
-  if (opts.simulate) {
-    console.log('\n=== SIMULATION MODE (Split Path Only) ===\n');
+  // === Split path: shared between --simulate and --split (real) ===
+  // This function is the canonical implementation used by both modes.
+  async function runSplitPath(dryRunOverride: boolean) {
+    const DEFAULT_BIN_PER_POSITION = 70;
+    const MAX_RESIZE_LENGTH = 91;
+    const desiredWidth = maxBinId - minBinId + 1;
+    const initialWidth = Math.min(DEFAULT_BIN_PER_POSITION, desiredWidth);
 
-    // SPLIT PATH — follows the exact internal pattern the Meteora SDK uses for wide ranges
-    console.log('--- SPLIT PATH (initializePosition2 + increasePositionLength2) ---');
-    try {
-      const DEFAULT_BIN_PER_POSITION = 70;
-      const MAX_RESIZE_LENGTH = 91;
+    const solBefore = await getSolBalance(connection, wallet.publicKey);
+    const tokenBefore = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
+    console.log(`  Balances before position creation: SOL ${solBefore} | Token ${tokenBefore}`);
 
-      const desiredWidth = maxBinId - minBinId + 1;
-      const initialWidth = Math.min(DEFAULT_BIN_PER_POSITION, desiredWidth);
+    console.log('\n  ⚠️  WARNING: Creating a DLMM position will lock SOL as rent (~0.10–0.20 SOL typical for wide ranges).');
+    console.log('     This rent is recoverable when you close the position, but only if the position is empty.');
 
-      // Pre-creation balances (after Jupiter, before any DLMM position work)
-      const solBefore = await getSolBalance(connection, wallet.publicKey);
-      const tokenBefore = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
-      console.log(`  Balances before position creation: SOL ${solBefore} | Token ${tokenBefore}`);
+    // Step 1: initializePosition2 + increasePositionLength2 (in one tx)
+    const initIx = await dlmm.program.methods
+      .initializePosition2(minBinId, initialWidth)
+      .accountsPartial({
+        payer: wallet.publicKey,
+        position: positionKeypair.publicKey,
+        lbPair: poolPubkey,
+        owner: wallet.publicKey,
+      })
+      .instruction();
 
-      console.log('\n  ⚠️  WARNING: Creating a DLMM position will lock SOL as rent (~0.10–0.20 SOL typical for wide ranges).');
-      console.log('     This rent is recoverable when you close the position, but only if the position is empty.');
-
-      // 1. Initialize position with starting width (capped at 70)
-      const initIx = await dlmm.program.methods
-        .initializePosition2(minBinId, initialWidth)
+    const extendIxs: any[] = [];
+    let currentEndBinId = minBinId + initialWidth - 1;
+    while (currentEndBinId < maxBinId) {
+      currentEndBinId = Math.min(currentEndBinId + MAX_RESIZE_LENGTH, maxBinId);
+      const extendIx = await dlmm.program.methods
+        .increasePositionLength2(currentEndBinId)
         .accountsPartial({
-          payer: wallet.publicKey,
-          position: positionKeypair.publicKey,
           lbPair: poolPubkey,
+          position: positionKeypair.publicKey,
+          funder: wallet.publicKey,
           owner: wallet.publicKey,
         })
         .instruction();
+      extendIxs.push(extendIx);
+    }
 
-      // 2. Extend position length as needed (in chunks of up to 91 bins)
-      const extendIxs = [];
-      let currentEndBinId = minBinId + initialWidth - 1;
-      while (currentEndBinId < maxBinId) {
-        currentEndBinId = Math.min(currentEndBinId + MAX_RESIZE_LENGTH, maxBinId);
-        const extendIx = await dlmm.program.methods
-          .increasePositionLength2(currentEndBinId)
-          .accountsPartial({
-            lbPair: poolPubkey,
-            position: positionKeypair.publicKey,
-            funder: wallet.publicKey,
-            owner: wallet.publicKey,
-          })
-          .instruction();
-        extendIxs.push(extendIx);
-      }
-
-      // Send position creation + extension(s) in one tx
+    if (dryRunOverride) {
+      console.log('  [DRY RUN] Would send initializePosition2 + increasePositionLength2 — skipped.');
+      console.log(`    initialWidth: ${initialWidth}, extensions: ${extendIxs.length}`);
+    } else {
       const createTx = new Transaction().add(initIx, ...extendIxs);
       createTx.feePayer = wallet.publicKey;
       const { blockhash: bh1 } = await connection.getLatestBlockhash();
@@ -528,203 +700,50 @@ async function main() {
       if (extendIxs.length > 0) {
         console.log(`    (Used ${extendIxs.length} increasePositionLength2 instruction(s))`);
       }
+    }
 
-      const solAfterCreate = await getSolBalance(connection, wallet.publicKey);
-      const tokenAfterCreate = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
-      console.log(`  Balances after position creation (before liquidity): SOL ${solAfterCreate} | Token ${tokenAfterCreate}`);
+    const solAfterCreate = await getSolBalance(connection, wallet.publicKey);
+    const tokenAfterCreate = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
+    console.log(`  Balances after position creation (before liquidity): SOL ${solAfterCreate} | Token ${tokenAfterCreate}`);
 
-      // 3. Add liquidity — fully low-level using addLiquidityByStrategy2
-      console.log('  Adding liquidity via low-level addLiquidityByStrategy2...');
+    // Step 2: Resolve (or initialize) bitmap extension
+    const binArrayBitmapExtension = await resolveBitmapExtension(
+      connection, dlmm, poolPubkey, wallet, dryRunOverride
+    );
 
-      const totalX = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-        ? new BN(0) : tokenAmountOut;
-      const totalY = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-        ? new BN(0) : tokenAmountOut;
-
-      // Derive user token accounts (correct program ID for Token-2022 vs regular)
-      const isTokenXSol = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
-      const isTokenYSol = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
-
-      const userTokenX = getAssociatedTokenAddressSync(
-        dlmm.tokenX.publicKey,
-        wallet.publicKey,
-        false,
-        isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
-      );
-
-      const userTokenY = getAssociatedTokenAddressSync(
-        dlmm.tokenY.publicKey,
-        wallet.publicKey,
-        false,
-        isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
-      );
-
-      // Determine the correct token programs for the instruction
-      const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
-      const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
-
-      // Decide whether to include binArrayBitmapExtension.
-      // We now do a robust check: derive the PDA and verify the account actually exists
-      // and is owned by the Meteora program before including it.
-      const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
-      const [possibleBinArrayBitmapExtension] = PublicKey.findProgramAddressSync(
-        [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
-        dlmm.program.programId
-      );
-
-      const bitmapExtensionInfo = await connection.getAccountInfo(possibleBinArrayBitmapExtension);
-      const includeBitmapExtension =
-        !!bitmapExtensionInfo &&
-        bitmapExtensionInfo.owner.toBase58() === dlmm.program.programId.toBase58();
-
-      console.log(`  Bitmap extension needed? ${includeBitmapExtension} (account exists & owned by Meteora: ${!!bitmapExtensionInfo})`);
-
-      let binArrayBitmapExtension: PublicKey | null = null;
-
-      if (!includeBitmapExtension) {
-        // The range needs the extension but it hasn't been created yet → initialize it
-        console.log('  ⚠️  WARNING: Initializing a bin array / bitmap extension locks ~0.07+ SOL in rent.');
-        console.log('     This rent is only recoverable if you (or someone) can later close the empty bin array.');
-        console.log('  Initializing binArrayBitmapExtension...');
-        const initIx = await dlmm.program.methods
-          .initializeBinArrayBitmapExtension()
-          .accountsPartial({
-            binArrayBitmapExtension: possibleBinArrayBitmapExtension,
-            lbPair: poolPubkey,
-            funder: wallet.publicKey,
-            rent: SYSVAR_RENT_PUBKEY,
-          })
-          .instruction();
-
-        const initTx = new Transaction().add(initIx);
-        initTx.feePayer = wallet.publicKey;
-        const { blockhash: bhInit } = await connection.getLatestBlockhash();
-        initTx.recentBlockhash = bhInit;
-        initTx.sign(wallet);
-
-        const initSig = await connection.sendTransaction(initTx, [wallet]);
-        await connection.confirmTransaction(initSig, 'confirmed');
-        console.log('  ✓ binArrayBitmapExtension initialized. Sig:', initSig);
-
-        binArrayBitmapExtension = possibleBinArrayBitmapExtension;
-      } else {
-        binArrayBitmapExtension = possibleBinArrayBitmapExtension;
-      }
-
-      // Ensure user token ATAs exist (low-level instructions require them to be initialized)
-      const preInstructions: any[] = [];
-
-      const userTokenXInfo = await connection.getAccountInfo(userTokenX);
-      if (!userTokenXInfo) {
-        console.log('  Creating missing ATA for token X...');
-        preInstructions.push(
-          createAssociatedTokenAccountInstruction(
-            wallet.publicKey,
-            userTokenX,
-            wallet.publicKey,
-            dlmm.tokenX.publicKey,
-            isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
-          )
-        );
-      }
-
-      const userTokenYInfo = await connection.getAccountInfo(userTokenY);
-      if (!userTokenYInfo) {
-        console.log('  Creating missing ATA for token Y...');
-        preInstructions.push(
-          createAssociatedTokenAccountInstruction(
-            wallet.publicKey,
-            userTokenY,
-            wallet.publicKey,
-            dlmm.tokenY.publicKey,
-            isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
-          )
-        );
-      }
-
-      // === Low-level liquidityParams for addLiquidityByStrategy2 ===
-      const currentActiveId = dlmm.lbPair.activeId;
-
-      // Dynamic & safer maxActiveBinSlippage calculation
-      // We calculate the distance from the current active bin to the farthest
-      // edge of the desired range, then add a safety buffer.
-      // This adapts automatically to wherever the active bin is.
-      const distanceToMin = Math.abs(currentActiveId - minBinId);
-      const distanceToMax = Math.abs(currentActiveId - maxBinId);
-      const maxDistanceFromActive = Math.max(distanceToMin, distanceToMax);
-
-      const SAFETY_BUFFER_BINS = 25; // Increase if you still hit 6004
-      const maxActiveBinSlippage = maxDistanceFromActive + SAFETY_BUFFER_BINS;
-
-      const strategyForParams = {
+    // Step 3: addLiquidityByStrategy2 (the canonical low-level path)
+    console.log('  Adding liquidity via low-level addLiquidityByStrategy2...');
+    try {
+      await sendAddLiquidityByStrategy2({
+        connection,
+        wallet,
+        dlmm,
+        poolPubkey,
+        positionPubkey: positionKeypair.publicKey,
         minBinId,
         maxBinId,
-        strategyType: sdkStrategyType, // 0 = Spot
-        singleSidedX: false,
-      };
+        totalX,
+        totalY,
+        sdkStrategyType,
+        getBinArrayAccountMetasCoverage,
+        toStrategyParameters,
+        binArrayBitmapExtension,
+        isTokenXSol,
+        isTokenYSol,
+        dryRun: dryRunOverride,
+      });
+    } catch (liqErr: any) {
+      console.error('  ❌ Low-level liquidity addition failed:');
+      console.error('     ', liqErr?.message || liqErr);
+      if (liqErr?.logs) console.error('     Logs:', liqErr.logs);
+    }
 
-      const strategyParameters = toStrategyParameters(strategyForParams);
+    const solAfterLiq = await getSolBalance(connection, wallet.publicKey);
+    const tokenAfterLiq = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
+    console.log(`  Balances after liquidity attempt: SOL ${solAfterLiq} | Token ${tokenAfterLiq}`);
 
-      const liquidityParams = {
-        amountX: totalX,
-        amountY: totalY,
-        activeId: currentActiveId,
-        maxActiveBinSlippage,
-        strategyParameters,
-      };
-
-      // === Fully low-level liquidity ===
-      console.log('  Adding liquidity via low-level addLiquidityByStrategy2 + bin arrays...');
-
-      const binArrayAccountMetas = getBinArrayAccountMetasCoverage(
-        new BN(minBinId),
-        new BN(maxBinId),
-        poolPubkey,
-        dlmm.program.programId
-      );
-
-      try {
-        const accounts: any = {
-          position: positionKeypair.publicKey,
-          lbPair: poolPubkey,
-          sender: wallet.publicKey,
-          user: wallet.publicKey,
-          userTokenX,
-          userTokenY,
-          tokenXProgram,
-          tokenYProgram,
-        };
-        if (binArrayBitmapExtension) {
-          accounts.binArrayBitmapExtension = binArrayBitmapExtension;
-        }
-
-        const addLiqIx = await dlmm.program.methods
-          .addLiquidityByStrategy2(liquidityParams, { slices: [] })
-          .accountsPartial(accounts)
-          .remainingAccounts(binArrayAccountMetas)
-          .instruction();
-
-        const allIxs = [...preInstructions, addLiqIx];
-        const liqTx = new Transaction().add(...allIxs);
-        liqTx.feePayer = wallet.publicKey;
-        const { blockhash } = await connection.getLatestBlockhash();
-        liqTx.recentBlockhash = blockhash;
-        liqTx.sign(wallet);
-
-        const sig = await connection.sendTransaction(liqTx, [wallet]);
-        await connection.confirmTransaction(sig, 'confirmed');
-        console.log('  ✓ Low-level liquidity tx sent. Sig:', sig);
-      } catch (liqErr: any) {
-        console.error('  ❌ Low-level liquidity addition failed:');
-        console.error('     ', liqErr?.message || liqErr);
-        if (liqErr?.logs) console.error('     Logs:', liqErr.logs);
-      }
-
-      const solAfterLiq = await getSolBalance(connection, wallet.publicKey);
-      const tokenAfterLiq = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
-      console.log(`  Balances after liquidity attempt: SOL ${solAfterLiq} | Token ${tokenAfterLiq}`);
-
-      // 4. Inspect the actual position state on-chain
+    // Step 4: Inspect final on-chain position state
+    if (!dryRunOverride) {
       try {
         const userPositions = await dlmm.getPositionsByUserAndLbPair(wallet.publicKey);
         const ourPosition = userPositions?.userPositions?.find(
@@ -746,258 +765,64 @@ async function main() {
       } catch (inspectErr: any) {
         console.log('  (Position inspection failed:', inspectErr?.message || inspectErr, ')');
       }
+    }
+  }
 
-      console.log('✅ SPLIT path completed (see balances + position inspection above).');
+  if (opts.simulate) {
+    console.log('\n=== SIMULATION MODE (Split Path) ===\n');
+    try {
+      await runSplitPath(false); // simulate = real sends but small/guarded
+      console.log('\n✅ SPLIT path completed (see balances + position inspection above).');
     } catch (err: any) {
       console.error('❌ SPLIT path failed:');
       console.error('   ', err?.message || err);
       if (err?.logs) console.error('   Logs:', err.logs);
     }
-
     console.log('\n=== End of simulation ===');
     return;
+  }
 
+  if (opts.dryRun) {
+    console.log('\n=== DRY RUN MODE (Split Path) ===\n');
+    try {
+      await runSplitPath(true);
+      console.log('\n✅ DRY RUN completed — no transactions were sent.');
+    } catch (err: any) {
+      console.error('❌ DRY RUN failed during build:', err?.message || err);
+    }
+    return;
+  }
+
+  // Real execution
+  console.log('⚠️  REAL EXECUTION MODE');
+
+  if (opts.split) {
+    console.log('\n=== REAL SPLIT EXECUTION (position + liquidity) ===\n');
+    try {
+      await runSplitPath(false);
+      console.log('\n✅ Real split open completed.');
+    } catch (err: any) {
+      console.error('❌ Real split open failed:', err?.message || err);
+      if (err?.logs) console.error('Logs:', err.logs);
+    }
   } else {
-    // Real execution (respect --split flag)
-    console.log('⚠️  REAL EXECUTION MODE');
-
-    if (opts.split) {
-      console.log('\n=== REAL SPLIT EXECUTION (position + liquidity) ===\n');
-
-      const DEFAULT_BIN_PER_POSITION = 70;
-      const MAX_RESIZE_LENGTH = 91;
-      const desiredWidth = maxBinId - minBinId + 1;
-      const initialWidth = Math.min(DEFAULT_BIN_PER_POSITION, desiredWidth);
-
-      console.log(`Creating position with split strategy (${desiredWidth} bins total)...`);
-
-      try {
-        // 1. Create + extend position
-        const initIx = await dlmm.program.methods
-          .initializePosition2(minBinId, initialWidth)
-          .accountsPartial({
-            payer: wallet.publicKey,
-            position: positionKeypair.publicKey,
-            lbPair: poolPubkey,
-            owner: wallet.publicKey,
-          })
-          .instruction();
-
-        const extendIxs = [];
-        let currentEndBinId = minBinId + initialWidth - 1;
-        while (currentEndBinId < maxBinId) {
-          currentEndBinId = Math.min(currentEndBinId + MAX_RESIZE_LENGTH, maxBinId);
-          const extendIx = await dlmm.program.methods
-            .increasePositionLength2(currentEndBinId)
-            .accountsPartial({
-              lbPair: poolPubkey,
-              position: positionKeypair.publicKey,
-              funder: wallet.publicKey,
-              owner: wallet.publicKey,
-            })
-            .instruction();
-          extendIxs.push(extendIx);
-        }
-
-        const createTx = new Transaction().add(initIx, ...extendIxs);
-        createTx.feePayer = wallet.publicKey;
-        const { blockhash: bh1 } = await connection.getLatestBlockhash();
-        createTx.recentBlockhash = bh1;
-        createTx.sign(positionKeypair);
-
-        const createSig = await connection.sendTransaction(createTx, [wallet, positionKeypair]);
-        await connection.confirmTransaction(createSig, 'confirmed');
-        console.log('✓ Position created + extended. Sig:', createSig);
-
-        // 2. Add liquidity — low-level using the program method
-        console.log('Adding liquidity via low-level addLiquidityByStrategy2...');
-
-        const totalX = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-          ? new BN(0) : tokenAmountOut;
-        const totalY = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-          ? new BN(0) : tokenAmountOut;
-
-        // Derive user token accounts (correct program ID for Token-2022 vs regular)
-        const isTokenXSol = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
-        const isTokenYSol = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
-
-        const userTokenX = getAssociatedTokenAddressSync(
-          dlmm.tokenX.publicKey,
-          wallet.publicKey,
-          false,
-          isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
-        );
-
-        const userTokenY = getAssociatedTokenAddressSync(
-          dlmm.tokenY.publicKey,
-          wallet.publicKey,
-          false,
-          isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
-        );
-
-        // Determine the correct token programs for the instruction
-        const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
-        const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
-
-        // Decide whether to include binArrayBitmapExtension (robust existence check)
-        const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
-        const [possibleBinArrayBitmapExtension] = PublicKey.findProgramAddressSync(
-          [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
-          dlmm.program.programId
-        );
-
-        const bitmapExtensionInfo = await connection.getAccountInfo(possibleBinArrayBitmapExtension);
-        const includeBitmapExtension =
-          !!bitmapExtensionInfo &&
-          bitmapExtensionInfo.owner.toBase58() === dlmm.program.programId.toBase58();
-
-        console.log(`  Bitmap extension needed? ${includeBitmapExtension} (account exists & owned by Meteora: ${!!bitmapExtensionInfo})`);
-
-        let binArrayBitmapExtension: PublicKey | null = null;
-
-        if (!includeBitmapExtension) {
-          // The range needs the extension but it hasn't been created yet → initialize it
-          console.log('  Initializing binArrayBitmapExtension...');
-          const initIx = await dlmm.program.methods
-            .initializeBinArrayBitmapExtension()
-            .accountsPartial({
-              binArrayBitmapExtension: possibleBinArrayBitmapExtension,
-              lbPair: poolPubkey,
-              funder: wallet.publicKey,
-              rent: SYSVAR_RENT_PUBKEY,
-            })
-            .instruction();
-
-          const initTx = new Transaction().add(initIx);
-          initTx.feePayer = wallet.publicKey;
-          const { blockhash: bhInit } = await connection.getLatestBlockhash();
-          initTx.recentBlockhash = bhInit;
-          initTx.sign(wallet);
-
-          const initSig = await connection.sendTransaction(initTx, [wallet]);
-          await connection.confirmTransaction(initSig, 'confirmed');
-          console.log('  ✓ binArrayBitmapExtension initialized. Sig:', initSig);
-
-          binArrayBitmapExtension = possibleBinArrayBitmapExtension;
-        } else {
-          binArrayBitmapExtension = possibleBinArrayBitmapExtension;
-        }
-
-        // Ensure user token ATAs exist (low-level instructions require them to be initialized)
-        const preInstructions: any[] = [];
-
-        const userTokenXInfo = await connection.getAccountInfo(userTokenX);
-        if (!userTokenXInfo) {
-          console.log('  Creating missing ATA for token X...');
-          preInstructions.push(
-            createAssociatedTokenAccountInstruction(
-              wallet.publicKey,
-              userTokenX,
-              wallet.publicKey,
-              dlmm.tokenX.publicKey,
-              isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
-            )
-          );
-        }
-
-        const userTokenYInfo = await connection.getAccountInfo(userTokenY);
-        if (!userTokenYInfo) {
-          console.log('  Creating missing ATA for token Y...');
-          preInstructions.push(
-            createAssociatedTokenAccountInstruction(
-              wallet.publicKey,
-              userTokenY,
-              wallet.publicKey,
-              dlmm.tokenY.publicKey,
-              isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
-            )
-          );
-        }
-
-        // Use high-level addLiquidityByStrategy after manual low-level position creation.
-        console.log('  Adding liquidity via high-level addLiquidityByStrategy (hybrid)...');
-
-        try {
-          const accounts: any = {
-            position: positionKeypair.publicKey,
-            lbPair: poolPubkey,
-            sender: wallet.publicKey,
-            user: wallet.publicKey,
-            userTokenX,
-            userTokenY,
-            tokenXProgram,
-            tokenYProgram,
-          };
-
-          if (binArrayBitmapExtension) {
-            accounts.binArrayBitmapExtension = binArrayBitmapExtension;
-          }
-
-          const addLiqIx = await dlmm.program.methods
-            .addLiquidityByStrategy2(liquidityParams as any, { slices: [] })
-            .accountsPartial(accounts)
-            .instruction();
-
-          const result: any = await dlmm.addLiquidityByStrategy({
-            positionPubKey: positionKeypair.publicKey,
-            user: wallet.publicKey,
-            totalXAmount: totalX,
-            totalYAmount: totalY,
-            strategy: {
-              minBinId,
-              maxBinId,
-              strategyType: sdkStrategyType,
-            },
-            slippage: 500,
-          });
-
-          if (result?.signature) {
-            console.log('  ✓ Liquidity added via high-level method. Sig:', result.signature);
-          } else if (result instanceof Transaction || (Array.isArray(result) && result[0] instanceof Transaction)) {
-            const txs = Array.isArray(result) ? result : [result];
-            for (const tx of txs) {
-              tx.feePayer = wallet.publicKey;
-              const { blockhash } = await connection.getLatestBlockhash();
-              tx.recentBlockhash = blockhash;
-              tx.sign(wallet);
-              const sig = await connection.sendTransaction(tx, [wallet]);
-              await connection.confirmTransaction(sig, 'confirmed');
-              console.log('  ✓ Liquidity tx sent. Sig:', sig);
-            }
-          } else {
-            console.log('  Liquidity step returned (no signature, not a Transaction):', result);
-          }
-        } catch (liqErr: any) {
-          console.error('❌ High-level liquidity addition failed:', liqErr?.message || liqErr);
-          if (liqErr?.logs) console.error('Logs:', liqErr.logs);
-        }
-
-        // 3. Final position inspection
-        try {
-          const userPositions = await dlmm.getPositionsByUserAndLbPair(wallet.publicKey);
-          const ourPosition = userPositions?.userPositions?.find(
-            (p: any) => p.publicKey?.toBase58?.() === positionKeypair.publicKey.toBase58()
-          );
-          if (ourPosition?.positionData) {
-            const pd = ourPosition.positionData;
-            console.log('✓ Final position state:');
-            console.log(`  Bin range: ${pd.lowerBinId} → ${pd.upperBinId}`);
-            console.log(`  Total liquidity: ${pd.totalLiquidity ?? '0'}`);
-          }
-        } catch {}
-
-        console.log('\n✅ Real split open completed.');
-      } catch (err: any) {
-        console.error('❌ Real split open failed:', err?.message || err);
-        if (err?.logs) console.error('Logs:', err.logs);
-      }
-    } else {
-      try {
-        await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
-        console.log('✅ Real combined open succeeded.');
-      } catch (err: any) {
-        console.error('❌ Real combined open failed:', err?.message || err);
-      }
+    // Fallback: combined initializePositionAndAddLiquidityByStrategy (narrow ranges only)
+    const params = {
+      positionPubKey: positionKeypair.publicKey,
+      user: wallet.publicKey,
+      totalXAmount: totalX,
+      totalYAmount: totalY,
+      strategy: {
+        minBinId,
+        maxBinId,
+        strategyType: sdkStrategyType,
+      },
+    };
+    try {
+      await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
+      console.log('✅ Real combined open succeeded.');
+    } catch (err: any) {
+      console.error('❌ Real combined open failed:', err?.message || err);
     }
   }
 }
@@ -1019,12 +844,10 @@ async function closeBinArray(lbPairAddress: string, binArrayAddress: string) {
   console.log(`Rent Receiver: ${wallet.publicKey.toBase58()}`);
 
   try {
-    // Load the DLMM instance just to get the program
     const dlmm = await DLMM.create(connection, lbPairPubkey);
 
-    // Optional: fetch the bin array to give the user some info
     try {
-      const binArrayAccount = await dlmm.program.account.binArray.fetch(binArrayPubkey);
+      await dlmm.program.account.binArray.fetch(binArrayPubkey);
       console.log(`Bin Array loaded. (You can inspect it further on Solscan if needed.)`);
     } catch (e) {
       console.log(`Could not fetch bin array state (it may already be closed or invalid).`);
