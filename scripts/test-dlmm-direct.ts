@@ -121,6 +121,26 @@ async function swapSolToTokenViaJupiter(
   return new BN(quote.outAmount);
 }
 
+async function getSolBalance(connection: Connection, pubkey: PublicKey): Promise<string> {
+  const lamports = await connection.getBalance(pubkey);
+  return (lamports / 1e9).toFixed(6);
+}
+
+async function getTokenBalance(
+  connection: Connection,
+  owner: PublicKey,
+  mint: PublicKey,
+  programId: PublicKey
+): Promise<string> {
+  const ata = getAssociatedTokenAddressSync(mint, owner, false, programId);
+  try {
+    const info = await connection.getTokenAccountBalance(ata);
+    return info.value.uiAmountString || '0';
+  } catch {
+    return '0 (no ATA)';
+  }
+}
+
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts: any = {
@@ -371,10 +391,10 @@ async function main() {
     // COMBINED PATH
     console.log('--- COMBINED PATH ---');
     try {
-      const result: any = await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
-      console.log('✅ Combined path succeeded (returned a transaction object).');
+      await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
+      console.log('✅ Combined path succeeded.');
     } catch (err: any) {
-      console.error('❌ COMBINED path failed:');
+      console.error('❌ COMBINED path failed (this is expected for wide ranges on binStep 100):');
       console.error('   ', err?.message || err);
       if (err?.logs) console.error('   Logs:', err.logs);
     }
@@ -387,6 +407,11 @@ async function main() {
 
       const desiredWidth = maxBinId - minBinId + 1;
       const initialWidth = Math.min(DEFAULT_BIN_PER_POSITION, desiredWidth);
+
+      // Pre-creation balances (after Jupiter, before any DLMM position work)
+      const solBefore = await getSolBalance(connection, wallet.publicKey);
+      const tokenBefore = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
+      console.log(`  Balances before position creation: SOL ${solBefore} | Token ${tokenBefore}`);
 
       // 1. Initialize position with starting width (capped at 70)
       const initIx = await dlmm.program.methods
@@ -430,8 +455,13 @@ async function main() {
         console.log(`    (Used ${extendIxs.length} increasePositionLength2 instruction(s))`);
       }
 
+      const solAfterCreate = await getSolBalance(connection, wallet.publicKey);
+      const tokenAfterCreate = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
+      console.log(`  Balances after position creation (before liquidity): SOL ${solAfterCreate} | Token ${tokenAfterCreate}`);
+
       // 3. Add liquidity into the now-correctly-sized position
-      const result: any = await dlmm.addLiquidityByStrategy({
+      console.log('  Adding liquidity via addLiquidityByStrategy...');
+      const liqResult: any = await dlmm.addLiquidityByStrategy({
         positionPubKey: positionKeypair.publicKey,
         user: wallet.publicKey,
         totalXAmount: dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
@@ -445,7 +475,40 @@ async function main() {
         },
       });
 
-      console.log('✅ SPLIT path succeeded (position created + liquidity added).');
+      console.log('  addLiquidityByStrategy result type:', typeof liqResult);
+      if (liqResult && typeof liqResult === 'object') {
+        if (liqResult.signature) console.log('  Liquidity tx signature:', liqResult.signature);
+        if (liqResult.instructions) console.log('  Returned', liqResult.instructions?.length || 0, 'instructions');
+      }
+
+      const solAfterLiq = await getSolBalance(connection, wallet.publicKey);
+      const tokenAfterLiq = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
+      console.log(`  Balances after liquidity attempt: SOL ${solAfterLiq} | Token ${tokenAfterLiq}`);
+
+      // 4. Inspect the actual position state on-chain
+      try {
+        const userPositions = await dlmm.getPositionsByUserAndLbPair(wallet.publicKey);
+        const ourPosition = userPositions?.userPositions?.find(
+          (p: any) => p.publicKey?.toBase58?.() === positionKeypair.publicKey.toBase58()
+        );
+
+        if (ourPosition?.positionData) {
+          const pd = ourPosition.positionData;
+          const lower = pd.lowerBinId ?? 'n/a';
+          const upper = pd.upperBinId ?? 'n/a';
+          const totalLiquidity = pd.totalLiquidity ?? 'n/a';
+          console.log('  ✓ Position found on-chain:');
+          console.log(`    Bin range: ${lower} → ${upper}`);
+          console.log(`    Total liquidity (raw): ${totalLiquidity}`);
+          console.log('    (If total liquidity is 0 or missing, no liquidity was deposited)');
+        } else {
+          console.log('  ⚠ Could not find our position in userPositions response.');
+        }
+      } catch (inspectErr: any) {
+        console.log('  (Position inspection failed:', inspectErr?.message || inspectErr, ')');
+      }
+
+      console.log('✅ SPLIT path completed (see balances + position inspection above).');
     } catch (err: any) {
       console.error('❌ SPLIT path failed:');
       console.error('   ', err?.message || err);
@@ -464,9 +527,94 @@ async function main() {
     }
 
     if (opts.split) {
-      // Real split execution (same logic as above, without early return)
-      // (omitted for brevity in this edit — user can copy from simulation block if needed)
-      console.log('Real split execution not fully wired in this quick update. Use --simulate first.');
+      console.log('\n=== REAL SPLIT EXECUTION (position + liquidity) ===\n');
+
+      const DEFAULT_BIN_PER_POSITION = 70;
+      const MAX_RESIZE_LENGTH = 91;
+      const desiredWidth = maxBinId - minBinId + 1;
+      const initialWidth = Math.min(DEFAULT_BIN_PER_POSITION, desiredWidth);
+
+      console.log(`Creating position with split strategy (${desiredWidth} bins total)...`);
+
+      try {
+        // 1. Create + extend position
+        const initIx = await dlmm.program.methods
+          .initializePosition2(minBinId, initialWidth)
+          .accountsPartial({
+            payer: wallet.publicKey,
+            position: positionKeypair.publicKey,
+            lbPair: poolPubkey,
+            owner: wallet.publicKey,
+          })
+          .instruction();
+
+        const extendIxs = [];
+        let currentEndBinId = minBinId + initialWidth - 1;
+        while (currentEndBinId < maxBinId) {
+          currentEndBinId = Math.min(currentEndBinId + MAX_RESIZE_LENGTH, maxBinId);
+          const extendIx = await dlmm.program.methods
+            .increasePositionLength2(currentEndBinId)
+            .accountsPartial({
+              lbPair: poolPubkey,
+              position: positionKeypair.publicKey,
+              funder: wallet.publicKey,
+              owner: wallet.publicKey,
+            })
+            .instruction();
+          extendIxs.push(extendIx);
+        }
+
+        const createTx = new Transaction().add(initIx, ...extendIxs);
+        createTx.feePayer = wallet.publicKey;
+        const { blockhash: bh1 } = await connection.getLatestBlockhash();
+        createTx.recentBlockhash = bh1;
+        createTx.sign(positionKeypair);
+
+        const createSig = await connection.sendTransaction(createTx, [wallet, positionKeypair]);
+        await connection.confirmTransaction(createSig, 'confirmed');
+        console.log('✓ Position created + extended. Sig:', createSig);
+
+        // 2. Add liquidity
+        console.log('Adding liquidity...');
+        const liqResult: any = await dlmm.addLiquidityByStrategy({
+          positionPubKey: positionKeypair.publicKey,
+          user: wallet.publicKey,
+          totalXAmount: dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
+            ? new BN(0) : tokenAmountOut,
+          totalYAmount: dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
+            ? new BN(0) : tokenAmountOut,
+          strategy: {
+            minBinId,
+            maxBinId,
+            strategyType: sdkStrategyType,
+          },
+        });
+
+        if (liqResult?.signature) {
+          console.log('✓ Liquidity added. Tx:', liqResult.signature);
+        } else {
+          console.log('Liquidity step returned:', liqResult);
+        }
+
+        // 3. Final position inspection
+        try {
+          const userPositions = await dlmm.getPositionsByUserAndLbPair(wallet.publicKey);
+          const ourPosition = userPositions?.userPositions?.find(
+            (p: any) => p.publicKey?.toBase58?.() === positionKeypair.publicKey.toBase58()
+          );
+          if (ourPosition?.positionData) {
+            const pd = ourPosition.positionData;
+            console.log('✓ Final position state:');
+            console.log(`  Bin range: ${pd.lowerBinId} → ${pd.upperBinId}`);
+            console.log(`  Total liquidity: ${pd.totalLiquidity ?? '0'}`);
+          }
+        } catch {}
+
+        console.log('\n✅ Real split open completed.');
+      } catch (err: any) {
+        console.error('❌ Real split open failed:', err?.message || err);
+        if (err?.logs) console.error('Logs:', err.logs);
+      }
     } else {
       try {
         await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
