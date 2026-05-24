@@ -53,7 +53,7 @@ import * as dotenvLocal from 'dotenv';
 import * as path from 'path';
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true });
 
-import { Keypair, PublicKey, Connection } from '@solana/web3.js';
+import { Keypair, PublicKey, Connection, Transaction } from '@solana/web3.js';
 import BN from 'bn.js';
 import DLMM from '@meteora-ag/dlmm';
 
@@ -380,13 +380,35 @@ async function main() {
     console.log('Calling initializePosition + addLiquidityByStrategy (SPLIT MODE for robustness)...');
 
     try {
-      // Step 1: Create the position account first (modern way)
-      console.log('  → Step 1: createPosition');
-      await dlmm.createPosition({
-        positionPubKey: positionKeypair.publicKey,
-        user: wallet.publicKey,
-      });
-      console.log('  ✓ Position account created');
+      // Step 1: Create the position account using low-level Anchor instruction
+      // (this is the actual way to do split creation on current SDK versions)
+      console.log('  → Step 1: initializePosition2 (via program.methods)');
+
+      const { SystemProgram } = await import('@solana/web3.js');
+
+      const ix = await dlmm.program.methods
+        .initializePosition2()
+        .accounts({
+          payer: wallet.publicKey,
+          position: positionKeypair.publicKey,
+          lbPair: poolPubkey,
+          owner: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+          // Note: some versions may require additional accounts (rent, etc.)
+        })
+        .instruction();
+
+      const tx = new Transaction().add(ix);
+      tx.feePayer = wallet.publicKey;
+      const { blockhash } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+
+      tx.sign(positionKeypair); // position is a signer
+
+      const sig = await connection.sendTransaction(tx, [wallet, positionKeypair]);
+      await connection.confirmTransaction(sig, 'confirmed');
+
+      console.log('  ✓ Position account created. Signature:', sig);
 
       // Step 2: Add liquidity to the newly created position
       console.log('  → Step 2: addLiquidityByStrategy');
