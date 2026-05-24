@@ -1,11 +1,15 @@
 /**
  * scripts/close-bin-arrays.ts
  *
- * Attempt to close bin array accounts to recover rent.
+ * Attempt to close bin array accounts to recover rent (user-funded bin arrays only).
  *
- * These bin arrays were created during experimental liquidity adds
- * and may or may not be closable depending on Meteora's access control
- * and whether they still contain liquidity.
+ * These 4 bin arrays were created as side-effects during experimental liquidity adds.
+ * According to analysis, the correct user-facing instruction is `closeBinArrayIfEmpty`
+ * (or the variant that checks the `funder` field rather than admin).
+ *
+ * The current on-chain instruction we have access to is `close_bin_array`.
+ * If it returns InvalidAdmin, it means this wallet is not authorized under the
+ * program's current access control for these specific accounts.
  *
  * Usage:
  *   npx tsx scripts/close-bin-arrays.ts
@@ -90,10 +94,12 @@ async function main() {
       // Check for specific known errors
       const errorMsg = err?.message || '';
       if (errorMsg.includes('InvalidAdmin') || errorMsg.includes('6015')) {
-        console.log('     → This bin array cannot be closed by your wallet (InvalidAdmin).');
-        console.log('       It was likely created under a context where only the pool admin or original creator can close it.');
+        console.log('     → Got InvalidAdmin (6015) from lb_access_control.rs.');
+        console.log('       Per analysis, this indicates the instruction is enforcing an admin check.');
+        console.log('       The correct user-facing close instruction may be closeBinArrayIfEmpty (or closeEmptyBinArrayAndTransferRent), which checks the funder field instead.');
+        console.log('       If that variant exists in this program version, it should allow the original funder (your wallet) to close empty bin arrays.');
       } else if (errorMsg.includes('BinArrayIsNotEmpty') || errorMsg.includes('0x177')) {
-        console.log('     → Bin array still contains liquidity. It cannot be closed until emptied.');
+        console.log('     → Bin array still contains liquidity. Empty it first.');
       }
     }
   }
