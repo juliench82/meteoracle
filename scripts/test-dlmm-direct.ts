@@ -153,7 +153,7 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const opts: any = {
     simulate: false,
-    amount: 0.05,
+    amount: 0.01,
     skipJupiter: false,
     tokenAmount: null, // raw units (BN friendly)
     useBalance: null,  // e.g. "50%", "0.8", "75"
@@ -205,6 +205,15 @@ function parseArgs() {
 
 async function main() {
   const opts = parseArgs();
+
+  // === TEST SCRIPT SAFETY CAP ===
+  // Hard limit for this test script only (not production code).
+  // Requested during debugging of the split position flow.
+  const MAX_TEST_AMOUNT_SOL = 0.01;
+  if (opts.amount > MAX_TEST_AMOUNT_SOL) {
+    console.log(`⚠️  [TEST SCRIPT] Safety cap active: Amount capped at ${MAX_TEST_AMOUNT_SOL} SOL (was ${opts.amount}).`);
+    opts.amount = MAX_TEST_AMOUNT_SOL;
+  }
 
   const connection = getConnection();
   const wallet = getWallet();
@@ -537,10 +546,6 @@ async function main() {
   } else {
     // Real execution (respect --split flag)
     console.log('⚠️  REAL EXECUTION MODE');
-    if (opts.amount > 0.02) {
-      console.log('Amount capped at 0.02 SOL.');
-      opts.amount = 0.02;
-    }
 
     if (opts.split) {
       console.log('\n=== REAL SPLIT EXECUTION (position + liquidity) ===\n');
