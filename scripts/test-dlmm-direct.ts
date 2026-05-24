@@ -468,7 +468,7 @@ async function main() {
       console.log(`  Balances after position creation (before liquidity): SOL ${solAfterCreate} | Token ${tokenAfterCreate}`);
 
       // 3. Add liquidity — low-level using the program method (following SDK internal pattern)
-      console.log('  Adding liquidity via low-level addLiquidityByStrategy2...');
+      console.log('  Adding liquidity via high-level addLiquidityByStrategy (hybrid approach)...');
 
       const totalX = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
         ? new BN(0) : tokenAmountOut;
@@ -606,38 +606,26 @@ async function main() {
       };
 
       try {
-        const accounts: any = {
-          position: positionKeypair.publicKey,
-          lbPair: poolPubkey,
-          sender: wallet.publicKey,
+        const result: any = await dlmm.addLiquidityByStrategy({
+          positionPubKey: positionKeypair.publicKey,
           user: wallet.publicKey,
-          userTokenX,
-          userTokenY,
-          tokenXProgram,
-          tokenYProgram,
-        };
+          totalXAmount: totalX,
+          totalYAmount: totalY,
+          strategy: {
+            minBinId,
+            maxBinId,
+            strategyType: sdkStrategyType,
+          },
+          slippage: 500, // 5% starting point for wide ranges
+        });
 
-        if (binArrayBitmapExtension) {
-          accounts.binArrayBitmapExtension = binArrayBitmapExtension;
+        if (result?.signature) {
+          console.log('  ✓ Liquidity added via high-level method. Sig:', result.signature);
+        } else {
+          console.log('  Liquidity step returned:', result);
         }
-
-        const addLiqIx = await dlmm.program.methods
-          .addLiquidityByStrategy2(liquidityParams as any, { slices: [] })
-          .accountsPartial(accounts)
-          .instruction();
-
-        const allInstructions = [...preInstructions, addLiqIx];
-        const liqTx = new Transaction().add(...allInstructions);
-        liqTx.feePayer = wallet.publicKey;
-        const { blockhash } = await connection.getLatestBlockhash();
-        liqTx.recentBlockhash = blockhash;
-        liqTx.sign(wallet);
-
-        const sig = await connection.sendTransaction(liqTx, [wallet]);
-        await connection.confirmTransaction(sig, 'confirmed');
-        console.log('  ✓ Low-level liquidity tx sent. Sig:', sig);
       } catch (liqErr: any) {
-        console.error('  ❌ Low-level liquidity addition failed:');
+        console.error('  ❌ High-level liquidity addition failed:');
         console.error('     ', liqErr?.message || liqErr);
         if (liqErr?.logs) console.error('     Logs:', liqErr.logs);
       }
@@ -836,33 +824,8 @@ async function main() {
           );
         }
 
-        // === Low-level liquidityParams for addLiquidityByStrategy2 ===
-        const currentActiveId = dlmm.lbPair.activeId;
-
-        // Dynamic & safer maxActiveBinSlippage calculation
-        const distanceToMin = Math.abs(currentActiveId - minBinId);
-        const distanceToMax = Math.abs(currentActiveId - maxBinId);
-        const maxDistanceFromActive = Math.max(distanceToMin, distanceToMax);
-
-        const SAFETY_BUFFER_BINS = 25; // Increase if you still hit 6004
-        const maxActiveBinSlippage = maxDistanceFromActive + SAFETY_BUFFER_BINS;
-
-        const strategyForParams = {
-          minBinId,
-          maxBinId,
-          strategyType: sdkStrategyType,
-          singleSidedX: false,
-        };
-
-        const strategyParameters = toStrategyParameters(strategyForParams);
-
-        const liquidityParams = {
-          amountX: totalX,
-          amountY: totalY,
-          activeId: currentActiveId,
-          maxActiveBinSlippage,
-          strategyParameters,
-        };
+        // Use high-level addLiquidityByStrategy after manual low-level position creation.
+        console.log('  Adding liquidity via high-level addLiquidityByStrategy (hybrid)...');
 
         try {
           const accounts: any = {
@@ -885,18 +848,26 @@ async function main() {
             .accountsPartial(accounts)
             .instruction();
 
-          const allInstructions = [...preInstructions, addLiqIx];
-          const liqTx = new Transaction().add(...allInstructions);
-          liqTx.feePayer = wallet.publicKey;
-          const { blockhash } = await connection.getLatestBlockhash();
-          liqTx.recentBlockhash = blockhash;
-          liqTx.sign(wallet);
+          const result: any = await dlmm.addLiquidityByStrategy({
+            positionPubKey: positionKeypair.publicKey,
+            user: wallet.publicKey,
+            totalXAmount: totalX,
+            totalYAmount: totalY,
+            strategy: {
+              minBinId,
+              maxBinId,
+              strategyType: sdkStrategyType,
+            },
+            slippage: 500,
+          });
 
-          const sig = await connection.sendTransaction(liqTx, [wallet]);
-          await connection.confirmTransaction(sig, 'confirmed');
-          console.log('✓ Low-level liquidity tx sent. Sig:', sig);
+          if (result?.signature) {
+            console.log('  ✓ Liquidity added via high-level method. Sig:', result.signature);
+          } else {
+            console.log('  Liquidity step returned:', result);
+          }
         } catch (liqErr: any) {
-          console.error('❌ Low-level liquidity addition failed:', liqErr?.message || liqErr);
+          console.error('❌ High-level liquidity addition failed:', liqErr?.message || liqErr);
           if (liqErr?.logs) console.error('Logs:', liqErr.logs);
         }
 
