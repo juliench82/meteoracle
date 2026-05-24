@@ -517,6 +517,7 @@ async function main() {
             position: positionKeypair.publicKey,
             lbPair: poolPubkey,
             binArrayBitmapExtension: binArrayBitmapExtension,
+            sender: wallet.publicKey,   // <-- added for "sender" account
             user: wallet.publicKey,
             userTokenX,
             userTokenY,
@@ -680,6 +681,7 @@ async function main() {
               position: positionKeypair.publicKey,
               lbPair: poolPubkey,
               binArrayBitmapExtension: binArrayBitmapExtension,
+              sender: wallet.publicKey,   // <-- added for "sender" account
               user: wallet.publicKey,
               userTokenX,
               userTokenY,
