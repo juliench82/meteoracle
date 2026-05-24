@@ -3,6 +3,9 @@
  *
  * Isolated tester for the direct DLMM SDK path used for Token-2022 / pump.fun graduates.
  *
+ * Focused on the split creation path (initializePosition2 + increasePositionLength2 + addLiquidity)
+ * for wide ranges that hit realloc limits with the normal combined call.
+ *
  * This lets you test the exact sequence the bot runs (Jupiter swap + DLMM SDK call)
  * without waiting for the scanner or risking large amounts.
  *
@@ -42,10 +45,15 @@
  *     --pool ... --mint ... --amount 0.05 \
  *     --min-bin -450 --max-bin -350
  *
- *   # Use split creation (initializePosition first, then addLiquidityByStrategy)
- *   # This is more robust for wider ranges or when hitting realloc limits.
+ *   # Test the split path in simulation (current recommended mode)
+ *   # Focuses purely on making wide-range split creation + liquidity work.
  *   npx tsx scripts/test-dlmm-direct.ts \
  *     --pool ... --mint ... --amount 0.05 \
+ *     --simulate
+ *
+ *   # Real split execution (small amount)
+ *   npx tsx scripts/test-dlmm-direct.ts \
+ *     --pool ... --mint ... --amount 0.02 \
  *     --split
  */
 
@@ -386,21 +394,10 @@ async function main() {
 
   // === Execution logic ===
   if (opts.simulate) {
-    console.log('\n=== SIMULATION MODE: Comparing BOTH paths ===\n');
-
-    // COMBINED PATH
-    console.log('--- COMBINED PATH ---');
-    try {
-      await dlmm.initializePositionAndAddLiquidityByStrategy(params as any);
-      console.log('✅ Combined path succeeded.');
-    } catch (err: any) {
-      console.error('❌ COMBINED path failed (this is expected for wide ranges on binStep 100):');
-      console.error('   ', err?.message || err);
-      if (err?.logs) console.error('   Logs:', err.logs);
-    }
+    console.log('\n=== SIMULATION MODE (Split Path Only) ===\n');
 
     // SPLIT PATH — follows the exact internal pattern the Meteora SDK uses for wide ranges
-    console.log('\n--- SPLIT PATH (initializePosition2 + increasePositionLength2) ---');
+    console.log('--- SPLIT PATH (initializePosition2 + increasePositionLength2) ---');
     try {
       const DEFAULT_BIN_PER_POSITION = 70;
       const MAX_RESIZE_LENGTH = 91;
@@ -515,7 +512,7 @@ async function main() {
       if (err?.logs) console.error('   Logs:', err.logs);
     }
 
-    console.log('\n=== End of comparison ===');
+    console.log('\n=== End of simulation ===');
     return;
 
   } else {
