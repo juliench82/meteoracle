@@ -32,6 +32,30 @@ async function main() {
 
   const dlmm = await DLMM.create(connection, LB_PAIR);
 
+  // Helper: print all close/bin-related instructions from the IDL
+  function logCloseAndBinInstructions(dlmmInstance: any) {
+    if (!dlmmInstance?.program?.idl?.instructions) {
+      console.log("No IDL instructions found on the program.");
+      return;
+    }
+
+    const relevant = dlmmInstance.program.idl.instructions
+      .map((i: any) => i.name)
+      .filter((name: string) =>
+        name.toLowerCase().includes("close") ||
+        name.toLowerCase().includes("bin")
+      );
+
+    console.log("\nRelevant instructions from IDL (close/bin related):");
+    if (relevant.length === 0) {
+      console.log("  (none found)");
+    } else {
+      relevant.forEach((name: string) => console.log(`  - ${name}`));
+    }
+  }
+
+  logCloseAndBinInstructions(dlmm);
+
   let recovered = 0;
 
   for (const { pubkey, index } of BIN_ARRAYS) {
