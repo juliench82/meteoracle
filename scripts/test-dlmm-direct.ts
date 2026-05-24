@@ -458,9 +458,9 @@ async function sendAddLiquidityByStrategy2(opts: {
     console.log('  ✓ Missing ATA(s) created. Sig:', ataSig);
   }
 
-  // Liquidity transaction with high compute unit limit
+  // Liquidity transaction with high compute unit limit (experimental 1.4M attempt)
   const liqTx = new Transaction()
-    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }))
+    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }))
     .add(addLiqIx);
 
   liqTx.feePayer = wallet.publicKey;
@@ -468,7 +468,7 @@ async function sendAddLiquidityByStrategy2(opts: {
   liqTx.recentBlockhash = blockhash;
   liqTx.sign(wallet);
 
-  console.log('  Sending addLiquidityByStrategy2 with 600k CU limit...');
+  console.log('  Sending addLiquidityByStrategy2 with 1.4M CU limit (experimental)...');
   const sig = await connection.sendTransaction(liqTx, [wallet]);
   await connection.confirmTransaction(sig, 'confirmed');
   console.log('  ✓ addLiquidityByStrategy2 sent. Sig:', sig);
