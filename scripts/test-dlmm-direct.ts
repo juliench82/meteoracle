@@ -368,7 +368,7 @@ async function main() {
   // 5. DLMM SDK call — using the standard, widely-used pattern
   console.log('[5/5] Preparing DLMM SDK call...');
 
-  const { StrategyType } = await import('@meteora-ag/dlmm');
+  const { StrategyType, binIdToBinArrayIndex, isOverflowDefaultBinArrayBitmap } = await import('@meteora-ag/dlmm');
 
   let sdkStrategyType = StrategyType.Spot;
   if (opts.strategy === 'scalp-spike') sdkStrategyType = StrategyType.Spot;
@@ -474,13 +474,6 @@ async function main() {
       const totalY = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
         ? new BN(0) : tokenAmountOut;
 
-      // Derive binArrayBitmapExtension (required for wider ranges that overflow the default bitmap)
-      const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
-      const [binArrayBitmapExtension] = PublicKey.findProgramAddressSync(
-        [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
-        dlmm.program.programId
-      );
-
       // Derive user token accounts (correct program ID for Token-2022 vs regular)
       const isTokenXSol = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
       const isTokenYSol = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
@@ -503,6 +496,23 @@ async function main() {
       const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
       const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
 
+      // Only include binArrayBitmapExtension when the range actually overflows the default bitmap
+      // (this matches exactly how the official SDK does it internally)
+      const minBinArrayIndex = binIdToBinArrayIndex(new BN(minBinId));
+      const maxBinArrayIndex = binIdToBinArrayIndex(new BN(maxBinId));
+      const useBinArrayBitmapExtension =
+        isOverflowDefaultBinArrayBitmap(minBinArrayIndex) ||
+        isOverflowDefaultBinArrayBitmap(maxBinArrayIndex);
+
+      let binArrayBitmapExtension: PublicKey | null = null;
+      if (useBinArrayBitmapExtension) {
+        const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
+        [binArrayBitmapExtension] = PublicKey.findProgramAddressSync(
+          [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
+          dlmm.program.programId
+        );
+      }
+
       // Build liquidity parameters similar to what the SDK uses internally
       const liquidityParams = {
         minBinId,
@@ -516,8 +526,8 @@ async function main() {
           .accountsPartial({
             position: positionKeypair.publicKey,
             lbPair: poolPubkey,
-            binArrayBitmapExtension: binArrayBitmapExtension,
-            sender: wallet.publicKey,   // <-- added for "sender" account
+            ...(binArrayBitmapExtension && { binArrayBitmapExtension }),
+            sender: wallet.publicKey,
             user: wallet.publicKey,
             userTokenX,
             userTokenY,
@@ -639,13 +649,6 @@ async function main() {
         const totalY = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
           ? new BN(0) : tokenAmountOut;
 
-        // Derive binArrayBitmapExtension (required for wider ranges)
-        const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
-        const [binArrayBitmapExtension] = PublicKey.findProgramAddressSync(
-          [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
-          dlmm.program.programId
-        );
-
         // Derive user token accounts (correct program ID for Token-2022 vs regular)
         const isTokenXSol = dlmm.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
         const isTokenYSol = dlmm.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112';
@@ -668,6 +671,22 @@ async function main() {
         const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
         const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
 
+        // Only include binArrayBitmapExtension when the range actually overflows the default bitmap
+        const minBinArrayIndex = binIdToBinArrayIndex(new BN(minBinId));
+        const maxBinArrayIndex = binIdToBinArrayIndex(new BN(maxBinId));
+        const useBinArrayBitmapExtension =
+          isOverflowDefaultBinArrayBitmap(minBinArrayIndex) ||
+          isOverflowDefaultBinArrayBitmap(maxBinArrayIndex);
+
+        let binArrayBitmapExtension: PublicKey | null = null;
+        if (useBinArrayBitmapExtension) {
+          const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
+          [binArrayBitmapExtension] = PublicKey.findProgramAddressSync(
+            [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
+            dlmm.program.programId
+          );
+        }
+
         const liquidityParams = {
           minBinId,
           maxBinId,
@@ -680,8 +699,8 @@ async function main() {
             .accountsPartial({
               position: positionKeypair.publicKey,
               lbPair: poolPubkey,
-              binArrayBitmapExtension: binArrayBitmapExtension,
-              sender: wallet.publicKey,   // <-- added for "sender" account
+              ...(binArrayBitmapExtension && { binArrayBitmapExtension }),
+              sender: wallet.publicKey,
               user: wallet.publicKey,
               userTokenX,
               userTokenY,
