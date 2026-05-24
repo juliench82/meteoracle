@@ -521,20 +521,24 @@ async function main() {
       };
 
       try {
+        const accounts: any = {
+          position: positionKeypair.publicKey,
+          lbPair: poolPubkey,
+          sender: wallet.publicKey,
+          user: wallet.publicKey,
+          userTokenX,
+          userTokenY,
+          tokenXProgram,
+          tokenYProgram,
+        };
+
+        if (binArrayBitmapExtension) {
+          accounts.binArrayBitmapExtension = binArrayBitmapExtension;
+        }
+
         const addLiqIx = await dlmm.program.methods
           .addLiquidityByStrategy2(liquidityParams as any, { slices: [] })
-          .accountsPartial({
-            position: positionKeypair.publicKey,
-            lbPair: poolPubkey,
-            ...(binArrayBitmapExtension && { binArrayBitmapExtension }),
-            sender: wallet.publicKey,
-            user: wallet.publicKey,
-            userTokenX,
-            userTokenY,
-            tokenXProgram,
-            tokenYProgram,
-            // Note: Still likely missing bin arrays + transfer hook remaining accounts.
-          })
+          .accountsPartial(accounts)
           .instruction();
 
         const liqTx = new Transaction().add(addLiqIx);
@@ -694,19 +698,24 @@ async function main() {
         };
 
         try {
+          const accounts: any = {
+            position: positionKeypair.publicKey,
+            lbPair: poolPubkey,
+            sender: wallet.publicKey,
+            user: wallet.publicKey,
+            userTokenX,
+            userTokenY,
+            tokenXProgram,
+            tokenYProgram,
+          };
+
+          if (binArrayBitmapExtension) {
+            accounts.binArrayBitmapExtension = binArrayBitmapExtension;
+          }
+
           const addLiqIx = await dlmm.program.methods
             .addLiquidityByStrategy2(liquidityParams as any, { slices: [] })
-            .accountsPartial({
-              position: positionKeypair.publicKey,
-              lbPair: poolPubkey,
-              ...(binArrayBitmapExtension && { binArrayBitmapExtension }),
-              sender: wallet.publicKey,
-              user: wallet.publicKey,
-              userTokenX,
-              userTokenY,
-              tokenXProgram,
-              tokenYProgram,
-            })
+            .accountsPartial(accounts)
             .instruction();
 
           const liqTx = new Transaction().add(addLiqIx);
