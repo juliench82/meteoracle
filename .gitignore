@@ -33,3 +33,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 cron-job.txt
+
+# Local test helper scripts (RICH-SOL specific, not meant to be shared)
+scripts/test-rich-direct.sh
+scripts/test-rich-zap.sh
