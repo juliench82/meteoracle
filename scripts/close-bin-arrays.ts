@@ -15,6 +15,10 @@
  *   npx tsx scripts/close-bin-arrays.ts
  */
 
+import * as dotenvLocal from 'dotenv';
+import * as path from 'path';
+dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true });
+
 import { Connection, PublicKey, Transaction, Keypair } from '@solana/web3.js';
 import { getConnection, getWallet } from '@/lib/solana';
 import DLMM from '@meteora-ag/dlmm';
