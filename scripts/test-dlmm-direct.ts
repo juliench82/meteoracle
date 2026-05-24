@@ -369,7 +369,7 @@ async function main() {
   // 5. DLMM SDK call — using the standard, widely-used pattern
   console.log('[5/5] Preparing DLMM SDK call...');
 
-  const { StrategyType } = await import('@meteora-ag/dlmm');
+  const { StrategyType, toStrategyParameters } = await import('@meteora-ag/dlmm');
 
   let sdkStrategyType = StrategyType.Spot;
   if (opts.strategy === 'scalp-spike') sdkStrategyType = StrategyType.Spot;
@@ -574,11 +574,35 @@ async function main() {
         );
       }
 
-      // Build liquidity parameters similar to what the SDK uses internally
-      const liquidityParams = {
+      // === Low-level liquidityParams for addLiquidityByStrategy2 ===
+      const currentActiveId = dlmm.lbPair.activeId;
+
+      // Dynamic & safer maxActiveBinSlippage calculation
+      // We calculate the distance from the current active bin to the farthest
+      // edge of the desired range, then add a safety buffer.
+      // This adapts automatically to wherever the active bin is.
+      const distanceToMin = Math.abs(currentActiveId - minBinId);
+      const distanceToMax = Math.abs(currentActiveId - maxBinId);
+      const maxDistanceFromActive = Math.max(distanceToMin, distanceToMax);
+
+      const SAFETY_BUFFER_BINS = 25; // Increase if you still hit 6004
+      const maxActiveBinSlippage = maxDistanceFromActive + SAFETY_BUFFER_BINS;
+
+      const strategyForParams = {
         minBinId,
         maxBinId,
-        strategyType: sdkStrategyType,
+        strategyType: sdkStrategyType, // 0 = Spot
+        singleSidedX: false,
+      };
+
+      const strategyParameters = toStrategyParameters(strategyForParams);
+
+      const liquidityParams = {
+        amountX: totalX,
+        amountY: totalY,
+        activeId: currentActiveId,
+        maxActiveBinSlippage,
+        strategyParameters,
       };
 
       try {
@@ -812,10 +836,32 @@ async function main() {
           );
         }
 
-        const liquidityParams = {
+        // === Low-level liquidityParams for addLiquidityByStrategy2 ===
+        const currentActiveId = dlmm.lbPair.activeId;
+
+        // Dynamic & safer maxActiveBinSlippage calculation
+        const distanceToMin = Math.abs(currentActiveId - minBinId);
+        const distanceToMax = Math.abs(currentActiveId - maxBinId);
+        const maxDistanceFromActive = Math.max(distanceToMin, distanceToMax);
+
+        const SAFETY_BUFFER_BINS = 25; // Increase if you still hit 6004
+        const maxActiveBinSlippage = maxDistanceFromActive + SAFETY_BUFFER_BINS;
+
+        const strategyForParams = {
           minBinId,
           maxBinId,
           strategyType: sdkStrategyType,
+          singleSidedX: false,
+        };
+
+        const strategyParameters = toStrategyParameters(strategyForParams);
+
+        const liquidityParams = {
+          amountX: totalX,
+          amountY: totalY,
+          activeId: currentActiveId,
+          maxActiveBinSlippage,
+          strategyParameters,
         };
 
         try {
