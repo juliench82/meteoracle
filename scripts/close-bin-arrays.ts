@@ -40,7 +40,7 @@ async function main() {
     try {
       const { Transaction } = await import('@solana/web3.js');
       const ix = await dlmm.program.methods
-        .closeBinArray()
+        .closeBinArrayIfEmpty()
         .accountsPartial({
           lbPair: LB_PAIR,
           binArray: binArrayPubkey,
