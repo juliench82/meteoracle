@@ -621,8 +621,21 @@ async function main() {
 
         if (result?.signature) {
           console.log('  ✓ Liquidity added via high-level method. Sig:', result.signature);
+        } else if (result instanceof Transaction || (Array.isArray(result) && result[0] instanceof Transaction)) {
+          // The high-level method sometimes returns the Transaction instead of sending it.
+          // We sign and send it ourselves.
+          const txs = Array.isArray(result) ? result : [result];
+          for (const tx of txs) {
+            tx.feePayer = wallet.publicKey;
+            const { blockhash } = await connection.getLatestBlockhash();
+            tx.recentBlockhash = blockhash;
+            tx.sign(wallet);
+            const sig = await connection.sendTransaction(tx, [wallet]);
+            await connection.confirmTransaction(sig, 'confirmed');
+            console.log('  ✓ Liquidity tx sent. Sig:', sig);
+          }
         } else {
-          console.log('  Liquidity step returned:', result);
+          console.log('  Liquidity step returned (no signature, not a Transaction):', result);
         }
       } catch (liqErr: any) {
         console.error('  ❌ High-level liquidity addition failed:');
@@ -863,8 +876,19 @@ async function main() {
 
           if (result?.signature) {
             console.log('  ✓ Liquidity added via high-level method. Sig:', result.signature);
+          } else if (result instanceof Transaction || (Array.isArray(result) && result[0] instanceof Transaction)) {
+            const txs = Array.isArray(result) ? result : [result];
+            for (const tx of txs) {
+              tx.feePayer = wallet.publicKey;
+              const { blockhash } = await connection.getLatestBlockhash();
+              tx.recentBlockhash = blockhash;
+              tx.sign(wallet);
+              const sig = await connection.sendTransaction(tx, [wallet]);
+              await connection.confirmTransaction(sig, 'confirmed');
+              console.log('  ✓ Liquidity tx sent. Sig:', sig);
+            }
           } else {
-            console.log('  Liquidity step returned:', result);
+            console.log('  Liquidity step returned (no signature, not a Transaction):', result);
           }
         } catch (liqErr: any) {
           console.error('❌ High-level liquidity addition failed:', liqErr?.message || liqErr);
