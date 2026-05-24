@@ -368,7 +368,7 @@ async function main() {
   // 5. DLMM SDK call — using the standard, widely-used pattern
   console.log('[5/5] Preparing DLMM SDK call...');
 
-  const { StrategyType, binIdToBinArrayIndex, isOverflowDefaultBinArrayBitmap } = await import('@meteora-ag/dlmm');
+  const { StrategyType } = await import('@meteora-ag/dlmm');
 
   let sdkStrategyType = StrategyType.Spot;
   if (opts.strategy === 'scalp-spike') sdkStrategyType = StrategyType.Spot;
@@ -496,22 +496,23 @@ async function main() {
       const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
       const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
 
-      // Only include binArrayBitmapExtension when the range actually overflows the default bitmap
-      // (this matches exactly how the official SDK does it internally)
-      const minBinArrayIndex = binIdToBinArrayIndex(new BN(minBinId));
-      const maxBinArrayIndex = binIdToBinArrayIndex(new BN(maxBinId));
-      const useBinArrayBitmapExtension =
-        isOverflowDefaultBinArrayBitmap(minBinArrayIndex) ||
-        isOverflowDefaultBinArrayBitmap(maxBinArrayIndex);
+      // Decide whether to include binArrayBitmapExtension.
+      // We now do a robust check: derive the PDA and verify the account actually exists
+      // and is owned by the Meteora program before including it.
+      const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
+      const [possibleBinArrayBitmapExtension] = PublicKey.findProgramAddressSync(
+        [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
+        dlmm.program.programId
+      );
 
-      let binArrayBitmapExtension: PublicKey | null = null;
-      if (useBinArrayBitmapExtension) {
-        const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
-        [binArrayBitmapExtension] = PublicKey.findProgramAddressSync(
-          [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
-          dlmm.program.programId
-        );
-      }
+      const bitmapExtensionInfo = await connection.getAccountInfo(possibleBinArrayBitmapExtension);
+      const includeBitmapExtension =
+        !!bitmapExtensionInfo &&
+        bitmapExtensionInfo.owner.toBase58() === dlmm.program.programId.toBase58();
+
+      const binArrayBitmapExtension = includeBitmapExtension ? possibleBinArrayBitmapExtension : null;
+
+      console.log(`  Bitmap extension needed? ${includeBitmapExtension} (account exists & owned by Meteora: ${!!bitmapExtensionInfo})`);
 
       // Build liquidity parameters similar to what the SDK uses internally
       const liquidityParams = {
@@ -675,21 +676,21 @@ async function main() {
         const tokenXProgram = isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
         const tokenYProgram = isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID;
 
-        // Only include binArrayBitmapExtension when the range actually overflows the default bitmap
-        const minBinArrayIndex = binIdToBinArrayIndex(new BN(minBinId));
-        const maxBinArrayIndex = binIdToBinArrayIndex(new BN(maxBinId));
-        const useBinArrayBitmapExtension =
-          isOverflowDefaultBinArrayBitmap(minBinArrayIndex) ||
-          isOverflowDefaultBinArrayBitmap(maxBinArrayIndex);
+        // Decide whether to include binArrayBitmapExtension (robust existence check)
+        const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
+        const [possibleBinArrayBitmapExtension] = PublicKey.findProgramAddressSync(
+          [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
+          dlmm.program.programId
+        );
 
-        let binArrayBitmapExtension: PublicKey | null = null;
-        if (useBinArrayBitmapExtension) {
-          const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from("bitmap");
-          [binArrayBitmapExtension] = PublicKey.findProgramAddressSync(
-            [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
-            dlmm.program.programId
-          );
-        }
+        const bitmapExtensionInfo = await connection.getAccountInfo(possibleBinArrayBitmapExtension);
+        const includeBitmapExtension =
+          !!bitmapExtensionInfo &&
+          bitmapExtensionInfo.owner.toBase58() === dlmm.program.programId.toBase58();
+
+        const binArrayBitmapExtension = includeBitmapExtension ? possibleBinArrayBitmapExtension : null;
+
+        console.log(`  Bitmap extension needed? ${includeBitmapExtension} (account exists & owned by Meteora: ${!!bitmapExtensionInfo})`);
 
         const liquidityParams = {
           minBinId,
