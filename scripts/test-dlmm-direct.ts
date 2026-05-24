@@ -60,6 +60,11 @@
  *   npx tsx scripts/test-dlmm-direct.ts \
  *     --pool <LB_PAIR_ADDRESS> \
  *     --close-bin-array <BIN_ARRAY_ADDRESS>
+ *
+ *   Safety flags (recommended during testing):
+ *     --simulate     → Builds and may send small test transactions
+ *     --dry-run      → Builds everything but sends NOTHING
+ *     --live         → Required for real sends outside --simulate
  */
 
 import * as dotenvLocal from 'dotenv';
@@ -168,6 +173,8 @@ function parseArgs() {
     execute: false,
     split: false,
     closeBinArray: null,
+    live: false,
+    dryRun: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -185,6 +192,8 @@ function parseArgs() {
     else if (arg === '--execute') opts.execute = true;
     else if (arg === '--split') opts.split = true;
     else if (arg === '--close-bin-array') opts.closeBinArray = args[++i];
+    else if (arg === '--live') opts.live = true;
+    else if (arg === '--dry-run') opts.dryRun = true;
     else if (arg === '--help') {
       console.log('See top of file for usage.');
       process.exit(0);
@@ -234,6 +243,41 @@ async function main() {
   if (opts.closeBinArray) {
     await closeBinArray(opts.pool, opts.closeBinArray);
     return;
+  }
+
+  // === STRONG SAFETY GATES FOR TESTING ===
+  const isRiskyOperation = !opts.simulate && !opts.dryRun;
+
+  if (opts.dryRun) {
+    console.log('🛡️  DRY RUN MODE — No transactions will be sent to the network.');
+  }
+
+  if (isRiskyOperation && !opts.live) {
+    console.error('\n❌ Refusing to run real (non-simulate) operations without explicit confirmation.');
+    console.error('   This script can create accounts and lock rent (e.g. positions, bin arrays).');
+    console.error('');
+    console.error('   To actually send real transactions, re-run with:');
+    console.error('     --live');
+    console.error('');
+    console.error('   Recommended safe workflow:');
+    console.error('     --simulate     (builds and sometimes sends small test txs)');
+    console.error('     --dry-run      (builds everything, sends nothing)');
+    console.error('     --live         (only when you are deliberately accepting risk)');
+    process.exit(1);
+  }
+
+  if (isRiskyOperation && opts.live) {
+    console.log('\n⚠️  LIVE MODE ENABLED — Real transactions will be sent.');
+    console.log('   You have explicitly accepted the risk of creating accounts and locking rent.\n');
+  }
+
+  if (!opts.dryRun) {
+    console.log('\n=== SAFETY SUMMARY ===');
+    console.log(`  Mode: ${opts.simulate ? 'SIMULATE' : opts.live ? 'LIVE (real sends)' : 'UNKNOWN'}`);
+    console.log(`  Max test amount: 0.01 SOL (hard cap)`);
+    console.log(`  Risk: Position creation + possible bin array initialization can lock 0.10–0.25+ SOL in rent.`);
+    console.log('  Use --dry-run for maximum safety during development.');
+    console.log('========================\n');
   }
 
   const connection = getConnection();
@@ -440,6 +484,9 @@ async function main() {
       const tokenBefore = await getTokenBalance(connection, wallet.publicKey, outputMint, tokenProgram);
       console.log(`  Balances before position creation: SOL ${solBefore} | Token ${tokenBefore}`);
 
+      console.log('\n  ⚠️  WARNING: Creating a DLMM position will lock SOL as rent (~0.10–0.20 SOL typical for wide ranges).');
+      console.log('     This rent is recoverable when you close the position, but only if the position is empty.');
+
       // 1. Initialize position with starting width (capped at 70)
       const initIx = await dlmm.program.methods
         .initializePosition2(minBinId, initialWidth)
@@ -536,6 +583,8 @@ async function main() {
 
       if (!includeBitmapExtension) {
         // The range needs the extension but it hasn't been created yet → initialize it
+        console.log('  ⚠️  WARNING: Initializing a bin array / bitmap extension locks ~0.07+ SOL in rent.');
+        console.log('     This rent is only recoverable if you (or someone) can later close the empty bin array.');
         console.log('  Initializing binArrayBitmapExtension...');
         const initIx = await dlmm.program.methods
           .initializeBinArrayBitmapExtension()
