@@ -72,6 +72,7 @@ import {
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   getAssociatedTokenAddressSync,
+  createAssociatedTokenAccountInstruction,
 } from '@solana/spl-token';
 import { strategyTypeForDistribution } from '@/bot/executor/utils';
 
@@ -542,6 +543,37 @@ async function main() {
         binArrayBitmapExtension = possibleBinArrayBitmapExtension;
       }
 
+      // Ensure user token ATAs exist (low-level instructions require them to be initialized)
+      const preInstructions: any[] = [];
+
+      const userTokenXInfo = await connection.getAccountInfo(userTokenX);
+      if (!userTokenXInfo) {
+        console.log('  Creating missing ATA for token X...');
+        preInstructions.push(
+          createAssociatedTokenAccountInstruction(
+            wallet.publicKey,
+            userTokenX,
+            wallet.publicKey,
+            dlmm.tokenX.publicKey,
+            isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
+          )
+        );
+      }
+
+      const userTokenYInfo = await connection.getAccountInfo(userTokenY);
+      if (!userTokenYInfo) {
+        console.log('  Creating missing ATA for token Y...');
+        preInstructions.push(
+          createAssociatedTokenAccountInstruction(
+            wallet.publicKey,
+            userTokenY,
+            wallet.publicKey,
+            dlmm.tokenY.publicKey,
+            isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
+          )
+        );
+      }
+
       // Build liquidity parameters similar to what the SDK uses internally
       const liquidityParams = {
         minBinId,
@@ -570,7 +602,8 @@ async function main() {
           .accountsPartial(accounts)
           .instruction();
 
-        const liqTx = new Transaction().add(addLiqIx);
+        const allInstructions = [...preInstructions, addLiqIx];
+        const liqTx = new Transaction().add(...allInstructions);
         liqTx.feePayer = wallet.publicKey;
         const { blockhash } = await connection.getLatestBlockhash();
         liqTx.recentBlockhash = blockhash;
@@ -748,6 +781,37 @@ async function main() {
           binArrayBitmapExtension = possibleBinArrayBitmapExtension;
         }
 
+        // Ensure user token ATAs exist (low-level instructions require them to be initialized)
+        const preInstructions: any[] = [];
+
+        const userTokenXInfo = await connection.getAccountInfo(userTokenX);
+        if (!userTokenXInfo) {
+          console.log('  Creating missing ATA for token X...');
+          preInstructions.push(
+            createAssociatedTokenAccountInstruction(
+              wallet.publicKey,
+              userTokenX,
+              wallet.publicKey,
+              dlmm.tokenX.publicKey,
+              isTokenXSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
+            )
+          );
+        }
+
+        const userTokenYInfo = await connection.getAccountInfo(userTokenY);
+        if (!userTokenYInfo) {
+          console.log('  Creating missing ATA for token Y...');
+          preInstructions.push(
+            createAssociatedTokenAccountInstruction(
+              wallet.publicKey,
+              userTokenY,
+              wallet.publicKey,
+              dlmm.tokenY.publicKey,
+              isTokenYSol ? TOKEN_PROGRAM_ID : TOKEN_2022_PROGRAM_ID
+            )
+          );
+        }
+
         const liquidityParams = {
           minBinId,
           maxBinId,
@@ -775,7 +839,8 @@ async function main() {
             .accountsPartial(accounts)
             .instruction();
 
-          const liqTx = new Transaction().add(addLiqIx);
+          const allInstructions = [...preInstructions, addLiqIx];
+          const liqTx = new Transaction().add(...allInstructions);
           liqTx.feePayer = wallet.publicKey;
           const { blockhash } = await connection.getLatestBlockhash();
           liqTx.recentBlockhash = blockhash;
