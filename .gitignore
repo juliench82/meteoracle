@@ -36,7 +36,7 @@ cron-job.txt
 clipboard.txt
 
 # Old / experimental test scripts (TypeScript errors ignored on purpose)
-scripts/check-positions.ts
+
 scripts/close-bin-arrays.ts
 scripts/test-dlmm-direct.ts
 scripts/test-dlmm-zap.ts
