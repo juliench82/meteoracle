@@ -606,6 +606,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     `[scanner] lanes — fresh=${freshPools.length}/${pools.length} <=${FRESH_MAX_AGE_MINUTES}min, ` +
     `momentum=${momentumPools.length}/${pools.length} spike/regain candidates`,
   )
+  console.log('[scanner] *** HEAVY OBSERVATION LOGGING ENABLED for dry-run period ***')
 
   console.log('[scanner] step 2/4 — lane pre-screen')
   console.log(
@@ -833,6 +834,13 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const binStep: number | undefined = bestPool.pool_config?.bin_step
     const binStepDisplay = binStep ?? '?'
 
+    // Rich diagnostic log for dry-run observation (added for visibility)
+    console.log(
+      `[scanner][pool] ${symbol} — SELECTED best pool: binStep=${binStepDisplay} ` +
+      `tvl=$${liqUsd.toFixed(0)} fee1h=${feeTvl1hPct.toFixed(2)}% vol1h=$${vol1h.toFixed(0)} ` +
+      `momentum=${momentumScore} age=${poolAgeHours.toFixed(1)}h`
+    )
+
     if (bestPool.address !== representativePool.address) {
       console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStepDisplay}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)}`)
     }
@@ -981,7 +989,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     if (!strategy) {
       rejectionReason = explainNoStrategy(metrics)
       decision = 'REJECTED'
-      console.log(`[scanner] ${symbol} — no strategy in ${lane} lane (class=${tokenClass}, quote=${quoteTokenMint}): ${rejectionReason}`)
+      console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) in ${lane} lane: ${rejectionReason}`)
     } else {
       if (strategy.id === 'scalp-spike' && momentumRegain) {
         console.log(
@@ -1018,6 +1026,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       } else {
         decision = 'ACCEPTED'
       }
+
+      console.log(
+        `[scanner][decision] ${symbol} — ${decision} (lane=${lane}, track=${track}, strategy=${strategy?.id ?? 'none'}, score=${finalScore}, binStep=${binStepDisplay}${bondingInfo})`
+      )
 
       console.log(JSON.stringify({
         event:     'candidate_evaluated',
@@ -1121,6 +1133,12 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       candidateCount++
       const candidateTrack = (ageHours * 60) <= FRESH_SNIPE_MAX_AGE_MINUTES ? 'snipe' : 'mature';
       console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, ${candidateTrack} track, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay})`)
+
+      // Extra verbose context for dry-run observation
+      console.log(
+        `[scanner][candidate] ${symbol} — bestPool binStep=${binStepDisplay} tvl=$${liqUsd.toFixed(0)} ` +
+        `fee1h=${feeTvl1hPct.toFixed(2)}% momentum=${momentumScore} bondingCurve=${bondingCurvePct ?? 'n/a'}%`
+      )
       await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
       // For mature track, we only attempt to open if score >= MATURE_MIN_SCORE_TO_OPEN (even if we recorded it at MIN_SCORE_TO_OPEN+)
@@ -1192,7 +1210,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     `[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, ` +
     `deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}, ` +
     `open-skipped: ${openSkippedCount}${openBlockedReason ? ` (${openBlockedReason})` : ''}, ` +
-    `binStepPreferred: ${binStepPreferredCount}, lowBinQuality: ${lowBinQualitySelections}`,
+    `binStepPreferred: ${binStepPreferredCount}, lowBinQuality: ${lowBinQualitySelections} ` +
+    `(fresh survivors: ${freshSurvivors?.length ?? 0}, momentum survivors: ${momentumSurvivors?.length ?? 0})`
   )
   return finish({
     scanned: fetchedPools.length,

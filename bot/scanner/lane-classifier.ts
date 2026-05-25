@@ -187,8 +187,18 @@ export function selectBestPool(
     p.token_x?.address === tokenAddress || p.token_y?.address === tokenAddress
   )
 
-  if (matching.length === 0) return { pool: null, binStepPreferred: false, chosenBinStep: undefined, feeOnlyBinStep: undefined }
-  if (matching.length === 1) return { pool: matching[0], binStepPreferred: false, chosenBinStep: matching[0]?.bin_step, feeOnlyBinStep: matching[0]?.bin_step }
+  if (matching.length === 0) {
+    console.log(`[scanner][select] ${tokenAddress} — no DLMM pools found for token in this lane's data`)
+    return { pool: null, binStepPreferred: false, chosenBinStep: undefined, feeOnlyBinStep: undefined }
+  }
+  if (matching.length === 1) {
+    const only = matching[0]
+    console.log(`[scanner][select] ${tokenAddress} — only 1 DLMM pool (binStep=${only?.bin_step}) — auto-selected`)
+    return { pool: only, binStepPreferred: false, chosenBinStep: only?.bin_step, feeOnlyBinStep: only?.bin_step }
+  }
+
+  // Multiple pools — this is where the interesting decisions happen
+  console.log(`[scanner][select] ${tokenAddress} — ${matching.length} DLMM pools available for selection (lane=${lane})`)
 
   // Compute pure fee-based best for comparison
   const pureFeeBest = matching.reduce((best, p) =>
@@ -226,14 +236,22 @@ export function selectBestPool(
 
   scored.sort((a, b) => b.score - a.score)
 
+  // Log top candidates for visibility during dry-run
+  const topForLog = scored.slice(0, 3).map(s => ({
+    binStep: s.pool?.bin_step,
+    fee: s.feeScore.toFixed(2),
+    binComp: s.binCompatibility.toFixed(2),
+    score: s.score.toFixed(1)
+  }))
+  console.log(`[scanner][select] ${tokenAddress} — top scored pools:`, JSON.stringify(topForLog))
+
   // === Option B: Stronger bin preference (deliberate boost) ===
-  // We prefer a pool with significantly better bin compatibility if it is still reasonably competitive on fees.
   const bestFeePool = pureFeeBest
   const bestFeeScore = getFeeTvlPct(bestFeePool, '1h') || 0
 
   let chosen = scored[0]
+  let optionBTriggered = false
 
-  // Find the pool with the best binCompatibility among those within fee tolerance of the best fee pool
   const competitivePools = scored.filter(item => {
     if (bestFeeScore <= 0) return false
     const relativeFeeDiff = Math.abs(item.feeScore - bestFeeScore) / bestFeeScore
@@ -245,20 +263,29 @@ export function selectBestPool(
       (current.binCompatibility > best.binCompatibility) ? current : best
     )
 
-    // Only switch if it offers a meaningful bin improvement over the current top choice
     if (bestBinAmongCompetitive.binCompatibility >= chosen.binCompatibility + BIN_COMPATIBILITY_MIN_IMPROVEMENT) {
       chosen = bestBinAmongCompetitive
+      optionBTriggered = true
     }
   }
 
+  if (optionBTriggered) {
+    console.log(`[scanner][select] ${tokenAddress} — Option B triggered: switched to better bin pool (binComp=${chosen.binCompatibility.toFixed(2)}) within fee tolerance`)
+  }
+
   const binStepPreferred = chosen.pool !== bestFeePool
+
+  console.log(
+    `[scanner][select] ${tokenAddress} — FINAL CHOICE: binStep=${chosen.pool?.bin_step} ` +
+    `fee=${chosen.feeScore.toFixed(2)} binComp=${chosen.binCompatibility.toFixed(2)} ` +
+    `binPreferred=${binStepPreferred}`
+  )
 
   return {
     pool: chosen.pool,
     binStepPreferred,
     chosenBinStep: chosen.pool?.bin_step,
     feeOnlyBinStep: bestFeePool?.bin_step,
-    // Diagnostics
     chosenBinCompatibility: chosen.binCompatibility,
     chosenFeeScore: chosen.feeScore,
     bestPossibleBinCompatibility: Math.max(...scored.map(s => s.binCompatibility)),
