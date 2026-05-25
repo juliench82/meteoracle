@@ -231,18 +231,9 @@ async function markIlStop(existing: CachedPosition, live: LiveMeteoraPosition): 
   }
 }
 
-function isDammCached(row: CachedPosition): boolean {
-  return (
-    row.strategy_id === 'damm-edge' ||
-    row.strategy_id === 'damm-live' ||
-    row.strategy_id === 'damm-migration' ||
-    row.position_type === 'damm-edge' ||
-    row.position_type === 'damm-migration'
-  )
-}
-
 function isDlmmCached(row: CachedPosition): boolean {
-  return !isDammCached(row)
+  // DAMM v2 fully removed — all remaining positions are treated as DLMM
+  return true
 }
 
 function shouldMarkExternallyClosed(
@@ -254,7 +245,7 @@ function shouldMarkExternallyClosed(
   if (!pubkey || pubkey === 'DRY_RUN') return false
   if (row.dry_run === true) return false
   if (livePubkeys.has(pubkey)) return false
-  if (isDammCached(row)) return sourceOk.dammOk
+  // DAMM v2 fully removed — all positions treated as DLMM for sync purposes
   if (isDlmmCached(row)) return sourceOk.dlmmOk
   return false
 }
@@ -332,14 +323,14 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
     }
 
     const dlmmLive = livePositions.filter(p => p.position_type === 'dlmm').length
-    const dammLive = livePositions.filter(p => p.position_type === 'damm-edge').length
+    const dammLive = 0
     const dlmmInserted = insertedPositions.filter(p => p.position_type === 'dlmm').length
-    const dammInserted = insertedPositions.filter(p => p.position_type === 'damm-edge').length
+    const dammInserted = 0
 
     console.log(
       `[position-sync] Meteora sync done live=${livePositions.length} updated=${updated} inserted=${insertedPositions.length} closed=${externallyClosed} il_stopped=${ilStopped} ` +
-      `(source dlmm=${snapshot.dlmmOk ? 'ok' : 'failed'}, damm=${snapshot.dammOk ? 'ok' : 'failed'}) ` +
-      `(dlmm live=${dlmmLive} inserted=${dlmmInserted}, damm live=${dammLive} inserted=${dammInserted})`,
+      `(source dlmm=${snapshot.dlmmOk ? 'ok' : 'failed'}) ` +
+      `(dlmm live=${dlmmLive} inserted=${dlmmInserted})`,
     )
 
     _syncFailCount = 0
@@ -349,13 +340,13 @@ export async function syncAllMeteoraPositions(): Promise<MeteoraPositionSyncResu
       inserted: insertedPositions.length,
       updated,
       dlmmOk: snapshot.dlmmOk,
-      dammOk: snapshot.dammOk,
+      dammOk: false,
       dlmmError: snapshot.dlmmError,
-      dammError: snapshot.dammError,
+      dammError: null,
       dlmmLive,
-      dammLive,
+      dammLive: 0,
       dlmmInserted,
-      dammInserted,
+      dammInserted: 0,
       externallyClosed,
       ilStopped,
       insertedPositions,

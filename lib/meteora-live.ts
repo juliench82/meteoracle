@@ -1,8 +1,7 @@
 import { fetchLiveDlmmPositions } from './meteora-live-dlmm'
-import { fetchLiveDammPositions } from './meteora-live-damm'
 
-// Thin re-export wrapper — all logic preserved in split files. No loss.
-export { fetchLiveDlmmPositions, fetchLiveDammPositions }
+// Thin re-export wrapper — DAMM v2 fully removed
+export { fetchLiveDlmmPositions }
 
 export type MeteoraLiveSourceStatus = {
   dlmmOk: boolean
@@ -33,13 +32,15 @@ export type LiveMeteoraPosition = {
 }
 
 export async function fetchLiveMeteoraSnapshot() {
-  const [dlmm, damm] = await Promise.allSettled([fetchLiveDlmmPositions(), fetchLiveDammPositions()])
+  // DAMM v2 fully removed — only DLMM live data
+  const dlmm = await fetchLiveDlmmPositions().catch(err => ({ error: err }))
+  const positions = 'error' in dlmm ? [] : dlmm as any[]
   return {
-    positions: [...(dlmm.status === 'fulfilled' ? dlmm.value : []), ...(damm.status === 'fulfilled' ? damm.value : [])] as LiveMeteoraPosition[],
-    dlmmOk: dlmm.status === 'fulfilled',
-    dammOk: damm.status === 'fulfilled',
-    dlmmError: dlmm.status === 'rejected' ? (dlmm.reason instanceof Error ? dlmm.reason.message : String(dlmm.reason)) : null,
-    dammError: damm.status === 'rejected' ? (damm.reason instanceof Error ? damm.reason.message : String(damm.reason)) : null,
+    positions: positions as LiveMeteoraPosition[],
+    dlmmOk: !('error' in dlmm),
+    dammOk: false,
+    dlmmError: 'error' in dlmm ? (dlmm.error instanceof Error ? dlmm.error.message : String(dlmm.error)) : null,
+    dammError: null,
   }
 }
 

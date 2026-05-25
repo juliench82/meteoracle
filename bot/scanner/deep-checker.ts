@@ -17,10 +17,10 @@ import {
   isMoonshotToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
-// DAMM Edge scoring import removed (logic fully disabled)
+// (DAMM v2 edge automation fully removed)
 import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
 import { scalpSpikeStrategy } from '@/strategies/scalp-spike'
-// openDammPosition / resolveVerifiedDammV2PoolForToken imports removed (DAMM scoring deleted)
+// (DAMM v2 imports and logic fully removed)
 import { openMoonboyPosition } from '../moonboy-executor'
 import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
@@ -50,7 +50,7 @@ import {
   LP_SCANNER_ENABLED,
   EVIL_PANDA_ENABLED,
   SCALP_SPIKE_ENABLED,
-  // DAMM_EDGE_ENABLED removed (scoring logic deleted)
+  // (DAMM v2 fully removed — no edge path remains)
 } from '@/lib/strategy-config'
 import {
   WSOL,
@@ -673,6 +673,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   let openedDammCountThisTick = 0
   let openSkippedCount = 0
   let binStepPreferredCount = 0
+  let lowBinQualitySelections = 0   // WS3 diagnostic: how many times we picked a pool with weak bin compatibility
   let dailyLossLimitHit: boolean | null = null
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
   const openedMintsThisTick = new Set<string>()
@@ -783,9 +784,24 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     if (result.binStepPreferred) {
       binStepPreferredCount++
+      const binInfo = result.chosenBinCompatibility !== undefined
+        ? ` (binScore=${result.chosenBinCompatibility.toFixed(2)})`
+        : ''
       console.log(
         `[scanner] ${symbol} — best pool chosen with bin_step preference for ${lane} lane ` +
-        `(chose binStep ${result.chosenBinStep ?? '?'} over fee-only ${result.feeOnlyBinStep ?? '?'})`
+        `(chose binStep ${result.chosenBinStep ?? '?'} over fee-only ${result.feeOnlyBinStep ?? '?'})${binInfo}`
+      )
+    }
+
+    // WS3 diagnostic logging (non-aggressive): surface when the chosen pool has weak bin compatibility
+    if (result.pool && result.chosenBinCompatibility !== undefined && result.chosenBinCompatibility < 0.4) {
+      lowBinQualitySelections++
+      const bestPossible = result.bestPossibleBinCompatibility !== undefined
+        ? result.bestPossibleBinCompatibility.toFixed(2)
+        : '?'
+      console.log(
+        `[scanner] ${symbol} — note: chosen pool has relatively low bin compatibility ` +
+        `(${result.chosenBinCompatibility.toFixed(2)}, best available: ${bestPossible}) for the target range`
       )
     }
     if (!bestPool) {
@@ -807,7 +823,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const volumeGrowth1h = getRecentVolumeGrowth(bestPool)
     const momentumScore = scoreMeteoraMomentum(bestPool)
 
-    // (Old DAMM Edge new-listing detection removed)
+    // (DAMM v2 support fully removed)
 
     const quoteTokenMint = getQuoteTokenMint(bestPool)
 
@@ -923,8 +939,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       launchpadSource,
     }
 
-    // (DAMM Edge scoring logic has been fully removed)
-    // ========== END DAMM v2 EDGE (SCORING REMOVED) ============================
+    // (DAMM v2 edge path was fully removed from the bot)
 
     const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : classifyToken({
       address:        metrics.address,
@@ -1177,7 +1192,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     `[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, ` +
     `deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}, ` +
     `open-skipped: ${openSkippedCount}${openBlockedReason ? ` (${openBlockedReason})` : ''}, ` +
-    `binStepPreferred: ${binStepPreferredCount}`,
+    `binStepPreferred: ${binStepPreferredCount}, lowBinQuality: ${lowBinQualitySelections}`,
   )
   return finish({
     scanned: fetchedPools.length,

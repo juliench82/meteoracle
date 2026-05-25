@@ -101,20 +101,11 @@ export const FRESH_MAX_AGE_MINUTES = Math.min(
   SCANNER_EARLY_MAX_AGE_MINUTES
 ) as number
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DAMM Edge (isolated track) — loosened in Option A strategy review
-// ─────────────────────────────────────────────────────────────────────────────
-export const DAMM_EDGE_MAX_AGE_MINUTES = envNumber('DAMM_EDGE_MAX_AGE_MINUTES', 25)
-export const DAMM_EDGE_MIN_FEE_TVL_PCT = envNumber('DAMM_EDGE_MIN_FEE_TVL_PCT', 5)
-export const DAMM_EDGE_MIN_LIQUIDITY_USD = envNumber('DAMM_EDGE_MIN_LIQUIDITY_USD', 25_000)
-export const DAMM_EDGE_MAX_MC_USD = envNumber('DAMM_EDGE_MAX_MC_USD', 5_000_000)
-
 // ── Feature flags / enabled switches ────────────────────────────────────────
 export const SCANNER_ENABLED = envBool('SCANNER_ENABLED', true)
 export const LP_SCANNER_ENABLED = envBool('LP_SCANNER_ENABLED', true) && SCANNER_ENABLED
 export const EVIL_PANDA_ENABLED = envBool('EVIL_PANDA_ENABLED', true)
 export const SCALP_SPIKE_ENABLED = envBool('SCALP_SPIKE_ENABLED', true)
-export const DAMM_EDGE_ENABLED = envBool('DAMM_EDGE_ENABLED', false)
 export const STABLE_FARM_ENABLED = envBool('STABLE_FARM_ENABLED', true)
 export const BLUECHIP_FARM_ENABLED = envBool('BLUECHIP_FARM_ENABLED', false)
 export const MOONBOY_ENABLED = envBool('MOONBOY_ENABLED', true)

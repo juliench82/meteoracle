@@ -10,6 +10,15 @@ const SCALP_SPIKE_MOMENTUM_REGAIN = {
 const MOMENTUM_SPIKE_THRESHOLD = 2.5
 const MOMENTUM_REGain_THRESHOLD = 1.5
 
+// === selectBestPool tuning constants ===
+const FEE_BIN_WEIGHT_FEE = 10
+const TARGET_BIN_UTILIZATION = 0.85
+
+// For Option B "stronger bin preference" logic:
+// We are willing to accept a slightly worse fee pool if it has meaningfully better bin compatibility.
+const BIN_COMPATIBILITY_FEE_TOLERANCE = 0.18 // 18% fee score tolerance
+const BIN_COMPATIBILITY_MIN_IMPROVEMENT = 0.25 // bin score must be at least this much better
+
 export interface LaneClassifierConfig {
   scannerEarlyMaxAgeMinutes: number
   freshMaxAgeMinutes: number
@@ -149,12 +158,13 @@ export function pickDeepCheckSurvivors(
  * Find the best pool for a given tradable token address within a lane's pool list.
  * Meteora pools store tokens as token_x and token_y — match on either side.
  *
- * When multiple pools exist for the same token (different bin_steps), we now prefer
- * pools whose bin_step would produce a "good" position width for the strategy's
- * desired range (closer to ideal without exceeding the strategy's max bins).
+ * Selection strategy (Option B style):
+ * - Primary: Highest fee_tvl_ratio_1h (most active trading).
+ * - Stronger bin step preference: We are willing to accept a modestly lower fee pool
+ *   if it offers significantly better bin compatibility for the target strategy range.
+ * - We never hard-reject a token just because all pools have suboptimal bin steps.
  *
- * Primary sort: highest feeTvl 1h (most active)
- * Secondary sort (when feeTvl is similar): best binStep compatibility with the range
+ * The 0.85 target utilization and fee/bin weights are defined as constants above.
  */
 export function selectBestPool(
   pools: any[],
@@ -168,6 +178,10 @@ export function selectBestPool(
   binStepPreferred: boolean;
   chosenBinStep?: number;
   feeOnlyBinStep?: number;
+  // Diagnostic fields (for logging / future visibility, no behavior change)
+  chosenBinCompatibility?: number;
+  chosenFeeScore?: number;
+  bestPossibleBinCompatibility?: number;
 } {
   const matching = pools.filter(p =>
     p.token_x?.address === tokenAddress || p.token_y?.address === tokenAddress
@@ -181,9 +195,15 @@ export function selectBestPool(
     (getFeeTvlPct(p, '1h') || 0) >= (getFeeTvlPct(best, '1h') || 0) ? p : best
   )
 
-  // Score each pool
+  // Score each pool (initial scoring)
   const scored = matching.map(pool => {
-    const feeScore = getFeeTvlPct(pool, '1h') || 0
+    let feeScore = getFeeTvlPct(pool, '1h') || 0
+
+    // Light noise reduction for fresh tokens (WS2): blend with 5m to reduce pure 1h spikes
+    if (lane === 'fresh') {
+      const fee5m = getFeeTvlPct(pool, '5m') || 0
+      feeScore = feeScore * 0.6 + fee5m * 0.4   // 60/40 blend as requested
+    }
 
     let binCompatibility = 0
     if (rangeDownPct !== undefined && rangeUpPct !== undefined && pool.bin_step) {
@@ -193,27 +213,55 @@ export function selectBestPool(
       if (maxBins && estimatedBins > maxBins) {
         binCompatibility = 0
       } else if (maxBins) {
-        const closeness = 1 - Math.abs(estimatedBins - maxBins * 0.85) / (maxBins * 0.85)
+        const closeness = 1 - Math.abs(estimatedBins - maxBins * TARGET_BIN_UTILIZATION) / (maxBins * TARGET_BIN_UTILIZATION)
         binCompatibility = Math.max(0, closeness)
       } else {
         binCompatibility = 0.5
       }
     }
 
-    const score = feeScore * 10 + binCompatibility
-    return { pool, score }
+    const score = feeScore * FEE_BIN_WEIGHT_FEE + binCompatibility
+    return { pool, score, feeScore, binCompatibility }
   })
 
   scored.sort((a, b) => b.score - a.score)
-  const chosen = scored[0].pool
 
-  const binStepPreferred = chosen !== pureFeeBest
+  // === Option B: Stronger bin preference (deliberate boost) ===
+  // We prefer a pool with significantly better bin compatibility if it is still reasonably competitive on fees.
+  const bestFeePool = pureFeeBest
+  const bestFeeScore = getFeeTvlPct(bestFeePool, '1h') || 0
+
+  let chosen = scored[0]
+
+  // Find the pool with the best binCompatibility among those within fee tolerance of the best fee pool
+  const competitivePools = scored.filter(item => {
+    if (bestFeeScore <= 0) return false
+    const relativeFeeDiff = Math.abs(item.feeScore - bestFeeScore) / bestFeeScore
+    return relativeFeeDiff <= BIN_COMPATIBILITY_FEE_TOLERANCE
+  })
+
+  if (competitivePools.length > 0) {
+    const bestBinAmongCompetitive = competitivePools.reduce((best, current) =>
+      (current.binCompatibility > best.binCompatibility) ? current : best
+    )
+
+    // Only switch if it offers a meaningful bin improvement over the current top choice
+    if (bestBinAmongCompetitive.binCompatibility >= chosen.binCompatibility + BIN_COMPATIBILITY_MIN_IMPROVEMENT) {
+      chosen = bestBinAmongCompetitive
+    }
+  }
+
+  const binStepPreferred = chosen.pool !== bestFeePool
 
   return {
-    pool: chosen,
+    pool: chosen.pool,
     binStepPreferred,
-    chosenBinStep: chosen?.bin_step,
-    feeOnlyBinStep: pureFeeBest?.bin_step,
+    chosenBinStep: chosen.pool?.bin_step,
+    feeOnlyBinStep: bestFeePool?.bin_step,
+    // Diagnostics
+    chosenBinCompatibility: chosen.binCompatibility,
+    chosenFeeScore: chosen.feeScore,
+    bestPossibleBinCompatibility: Math.max(...scored.map(s => s.binCompatibility)),
   }
 }
 

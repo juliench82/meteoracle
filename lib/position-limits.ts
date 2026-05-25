@@ -4,7 +4,7 @@ import { getConnection, getWallet } from '@/lib/solana'
 
 export const OPEN_LP_STATUSES = ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry']
 
-export type OpenLpScope = 'all' | 'market' | 'damm-migration'
+export type OpenLpScope = 'all' | 'market' // DAMM v2 fully removed from the bot
 
 export interface OpenLpLimitState {
   effectiveOpenCount: number
@@ -18,37 +18,16 @@ export interface OpenLpLimitState {
   livePositions: LiveMeteoraPosition[]
 }
 
-function isDammMigrationPosition(position: { strategy_id?: string | null; position_type?: string | null }): boolean {
-  return (
-    position.strategy_id === 'damm-migration' ||
-    position.position_type === 'damm-migration'
-  )
-}
-
 export function matchesOpenLpScope(
   position: { strategy_id?: string | null; position_type?: string | null },
   scope: OpenLpScope,
 ): boolean {
-  if (scope === 'all') return true
-  const isMigration = isDammMigrationPosition(position)
-  return scope === 'damm-migration' ? isMigration : !isMigration
-}
-
-function isLiveDammPosition(position: LiveMeteoraPosition): boolean {
-  return position.position_type === 'damm-edge' || position.strategy_id === 'damm-live'
+  return scope === 'all' || scope === 'market'
 }
 
 function liveOpenCountForScope(positions: LiveMeteoraPosition[], scope: OpenLpScope): number {
   const live = positions.filter(position => !position.dry_run)
-  if (scope === 'all') return live.length
-
-  // Meteora live data cannot know our local strategy_id before Supabase sync.
-  // For migration safety, any live DAMM v2 position occupies the migration slot.
-  if (scope === 'damm-migration') {
-    return live.filter(isLiveDammPosition).length
-  }
-
-  return live.filter(position => !isLiveDammPosition(position)).length
+  return live.length
 }
 
 export async function getOpenLpLimitState(scope: OpenLpScope = 'all'): Promise<OpenLpLimitState> {

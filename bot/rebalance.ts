@@ -40,15 +40,7 @@ export interface RebalanceOptions {
   allowHealthBypass?: boolean
 }
 
-function isDammLp(pos: LpPositionRow): boolean {
-  return (
-    pos.strategy_id === 'damm-edge' ||
-    pos.strategy_id === 'damm-live' ||
-    pos.strategy_id === 'damm-migration' ||
-    pos.position_type === 'damm-edge' ||
-    pos.position_type === 'damm-migration'
-  )
-}
+
 
 function firstFiniteNumber(...values: unknown[]): number | null {
   for (const value of values) {
@@ -258,7 +250,8 @@ export async function rebalanceDlmmPosition(
   if (position.status === 'closed') {
     return { success: false, closed: false, reopened: false, oldPositionId: positionId, newPositionId: null, symbol, strategyId, reason, error: 'position is already closed' }
   }
-  if (isDammLp(position)) {
+  // DAMM v2 support has been fully removed. Rebalancing is DLMM-only.
+  if (position.position_type?.includes('damm') || String(position.strategy_id || '').includes('damm')) {
     return { success: false, closed: false, reopened: false, oldPositionId: positionId, newPositionId: null, symbol, strategyId, reason, error: 'rebalance is only supported for DLMM positions' }
   }
   if (!strategy) {

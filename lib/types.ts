@@ -191,44 +191,4 @@ export interface DexScreenerPair {
   url?: string
 }
 
-// ── DAMM v2 — isolated type definitions ────────────────────────────────────────────
-// These are used by DAMM market-edge and DBC migration entries.
-// No existing DLMM code references these types.
 
-export type DammPositionStrategyId = 'damm-edge' | 'damm-migration'
-
-/**
- * Parameters needed to open a DAMM v2 position.
- * Built by evaluateDammEdge() or the DBC graduation watcher and consumed by openDammPosition().
- * For damm-edge scanner opens, poolAddress must be a verified DAMM v2 pool, not the source DLMM pool.
- */
-export interface DammPositionParams {
-  tokenAddress: string
-  poolAddress: string
-  /** SOL amount to deposit (conservative — we are testing the edge). */
-  solAmount: number
-  symbol: string
-  /** Pool age in minutes at time of decision. */
-  ageMinutes: number
-  /** 24h fee/TVL % at time of decision (for logging / audit). */
-  feeTvl24hPct: number
-  /** Pool liquidity in USD at time of decision (for logging / audit). */
-  liquidityUsd: number
-  /** pump.fun bonding curve fill % at time of decision (0–100). Optional. */
-  bondingCurvePct?: number
-  strategyId?: DammPositionStrategyId
-  positionType?: DammPositionStrategyId
-  metadata?: Record<string, unknown>
-}
-
-/**
- * Return value of evaluateDammEdge().
- * Tells the scanner whether to open a DAMM v2 position and with what params.
- */
-export interface DammEdgeDecision {
-  shouldUseDamm: boolean
-  /** Human-readable reason for accept or reject — always present for logging. */
-  reason: string
-  /** Only present when shouldUseDamm === true. */
-  params?: DammPositionParams
-}

@@ -160,7 +160,7 @@ export async function detectAllOrphanedPositions(): Promise<MeteoraPositionSyncR
       positionPubKey,
       poolAddress: live.pool_address,
       mint: live.mint,
-      positionType: live.position_type === 'damm-edge' ? 'damm-v2' : 'dlmm',
+      positionType: 'dlmm', // DAMM v2 fully removed
     })
   }
 

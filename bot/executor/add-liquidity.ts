@@ -63,10 +63,6 @@ export async function addLiquidityToPosition(
 
   const symbol = position.symbol ?? position.mint ?? positionId
 
-  if (position.position_type === 'damm-edge' || position.position_type === 'damm-migration' || position.strategy_id === 'damm-edge') {
-    return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'adding liquidity is currently supported for DLMM positions only' }
-  }
-
   if (position.status === 'closed') {
     return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'position is already closed' }
   }

@@ -58,7 +58,7 @@ type AlertPayload =
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string; mint?: string; positionType?: string }
   | { type: 'pre_grad_pool_created'; symbol: string; mint: string; pool: string; sol: number }
   | { type: 'pre_grad_create_failed'; mint: string; error: string }
-  | { type: 'pre_grad_opened'; symbol: string; positionId: string; poolAddress: string; bondingCurvePct: number }
+  // pre_grad_opened removed — was only used by the old DAMM v2 edge path
   | {
       type: 'pre_grad_closed'
       symbol: string
@@ -221,14 +221,7 @@ function formatMessage(payload: AlertPayload): string {
         `Error: ${payload.error}`,
       ].join('\n')
 
-    case 'pre_grad_opened':
-      return [
-        `🌱 *Pre-Grad Position Opened*`,
-        `Token: \`${payload.symbol}\``,
-        `ID: \`${payload.positionId}\``,
-        `Pool: \`${payload.poolAddress}\``,
-        `Curve: ${payload.bondingCurvePct.toFixed(1)}% ${bondingCurveEmoji(payload.bondingCurvePct)}`,
-      ].join('\n')
+    // pre_grad_opened case removed — DAMM v2 edge path fully deleted
 
     case 'pre_grad_closed': {
       const valueLine      = payload.positionValueUsd  != null

@@ -117,6 +117,6 @@ export function passesMomentumRegainStrategyFilters(metrics: TokenMetrics): bool
 
 export function getOpenDammEdgeCount(limitState: OpenLpLimitState | null): number {
   return limitState?.livePositions.filter(position =>
-    position.position_type === 'damm-edge' || position.strategy_id === 'damm-edge',
+    false, // DAMM v2 fully removed
   ).length ?? 0
 }

@@ -20,7 +20,7 @@ import type { Strategy } from '@/lib/types'
 export const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
 export const SYNC_FAIL_ALERT_THRESHOLD = parseInt(process.env.MONITOR_SYNC_FAIL_ALERT_THRESHOLD ?? '3')
 
-export const DAMM_EDGE_EXIT_STRATEGY: Strategy = { id: 'damm-edge', version: 'v1.0', name: 'DAMM Edge', description: 'DAMM v2 market-edge exit policy.', enabled: true, filters: { minMcUsd: 0, maxMcUsd: Number.MAX_SAFE_INTEGER, minVolume24h: 0, minLiquidityUsd: 0, maxTopHolderPct: 100, minHolderCount: 0, maxAgeHours: Number.MAX_SAFE_INTEGER, minRugcheckScore: 0, requireSocialSignal: false, minFeeTvl24hPct: 0 }, position: { binStep: 0, rangeDownPct: 0, rangeUpPct: 0, distributionType: 'spot', solBias: 1 }, exits: { stopLossPct: -30, takeProfitPct: 40, outOfRangeMinutes: 0, maxDurationHours: 72, claimFeesBeforeClose: true, minFeesToClaim: 0 } }
+
 
 export const LIVE_CACHE_EXIT_STRATEGY_ID = (process.env.MONITOR_LIVE_CACHE_EXIT_STRATEGY_ID ?? '').trim()
 export const LIVE_CACHE_ALERT_INTERVAL_MS = parseInt(process.env.MONITOR_LIVE_CACHE_ALERT_INTERVAL_MIN ?? '15', 10) * 60_000

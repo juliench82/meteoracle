@@ -30,7 +30,7 @@ import { promisify } from 'util'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { addLiquidityToPosition, closePosition } from '@/bot/executor'
-import { closeDammPosition } from '@/bot/damm-executor'
+// closeDammPosition import removed — DAMM v2 fully deleted
 import { rebalanceDlmmPosition } from '@/bot/rebalance'
 import { runScanner, type ScannerResult } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
@@ -68,24 +68,13 @@ if (ALLOWED_USER_IDS.size === 0) {
 
 let lastUpdateId = 0
 
-function isDammLp(pos: { strategy_id?: string | null; position_type?: string | null }): boolean {
-  return (
-    pos.strategy_id === 'damm-edge' ||
-    pos.strategy_id === 'damm-live' ||
-    pos.strategy_id === 'damm-migration' ||
-    pos.position_type === 'damm-edge' ||
-    pos.position_type === 'damm-migration'
-  )
-}
+
 
 async function closeLpPositionByKind(
   pos: { id: string; strategy_id?: string | null; position_type?: string | null },
   reason: string,
 ): Promise<boolean> {
-  if (isDammLp(pos)) {
-    const result = await closeDammPosition(pos.id, reason)
-    return result.success
-  }
+  // DAMM v2 fully removed — all positions now close via DLMM path
   return closePosition(pos.id, reason)
 }
 
@@ -157,7 +146,7 @@ async function resolveAddTarget(args: string[]): Promise<{
     return { positionId: null, solAmount: null, error: `Could not load positions: ${error.message}` }
   }
 
-  const dlmmPositions = (positions ?? []).filter(position => !isDammLp(position))
+  const dlmmPositions = (positions ?? []).filter(position => true) // DAMM v2 fully removed — treat all as DLMM
 
   if (args.length === 1) {
     const solAmount = parseSolAmount(args[0])
@@ -442,7 +431,7 @@ async function handleStatus() {
   }
   const liveLp = liveSnapshot.positions
   const liveDlmmCount = liveLp.filter(p => p.position_type === 'dlmm').length
-  const liveDammCount = liveLp.filter(p => p.position_type === 'damm-edge').length
+  const liveDammCount = 0 // DAMM v2 fully removed
   const wallet = await fetchWalletLiveBalances(liveLp.map(p => p.mint)).catch(() => null)
   const warning = liveSourceWarning(liveSource, {
     dlmm: liveSnapshot.dlmmError,
@@ -464,7 +453,7 @@ async function handleStatus() {
   const cacheOnlyCount = mergedOpenLp.length - liveConfirmedCount
 
   const dlmmLines = mergedOpenLp
-    .filter(p => !isDammLp(p))
+    .filter(p => true) // DAMM v2 fully removed
     .map(p => {
     const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
@@ -477,18 +466,9 @@ async function handleStatus() {
     return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | value ${fmtUsd(value)} | fees ${fmtUsd(fees)}${pnlText} | ${mins}min${oor}${source}`
   })
 
-  const dammPositions = mergedOpenLp.filter(isDammLp)
-  const dammLines = dammPositions.map(p => {
-    const mins = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
-    const bondingCurvePct = p.metadata?.bonding_curve_pct
-    const curve = bondingCurvePct != null ? ` | curve ${Number(bondingCurvePct).toFixed(1)}%` : ''
-    const value = p.position_value_usd ?? p.metadata?.position_value_usd
-    const valueText = value != null ? ` | value $${Number(value).toFixed(2)}` : ''
-    const fees = p.claimable_fees_usd ?? p.metadata?.claimable_fees_usd
-    const feesText = fees != null ? ` | fees $${Number(fees).toFixed(2)}` : ''
-    const source = isLiveConfirmedPosition(p) || p.strategy_id === 'damm-live' ? ' | Meteora live' : ' | Supabase cache only'
-    return `  • ${p.symbol} — ${(p.sol_deposited ?? 0).toFixed(3)} SOL | ${mins}min${curve}${valueText}${feesText}${source}`
-  })
+  // DAMM v2 fully removed
+  const dammPositions: any[] = []
+  const dammLines: string[] = [] as any[]
 
   await reply([
     `🤖 *Bot Status*`,
@@ -496,7 +476,7 @@ async function handleStatus() {
     `Mode:  ${state.dry_run ? '🟡 Dry-run' : '🟢 Live'}`,
     `Wallet: ${wallet ? wallet.sol.toFixed(4) : 'n/a'} SOL`,
     `Scanner tick: ${formatMinutesAgo(scannerHealth?.last_scan_at)}`,
-    `Meteora live: ${liveLp.length} total (${liveDlmmCount} DLMM / ${liveDammCount} DAMM)`,
+    `Meteora live: ${liveLp.length} total (${liveDlmmCount} DLMM / 0 DAMM)`, // DAMM v2 removed
     ...(warning ? [warning] : []),
     `Supabase cache: ${(openLp ?? []).length} open rows`,
     `Rows below: ${liveConfirmedCount} live-confirmed / ${cacheOnlyCount} cache-only`,

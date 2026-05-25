@@ -2,7 +2,7 @@
  * lib/solana-tx.ts
  *
  * Shared Solana transaction utilities.
- * Extracted from bot/executor.ts + bot/damm-executor.ts (P1 maintainability improvement).
+ * Extracted from bot/executor.ts (DAMM v2 executor was fully removed)
  *
  * Provides:
  * - Priority fee helpers

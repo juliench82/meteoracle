@@ -116,7 +116,7 @@ async function fetchDashboardDataUncached(): Promise<DashboardData> {
       errors: liveErrors,
       count: liveLp.length,
       dlmm: liveLp.filter(p => p.position_type === 'dlmm').length,
-      damm: liveLp.filter(p => p.position_type === 'damm-edge').length,
+      damm: 0, // DAMM v2 removed
     },
     source: liveSource.dlmmOk && liveSource.dammOk ? 'meteora-live' : 'meteora-live-partial',
   }
@@ -151,7 +151,7 @@ function buildPortfolioSummary(openLp: any[], closedLp: any[], liveSource: Meteo
     source: liveSource.dlmmOk || liveSource.dammOk ? 'meteora-live' : 'supabase-cache',
     openCount: openLp.length,
     dlmmCount: openLp.filter(p => p.position_type === 'dlmm').length,
-    dammCount: openLp.filter(p => ['damm-edge', 'damm-migration'].includes(p.position_type)).length,
+    dammCount: 0, // DAMM v2 removed
     outOfRangeCount: openLp.filter(p => p.status === 'out_of_range').length,
     totalPositionValueUsd: Math.round(totalPositionValueUsd * 100) / 100,
     totalClaimableFeesUsd: Math.round(totalClaimableFeesUsd * 100) / 100,

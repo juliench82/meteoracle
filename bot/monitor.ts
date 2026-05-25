@@ -5,7 +5,6 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import {
   MONITOR_INTERVAL_MS,
   SYNC_FAIL_ALERT_THRESHOLD,
-  DAMM_EDGE_EXIT_STRATEGY,
   LIVE_CACHE_EXIT_STRATEGY_ID,
   LIVE_CACHE_ALERT_INTERVAL_MS,
   ORPHAN_CHECK_EVERY_N,
@@ -15,7 +14,6 @@ import {
   _unmanagedLiveAlertAt,
 } from './monitor-core'
 import { checkDlmmPosition } from './monitor-dlmm'
-import { checkDammEdgePosition } from './monitor-damm'
 import { detectAllOrphanedPositions } from './orphan-detector'
 import { checkMoonboyPositions } from './moonboy-executor'
 import { retryStrandedSells } from '@/lib/swap'
@@ -29,11 +27,10 @@ import { sendAlert } from './alerter'
 import { sendStartupAlert } from './startup-alert'
 import type { Strategy } from '@/lib/types'
 
-// Re-export for any existing imports
-export { DAMM_EDGE_EXIT_STRATEGY, LIVE_CACHE_EXIT_STRATEGY_ID }
+export { LIVE_CACHE_EXIT_STRATEGY_ID }
 export async function monitorPositions() { return runTick() }
 
-console.log('[monitor] split complete — using monitor-core + monitor-damm + monitor-dlmm')
+console.log('[monitor] split complete — using monitor-core + monitor-dlmm (DAMM v2 fully removed)')
 
 const LP_MONITOR_ENABLED   = process.env.LP_MONITOR_ENABLED    !== 'false'
 const MONITOR_EXITS_ENABLED = process.env.MONITOR_EXITS_ENABLED !== 'false'
@@ -132,17 +129,7 @@ async function runTick(): Promise<{ checked: number; closed: number; claimed: nu
     const strategyId = position.strategy_id ?? ''
     stats.checked++
 
-    // DAMM edge positions
-    const isDammManaged =
-      ['pre_grad', 'pre-grad', 'damm-edge', 'damm-migration', 'damm-launch'].includes(strategyId) ||
-      ['pre_grad', 'pre-grad', 'damm-edge', 'damm-migration', 'damm-launch'].includes(position.position_type ?? '')
 
-    if (isDammManaged) {
-      await checkDammEdgePosition(position, DAMM_EDGE_EXIT_STRATEGY, stats, liveSolPriceUsd).catch(err =>
-        console.error(`[monitor][${position.symbol}][damm] tick error:`, err),
-      )
-      continue
-    }
 
     // Live-cache rows without an exit strategy
     if (strategyId === 'meteora-live') {

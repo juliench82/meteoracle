@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { runScanner, type ScannerResult } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
 import { addLiquidityToPosition, closePosition } from '@/bot/executor'
-import { closeDammPosition } from '@/bot/damm-executor'
+// closeDammPosition import removed — DAMM v2 fully deleted
 import { rebalanceDlmmPosition } from '@/bot/rebalance'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState, acquireRunLock, releaseRunLock } from '@/lib/botState'
@@ -132,24 +132,11 @@ function guardBot(state: { enabled: boolean }) {
   return !state.enabled
 }
 
-function isDammLp(pos: { strategy_id?: string | null; position_type?: string | null }): boolean {
-  return (
-    pos.strategy_id === 'damm-edge' ||
-    pos.strategy_id === 'damm-live' ||
-    pos.strategy_id === 'damm-migration' ||
-    pos.position_type === 'damm-edge' ||
-    pos.position_type === 'damm-migration'
-  )
-}
-
 async function closeLpPositionByKind(
   pos: { id: string; strategy_id?: string | null; position_type?: string | null },
   reason: string,
 ): Promise<boolean> {
-  if (isDammLp(pos)) {
-    const result = await closeDammPosition(pos.id, reason)
-    return result.success
-  }
+  // DAMM v2 fully removed — all closes now go through DLMM path
   return closePosition(pos.id, reason)
 }
 
@@ -180,7 +167,7 @@ async function resolveAddTarget(
     return { positionId: null, solAmount: null, error: `Could not load positions: ${error.message}` }
   }
 
-  const dlmmPositions = (positions ?? []).filter(position => !isDammLp(position))
+  const dlmmPositions = (positions ?? []).filter(position => true) // DAMM v2 fully removed — all treated as DLMM
   if (parts.length === 2) {
     const solAmount = parseSolAmount(parts[1])
     if (solAmount === null) {
@@ -466,7 +453,7 @@ export async function POST(req: Request) {
       const liveSnapshot = liveLpRes.status === 'fulfilled' ? liveLpRes.value : null
       const liveLpCount = liveSnapshot?.positions.length ?? 0
       const liveDlmmCount = liveSnapshot?.positions.filter(p => p.position_type === 'dlmm').length ?? 0
-      const liveDammCount = liveSnapshot?.positions.filter(p => p.position_type === 'damm-edge').length ?? 0
+      const liveDammCount = 0 // DAMM v2 fully removed
       const liveWarning = liveSnapshot && (!liveSnapshot.dlmmOk || !liveSnapshot.dammOk)
         ? [
           `Meteora fetch incomplete: DLMM ${liveSnapshot.dlmmOk ? 'ok' : 'failed'} / DAMM ${liveSnapshot.dammOk ? 'ok' : 'failed'}`,

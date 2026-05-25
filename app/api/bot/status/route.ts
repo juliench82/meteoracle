@@ -37,7 +37,7 @@ export async function GET() {
   const liveSnapshot = liveLpRes.status     === 'fulfilled' ? liveLpRes.value : null
   const liveLpCount = liveSnapshot?.positions.length ?? 0
   const wallet = walletRes.status          === 'fulfilled' ? walletRes.value : null
-  const liveDammCount = liveSnapshot?.positions.filter(p => p.position_type === 'damm-edge').length ?? 0
+  const liveDammCount = 0 // DAMM v2 fully removed from the bot
   const liveDlmmCount = liveSnapshot?.positions.filter(p => p.position_type === 'dlmm').length ?? 0
   const meteoraOk = Boolean(liveSnapshot?.dlmmOk || liveSnapshot?.dammOk)
 
