@@ -4,7 +4,9 @@ import path from 'path'
 
 const ENV_PATH = path.resolve(process.cwd(), '.env.local')
 
-// Variables we allow editing from the UI, grouped by category
+// Variables we allow editing from the UI, grouped by category.
+// DAMM v2 / DAMM Edge support has been fully removed from the bot.
+// Most configuration should be managed here via the website instead of .env.local.
 const EDITABLE_VARS = {
   global: [
     'MAX_CONCURRENT_MARKET_LP_POSITIONS',

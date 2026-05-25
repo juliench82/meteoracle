@@ -10,7 +10,6 @@ const GROUP_LABELS: Record<string, string> = {
   global: 'Global Risk & Position Sizing',
   evilPanda: 'Evil Panda Strategy',
   scalpSpike: 'Scalp Spike Strategy',
-  dammEdge: 'DAMM Edge Strategy',
   scanner: 'Scanner Tuning',
 }
 
