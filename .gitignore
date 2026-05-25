@@ -37,3 +37,6 @@ clipboard.txt
 
 # Old / archived scripts (not actively maintained)
 scripts/archive/
+
+# Development / experimental scripts (causing build issues, not ready to include)
+scripts/dev/
