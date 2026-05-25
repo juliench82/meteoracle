@@ -63,8 +63,9 @@ async function main() {
     console.log(`\nClosing bin array index ${index}: ${pubkey}`);
     try {
       const { Transaction } = await import('@solana/web3.js');
+      // closeBinArrayIfEmpty may not exist on current IDL — using closeBinArray
       const ix = await dlmm.program.methods
-        .closeBinArrayIfEmpty()
+        .closeBinArray()
         .accountsPartial({
           lbPair: LB_PAIR,
           binArray: binArrayPubkey,

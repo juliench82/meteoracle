@@ -551,7 +551,9 @@ async function main() {
   const rawActiveId = dlmm.lbPair.activeId;
   const activeBinIdNum: number = typeof rawActiveId === 'number'
     ? rawActiveId
-    : (rawActiveId?.toNumber ? rawActiveId.toNumber() : Number(rawActiveId));
+    : (rawActiveId && typeof (rawActiveId as any).toNumber === 'function' 
+        ? (rawActiveId as any).toNumber() 
+        : Number(rawActiveId));
 
   console.log('  Active bin:', activeBinIdNum);
   console.log('  Bin step:', dlmm.lbPair.binStep);
@@ -812,7 +814,7 @@ async function main() {
           const pd = ourPosition.positionData;
           const lower = pd.lowerBinId ?? 'n/a';
           const upper = pd.upperBinId ?? 'n/a';
-          const totalLiquidity = pd.totalLiquidity ?? 'n/a';
+          const totalLiquidity = (pd as any).totalLiquidity ?? 'n/a';
           console.log('  ✓ Position found on-chain:');
           console.log(`    Bin range: ${lower} → ${upper}`);
           console.log(`    Total liquidity (raw): ${totalLiquidity}`);

@@ -158,7 +158,9 @@ async function main() {
   const rawActiveId = dlmmPool.lbPair.activeId;
   const activeBinIdNum: number = typeof rawActiveId === 'number' 
     ? rawActiveId 
-    : (rawActiveId?.toNumber ? rawActiveId.toNumber() : Number(rawActiveId));
+    : (rawActiveId && typeof (rawActiveId as any).toNumber === 'function' 
+        ? (rawActiveId as any).toNumber() 
+        : Number(rawActiveId));
 
   console.log('  Active bin:', activeBinIdNum);
   console.log('  Bin step:', dlmmPool.lbPair.binStep);
@@ -262,8 +264,8 @@ async function main() {
     lbPair: poolPubkey,
     connection,
     swapSlippageBps: 100,
-    minDeltaId: minBinId - activeBinId,
-    maxDeltaId: maxBinId - activeBinId,
+    minDeltaId: minBinId - activeBinIdNum,
+    maxDeltaId: maxBinId - activeBinIdNum,
     strategy: strategyTypeForDistribution(await getStrategyType(), 'spot'),
   });
 
@@ -273,8 +275,8 @@ async function main() {
     inputTokenMint: new PublicKey('So11111111111111111111111111111111111111112'),
     amountIn: amountInLamports,
     maxActiveBinSlippage: 100,
-    minDeltaId: minBinId - activeBinId,
-    maxDeltaId: maxBinId - activeBinId,
+    minDeltaId: minBinId - activeBinIdNum,
+    maxDeltaId: maxBinId - activeBinIdNum,
     strategy: strategyTypeForDistribution(await getStrategyType(), 'spot'),
     favorXInActiveId: dlmmPool.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112',
     maxAccounts: 64,
