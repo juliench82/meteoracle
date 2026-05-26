@@ -40,7 +40,7 @@ export async function getOpenLpLimitState(scope: OpenLpScope = 'all'): Promise<O
       .in('status', OPEN_LP_STATUSES),
   ])
 
-  const liveFetchOk = snapshot.dlmmOk && snapshot.dammOk
+  const liveFetchOk = snapshot.dlmmOk  // DAMM v2 fully removed — only DLMM live data matters now
 
   if (cached.error && !liveFetchOk) {
     throw new Error(`lp_positions open count failed: ${cached.error.message}`)
@@ -63,7 +63,7 @@ export async function getOpenLpLimitState(scope: OpenLpScope = 'all'): Promise<O
     cachedOpenCount,
     liveFetchOk,
     dlmmOk: snapshot.dlmmOk,
-    dammOk: snapshot.dammOk,
+    dammOk: false,                    // DAMM v2 fully removed
     countSource,
     livePositions: snapshot.positions,
   }

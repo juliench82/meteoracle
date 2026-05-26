@@ -96,6 +96,10 @@ export async function openPosition(
 
   const botState = await getBotState()
   const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
+
+  // Very loud early visibility for dry-run state (helps debug VPS env loading issues)
+  console.log(`${label} DRY_RUN effective value: ${DRY_RUN} (ENV_FORCED=${ENV_DRY_RUN_FORCED}, botState.dry_run=${botState.dry_run})`)
+
   const supabase = createServerClient()
 
   if (DRY_RUN) {
@@ -553,6 +557,8 @@ async function openPositionToken2022(
 ): Promise<string | null> {
   const label = `${attemptLabel}[token2022]`
 
+  console.log(`${label} [DRY-RUN GUARD] DRY_RUN param received: ${DRY_RUN}`)
+
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
     return null
@@ -565,6 +571,11 @@ async function openPositionToken2022(
     const amountIn = new BN(Math.floor(solAmount * 1e9))
 
     console.log(`${label} entering Token-2022 low-level split path (initializePosition2 + addLiquidityByStrategy2)`)
+
+    if (DRY_RUN) {
+      console.log(`${label} [SAFETY] DRY_RUN still true before Jupiter — aborting`)
+      return null
+    }
 
     // 1. Swap SOL → token using Jupiter (reliable for Token-2022)
     console.log(`${label} swapping ${solAmount} SOL → ${metrics.symbol} via Jupiter...`)
@@ -579,6 +590,11 @@ async function openPositionToken2022(
 
     if (tokenAmountOut.isZero()) {
       throw new Error(`${label} Jupiter swap returned zero tokens`)
+    }
+
+    if (DRY_RUN) {
+      console.log(`${label} [SAFETY] DRY_RUN true before low-level position creation — aborting`)
+      return null
     }
 
     const activeBin = await dlmmPool.getActiveBin()
@@ -701,6 +717,11 @@ async function openPositionToken2022(
       console.warn(`${label} bitmap extension resolution skipped or failed (non-fatal):`, bitmapErr?.message || bitmapErr)
     }
 
+    if (DRY_RUN) {
+      console.log(`${label} [SAFETY] DRY_RUN true before liquidity addition — aborting`)
+      return null
+    }
+
     // === Low-level addLiquidityByStrategy2 ===
     console.log(`${label} Adding liquidity via low-level addLiquidityByStrategy2...`)
 
@@ -812,6 +833,34 @@ async function openPositionToken2022(
 
     const allRemaining = [...binArrayAccountMetas, ...hookRemainingAccounts]
     console.log(`${label} Bin arrays required: ${binArrayAccountMetas.length}, total remainingAccounts: ${allRemaining.length}`)
+
+    // === Initialize any missing bin arrays for the range (critical for fresh/wide ranges on Token-2022) ===
+    for (const meta of binArrayAccountMetas) {
+      try {
+        const info = await connection.getAccountInfo(meta.pubkey)
+        const isOwnedByProgram = info && info.owner.toBase58() === dlmmPool.program.programId.toBase58()
+
+        if (!isOwnedByProgram) {
+          console.log(`${label} Initializing missing bin array for index ${meta.binArrayIndex?.toString() ?? 'unknown'}`)
+          const initIx = await dlmmPool.program.methods
+            .initializeBinArray(meta.binArrayIndex)
+            .accountsPartial({
+              lbPair: poolPubkey,
+              binArray: meta.pubkey,
+              funder: wallet.publicKey,
+              rent: SYSVAR_RENT_PUBKEY,
+            })
+            .instruction()
+
+          const initTx = new Transaction().add(initIx)
+          const preparedInitTx = applyPriorityFee(initTx, priorityFee, ADD_LIQUIDITY_FALLBACK_CU)
+          const initSig = await sendLegacyTx(preparedInitTx, [wallet], `${label} init-bin-array`)
+          console.log(`${label} ✓ Bin array initialized. Sig: ${initSig}`)
+        }
+      } catch (binErr: any) {
+        console.warn(`${label} Failed to initialize bin array ${meta.pubkey.toBase58()}:`, binErr?.message || binErr)
+      }
+    }
 
     const addLiqIx = await dlmmPool.program.methods
       .addLiquidityByStrategy2(liquidityParams, hookSlices)

@@ -650,8 +650,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     openCount = limitState.effectiveOpenCount
     if (!limitState.liveFetchOk) {
       console.warn(
-        `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}, dammOk=${limitState.dammOk}) — ` +
-        `using Supabase cache fallback for open caps`,
+        `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}) — ` +
+        `using Supabase cache fallback for open caps (DAMM v2 support removed)`,
       )
     }
     availableOpenSlots = Math.max(0, MAX_CONCURRENT_MARKET_LP_POSITIONS - openCount)
