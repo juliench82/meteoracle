@@ -78,6 +78,7 @@ import {
 } from './persistence'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
+const LIVE_TRADING_ENABLED = process.env.LIVE_TRADING_ENABLED === 'true'
 
 
 
@@ -95,10 +96,13 @@ export async function openPosition(
   console.log(`${label} opening position`)
 
   const botState = await getBotState()
-  const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
+  const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run || !LIVE_TRADING_ENABLED
 
   // Very loud early visibility for dry-run state (helps debug VPS env loading issues)
-  console.log(`${label} DRY_RUN effective value: ${DRY_RUN} (ENV_FORCED=${ENV_DRY_RUN_FORCED}, botState.dry_run=${botState.dry_run})`)
+  console.log(
+    `${label} DRY_RUN effective value: ${DRY_RUN} ` +
+    `(ENV_FORCED=${ENV_DRY_RUN_FORCED}, botState.dry_run=${botState.dry_run}, LIVE_TRADING_ENABLED=${LIVE_TRADING_ENABLED})`
+  )
 
   const supabase = createServerClient()
 
@@ -561,6 +565,13 @@ async function openPositionToken2022(
 
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
+    return null
+  }
+
+  // Extra hard gate: even if DRY_RUN is somehow false, refuse real work on Token-2022
+  // unless LIVE_TRADING_ENABLED is explicitly true.
+  if (!LIVE_TRADING_ENABLED) {
+    console.error(`${label} [CRITICAL SAFETY] LIVE_TRADING_ENABLED is not true — refusing to do real work`)
     return null
   }
 
