@@ -737,7 +737,7 @@ async function openPositionToken2022(
     console.log(`${label} Adding liquidity via low-level addLiquidityByStrategy2...`)
 
     // Lazy import low-level helpers (same pattern as test script)
-    const { toStrategyParameters, getBinArrayAccountMetasCoverage } = await import('@meteora-ag/dlmm')
+    const { toStrategyParameters, getBinArrayAccountMetasCoverage, getBinArrayIndexesCoverage } = await import('@meteora-ag/dlmm')
     const strategyType = strategyTypeForDistribution(await getStrategyType(), strategy.position.distributionType)
 
     // Resolve transfer hook remaining accounts for Token-2022
@@ -821,6 +821,7 @@ async function openPositionToken2022(
       strategyParameters,
     }
 
+    const binArrayIndexes = getBinArrayIndexesCoverage(new BN(minBinId), new BN(maxBinId))
     const binArrayAccountMetas = getBinArrayAccountMetasCoverage(
       new BN(minBinId),
       new BN(maxBinId),
@@ -846,18 +847,26 @@ async function openPositionToken2022(
     console.log(`${label} Bin arrays required: ${binArrayAccountMetas.length}, total remainingAccounts: ${allRemaining.length}`)
 
     // === Initialize any missing bin arrays for the range (critical for fresh/wide ranges on Token-2022) ===
-    for (const meta of binArrayAccountMetas) {
+    // We must use the parallel indexes list because AccountMeta from getBinArrayAccountMetasCoverage does not carry binArrayIndex.
+    // The indexes are required for the initializeBinArray instruction.
+    const binArrayCoverage = binArrayIndexes.map((binArrayIndex, i) => ({
+      binArrayIndex,
+      pubkey: binArrayAccountMetas[i]?.pubkey,
+    }))
+
+    for (const { binArrayIndex, pubkey } of binArrayCoverage) {
+      if (!pubkey) continue
       try {
-        const info = await connection.getAccountInfo(meta.pubkey)
+        const info = await connection.getAccountInfo(pubkey)
         const isOwnedByProgram = info && info.owner.toBase58() === dlmmPool.program.programId.toBase58()
 
         if (!isOwnedByProgram) {
-          console.log(`${label} Initializing missing bin array for index ${meta.binArrayIndex?.toString() ?? 'unknown'}`)
+          console.log(`${label} Initializing missing bin array for index ${binArrayIndex?.toString() ?? 'unknown'}`)
           const initIx = await dlmmPool.program.methods
-            .initializeBinArray(meta.binArrayIndex)
+            .initializeBinArray(binArrayIndex)
             .accountsPartial({
               lbPair: poolPubkey,
-              binArray: meta.pubkey,
+              binArray: pubkey,
               funder: wallet.publicKey,
               rent: SYSVAR_RENT_PUBKEY,
             })
@@ -869,7 +878,7 @@ async function openPositionToken2022(
           console.log(`${label} ✓ Bin array initialized. Sig: ${initSig}`)
         }
       } catch (binErr: any) {
-        console.warn(`${label} Failed to initialize bin array ${meta.pubkey.toBase58()}:`, binErr?.message || binErr)
+        console.warn(`${label} Failed to initialize bin array ${pubkey?.toBase58?.()}:`, binErr?.message || binErr)
       }
     }
 
