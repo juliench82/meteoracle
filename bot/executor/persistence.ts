@@ -26,6 +26,16 @@ export async function persistPosition(
 ): Promise<string> {
   const supabase = createServerClient()
 
+  // Idempotency guard: if we already have an active/open row for this mint,
+  // return the existing id instead of throwing on the unique constraint.
+  // This protects against duplicate open attempts (e.g. after clearing DB and going live,
+  // or rapid re-processing of the same candidate).
+  const existing = await findExistingActivePosition(metrics.address)
+  if (existing) {
+    console.log(`[executor] persistPosition — mint ${metrics.symbol} already has active row (id=${existing.id}), returning existing id instead of inserting`)
+    return existing.id
+  }
+
   const { data, error } = await supabase
     .from('lp_positions')
     .insert({
