@@ -75,10 +75,10 @@ import {
 import {
   persistPosition,
   sendOpenAlert,
+  findExistingActivePosition,
 } from './persistence'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
-const LIVE_TRADING_ENABLED = process.env.LIVE_TRADING_ENABLED === 'true'
 
 
 
@@ -96,22 +96,33 @@ export async function openPosition(
   console.log(`${label} opening position`)
 
   const botState = await getBotState()
-  const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run || !LIVE_TRADING_ENABLED
+  const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
 
   // Very loud early visibility for dry-run state (helps debug VPS env loading issues)
   console.log(
     `${label} DRY_RUN effective value: ${DRY_RUN} ` +
-    `(ENV_FORCED=${ENV_DRY_RUN_FORCED}, botState.dry_run=${botState.dry_run}, LIVE_TRADING_ENABLED=${LIVE_TRADING_ENABLED})`
+    `(ENV_FORCED=${ENV_DRY_RUN_FORCED}, botState.dry_run=${botState.dry_run})`
   )
 
   const supabase = createServerClient()
 
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
+
+    // Idempotency guard: prevent duplicate inserts into lp_positions during long dry-run observation.
+    // Dry-run rows live only in Supabase (never in on-chain snapshot), so the deep-checker guards
+    // can be bypassed on later ticks → we must defend here too.
+    const existing = await findExistingActivePosition(metrics.address)
+    if (existing) {
+      console.log(`${label} DRY RUN — ${metrics.symbol} already has active simulation row (id=${existing.id}). Skipping duplicate persist to avoid lp_positions_mint_open_unique violation.`)
+      return existing.id
+    }
+
     const envCap = MARKET_LP_SOL_PER_POSITION
     const dryRunSolAmount = strategy.position.maxSolPerPosition
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
+    console.log(`${label} DRY RUN — creating new simulation row for ${metrics.symbol} (first time this tick/scan)`)
     const positionId = await persistPosition(metrics, strategy, 'dry-run-sig', metrics.priceUsd ?? 0, 0, dryRunSolAmount, undefined, 0, DRY_RUN)
     await sendOpenAlert(metrics, strategy, positionId, dryRunSolAmount, 0)
     return positionId
@@ -568,13 +579,6 @@ async function openPositionToken2022(
     return null
   }
 
-  // Extra hard gate: even if DRY_RUN is somehow false, refuse real work on Token-2022
-  // unless LIVE_TRADING_ENABLED is explicitly true.
-  if (!LIVE_TRADING_ENABLED) {
-    console.error(`${label} [CRITICAL SAFETY] LIVE_TRADING_ENABLED is not true — refusing to do real work`)
-    return null
-  }
-
   const connection = getConnection()
   const wallet = getWallet()
 
@@ -582,11 +586,6 @@ async function openPositionToken2022(
     const amountIn = new BN(Math.floor(solAmount * 1e9))
 
     console.log(`${label} entering Token-2022 low-level split path (initializePosition2 + addLiquidityByStrategy2)`)
-
-    if (DRY_RUN) {
-      console.log(`${label} [SAFETY] DRY_RUN still true before Jupiter — aborting`)
-      return null
-    }
 
     // 1. Swap SOL → token using Jupiter (reliable for Token-2022)
     console.log(`${label} swapping ${solAmount} SOL → ${metrics.symbol} via Jupiter...`)

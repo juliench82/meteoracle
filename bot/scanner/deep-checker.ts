@@ -719,13 +719,18 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       continue
     }
 
-    if (!limitState?.liveFetchOk) {
-      const posResult = await withTimeout(
-        supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
-          .in('status', OPEN_LP_STATUSES).limit(1),
-        SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
-      )
-      if (posResult?.data && posResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: cached open LP position exists (live fallback mode)`); continue }
+    // Always check Supabase for existing simulation or live rows for this mint.
+    // Critical during long dry-run observation: dry-run fake rows live only in the DB
+    // (never appear in the on-chain livePositions snapshot), so the previous "only when !liveFetchOk"
+    // guard was insufficient and allowed repeated attempts → duplicate key violations.
+    const posResult = await withTimeout(
+      supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
+        .in('status', OPEN_LP_STATUSES).limit(1),
+      SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
+    )
+    if (posResult?.data && posResult.data.length > 0) {
+      console.log(`[scanner] ${symbol} — skip: existing LP position/simulation row for mint (id=${posResult.data[0].id})`)
+      continue
     }
 
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {

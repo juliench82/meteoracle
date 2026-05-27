@@ -41,8 +41,11 @@ lerna-debug.log*
 cron-job.txt
 clipboard.txt
 
-# Old / archived scripts (not actively maintained)
-scripts/archive/
-
-# Development / experimental scripts (causing build issues, not ready to include)
-scripts/dev/
+# Scripts
+# - The entire scripts/ folder is excluded from TypeScript compilation in tsconfig.json
+#   so scripts cannot break the main app build.
+# - Only the root-level utility scripts (assert-env-local-only.cjs, patch-dlmm-esm.js)
+#   and scripts/utils/ are required for the build process.
+# - dev/ and archive/ contain test and historical scripts. These are now committed
+#   so that important testing evidence (e.g. low-level DLMM path validation) is visible
+#   in the repository history.

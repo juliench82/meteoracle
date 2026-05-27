@@ -8,6 +8,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
+import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
@@ -145,5 +146,28 @@ export async function sendCloseAlert(
     })
   } catch (alertErr) {
     console.warn('[executor] sendCloseAlert failed (non-fatal):', alertErr)
+  }
+}
+
+/**
+ * Check whether this mint already has an active/pending simulation or live record.
+ * Used primarily to make the dry-run fast-path idempotent and prevent
+ * "duplicate key violates lp_positions_mint_open_unique" spam during observation.
+ */
+export async function findExistingActivePosition(mint: string): Promise<{ id: string } | null> {
+  const supabase = createServerClient()
+  try {
+    const { data, error } = await supabase
+      .from('lp_positions')
+      .select('id')
+      .eq('mint', mint)
+      .in('status', OPEN_LP_STATUSES)
+      .limit(1)
+      .single()
+
+    if (error || !data) return null
+    return { id: data.id }
+  } catch {
+    return null
   }
 }
