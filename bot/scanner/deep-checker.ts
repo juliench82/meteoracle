@@ -64,6 +64,7 @@ import {
   getTradableToken,
   getVolumeTvlRatio,
   scoreMeteoraMomentum,
+  cleanupOldPoolCache,
 } from './pool-fetcher'
 import {
   classifyPoolsIntoLanes,
@@ -1209,6 +1210,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     console.log(`[scanner] Helius cache: ${getHolderCacheSize()} entries`)
   }
   console.log(`[scanner] Rugcheck cache: ${getRugcheckCacheSize()} entries`)
+
+  // Periodically clean the scanner_pool_cache table. This is important because the persist path
+  // (when enabled) writes a lot of data. Even when disabled, old data from previous runs can accumulate.
+  void cleanupOldPoolCache()
 
   console.log(
     `[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, ` +

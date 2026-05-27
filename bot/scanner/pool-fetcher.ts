@@ -13,6 +13,12 @@ const METEORA_CACHE_TTL_MS = parseInt(
   10,
 )
 
+// WARNING: Persisting the full Meteora pool list (often 1000-5000+ rows with large JSONB metadata + GIN index)
+// to Supabase on every cache refresh is extremely expensive on Disk I/O.
+// This is a primary contributor to "Disk IO budget" exhaustion warnings.
+// Default is now OFF to protect Supabase resources. Only enable temporarily if you really need cross-restart warm cache.
+const ENABLE_DB_POOL_CACHE_PERSIST = (process.env.SCANNER_PERSIST_POOL_CACHE ?? 'false').toLowerCase() === 'true'
+
 function getCachedMeteoraPools(): MeteoraPool[] | null {
   if (!meteoraPoolsCache) return null
   if (Date.now() - meteoraPoolsCache.ts > METEORA_CACHE_TTL_MS) return null
@@ -292,6 +298,9 @@ async function loadDbPoolCache(): Promise<MeteoraPool[] | null> {
 }
 
 function persistDbPoolCache(pools: MeteoraPool[]): void {
+  if (!ENABLE_DB_POOL_CACHE_PERSIST) {
+    return // Disabled by default — full pool cache persistence is a major Disk IO consumer (large JSONB + GIN index)
+  }
   if (pools.length === 0) return
 
   const now = new Date().toISOString()
@@ -342,9 +351,13 @@ function persistDbPoolCache(pools: MeteoraPool[]): void {
 }
 
 /**
- * Cleans up old rows from scanner_pool_cache to protect Supabase free tier resources.
+ * Cleans up old rows from scanner_pool_cache to protect Supabase Disk I/O budget.
  * Keeps rows seen in the last RETENTION_HOURS (default 48).
- * Should be called periodically (e.g. once per scanner tick).
+ *
+ * This is now called automatically at the end of every scanner tick.
+ *
+ * WARNING: The full persist path (when SCANNER_PERSIST_POOL_CACHE=true) is extremely I/O heavy
+ * due to large JSONB + GIN index maintenance. It is disabled by default for this reason.
  */
 const POOL_CACHE_RETENTION_HOURS = parseInt(
   process.env.SCANNER_POOL_CACHE_RETENTION_HOURS ?? '48',
@@ -471,7 +484,12 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
   meteoraPoolsCache = { pools: allPools, ts: Date.now() }
   console.log(`[scanner] cached ${allPools.length} Meteora pools for ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min`)
 
-  persistDbPoolCache(allPools)
+  if (ENABLE_DB_POOL_CACHE_PERSIST) {
+    persistDbPoolCache(allPools)
+  } else {
+    // Default behavior: skip the very expensive full-pool upsert to Supabase.
+    // This dramatically reduces Disk I/O. Warm-start will only work from whatever data is already in the table.
+  }
 
   const pools = applyJsPreFilter(allPools, config)
   console.log(

@@ -55,6 +55,9 @@ if (require.main === module || process.env.LP_SCANNER_STANDALONE === 'true') {
     console.log(`${label} disabled — LP_SCANNER_ENABLED=false`)
   } else {
     console.log(`${label} starting — poll every ${SCAN_INTERVAL_MS / 1000}s`)
+    // Note on Supabase IO: Full pool cache persistence to scanner_pool_cache is DISABLED by default
+    // because it was a major source of Disk I/O exhaustion (large JSONB upserts + GIN indexes).
+    // Set SCANNER_PERSIST_POOL_CACHE=true only temporarily if you need cross-restart warm cache.
     validateStartup(label)
       .then(() => {
         void writeScannerHeartbeat('startup')
