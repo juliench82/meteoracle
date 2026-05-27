@@ -589,12 +589,13 @@ async function openPositionToken2022(
 
     // 1. Swap SOL → token using Jupiter (reliable for Token-2022)
     console.log(`${label} swapping ${solAmount} SOL → ${metrics.symbol} via Jupiter...`)
+    // Jupiter swap for fresh Token-2022 tokens.
+    // The helper now uses your SWAP_SLIPPAGE_BPS + a ladder + retries for live reliability.
     const tokenAmountOut = await swapSolToTokenViaJupiter(
       connection,
       wallet,
       outputMint,
-      amountIn,
-      100 // 1% slippage for safety
+      amountIn
     )
     console.log(`${label} received ${tokenAmountOut.toString()} of ${metrics.symbol}`)
 
@@ -951,66 +952,119 @@ async function openPositionToken2022(
 
 /**
  * Jupiter v1 swap helper: SOL → output token.
- * Used exclusively by the manual Token-2022 fallback path.
+ * Used exclusively for the manual Token-2022 low-level opening path.
+ *
+ * Features for live trading:
+ * - Respects SWAP_SLIPPAGE_BPS from .env
+ * - Uses a slippage ladder on simulation failures (common on fresh pump.fun tokens)
+ * - Hard capped at 2000 bps for safety (configurable via MAX_SLIPPAGE_BPS inside the function)
+ * - Basic retry with backoff
  */
 async function swapSolToTokenViaJupiter(
   connection: Connection,
   wallet: Keypair,
   outputMint: PublicKey,
   amountIn: BN,
-  slippageBps: number = 100
+  slippageBps?: number
 ): Promise<BN> {
-  // Updated to current Jupiter Swap API v1 (https://dev.jup.ag/docs/swap/v1/get-quote)
-  const quoteParams = new URLSearchParams({
-    inputMint: 'So11111111111111111111111111111111111111112',
-    outputMint: outputMint.toBase58(),
-    amount: amountIn.toString(),
-    slippageBps: slippageBps.toString(),
-    onlyDirectRoutes: 'false',
-  });
+  const SWAP_MAX_RETRIES = 3;
+  const SWAP_RETRY_DELAY_MS = 2500;
+  const MAX_SLIPPAGE_BPS = 2000; // Hard cap for live trading safety
 
-  const quoteUrl = `https://api.jup.ag/swap/v1/quote?${quoteParams.toString()}`;
+  // Build slippage ladder starting from user's setting (or safe default)
+  let baseSlippage = slippageBps ?? parseInt(process.env.SWAP_SLIPPAGE_BPS ?? '300');
 
-  const quoteRes = await fetch(quoteUrl);
-
-  if (!quoteRes.ok) {
-    const text = await quoteRes.text();
-    throw new Error(`Jupiter quote failed with ${quoteRes.status}: ${text}`);
+  if (baseSlippage > MAX_SLIPPAGE_BPS) {
+    console.warn(`[executor] SWAP_SLIPPAGE_BPS=${baseSlippage} exceeds hard cap of ${MAX_SLIPPAGE_BPS}. Capping to ${MAX_SLIPPAGE_BPS}.`);
+    baseSlippage = MAX_SLIPPAGE_BPS;
   }
 
-  const quote = await quoteRes.json();
+  const SLIPPAGE_LADDER = [100, 300, 500, 1000, 2000, 5000];
+  const startIdx = SLIPPAGE_LADDER.findIndex(b => b >= baseSlippage);
+  let ladder = startIdx === -1 ? [baseSlippage] : SLIPPAGE_LADDER.slice(startIdx);
 
-  if (quote.error) {
-    throw new Error(`Jupiter quote error: ${quote.error}`);
+  // Hard cap the ladder at 2000bps for live trading
+  ladder = ladder.filter(bps => bps <= MAX_SLIPPAGE_BPS);
+
+  if (ladder.length === 0) {
+    ladder = [MAX_SLIPPAGE_BPS];
   }
 
-  const swapRes = await fetch('https://api.jup.ag/swap/v1/swap', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      quoteResponse: quote,
-      userPublicKey: wallet.publicKey.toBase58(),
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-    }),
-  });
+  let lastError: Error | null = null;
 
-  if (!swapRes.ok) {
-    const text = await swapRes.text();
-    throw new Error(`Jupiter swap failed with ${swapRes.status}: ${text}`);
+  for (let attempt = 1; attempt <= SWAP_MAX_RETRIES; attempt++) {
+    for (const currentSlippage of ladder) {
+      try {
+        const isAtHardCap = currentSlippage === MAX_SLIPPAGE_BPS;
+        console.log(`[executor] Jupiter SOL→token quote (slippage ${currentSlippage}bps, attempt ${attempt}/${SWAP_MAX_RETRIES})${isAtHardCap ? ' [HARD CAP]' : ''}`);
+
+        const quoteParams = new URLSearchParams({
+          inputMint: 'So11111111111111111111111111111111111111112',
+          outputMint: outputMint.toBase58(),
+          amount: amountIn.toString(),
+          slippageBps: currentSlippage.toString(),
+          onlyDirectRoutes: 'false',
+        });
+
+        const quoteUrl = `https://api.jup.ag/swap/v1/quote?${quoteParams.toString()}`;
+        const quoteRes = await fetch(quoteUrl);
+
+        if (!quoteRes.ok) {
+          const text = await quoteRes.text();
+          throw new Error(`Jupiter quote failed: ${text}`);
+        }
+
+        const quote = await quoteRes.json();
+        if (quote.error) throw new Error(`Jupiter quote error: ${quote.error}`);
+
+        const swapRes = await fetch('https://api.jup.ag/swap/v1/swap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            quoteResponse: quote,
+            userPublicKey: wallet.publicKey.toBase58(),
+            wrapAndUnwrapSol: true,
+            dynamicComputeUnitLimit: true,
+          }),
+        });
+
+        if (!swapRes.ok) {
+          const text = await swapRes.text();
+          throw new Error(`Jupiter swap failed: ${text}`);
+        }
+
+        const swap = await swapRes.json();
+        if (swap.error) throw new Error(`Jupiter swap error: ${swap.error}`);
+
+        const tx = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, 'base64'));
+        tx.sign([wallet]);
+
+        const signature = await connection.sendRawTransaction(tx.serialize());
+        await connection.confirmTransaction(signature, 'confirmed');
+
+        console.log(`[executor] Jupiter swap succeeded with ${currentSlippage}bps`);
+        return new BN(quote.outAmount);
+
+      } catch (err: any) {
+        lastError = err;
+        const msg = err?.message || String(err);
+        const isSlippageError = msg.includes('0x1771') || msg.toLowerCase().includes('slippage');
+
+        console.warn(`[executor] Jupiter swap attempt failed (slippage ${currentSlippage}bps): ${msg}`);
+
+        // Only continue to next slippage level on simulation/slippage errors
+        if (!isSlippageError && attempt < SWAP_MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, SWAP_RETRY_DELAY_MS));
+          break; // retry same slippage after delay
+        }
+      }
+    }
+
+    if (attempt < SWAP_MAX_RETRIES) {
+      console.log(`[executor] Retrying Jupiter swap after delay...`);
+      await new Promise(r => setTimeout(r, SWAP_RETRY_DELAY_MS));
+    }
   }
 
-  const swap = await swapRes.json();
-
-  if (swap.error) {
-    throw new Error(`Jupiter swap error: ${swap.error}`);
-  }
-
-  const tx = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, 'base64'));
-  tx.sign([wallet]);
-
-  const signature = await connection.sendRawTransaction(tx.serialize());
-  await connection.confirmTransaction(signature, 'confirmed');
-
-  return new BN(quote.outAmount);
+  throw lastError || new Error('Jupiter swap failed after all retries and slippage levels');
 }
