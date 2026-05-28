@@ -137,29 +137,25 @@ async function runTick(): Promise<{ checked: number; closed: number; claimed: nu
       const now = Date.now()
       const lastAlertAt = _unmanagedLiveAlertAt.get(posId) ?? 0
 
+      // Adopted / unknown positions: use configured fallback or default to evil-panda for safety
+      const effectiveExitStrategyId = LIVE_CACHE_EXIT_STRATEGY_ID || 'evil-panda'
+
       if (!LIVE_CACHE_EXIT_STRATEGY_ID) {
-        if (now - lastAlertAt > LIVE_CACHE_ALERT_INTERVAL_MS) {
-          _unmanagedLiveAlertAt.set(posId, now)
-          console.warn(`[monitor] unmanaged adopted row skipped (no exit strategy configured) id=${posId} symbol=${position.symbol}`)
-        } else {
-          console.log(`[monitor] ${position.symbol} remains unmanaged live cache row — alert throttled`)
-        }
-        continue
+        console.log(`[monitor] using default evil-panda fallback for adopted/unknown position id=${posId} symbol=${position.symbol}`)
       }
 
-      // LIVE_CACHE_EXIT_STRATEGY_ID is set → attempt to adopt for exits
       const adoptedStrategy: Strategy | undefined =
-        STRATEGIES.find((s: Strategy) => s.id === LIVE_CACHE_EXIT_STRATEGY_ID) as Strategy | undefined
+        STRATEGIES.find((s: Strategy) => s.id === effectiveExitStrategyId) as Strategy | undefined
 
       if (!adoptedStrategy) {
         if (now - lastAlertAt > LIVE_CACHE_ALERT_INTERVAL_MS) {
           _unmanagedLiveAlertAt.set(posId, now)
-          console.warn(`[monitor] configured exit strategy not found id=${LIVE_CACHE_EXIT_STRATEGY_ID} position=${posId}`)
+          console.warn(`[monitor] fallback exit strategy not found id=${effectiveExitStrategyId} position=${posId}`)
         }
         continue
       }
 
-      console.log(`[monitor] adopted row evaluating under MONITOR_LIVE_CACHE_EXIT_STRATEGY_ID=${LIVE_CACHE_EXIT_STRATEGY_ID} id=${posId} symbol=${position.symbol}`)
+      console.log(`[monitor] adopted row evaluating under exit strategy=${effectiveExitStrategyId} id=${posId} symbol=${position.symbol}`)
       await checkDlmmPosition(position, adoptedStrategy, stats, liveSolPriceUsd).catch(err =>
         console.error(`[monitor][${position.symbol}][adopted:${adoptedStrategy.id}] tick error:`, err),
       )

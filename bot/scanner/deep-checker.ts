@@ -1174,16 +1174,50 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         continue
       }
 
+      // Moonboy is tied to the scanner having accepted the candidate based on its criteria,
+      // not on whether the LP position itself successfully opened (Jupiter failures etc. are common on fresh tokens).
+      // We fire Moonboy here, before attempting the (potentially failing) openPosition call.
+      console.log(`[scanner] ${symbol} — candidate passed all criteria, triggering Moonboy companion buy (if eligible)`)
+      void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
+
       const positionId = await openPosition(metrics, strategy)
       if (positionId) {
         openedCount++
         dailyLossLimitHit = null
         openedMintsThisTick.add(tokenAddress)
 
-        console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId}), triggering Moonboy companion buy (if eligible)`)
-        // Moonboy is only triggered from the successful scanner open-position flow.
-        // Adopted meteora-live rows discovered later by wallet sync intentionally skip auto-Moonboy.
-        void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
+        console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`)
+
+        // Explicitly claim/lock the strategy + symbol on the DB row so position-sync cannot overwrite them later.
+        // This ensures that anything the lp-scanner successfully opens keeps the correct strategy_id and real token symbol.
+        // We retry a couple of times because DB contention or transient issues can occur.
+        const supabase = (await import('@/lib/supabase')).createServerClient();
+        let claimSuccess = false;
+        for (let attempt = 1; attempt <= 3 && !claimSuccess; attempt++) {
+          try {
+            await supabase
+              .from('lp_positions')
+              .update({
+                strategy_id: strategy.id,
+                symbol: symbol,   // force the real token symbol from scanner (prevents "LIVE")
+                metadata: {
+                  claimed_by_scanner_at: new Date().toISOString(),
+                  original_strategy_id: strategy.id,
+                }
+              })
+              .eq('id', positionId);
+            claimSuccess = true;
+          } catch (claimErr) {
+            if (attempt === 3) {
+              console.warn(`[scanner] failed to claim strategy/symbol for position ${positionId} after 3 attempts:`, claimErr);
+            } else {
+              await new Promise(r => setTimeout(r, 500 * attempt));
+            }
+          }
+        }
+        if (claimSuccess) {
+          console.log(`[scanner] successfully claimed position ${positionId} with strategy=${strategy.id} and real symbol`);
+        }
 
         await sendAlert({
           type: 'position_opened',

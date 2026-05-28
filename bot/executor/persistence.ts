@@ -36,11 +36,14 @@ export async function persistPosition(
     return existing.id
   }
 
+  // Safety: never allow the literal string "LIVE" as symbol, even in edge cases.
+  const safeSymbol = (metrics.symbol && metrics.symbol !== 'LIVE') ? metrics.symbol : metrics.address;
+
   const { data, error } = await supabase
     .from('lp_positions')
     .insert({
       mint:            metrics.address,
-      symbol:          metrics.symbol,
+      symbol:          safeSymbol,
       pool_address:    metrics.poolAddress,
       position_pubkey: positionPubKey ?? null,
       strategy_id:     strategy.id,

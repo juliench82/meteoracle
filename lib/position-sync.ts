@@ -83,8 +83,11 @@ function insertBody(live: LiveMeteoraPosition): Record<string, unknown> {
     ? live.strategy_id
     : 'meteora-live';
 
+  // Never write the literal string "LIVE" as symbol. Use the mint as fallback.
+  const safeSymbol = (live.symbol && live.symbol !== 'LIVE') ? live.symbol : live.mint;
+
   return {
-    symbol: live.symbol,
+    symbol: safeSymbol,
     mint: live.mint,
     token_address: live.mint,
     pool_address: live.pool_address,
@@ -134,17 +137,26 @@ function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record
     existing.strategy_id !== 'meteora-live' &&
     existing.strategy_id !== 'damm-live';
 
+  // Never allow the sync to change a real bot-managed strategy_id back to meteora-live
+  const shouldUpdateStrategyId = !isProtectedStrategy;
+
   const hasValidSymbol = existing.symbol && existing.symbol !== 'LIVE';
   const shouldUpdateSymbol = !isProtectedStrategy || !hasValidSymbol;
 
   if (isProtectedStrategy && hasValidSymbol && existing.symbol !== live.symbol) {
     console.log(`[position-sync] refusing to overwrite managed symbol id=${existing.id} pubkey=${existing.position_pubkey} old=${existing.symbol} new=${live.symbol}`);
   }
+
+  if (isProtectedStrategy && existing.strategy_id !== live.strategy_id) {
+    console.log(`[position-sync] refusing to overwrite protected strategy_id id=${existing.id} pubkey=${existing.position_pubkey} old=${existing.strategy_id} new=${live.strategy_id}`);
+  }
+
   const preserveLocalStatus = shouldPreserveLocalStatus(existing)
   const reviveClosedLive = existing.status === 'closed' && !preserveLocalStatus
 
   return {
     ...(shouldUpdateSymbol && { symbol: live.symbol }),
+    ...(shouldUpdateStrategyId && { strategy_id: live.strategy_id }),
     mint: live.mint,
     token_address: live.mint,
     pool_address: live.pool_address,
