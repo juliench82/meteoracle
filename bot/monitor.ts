@@ -131,23 +131,38 @@ async function runTick(): Promise<{ checked: number; closed: number; claimed: nu
 
 
 
-    // Live-cache rows without an exit strategy
+    // Live-cache rows (adopted positions)
     if (strategyId === 'meteora-live') {
       const posId = String(position.id)
       const now = Date.now()
       const lastAlertAt = _unmanagedLiveAlertAt.get(posId) ?? 0
-      if (now - lastAlertAt > LIVE_CACHE_ALERT_INTERVAL_MS) {
-        _unmanagedLiveAlertAt.set(posId, now)
-        if (!LIVE_CACHE_EXIT_STRATEGY_ID) {
-          console.warn(
-            `[monitor] ${position.symbol} is a live Meteora cache row without an exit policy ` +
-            `(strategy_id=meteora-live). Set MONITOR_LIVE_CACHE_EXIT_STRATEGY_ID to a real strategy id ` +
-            `or close/adopt position ${posId} manually. Current setting: unset`,
-          )
+
+      if (!LIVE_CACHE_EXIT_STRATEGY_ID) {
+        if (now - lastAlertAt > LIVE_CACHE_ALERT_INTERVAL_MS) {
+          _unmanagedLiveAlertAt.set(posId, now)
+          console.warn(`[monitor] unmanaged adopted row skipped (no exit strategy configured) id=${posId} symbol=${position.symbol}`)
+        } else {
+          console.log(`[monitor] ${position.symbol} remains unmanaged live cache row — alert throttled`)
         }
-      } else {
-        console.log(`[monitor] ${position.symbol} remains unmanaged live cache row — alert throttled`)
+        continue
       }
+
+      // LIVE_CACHE_EXIT_STRATEGY_ID is set → attempt to adopt for exits
+      const adoptedStrategy: Strategy | undefined =
+        STRATEGIES.find((s: Strategy) => s.id === LIVE_CACHE_EXIT_STRATEGY_ID) as Strategy | undefined
+
+      if (!adoptedStrategy) {
+        if (now - lastAlertAt > LIVE_CACHE_ALERT_INTERVAL_MS) {
+          _unmanagedLiveAlertAt.set(posId, now)
+          console.warn(`[monitor] configured exit strategy not found id=${LIVE_CACHE_EXIT_STRATEGY_ID} position=${posId}`)
+        }
+        continue
+      }
+
+      console.log(`[monitor] adopted row evaluating under MONITOR_LIVE_CACHE_EXIT_STRATEGY_ID=${LIVE_CACHE_EXIT_STRATEGY_ID} id=${posId} symbol=${position.symbol}`)
+      await checkDlmmPosition(position, adoptedStrategy, stats, liveSolPriceUsd).catch(err =>
+        console.error(`[monitor][${position.symbol}][adopted:${adoptedStrategy.id}] tick error:`, err),
+      )
       continue
     }
 
