@@ -79,12 +79,16 @@ async function fetchOpenCachedPositions(): Promise<CachedPosition[]> {
 }
 
 function insertBody(live: LiveMeteoraPosition): Record<string, unknown> {
+  const safeStrategyId = (live.strategy_id && live.strategy_id !== 'meteora-live')
+    ? live.strategy_id
+    : 'meteora-live';
+
   return {
     symbol: live.symbol,
     mint: live.mint,
     token_address: live.mint,
     pool_address: live.pool_address,
-    strategy_id: live.strategy_id,
+    strategy_id: safeStrategyId,
     entry_price: 0,
     entry_price_sol: 0,
     entry_price_usd: 0,
@@ -106,12 +110,13 @@ function insertBody(live: LiveMeteoraPosition): Record<string, unknown> {
       detectedBy: 'wallet-position-sync',
       needs_strategy_review: true,
     },
-  }
+  };
 }
 
 function shouldRefreshSymbol(existing: CachedPosition): boolean {
-  const symbol = String(existing.symbol ?? '')
-  return !symbol || symbol === 'SOL' || /^(LIVE|DAMM|ORPHAN)-/.test(symbol) || existing.strategy_id === 'meteora-live' || existing.strategy_id === 'damm-live'
+  const symbol = String(existing.symbol ?? '');
+  if (symbol && symbol !== 'LIVE' && !/^(LIVE|DAMM|ORPHAN)-/.test(symbol)) return false;
+  return !symbol || symbol === 'SOL' || /^(LIVE|DAMM|ORPHAN)-/.test(symbol) || existing.strategy_id === 'meteora-live' || existing.strategy_id === 'damm-live';
 }
 
 function closedRecently(existing: CachedPosition): boolean {
@@ -125,11 +130,21 @@ function shouldPreserveLocalStatus(existing: CachedPosition): boolean {
 }
 
 function updateBody(live: LiveMeteoraPosition, existing: CachedPosition): Record<string, unknown> {
+  const isProtectedStrategy = existing.strategy_id &&
+    existing.strategy_id !== 'meteora-live' &&
+    existing.strategy_id !== 'damm-live';
+
+  const hasValidSymbol = existing.symbol && existing.symbol !== 'LIVE';
+  const shouldUpdateSymbol = !isProtectedStrategy || !hasValidSymbol;
+
+  if (isProtectedStrategy && hasValidSymbol && existing.symbol !== live.symbol) {
+    console.log(`[position-sync] refusing to overwrite managed symbol id=${existing.id} pubkey=${existing.position_pubkey} old=${existing.symbol} new=${live.symbol}`);
+  }
   const preserveLocalStatus = shouldPreserveLocalStatus(existing)
   const reviveClosedLive = existing.status === 'closed' && !preserveLocalStatus
 
   return {
-    ...(shouldRefreshSymbol(existing) && { symbol: live.symbol }),
+    ...(shouldUpdateSymbol && { symbol: live.symbol }),
     mint: live.mint,
     token_address: live.mint,
     pool_address: live.pool_address,
