@@ -1181,6 +1181,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         openedMintsThisTick.add(tokenAddress)
 
         console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId}), triggering Moonboy companion buy (if eligible)`)
+        // Moonboy is only triggered from the successful scanner open-position flow.
+        // Adopted meteora-live rows discovered later by wallet sync intentionally skip auto-Moonboy.
         void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
 
         await sendAlert({
