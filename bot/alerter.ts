@@ -23,6 +23,15 @@ type AlertPayload =
       mint?: string
     }
   | {
+      type: 'position_adopted'
+      symbol: string
+      positionPubkey: string
+      solDeposited: number
+      poolAddress?: string
+      mint?: string
+      positionValueUsd?: number
+    }
+  | {
       type: 'position_closed'
       symbol: string
       strategy: string
@@ -137,6 +146,23 @@ function formatMessage(payload: AlertPayload): string {
         `🧠 Strategy: ${payload.strategy}`,
         `📈 ${dexUrl}`,
       ].join('\n')
+    }
+
+    case 'position_adopted': {
+      const dexUrl = payload.poolAddress || payload.mint
+        ? `https://dexscreener.com/solana/${payload.poolAddress || payload.mint}`
+        : null
+      const valuePart = payload.positionValueUsd != null && payload.positionValueUsd > 0
+        ? `\n💵 Est. Value: $${payload.positionValueUsd.toFixed(2)}`
+        : ''
+      return [
+        `⚠️ *Adopted Position* ${payload.symbol}`,
+        `💰 Deposited: ${payload.solDeposited.toFixed(4)} SOL${valuePart}`,
+        `🔑 Pubkey: \`${payload.positionPubkey.slice(0, 12)}…\``,
+        `🧠 Strategy: evil-panda (adopted — no bot entry)`,
+        dexUrl ? `📈 ${dexUrl}` : null,
+        `_Position discovered on-chain — exit rules now active_`,
+      ].filter(Boolean).join('\n')
     }
 
     case 'position_closed': {
