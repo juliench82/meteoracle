@@ -12,16 +12,20 @@ const SWAP_RETRY_DELAY_MS = 3_000
 // Slippage ladder for swapTokenToSol: tries each tier in order until one lands.
 // Env SWAP_SLIPPAGE_BPS overrides the starting tier (not the full ladder).
 const SLIPPAGE_LADDER_BPS = [100, 300, 500, 1000, 2000, 5000]
+const MAX_SLIPPAGE_BPS = 2000; // Hard roof for slippage (reasonable max per user preference)
 
 function baseSlippageBps(): number {
   return parseInt(process.env.SWAP_SLIPPAGE_BPS ?? '100')
 }
 
-// Returns the ladder starting from the configured base slippage.
+// Returns the ladder starting from the configured base slippage, capped at MAX_SLIPPAGE_BPS.
 function slippageLadder(): number[] {
   const base = baseSlippageBps()
   const idx = SLIPPAGE_LADDER_BPS.findIndex(b => b >= base)
-  return idx === -1 ? [base] : SLIPPAGE_LADDER_BPS.slice(idx)
+  let ladder = idx === -1 ? [base] : SLIPPAGE_LADDER_BPS.slice(idx)
+  ladder = ladder.filter(bps => bps <= MAX_SLIPPAGE_BPS)
+  if (ladder.length === 0) ladder = [MAX_SLIPPAGE_BPS]
+  return ladder
 }
 
 async function getTokenBalance(connection: Connection, mint: string, owner: PublicKey): Promise<bigint> {
@@ -329,33 +333,50 @@ export async function buyTokenWithSol(
 
   console.log(`${label} [swap] buying ~$${usdAmount} (${solAmount.toFixed(5)} SOL) of ${tokenMint.slice(0, 8)}…`)
 
-  const quoteUrl =
-    `${JUPITER_QUOTE_API}/quote?inputMint=${NATIVE_MINT}&outputMint=${tokenMint}` +
-    `&amount=${lamports.toString()}&slippageBps=${baseSlippageBps()}&onlyDirectRoutes=false`
-  const quoteRes = await fetchWithRetry(quoteUrl, {})
-  if (!quoteRes.ok) throw new Error(`Jupiter buy quote failed: ${quoteRes.status} ${await quoteRes.text()}`)
-  const quote = await quoteRes.json()
+  const ladder = slippageLadder()
+  let lastError: unknown
 
-  const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      quoteResponse: quote,
-      userPublicKey: wallet.publicKey.toBase58(),
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: 'auto',
-    }),
-  })
-  if (!swapRes.ok) throw new Error(`Jupiter buy swap tx failed: ${swapRes.status} ${await swapRes.text()}`)
-  const { swapTransaction } = await swapRes.json()
+  for (const slippage of ladder) {
+    try {
+      console.log(`${label} [swap] trying buy with slippage ${slippage}bps…`)
 
-  const txBuf = Buffer.from(swapTransaction, 'base64')
-  const tx = VersionedTransaction.deserialize(txBuf)
-  tx.sign([wallet])
+      const quoteUrl =
+        `${JUPITER_QUOTE_API}/quote?inputMint=${NATIVE_MINT}&outputMint=${tokenMint}` +
+        `&amount=${lamports.toString()}&slippageBps=${slippage}&onlyDirectRoutes=false`
 
-  const sig = await sendAndConfirmVersioned(tx, `${label}[buy]`)
-  const tokenAmountOut = BigInt(quote.outAmount ?? '0')
-  console.log(`${label} [swap] buy confirmed ✔ sig: ${sig} | outAmount: ${tokenAmountOut.toString()}`)
-  return { sig, solSpent: Number(lamports) / 1e9, tokenAmountOut }
+      const quoteRes = await fetchWithRetry(quoteUrl, {})
+      if (!quoteRes.ok) throw new Error(`Jupiter buy quote failed: ${quoteRes.status} ${await quoteRes.text()}`)
+      const quote = await quoteRes.json()
+
+      const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          quoteResponse: quote,
+          userPublicKey: wallet.publicKey.toBase58(),
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: 'auto',
+        }),
+      })
+      if (!swapRes.ok) throw new Error(`Jupiter buy swap tx failed: ${swapRes.status} ${await swapRes.text()}`)
+      const { swapTransaction } = await swapRes.json()
+
+      const txBuf = Buffer.from(swapTransaction, 'base64')
+      const tx = VersionedTransaction.deserialize(txBuf)
+      tx.sign([wallet])
+
+      const sig = await sendAndConfirmVersioned(tx, `${label}[buy]`)
+      const tokenAmountOut = BigInt(quote.outAmount ?? '0')
+      console.log(`${label} [swap] buy confirmed ✔ with ${slippage}bps | sig: ${sig} | outAmount: ${tokenAmountOut.toString()}`)
+      return { sig, solSpent: Number(lamports) / 1e9, tokenAmountOut }
+
+    } catch (err) {
+      lastError = err
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`${label} [swap] buy failed at ${slippage}bps: ${msg}`)
+    }
+  }
+
+  throw lastError || new Error('Moonboy buy failed after all slippage levels')
 }

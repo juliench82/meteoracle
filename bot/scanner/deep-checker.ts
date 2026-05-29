@@ -720,18 +720,28 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       continue
     }
 
-    // Always check Supabase for existing simulation or live rows for this mint.
-    // Critical during long dry-run observation: dry-run fake rows live only in the DB
-    // (never appear in the on-chain livePositions snapshot), so the previous "only when !liveFetchOk"
-    // guard was insufficient and allowed repeated attempts → duplicate key violations.
+    // Strong per-mint dedup for LP positions.
+    // 1. Skip if there is currently an open/active position for this mint.
+    // 2. Skip if there was a recent position for this mint (last 6 hours) that was closed with a "bad" reason
+    //    (e.g. pnl_unavailable). This prevents rapid re-opening the same mint after a failed/bad close attempt.
+    const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     const posResult = await withTimeout(
-      supabase.from('lp_positions').select('id').eq('mint', tokenAddress)
-        .in('status', OPEN_LP_STATUSES).limit(1),
+      supabase.from('lp_positions')
+        .select('id, status, close_reason, closed_at')
+        .eq('mint', tokenAddress)
+        .or(`status.in.(${OPEN_LP_STATUSES.join(',')}),and(status.eq.closed,closed_at.gte.${recentClosedCutoff})`)
+        .limit(1),
       SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
-    )
+    );
+
     if (posResult?.data && posResult.data.length > 0) {
-      console.log(`[scanner] ${symbol} — skip: existing LP position/simulation row for mint (id=${posResult.data[0].id})`)
-      continue
+      const existing = posResult.data[0];
+      if (OPEN_LP_STATUSES.includes(existing.status)) {
+        console.log(`[scanner] ${symbol} — skip: existing open LP position for mint (id=${existing.id})`);
+      } else {
+        console.log(`[scanner] ${symbol} — skip: recent bad close for this mint (id=${existing.id}, reason=${existing.close_reason})`);
+      }
+      continue;
     }
 
     if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {

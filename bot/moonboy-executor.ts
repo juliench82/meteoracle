@@ -102,11 +102,19 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
 
   // ── DexScreener age gate ──────────────────────────────────────────────────
   // Token age is measured from pairCreatedAt in DexScreener data, not Meteora.
-  // If pairCreatedAt is unavailable we skip to avoid opening on stale tokens.
+  // We have both a max age (don't buy stale) and a min age for Moonboy buys (avoid the absolute worst simulation failures on ultra-fresh launches).
   const dexData = await getDexScreenerData(metrics.address)
   const nowMs = Date.now()
   if (dexData.pairCreatedAt !== null) {
     const tokenAgeMinutes = (nowMs - dexData.pairCreatedAt) / 60_000
+
+    // Skip ultra-fresh tokens for Moonboy — sells are extremely unreliable in the first ~45 minutes.
+    const MOONBOY_MIN_AGE_MINUTES = 45
+    if (tokenAgeMinutes < MOONBOY_MIN_AGE_MINUTES) {
+      console.log(`${label} skipped — too fresh for reliable Moonboy sell (${tokenAgeMinutes.toFixed(1)}m < ${MOONBOY_MIN_AGE_MINUTES}m)`)
+      return null
+    }
+
     if (tokenAgeMinutes > MOONBOY_MAX_TOKEN_AGE_MINUTES) {
       console.log(
         `${label} skipped — DexScreener age ${tokenAgeMinutes.toFixed(1)}m > ${MOONBOY_MAX_TOKEN_AGE_MINUTES}m limit`
@@ -126,15 +134,18 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     return null
   }
 
-  // Dedup: skip if already open for this mint
-  const { data: existing } = await supabase
+  // Dedup: skip if there is already an open Moonboy or one that was opened/closed very recently for this mint.
+  // This prevents multiple small buys for the exact same token in a short window (which happened with ALIENS).
+  const recentCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // last 2 hours
+  const { data: recent } = await supabase
     .from('moonboy_positions')
     .select('id')
     .eq('mint', metrics.address)
-    .eq('status', 'open')
-    .limit(1)
-  if (existing && existing.length > 0) {
-    console.log(`${label} already have open position for this mint — skipping`)
+    .or(`status.eq.open,opened_at.gte.${recentCutoff}`)
+    .limit(1);
+
+  if (recent && recent.length > 0) {
+    console.log(`${label} already have recent Moonboy activity for this mint — skipping duplicate buy`)
     return null
   }
 
