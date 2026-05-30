@@ -2,8 +2,8 @@ module.exports = {
   apps: [
     {
       name: 'meteoracle-worker',
-      script: 'tsx',
-      args: '--tsconfig tsconfig.worker.json worker.ts',
+      script: 'node',
+      args: '-r tsconfig-paths/register dist/worker.js',
       cwd: './',
       env: {
         NODE_ENV: 'production'
@@ -15,8 +15,8 @@ module.exports = {
     },
     {
       name: 'meteoracle-telegram',
-      script: 'tsx',
-      args: 'bot/telegram-bot.ts',
+      script: 'node',
+      args: '-r tsconfig-paths/register dist/bot/telegram-bot.js',
       cwd: './',
       env: {
         NODE_ENV: 'production'

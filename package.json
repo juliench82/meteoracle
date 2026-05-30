@@ -4,9 +4,12 @@
   "description": "Minimal Meteora DLMM LP bot — evil-panda on fresh shitcoins + simple Moonboy (max 3, 10$, 2x)",
   "private": true,
   "scripts": {
+    "build": "tsc --project tsconfig.worker.json",
     "worker": "tsx --tsconfig tsconfig.worker.json worker.ts",
     "worker:build": "tsc --project tsconfig.worker.json",
     "worker:start": "node -r tsconfig-paths/register dist/worker.js",
+    "start:worker": "node -r tsconfig-paths/register dist/worker.js",
+    "start:telegram": "node -r tsconfig-paths/register dist/bot/telegram-bot.js",
     "type-check": "tsc --noEmit",
     "postinstall": "node scripts/patch-dlmm-esm.js"
   },
