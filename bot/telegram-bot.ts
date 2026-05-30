@@ -44,27 +44,8 @@ async function sendMessage(text: string, chatId = CHAT_ID) {
     })
   } catch (e) {
     console.error('[telegram] sendMessage failed:', e)
-  if (text === '/help' || text === '/start') {
-    const help = [
-      '*Meteoracle Commands*' ,
-      '' ,
-      '/status — state + open positions count' ,
-      '/positions — full list (LP + Moonboy with 2x targets)' ,
-      '/config — key runtime settings' ,
-      '/tick — force scanner + monitor cycle' ,
-      '/dry — safe mode' ,
-      '/live — real money (requires /live-confirm)' ,
-      '/pause — pause new actions (soft)' ,
-      '/resume — resume from pause' ,
-      '/stop — hard stop (PM2)' ,
-      '/restart — restart processes' ,
-      '/close <id> — close LP or Moonboy' ,
-      '' ,
-      'All data from local state files.',
-    ].join('\n');
-    await sendMessage(help, chatId);
-    return;
-  }  if (text === '/help' || text === '/start') {
+  }
+}
     const help = [
       '*Meteoracle Commands*',
       '',

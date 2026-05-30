@@ -318,6 +318,7 @@ function getScannerAdjustedScore(
   return total
 }
 
+function meetsFilters(metrics: TokenMetrics, f: any): boolean {
   return (
     metrics.mcUsd >= f.minMcUsd &&
     metrics.mcUsd <= f.maxMcUsd &&
@@ -546,11 +547,11 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     `${pools.length} lane-eligible`,
   )
   console.log(
-    `[scanner] early age gate — snipe(<=${FRESH_SNIPE_MAX_AGE_MINUTES}min): ${earlyAgePools.length} + ` +
+    `[scanner] early age gate — snipe(<=${FRESH_SNIPE_MAX_AGE_MINUTES}min): ${earlyAgePools.length}`
   )
 
   console.log(
-    `[scanner] lanes — fresh=${freshPools.length}/${pools.length} <=${FRESH_MAX_AGE_MINUTES}min, ` +
+    `[scanner] lanes — fresh=${freshPools.length}/${pools.length} <=${FRESH_MAX_AGE_MINUTES}min`
   )
   console.log('[scanner] *** HEAVY OBSERVATION LOGGING ENABLED for dry-run period ***')
 
@@ -595,9 +596,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   } else {
     openCount = limitState.effectiveOpenCount
     if (!limitState.liveFetchOk) {
-      console.warn(
-        `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}) — ` +
-      )
+      console.warn(`[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk})`)
     }
     availableOpenSlots = Math.max(0, MAX_CONCURRENT_MARKET_LP_POSITIONS - openCount)
     if (availableOpenSlots === 0) {
@@ -621,7 +620,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   let lowBinQualitySelections = 0   // WS3 diagnostic: how many times we picked a pool with weak bin compatibility
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
   const openedMintsThisTick = new Set<string>()
-    }
+
+  // (daily loss limit check stubbed during refactor cleanup)
+  function canOpenNewPositions(): boolean {
+    if (isDailyLossLimitHit()) {
       console.warn('[scanner] daily loss limit hit — no new positions')
       return false
     }
@@ -893,23 +895,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       binStep,
       launchpadSource,
     }
-
-
-      address:        metrics.address,
-      mcUsd:          metrics.mcUsd,
-      volume24h:      metrics.volume24h,
-      volume1h:       vol1h,
-      volume5m:       vol5m,
-      liquidityUsd:   metrics.liquidityUsd,
-      ageHours:       metrics.ageHours,
-      topHolderPct:   metrics.topHolderPct,
-      holderCount:    metrics.holderCount,
-      rugcheckScore:  metrics.rugcheckScore,
-      quoteTokenMint: metrics.quoteTokenMint,
-      feeTvl1hPct:    metrics.feeTvl1hPct,
-      feeTvl5mPct:    metrics.feeTvl5mPct,
-      feeTvl24hPct:   metrics.feeTvl24hPct,
-    })
 
     const strategy =
       getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
