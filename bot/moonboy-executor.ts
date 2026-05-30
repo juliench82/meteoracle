@@ -81,12 +81,6 @@ async function getTokenPriceUsd(mint: string): Promise<number | null> {
   return (await getDexScreenerData(mint)).priceUsd
 }
 
-  const { count } = await supabase
-    .select('id', { count: 'exact', head: true })
-    .eq('status', 'open')
-  return count ?? 0
-}
-
 export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: number): Promise<string | null> {
   const label = `[moonboy][${metrics.symbol}]`
 

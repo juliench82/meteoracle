@@ -333,17 +333,8 @@ function persistDbPoolCache(pools: MeteoraPool[]): void {
   const chunks: typeof rows[] = []
   for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK))
 
-  Promise.allSettled(
-    chunks.map((chunk) =>
-        .from('scanner_pool_cache')
-        .upsert(chunk, { onConflict: 'pool_address', ignoreDuplicates: false }),
-    ),
-  ).then((results) => {
-    const failed = results.filter((r) => r.status === 'rejected')
-    if (failed.length > 0) {
-      console.warn(`[scanner] scanner_pool_cache upsert: ${failed.length}/${chunks.length} chunks failed`)
-    }
-  }).catch(() => { /* never throws */ })
+  // Supabase cache upsert removed during refactor — local state only for now
+  // Promise.allSettled(...) stubbed
 }
 
 /**

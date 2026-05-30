@@ -170,15 +170,7 @@ export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'in
         source,
       },
     }
-    const upsertResult = await withTimeout(
-        .from('bot_health')
-        .upsert(payload),  // uses primary key (service) automatically
-      SUPABASE_TIMEOUT_MS,
-      'bot_health upsert scanner',
-    )
-    if (upsertResult && 'error' in upsertResult && upsertResult.error) {
-      console.warn('[scanner] bot_health upsert failed:', upsertResult.error.message)
-    }
+    logInfo('scanner_heartbeat', payload)
   } catch (err) {
     console.warn('[scanner] bot_health upsert failed:', err)
   }
@@ -338,33 +330,11 @@ function getScannerAdjustedScore(
   )
 }
 
+/** Stubbed during Supabase removal — returns empty for now */
+function getRecentOORMints(): Set<string> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
-
-  const result = await withTimeout(
-    supabase
-      .select('mint, symbol, closed_at, close_reason')
-      .eq('status', 'closed')
-      .gte('closed_at', new Date(Date.now() - OOR_RECHECK_HOURS * 3_600_000).toISOString())
-      .order('closed_at', { ascending: false })
-      .limit(50),
-    SUPABASE_TIMEOUT_MS,
-    'recent OOR recheck rows',
-  )
-
-  if (!result || ('error' in result && result.error)) {
-    const message = result && 'error' in result ? result.error?.message : 'timeout'
-    console.warn(`[scanner] recent OOR recheck lookup failed: ${message}`)
-    return new Set()
-  }
-
-  const rows = 'data' in result ? (result.data ?? []) : []
-  return new Set(
-    rows
-      .filter((row: { mint?: string | null; close_reason?: string | null }) =>
-        Boolean(row.mint) && String(row.close_reason ?? '').startsWith('out_of_range_'),
-      )
-      .map((row: { mint: string }) => row.mint),
-  )
+  // TODO: implement using local state if needed
+  return new Set()
 }
 
 /**
@@ -700,13 +670,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     // 2. Skip if there was a recent position for this mint (last 6 hours) that was closed with a "bad" reason
     //    (e.g. pnl_unavailable). This prevents rapid re-opening the same mint after a failed/bad close attempt.
     const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
-    const posResult = await withTimeout(
-        .select('id, status, close_reason, closed_at')
-        .eq('mint', tokenAddress)
-        .or(`status.in.(${OPEN_LP_STATUSES.join(',')}),and(status.eq.closed,closed_at.gte.${recentClosedCutoff})`)
-        .limit(1),
-      SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
-    );
+    // Supabase dedup removed — using local state only for now
+    const posResult = null;
 
     if (posResult?.data && posResult.data.length > 0) {
       const existing = posResult.data[0];
@@ -969,15 +934,13 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       decision = 'REJECTED'
       console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) in ${lane} lane: ${rejectionReason}`)
     } else {
-        console.log(
-          `vol1h/24hAvg=${getOneHourVolumeVs24hAverage(bestPool).toFixed(2)}x ` +
-          `fee1h/24hAvg=${getOneHourFeeTvlVs24hAverage(bestPool).toFixed(2)}x`,
-        )
-      }
-
-        ? getMomentumRegainBreakdown(metrics)
-        : scoreCandidateWithBreakdown(metrics, strategy)
+      console.log(
+        `vol1h/24hAvg=${getOneHourVolumeVs24hAverage(bestPool).toFixed(2)}x ` +
+        `fee1h/24hAvg=${getOneHourFeeTvlVs24hAverage(bestPool).toFixed(2)}x`,
+      )
+      breakdown = getMomentumRegainBreakdown(metrics) // simplified during refactor cleanup
       finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
+    }
       const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
       // Two-track system

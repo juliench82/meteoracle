@@ -81,9 +81,6 @@ async function sendMessage(text: string, chatId = CHAT_ID) {
     ].join('\n')
     await sendMessage(help, chatId)
     return
-    ].join('\n');
-    await sendMessage(help, chatId);
-    return;
 
   if (text === '/pause') {
     await setBotState({ paused: true });
@@ -209,9 +206,6 @@ async function sendMessage(text: string, chatId = CHAT_ID) {
       return
     }
     await sendMessage(`No position found with: ${id}`, chatId)
-    return
-  }      await sendMessage(`Error closing ${id}.`, chatId)
-    }
     return
   }
 

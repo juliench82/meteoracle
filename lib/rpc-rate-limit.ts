@@ -156,24 +156,9 @@ export function isRpcRateLimitError(error: unknown): boolean {
 }
 
 export async function refreshRpcProviderCooldown(provider: RpcProvider): Promise<void> {
-  try {
-      .select('cooldown_until')
-      .eq('provider', provider)
-      .maybeSingle()
-
-    if (error) throw error
-
-    const cooldownUntil = typeof data?.cooldown_until === 'string'
-      ? Date.parse(data.cooldown_until)
-      : 0
-    cooldowns[provider].untilMs = Number.isFinite(cooldownUntil) ? cooldownUntil : 0
-    cooldowns[provider].warnedReadFailure = false
-  } catch (err) {
-    if (!cooldowns[provider].warnedReadFailure) {
-      cooldowns[provider].warnedReadFailure = true
-      console.warn(`[rpc-rate-limit] ${provider} cooldown read failed: ${summarizeError(err)}`)
-    }
-  }
+  // Supabase persistence removed — using in-memory only for now
+  // (cooldowns are kept in the module-level `cooldowns` map)
+  cooldowns[provider].warnedReadFailure = false
 }
 
 export async function recordRpcProvider429(provider: RpcProvider, error?: unknown): Promise<void> {
@@ -186,23 +171,9 @@ export async function recordRpcProvider429(provider: RpcProvider, error?: unknow
   if (now - state.lastWriteAtMs < minWriteIntervalMs) return
   state.lastWriteAtMs = now
 
-  try {
-      .upsert({
-        provider,
-        cooldown_until: new Date(state.untilMs).toISOString(),
-        last_status: 429,
-        last_error: error ? summarizeError(error, 500) : '429 Too Many Requests',
-      }, { onConflict: 'provider' })
-
-    if (dbError) throw dbError
-    state.warnedWriteFailure = false
-    console.warn(`[rpc-rate-limit] ${provider} 429 cooldown until ${new Date(state.untilMs).toISOString()}`)
-  } catch (err) {
-    if (!state.warnedWriteFailure) {
-      state.warnedWriteFailure = true
-      console.warn(`[rpc-rate-limit] ${provider} cooldown write failed: ${summarizeError(err)}`)
-    }
-  }
+  // Supabase write removed during refactor — cooldown is tracked in-memory only
+  state.warnedWriteFailure = false
+  console.warn(`[rpc-rate-limit] ${provider} 429 cooldown until ${new Date(state.untilMs).toISOString()} (in-memory)`)
 }
 
 export async function awaitRpcProviderSlot(provider: RpcProvider, context: string): Promise<void> {
