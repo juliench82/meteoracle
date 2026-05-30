@@ -22,6 +22,7 @@ import {
 } from '@/lib/solana-tx'
 
 import { persistPosition } from './persistence'
+import { logInfo, logError } from '@/lib/log'
 import {
   getDLMM,
   getStrategyType,
@@ -81,10 +82,7 @@ export async function addLiquidityToPosition(
   const dryRun = ENV_DRY_RUN_FORCED || botState.dry_run
 
   if (dryRun) {
-    await supabase.logInfo('legacy_bot_log', {
-      level: 'info', event: 'add_liquidity_dry_run',
-      payload: { positionId, symbol, solAmount, strategy: strategy.id },
-    })
+    logInfo('add_liquidity_dry_run', { positionId, symbol, solAmount, strategy: strategy.id })
     console.log(`${label} dry_run=true — skipping add liquidity tx`)
     return { success: true, dryRun: true, txSignature: 'DRY_RUN', symbol, solAdded: solAmount }
   }
@@ -146,15 +144,10 @@ export async function addLiquidityToPosition(
 
     const sig = await sendLegacyTx(tx, [wallet], label)
 
-    // Update DB with new totals (simplified)
-    const previousSol = Number(position.sol_deposited ?? 0)
-      sol_deposited: Math.round((previousSol + solAmount) * 1e9) / 1e9,
-    }).eq('id', positionId)
+    // TODO: persist updated sol_deposited via local state once the refactor lands
+    // (Supabase path removed)
 
-    await supabase.logInfo('legacy_bot_log', {
-      level: 'info', event: 'add_liquidity_success',
-      payload: { positionId, symbol, solAmount, strategy: strategy.id, txSignature: sig },
-    })
+    logInfo('add_liquidity_success', { positionId, symbol, solAmount, strategy: strategy.id, txSignature: sig })
 
     console.log(`${label} added ${solAmount} SOL to ${symbol} ✔ sig: ${sig}`)
     return { success: true, dryRun: false, txSignature: sig, symbol, solAdded: solAmount }
@@ -162,10 +155,7 @@ export async function addLiquidityToPosition(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} add liquidity failed:`, message)
-    await supabase.logInfo('legacy_bot_log', {
-      level: 'error', event: 'add_liquidity_failed',
-      payload: { positionId, symbol, solAmount, error: message },
-    })
+    logError('add_liquidity_failed', { positionId, symbol, solAmount, error: message })
     return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: message }
   }
 }

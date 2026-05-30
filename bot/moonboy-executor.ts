@@ -7,6 +7,7 @@ import { buyTokenWithSol, swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { TokenMetrics } from '@/lib/types'
 import { moonboyStrategy } from '@/strategies/moonboy'
+import { logError } from '@/lib/log'
 
 const MOONBOY_BUY_USD = parseFloat(process.env.MOONBOY_BUY_USD ?? '10')
 const MOONBOY_MAX_OPEN = parseInt(process.env.MOONBOY_MAX_OPEN ?? '3')
@@ -162,9 +163,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`${label} buy failed:`, msg)
-        level: 'error', event: 'moonboy_buy_failed',
-        payload: { symbol: metrics.symbol, mint: metrics.address, error: msg },
-      })
+      logError('moonboy_buy_failed', { symbol: metrics.symbol, mint: metrics.address, error: msg })
       return null
     }
   } else {
@@ -309,9 +308,7 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error(`${label} moonboy sell failed:`, msg)
-          level: 'error', event: 'moonboy_sell_failed',
-          payload: { id: pos.id, symbol: pos.symbol, mint: pos.mint, reason: closeReason, error: msg },
-        })
+        logError('moonboy_sell_failed', { id: pos.id, symbol: pos.symbol, mint: pos.mint, reason: closeReason, error: msg })
         await sendAlert({
           type: 'error',
           message: `⚠️ Moonboy sell FAILED for ${pos.symbol} (${closeReason})\nMint: \`${pos.mint}\`\nTokens stranded in wallet — manual swap required.\nError: ${msg}`,

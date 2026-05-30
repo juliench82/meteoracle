@@ -532,9 +532,11 @@ export async function openPosition(
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
     }
-    import { logInfo, logError } from '@/lib/log'; logInfo(
-      level: 'error', event: 'open_position_failed',
-      payload: { symbol: metrics.symbol, strategy: strategy.id, error: message, stack: err instanceof Error ? err.stack : undefined },
+    logError('open_position_failed', {
+      symbol: metrics.symbol,
+      strategy: strategy.id,
+      error: message,
+      stack: err instanceof Error ? err.stack : undefined,
     })
     return null
   }
@@ -939,10 +941,11 @@ async function openPositionToken2022(
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
     }
-    import { logInfo, logError } from '@/lib/log'; logInfo(
-      level: 'error',
-      event: 'open_position_token2022_failed',
-      payload: { symbol: metrics.symbol, strategy: strategy.id, error: message, stack: err instanceof Error ? err.stack : undefined },
+    logError('open_position_token2022_failed', {
+      symbol: metrics.symbol,
+      strategy: strategy.id,
+      error: message,
+      stack: err instanceof Error ? err.stack : undefined,
     })
     return null
   }

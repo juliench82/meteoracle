@@ -16,6 +16,7 @@ import {
   Connection,
 } from '@solana/web3.js'
 import { getConnection } from './solana'
+import { logError } from './log'
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 const COMPUTE_BUDGET_SET_UNIT_LIMIT = 2
@@ -70,10 +71,7 @@ export async function simulateAndCheck(tx: Transaction, label: string): Promise<
 
       // Persist to bot_logs so we can actually debug these failures later
       try {
-          level: 'error',
-          event: 'tx_simulation_failed',
-          payload: errorPayload,
-        })
+        logError('tx_simulation_failed', errorPayload)
       } catch (logErr) {
         console.error(`[simulateAndCheck] failed to write simulation failure to bot_logs`, logErr)
       }

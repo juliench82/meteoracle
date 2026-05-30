@@ -24,6 +24,7 @@ import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/
 import { getHeliusRpcEndpoint } from '@/lib/solana'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
+import { logInfo, logError } from '@/lib/log'
 import {
   SCAN_INTERVAL_MS,
   SCANNER_TICK_TIMEOUT_MS,
@@ -153,19 +154,9 @@ export async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label:
 
 export async function logScannerTick(result: ScannerResult, durationMs: number, source = 'scanner'): Promise<void> {
   try {
-    const insertResult = await withTimeout(
-        level: result.error ? 'error' : 'info',
-        event: result.error ? 'scanner_tick_failed' : 'scanner_tick',
-        payload: { ...result, durationMs, source },
-      }),
-      SUPABASE_TIMEOUT_MS,
-      'bot_logs insert scanner_tick',
-    )
-    if (insertResult && 'error' in insertResult && insertResult.error) {
-      console.warn('[scanner] bot_logs insert failed:', insertResult.error.message)
-    }
+    logInfo(result.error ? 'scanner_tick_failed' : 'scanner_tick', { ...result, durationMs, source })
   } catch (err) {
-    console.warn('[scanner] bot_logs insert failed:', err)
+    console.warn('[scanner] logScannerTick failed:', err)
   }
 }
 
