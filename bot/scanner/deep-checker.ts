@@ -1154,7 +1154,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         )
       }
     }
-  }
 
   if (USE_HELIUS) {
     const { getHolderCacheSize } = await import('@/lib/helius')
