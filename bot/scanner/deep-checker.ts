@@ -1087,6 +1087,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         continue
       }
 
+      if (!canOpenNewPositions()) {
         openSkippedCount++
         console.log(`[scanner] ${symbol} qualifies but open skipped: daily loss circuit breaker`)
         continue
