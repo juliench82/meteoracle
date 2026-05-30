@@ -3,7 +3,6 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
 import { getConnection, getWallet } from '@/lib/solana'
-import { createServerClient } from '@/lib/supabase'
 import { buyTokenWithSol, swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { TokenMetrics } from '@/lib/types'
@@ -81,9 +80,7 @@ async function getTokenPriceUsd(mint: string): Promise<number | null> {
   return (await getDexScreenerData(mint)).priceUsd
 }
 
-async function countOpenMoonboys(supabase: ReturnType<typeof createServerClient>): Promise<number> {
   const { count } = await supabase
-    .from('moonboy_positions')
     .select('id', { count: 'exact', head: true })
     .eq('status', 'open')
   return count ?? 0
@@ -91,7 +88,6 @@ async function countOpenMoonboys(supabase: ReturnType<typeof createServerClient>
 
 export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: number): Promise<string | null> {
   const label = `[moonboy][${metrics.symbol}]`
-  const supabase = createServerClient()
 
   console.log(`${label} evaluating companion spot-buy ($${MOONBOY_BUY_USD} target)`)
 
@@ -138,7 +134,6 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   // This prevents multiple small buys for the exact same token in a short window (which happened with ALIENS).
   const recentCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // last 2 hours
   const { data: recent } = await supabase
-    .from('moonboy_positions')
     .select('id')
     .eq('mint', metrics.address)
     .or(`status.eq.open,opened_at.gte.${recentCutoff}`)
@@ -167,7 +162,6 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`${label} buy failed:`, msg)
-      await supabase.from('bot_logs').insert({
         level: 'error', event: 'moonboy_buy_failed',
         payload: { symbol: metrics.symbol, mint: metrics.address, error: msg },
       })
@@ -183,7 +177,6 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     : null
 
   const { data, error } = await supabase
-    .from('moonboy_positions')
     .insert({
       mint:            metrics.address,
       symbol:          metrics.symbol,
@@ -232,11 +225,9 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
 }
 
 export async function checkMoonboyPositions(): Promise<{ checked: number; closed: number }> {
-  const supabase = createServerClient()
   const stats = { checked: 0, closed: 0 }
 
   const { data: positions, error } = await supabase
-    .from('moonboy_positions')
     .select('*')
     .eq('status', 'open')
 
@@ -294,7 +285,6 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
     // Update current price in DB (fire-and-forget, non-fatal)
     void Promise.resolve(
       supabase
-        .from('moonboy_positions')
         .update({ current_price_usd: currentPriceUsd, pnl_pct: Math.round(pnlPct * 100) / 100 })
         .eq('id', pos.id),
     ).catch(() => {})
@@ -319,7 +309,6 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error(`${label} moonboy sell failed:`, msg)
-        await supabase.from('bot_logs').insert({
           level: 'error', event: 'moonboy_sell_failed',
           payload: { id: pos.id, symbol: pos.symbol, mint: pos.mint, reason: closeReason, error: msg },
         })
@@ -328,14 +317,12 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
           message: `⚠️ Moonboy sell FAILED for ${pos.symbol} (${closeReason})\nMint: \`${pos.mint}\`\nTokens stranded in wallet — manual swap required.\nError: ${msg}`,
         }).catch(() => {})
         // Mark as sell_failed so we don't retry forever
-        await supabase.from('moonboy_positions').update({ status: 'sell_failed', close_reason: closeReason }).eq('id', pos.id)
         stats.closed++
         continue
       }
     }
 
     await supabase
-      .from('moonboy_positions')
       .update({
         status: 'closed',
         closed_at: new Date().toISOString(),
@@ -359,4 +346,53 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
   }
 
   return stats
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flexible Moonboy exit logic (as requested)
+// Sell conditions:
+// - Reach 100% of 2x → sell anyway
+// - Reach 80% of 2x + 15 minutes without a new high → sell
+// - From 80% of 2x: trailing stop of 20% from the peak reached
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MOONBOY_PROFIT_THRESHOLD_PCT = 80; // % of the way to 2x to start special rules
+const MOONBOY_NO_HIGH_MINUTES = 15;
+const MOONBOY_TRAILING_DROP_PCT = 20;
+
+export function shouldSellMoonboy(
+  entryPriceUsd: number,
+  currentPriceUsd: number,
+  highestPriceSinceThreshold: number,
+  minutesSinceLastHigh: number
+): { shouldSell: boolean; reason: string } {
+  if (!entryPriceUsd || entryPriceUsd <= 0 || !currentPriceUsd) {
+    return { shouldSell: false, reason: '' };
+  }
+
+  const targetPrice = entryPriceUsd * 2;
+  const profitPctOfTarget = ((currentPriceUsd - entryPriceUsd) / (targetPrice - entryPriceUsd)) * 100;
+
+  // Always sell at 100% of 2x
+  if (currentPriceUsd >= targetPrice) {
+    return { shouldSell: true, reason: 'take_profit_2x' };
+  }
+
+  // Once we crossed the threshold (80%)
+  if (profitPctOfTarget >= MOONBOY_PROFIT_THRESHOLD_PCT) {
+    // Time-based: 15min without new high after 80%
+    if (minutesSinceLastHigh >= MOONBOY_NO_HIGH_MINUTES) {
+      return { shouldSell: true, reason: `take_profit_80pct_no_high_${MOONBOY_NO_HIGH_MINUTES}min` };
+    }
+
+    // Trailing stop: 20% drop from the peak reached after 80%
+    if (highestPriceSinceThreshold > 0) {
+      const dropFromPeak = ((highestPriceSinceThreshold - currentPriceUsd) / highestPriceSinceThreshold) * 100;
+      if (dropFromPeak >= MOONBOY_TRAILING_DROP_PCT) {
+        return { shouldSell: true, reason: `trailing_20pct_from_peak` };
+      }
+    }
+  }
+
+  return { shouldSell: false, reason: '' };
 }

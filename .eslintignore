@@ -1,8 +1,0 @@
-# Ignore all development and test scripts
-# These are excluded from TypeScript compilation anyway (see tsconfig.json)
-# and often contain loose/experimental code that would fail linting.
-scripts/
-
-# Also ignore logs and common noise
-logs/
-*.log

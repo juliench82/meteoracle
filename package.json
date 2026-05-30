@@ -1,20 +1,13 @@
 {
   "name": "meteoracle",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "description": "Minimal Meteora DLMM LP bot — evil-panda on fresh shitcoins + simple Moonboy (max 3, 10$, 2x)",
   "private": true,
   "scripts": {
-    "predev": "node scripts/assert-env-local-only.cjs",
-    "dev": "next dev",
-    "prebuild": "node scripts/assert-env-local-only.cjs",
-    "build": "next build",
-    "prestart": "node scripts/assert-env-local-only.cjs",
-    "start": "next start -p 3000",
-    "lint": "next lint",
-    "type-check": "tsc --noEmit",
-    "dbc-graduation-watcher": "tsx bot/dbc-graduation-watcher.ts",
     "worker": "tsx --tsconfig tsconfig.worker.json worker.ts",
     "worker:build": "tsc --project tsconfig.worker.json",
     "worker:start": "node -r tsconfig-paths/register dist/worker.js",
+    "type-check": "tsc --noEmit",
     "postinstall": "node scripts/patch-dlmm-esm.js"
   },
   "overrides": {
@@ -29,35 +22,19 @@
     }
   },
   "dependencies": {
-    "@meteora-ag/cp-amm-sdk": "^1.0.0",
     "@meteora-ag/dlmm": "^1.9.10",
-    "@meteora-ag/dynamic-bonding-curve-sdk": "^1.5.7",
     "@meteora-ag/zap-sdk": "^1.3.1",
     "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.8",
-    "@supabase/supabase-js": "^2.101.1",
-    "@vercel/kv": "^3.0.0",
     "axios": "^1.7.9",
     "bn.js": "^5.2.1",
     "bs58": "^5.0.0",
     "dotenv": "^17.3.1",
-    "lucide-react": "^0.468.0",
-    "next": "^14.2.35",
-    "react": "^18",
-    "react-dom": "^18",
-    "recharts": "^3.8.1",
     "tsconfig-paths": "^4.2.0"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.6",
     "@types/node": "^20",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "autoprefixer": "^10.4.20",
-    "eslint": "^8",
-    "eslint-config-next": "^14.2.35",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.17",
     "tsx": "^4.19.4",
     "typescript": "^5"
   }

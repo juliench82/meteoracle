@@ -1,5 +1,4 @@
 import axios, { type AxiosRequestConfig, type AxiosResponse } from 'axios'
-import { createServerClient } from '@/lib/supabase'
 import { summarizeError } from '@/lib/logging'
 
 export type RpcProvider = 'helius'
@@ -158,8 +157,6 @@ export function isRpcRateLimitError(error: unknown): boolean {
 
 export async function refreshRpcProviderCooldown(provider: RpcProvider): Promise<void> {
   try {
-    const { data, error } = await createServerClient()
-      .from('rpc_provider_cooldowns')
       .select('cooldown_until')
       .eq('provider', provider)
       .maybeSingle()
@@ -190,8 +187,6 @@ export async function recordRpcProvider429(provider: RpcProvider, error?: unknow
   state.lastWriteAtMs = now
 
   try {
-    const { error: dbError } = await createServerClient()
-      .from('rpc_provider_cooldowns')
       .upsert({
         provider,
         cooldown_until: new Date(state.untilMs).toISOString(),

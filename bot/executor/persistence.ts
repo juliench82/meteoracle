@@ -5,7 +5,6 @@
  * This keeps the main executor file smaller and more focused.
  */
 
-import { createServerClient } from '@/lib/supabase'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
@@ -24,7 +23,6 @@ export async function persistPosition(
   dryRun: boolean = ENV_DRY_RUN_FORCED,
   needsLiquidityRetry: boolean = false
 ): Promise<string> {
-  const supabase = createServerClient()
 
   // Idempotency guard: if we already have an active/open row for this mint,
   // return the existing id instead of throwing on the unique constraint.
@@ -40,7 +38,6 @@ export async function persistPosition(
   const safeSymbol = (metrics.symbol && metrics.symbol !== 'LIVE') ? metrics.symbol : metrics.address;
 
   const { data, error } = await supabase
-    .from('lp_positions')
     .insert({
       mint:            metrics.address,
       symbol:          safeSymbol,
@@ -95,10 +92,8 @@ export async function markPositionClosed(
   claimableFeesUsd: number | null,
   reason: string
 ): Promise<void> {
-  const supabase = createServerClient()
 
   await supabase
-    .from('lp_positions')
     .update({
       status:            'closed',
       closed_at:         new Date().toISOString(),
@@ -168,10 +163,8 @@ export async function sendCloseAlert(
  * "duplicate key violates lp_positions_mint_open_unique" spam during observation.
  */
 export async function findExistingActivePosition(mint: string): Promise<{ id: string } | null> {
-  const supabase = createServerClient()
   try {
     const { data, error } = await supabase
-      .from('lp_positions')
       .select('id')
       .eq('mint', mint)
       .in('status', OPEN_LP_STATUSES)

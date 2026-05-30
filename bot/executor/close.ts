@@ -9,7 +9,6 @@ import { getAssociatedTokenAddressSync, NATIVE_MINT } from '@solana/spl-token'
 import BN from 'bn.js'
 
 import { getConnection, getWallet } from '@/lib/solana'
-import { createServerClient } from '@/lib/supabase'
 import { swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 
@@ -93,10 +92,8 @@ export async function closePosition(
   positionId: string,
   reason: string,
 ): Promise<boolean> {
-  const supabase = createServerClient()
 
   const { data: position, error } = await supabase
-    .from('lp_positions').select('*').eq('id', positionId).single()
 
   if (error || !position) {
     console.error(`[executor] closePosition: LP position ${positionId} not found`)
@@ -116,7 +113,7 @@ export async function closePosition(
 
   if (ENV_DRY_RUN_FORCED) {
     console.warn(`${label} BOT_DRY_RUN=true — refusing to close live on-chain position`)
-    await supabase.from('bot_logs').insert({
+    await supabase.logInfo('legacy_bot_log', {
       level: 'warn',
       event: 'close_position_skipped_env_dry_run',
       payload: { positionId, reason },
@@ -215,7 +212,7 @@ export async function closePosition(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} close failed:`, message)
-    await supabase.from('bot_logs').insert({
+    await supabase.logInfo('legacy_bot_log', {
       level: 'error', event: 'close_position_failed',
       payload: { positionId, reason, error: message },
     })

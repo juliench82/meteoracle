@@ -1,138 +1,30 @@
-/**
- * ecosystem.config.cjs  — PM2 process config
- *
- * Processes:
- *
- * PIPELINE: Meteora market LP (DLMM + DAMM v2)
- *   lp-scanner       — polls Meteora pools every 15min, classifies token, opens LP positions
- *   lp-monitor-dlmm  — monitors LP range health, rebalances, exits every 60s
- *
- * INTERFACE
- *   telegram-bot     — Telegram command interface (/tick, /positions, etc.)
- *   dashboard        — Next.js dashboard on port 3000
- *                      Uses start-dashboard.sh which cleans .next before every start.
- *
- * Pool discovery strategy:
- *   Launchpads (pump.fun, Believe, Moonshot, etc.) handle migration of bonding curve
- *   pools to Meteora DLMM / DAMM v2 automatically. The lp-scanner discovers these pools
- *   via the Meteora API the moment they appear — no on-chain watching needed.
- *
- * Setup:
- *   npm install -g pm2
- *   chmod +x start-dashboard.sh
- *   pm2 start ecosystem.config.cjs
- *   pm2 save
- *   pm2 startup   ← follow the printed command
- *
- * Deploy:
- *   git pull && pm2 restart all --update-env && pm2 save
- *
- * DRY-RUN vs LIVE:
- *   BOT_DRY_RUN=true  — simulate only, no real txs, no wallet needed
- *   BOT_DRY_RUN=false — live mode, REAL money, fund wallet first
- *
- * NODE_OPTIONS note:
- *   --conditions=require forces Node.js to resolve the `require` export condition
- *   on all packages. This makes tsx load @meteora-ag/dlmm's compiled CJS dist
- *   (./dist/index.cjs) instead of its TypeScript source (./src/), which would
- *   otherwise trigger an ESM import of { BN } from @coral-xyz/anchor that fails
- *   because the anchor ESM bundle does not re-export BN.
- */
-
 module.exports = {
   apps: [
-    // ── PIPELINE: Meteora LP (DLMM + DAMM v2) ────────────────────────────────
     {
-      name:          'lp-scanner',
-      script:        'npx',
-      args:          'tsx bot/scanner.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  10_000,
-      exp_backoff_restart_delay: 30_000,
-      min_uptime:     60_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
+      name: 'meteoracle-worker',
+      script: 'tsx',
+      args: '--tsconfig tsconfig.worker.json worker.ts',
+      cwd: './',
       env: {
-        NODE_ENV:              'production',
-        LP_SCANNER_STANDALONE: 'true',
-        LP_SCANNER_ENABLED:    'true',
-        SCALP_SPIKE_ENABLED:   'true',
-        EVIL_PANDA_ENABLED:    'true',
-        DAMM_EDGE_ENABLED:     'true',
-        MAX_CONCURRENT_DAMM_POSITIONS: '2',
-        NODE_OPTIONS:          '--conditions=require',
+        NODE_ENV: 'production'
       },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/lp-scanner-error.log',
-      out_file:   './logs/lp-scanner-out.log',
-      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '1G',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
     },
     {
-      name:          'lp-monitor-dlmm',
-      script:        'npx',
-      args:          'tsx bot/monitor.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  10_000,
-      exp_backoff_restart_delay: 30_000,
-      min_uptime:     60_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
+      name: 'meteoracle-telegram',
+      script: 'tsx',
+      args: 'bot/telegram-bot.ts',
+      cwd: './',
       env: {
-        NODE_ENV:              'production',
-        LP_MONITOR_STANDALONE: 'true',
-        LP_MONITOR_ENABLED:    'true',
-        MONITOR_EXITS_ENABLED: 'true',
-        LP_MONITOR_INTERVAL_SEC: '60',
-        SCALP_SPIKE_OOR_MINUTES: '10',
-        NODE_OPTIONS:          '--conditions=require',
+        NODE_ENV: 'production'
       },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/lp-monitor-dlmm-error.log',
-      out_file:   './logs/lp-monitor-dlmm-out.log',
-      merge_logs: true,
-    },
-
-    // ── INTERFACE ─────────────────────────────────────────────────────────────
-    {
-      name:          'telegram-bot',
-      script:        'npx',
-      args:          'tsx bot/telegram-bot.ts',
-      interpreter:   'none',
-      cwd:           __dirname,
-      restart_delay:  5_000,
-      exp_backoff_restart_delay: 30_000,
-      min_uptime:     60_000,
-      max_restarts:   10,
-      env_file:      '.env.local',
-      env: {
-        NODE_ENV:     'production',
-        NODE_OPTIONS: '--conditions=require',
-      },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/telegram-bot-error.log',
-      out_file:   './logs/telegram-bot-out.log',
-      merge_logs: true,
-    },
-    {
-      name:          'dashboard',
-      script:        './start-dashboard.sh',
-      interpreter:   'bash',
-      cwd:           __dirname,
-      restart_delay:  10_000,
-      exp_backoff_restart_delay: 30_000,
-      min_uptime:     60_000,
-      max_restarts:   5,
-      env_file:      '.env.local',
-      env: {
-        NODE_ENV: 'production',
-        PORT:     '3000',
-      },
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      error_file: './logs/dashboard-error.log',
-      out_file:   './logs/dashboard-out.log',
-      merge_logs: true,
-    },
-  ],
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '512M',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+    }
+  ]
 }

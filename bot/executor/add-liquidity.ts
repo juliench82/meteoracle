@@ -9,7 +9,6 @@ import { PublicKey, Transaction, TransactionInstruction, ComputeBudgetProgram } 
 import BN from 'bn.js'
 
 import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
-import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import type { Strategy } from '@/lib/types'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
@@ -44,7 +43,6 @@ export async function addLiquidityToPosition(
   positionId: string,
   solAmount: number,
 ) {
-  const supabase = createServerClient()
   const label = `[executor][add][${positionId}]`
 
   if (!Number.isFinite(solAmount) || solAmount <= 0) {
@@ -52,7 +50,6 @@ export async function addLiquidityToPosition(
   }
 
   const { data: position, error } = await supabase
-    .from('lp_positions')
     .select('*')
     .eq('id', positionId)
     .single()
@@ -84,7 +81,7 @@ export async function addLiquidityToPosition(
   const dryRun = ENV_DRY_RUN_FORCED || botState.dry_run
 
   if (dryRun) {
-    await supabase.from('bot_logs').insert({
+    await supabase.logInfo('legacy_bot_log', {
       level: 'info', event: 'add_liquidity_dry_run',
       payload: { positionId, symbol, solAmount, strategy: strategy.id },
     })
@@ -151,11 +148,10 @@ export async function addLiquidityToPosition(
 
     // Update DB with new totals (simplified)
     const previousSol = Number(position.sol_deposited ?? 0)
-    await supabase.from('lp_positions').update({
       sol_deposited: Math.round((previousSol + solAmount) * 1e9) / 1e9,
     }).eq('id', positionId)
 
-    await supabase.from('bot_logs').insert({
+    await supabase.logInfo('legacy_bot_log', {
       level: 'info', event: 'add_liquidity_success',
       payload: { positionId, symbol, solAmount, strategy: strategy.id, txSignature: sig },
     })
@@ -166,7 +162,7 @@ export async function addLiquidityToPosition(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} add liquidity failed:`, message)
-    await supabase.from('bot_logs').insert({
+    await supabase.logInfo('legacy_bot_log', {
       level: 'error', event: 'add_liquidity_failed',
       payload: { positionId, symbol, solAmount, error: message },
     })

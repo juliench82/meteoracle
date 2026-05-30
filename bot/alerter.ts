@@ -67,7 +67,6 @@ type AlertPayload =
   | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string; mint?: string; positionType?: string }
   | { type: 'pre_grad_pool_created'; symbol: string; mint: string; pool: string; sol: number }
   | { type: 'pre_grad_create_failed'; mint: string; error: string }
-  // pre_grad_opened removed — was only used by the old DAMM v2 edge path
   | {
       type: 'pre_grad_closed'
       symbol: string
@@ -115,7 +114,6 @@ export async function sendAlert(payload: AlertPayload): Promise<void> {
 function strategyBadge(strategy: string): string {
   const s = strategy.toLowerCase()
   if (s.includes('damm') || s.includes('pre_grad') || s.includes('pre-grad')) {
-    return '🌱 DAMM v2'
   }
   return '📊 DLMM'
 }
@@ -233,7 +231,6 @@ function formatMessage(payload: AlertPayload): string {
 
     case 'pre_grad_pool_created':
       return [
-        `🌱 *Pre-Grad DAMM v2 Pool Created*`,
         `Token: \`${payload.symbol}\``,
         `Mint: \`${payload.mint}\``,
         `Pool: \`${payload.pool}\``,
@@ -247,7 +244,6 @@ function formatMessage(payload: AlertPayload): string {
         `Error: ${payload.error}`,
       ].join('\n')
 
-    // pre_grad_opened case removed — DAMM v2 edge path fully deleted
 
     case 'pre_grad_closed': {
       const valueLine      = payload.positionValueUsd  != null

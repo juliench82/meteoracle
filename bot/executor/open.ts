@@ -52,7 +52,6 @@ import {
 } from './utils'
 
 import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '@/lib/solana'
-import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
@@ -104,7 +103,6 @@ export async function openPosition(
     `(ENV_FORCED=${ENV_DRY_RUN_FORCED}, botState.dry_run=${botState.dry_run})`
   )
 
-  const supabase = createServerClient()
 
   if (DRY_RUN) {
     console.log(`${label} DRY RUN — skipping on-chain tx`)
@@ -165,7 +163,7 @@ export async function openPosition(
 
     if (totalDeployed + solAmount > maxTotalDeployed) {
       console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed (${exposureSource})`)
-      await supabase.from('bot_logs').insert({
+      await supabase.logInfo('legacy_bot_log', {
         level: 'warn', event: 'open_position_skipped_exposure_cap',
         payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed, source: exposureSource },
       })
@@ -180,7 +178,7 @@ export async function openPosition(
 
     if (balanceSol < requiredSol) {
       console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)}`)
-      await supabase.from('bot_logs').insert({
+      await supabase.logInfo('legacy_bot_log', {
         level: 'warn', event: 'open_position_skipped_insufficient_balance',
         payload: {
           symbol: metrics.symbol,
@@ -199,7 +197,7 @@ export async function openPosition(
       poolPubkey = new PublicKey(metrics.poolAddress || '')
     } catch (e: any) {
       console.error(`${label} invalid poolAddress "${metrics.poolAddress}": ${e?.message || e}`)
-      await supabase.from('bot_logs').insert({
+      await supabase.logInfo('legacy_bot_log', {
         level: 'error', event: 'open_position_skipped_bad_pool_address',
         payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress, error: e?.message || String(e) },
       })
@@ -214,7 +212,7 @@ export async function openPosition(
       const DLMM_PROGRAM_ID = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'
       if (!poolAccount || poolAccount.owner.toBase58() !== DLMM_PROGRAM_ID) {
         console.warn(`${label} pool ${metrics.poolAddress} not a valid DLMM lb pair (owner=${poolAccount?.owner.toBase58() ?? 'missing'}) — skipping`)
-        await supabase.from('bot_logs').insert({
+        await supabase.logInfo('legacy_bot_log', {
           level: 'warn', event: 'open_position_skipped_non_dlmm_pool',
           payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },
         })
@@ -277,7 +275,7 @@ export async function openPosition(
         binStep,
         strategy: strategy.id,
       });
-      await supabase.from('bot_logs').insert({
+      await supabase.logInfo('legacy_bot_log', {
         level: 'warn',
         event: 'open_position_skipped_invalid_bin_range',
         payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
@@ -342,7 +340,7 @@ export async function openPosition(
 
     if (!solIsTokenX && !solIsTokenY) {
       console.warn(`${label} pool has no SOL side — rejecting one-sided SOL zap-in`)
-      await supabase.from('bot_logs').insert({
+      await supabase.logInfo('legacy_bot_log', {
         level: 'warn',
         event: 'open_position_skipped_non_sol_pair',
         payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },
@@ -534,7 +532,7 @@ export async function openPosition(
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
     }
-    await createServerClient().from('bot_logs').insert({
+    import { logInfo, logError } from '@/lib/log'; logInfo(
       level: 'error', event: 'open_position_failed',
       payload: { symbol: metrics.symbol, strategy: strategy.id, error: message, stack: err instanceof Error ? err.stack : undefined },
     })
@@ -941,7 +939,7 @@ async function openPositionToken2022(
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
     }
-    await createServerClient().from('bot_logs').insert({
+    import { logInfo, logError } from '@/lib/log'; logInfo(
       level: 'error',
       event: 'open_position_token2022_failed',
       payload: { symbol: metrics.symbol, strategy: strategy.id, error: message, stack: err instanceof Error ? err.stack : undefined },

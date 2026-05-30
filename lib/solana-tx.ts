@@ -2,7 +2,6 @@
  * lib/solana-tx.ts
  *
  * Shared Solana transaction utilities.
- * Extracted from bot/executor.ts (DAMM v2 executor was fully removed)
  *
  * Provides:
  * - Priority fee helpers
@@ -17,7 +16,6 @@ import {
   Connection,
 } from '@solana/web3.js'
 import { getConnection } from './solana'
-import { createServerClient } from './supabase'
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
 const COMPUTE_BUDGET_SET_UNIT_LIMIT = 2
@@ -72,7 +70,6 @@ export async function simulateAndCheck(tx: Transaction, label: string): Promise<
 
       // Persist to bot_logs so we can actually debug these failures later
       try {
-        await createServerClient().from('bot_logs').insert({
           level: 'error',
           event: 'tx_simulation_failed',
           payload: errorPayload,

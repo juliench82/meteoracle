@@ -1,6 +1,5 @@
 import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
-import { createServerClient } from '@/lib/supabase'
 import { sendAlert } from '@/bot/alerter'
 
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
@@ -196,11 +195,9 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     return stats
   }
 
-  const supabase = createServerClient()
 
   // --- moonboy_positions ---
   const { data: moonboys } = await supabase
-    .from('moonboy_positions')
     .select('id, mint, symbol, close_reason')
     .eq('status', 'sell_failed')
   
@@ -216,7 +213,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         console.log(`${label} recovered ✔ sig=${sig.slice(0, 8)}…`)
       }
       await supabase
-        .from('moonboy_positions')
         .update({
           status: 'closed',
           closed_at: new Date().toISOString(),
@@ -237,7 +233,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`${label} retry swap still failed — will try again next tick: ${msg}`)
-      await supabase.from('bot_logs').insert({
+      await supabase.logInfo('legacy_bot_log', {
         level: 'warn',
         event: 'stranded_sell_retry_failed',
         payload: { table: 'moonboy_positions', id: row.id, symbol: row.symbol, mint: row.mint, error: msg },
@@ -247,7 +243,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
 
   // --- lp_positions ---
   const { data: lpRows } = await supabase
-    .from('lp_positions')
     .select('id, symbol, metadata, close_reason')
     .eq('status', 'sell_failed')
 
@@ -258,7 +253,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
 
     if (!mint) {
       console.warn(`${label} no token_mint in metadata — cannot retry swap, skipping`)
-      await supabase.from('bot_logs').insert({
+      await supabase.logInfo('legacy_bot_log', {
         level: 'warn',
         event: 'stranded_sell_no_mint',
         payload: { table: 'lp_positions', id: row.id, symbol: row.symbol },
@@ -274,7 +269,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         console.log(`${label} recovered ✔ sig=${sig.slice(0, 8)}…`)
       }
       await supabase
-        .from('lp_positions')
         .update({
           status: 'closed',
           closed_at: new Date().toISOString(),
@@ -294,7 +288,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`${label} retry swap still failed — will try again next tick: ${msg}`)
-      await supabase.from('bot_logs').insert({
+      await supabase.logInfo('legacy_bot_log', {
         level: 'warn',
         event: 'stranded_sell_retry_failed',
         payload: { table: 'lp_positions', id: row.id, symbol: row.symbol, mint, error: msg },

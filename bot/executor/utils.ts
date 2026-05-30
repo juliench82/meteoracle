@@ -13,7 +13,6 @@ import {
 } from '@solana/spl-token';
 
 import { getConnection } from '@/lib/solana';
-import { createServerClient } from '@/lib/supabase';
 import type { Strategy } from '@/lib/types';
 import { OPEN_LP_STATUSES, type OpenLpLimitState } from '@/lib/position-limits';
 import { STRATEGIES } from '@/strategies';
@@ -32,9 +31,6 @@ export const DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE = 2;
 
 export const MAX_BINS_BY_STRATEGY: Record<string, number> = {
   'evil-panda':    150,
-  'scalp-spike':   100,
-  'bluechip-farm': 100,
-  'stable-farm':   100,
 };
 export const MAX_BINS_DEFAULT = 150;
 
@@ -76,7 +72,6 @@ export function findStrategyForPosition(position: Record<string, any>): Strategy
 }
 
 export async function getTotalDeployedSolForCap(
-  supabase: ReturnType<typeof createServerClient>,
   limitState: OpenLpLimitState,
 ): Promise<{ totalDeployed: number; source: OpenLpLimitState['countSource'] }> {
   if (limitState.liveFetchOk) {
@@ -89,7 +84,6 @@ export async function getTotalDeployedSolForCap(
     }
 
     const { data, error } = await supabase
-      .from('lp_positions')
       .select('position_pubkey, sol_deposited')
       .in('position_pubkey', livePubkeys);
 
@@ -111,7 +105,6 @@ export async function getTotalDeployedSolForCap(
   }
 
   const { data: openPositions } = await supabase
-    .from('lp_positions')
     .select('sol_deposited')
     .in('status', OPEN_LP_STATUSES);
 

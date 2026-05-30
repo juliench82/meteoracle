@@ -2,52 +2,30 @@ import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
-import {
-  MONITOR_INTERVAL_MS,
-  SYNC_FAIL_ALERT_THRESHOLD,
-  LIVE_CACHE_EXIT_STRATEGY_ID,
-  LIVE_CACHE_ALERT_INTERVAL_MS,
-  ORPHAN_CHECK_EVERY_N,
-  fetchLiveSolPriceUsd,
-  sbSelect,
-  isLpPositionRow,
-  _unmanagedLiveAlertAt,
-} from './monitor-core'
-import { checkDlmmPosition } from './monitor-dlmm'
-import { detectAllOrphanedPositions } from './orphan-detector'
 import { checkMoonboyPositions } from './moonboy-executor'
 import { retryStrandedSells } from '@/lib/swap'
-import { STRATEGIES } from '@/strategies'
-import { fetchLiveMeteoraSnapshot, mergeDbAndLiveLpPositions } from '@/lib/meteora-live'
-import { OPEN_LP_STATUSES } from '@/lib/position-limits'
-import { syncAllMeteoraPositions } from '@/lib/position-sync'
-import { getBotState, incrementSyncFailCount, resetSyncFailCount } from '@/lib/botState'
-import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
-import { sendAlert } from './alerter'
-import { sendStartupAlert } from './startup-alert'
-import type { Strategy } from '@/lib/types'
+import { getBotState } from '@/lib/botState'
 
-export { LIVE_CACHE_EXIT_STRATEGY_ID }
-export async function monitorPositions() { return runTick() }
-
-console.log('[monitor] split complete — using monitor-core + monitor-dlmm (DAMM v2 fully removed)')
-
-const LP_MONITOR_ENABLED   = process.env.LP_MONITOR_ENABLED    !== 'false'
-const MONITOR_EXITS_ENABLED = process.env.MONITOR_EXITS_ENABLED !== 'false'
+/**
+ * Ultra-minimal monitor.
+ * - Moonboy 2x monitoring via local-state
+ * - Stranded sell retries
+ */
 
 let tickCount = 0
+const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1000
+const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
 
-async function runTick(): Promise<{ checked: number; closed: number; claimed: number; rebalanced: number }> {
-  const stats = { checked: 0, closed: 0, claimed: 0, rebalanced: 0 }
+export async function monitorPositions() {
+  return runTick()
+}
 
-  const botState = await getBotState().catch(() => ({
-    enabled: false,
-    dry_run: true,
-    is_running: false,
-    running_since: null,
-    sync_fail_count: 0,
-    paused: false
-  }))
+console.log('[monitor] ultra-minimal (local-state Moonboy + stranded sells)')
+
+async function runTick(): Promise<{ checked: number; closed: number }> {
+  const stats = { checked: 0, closed: 0 }
+
+  const botState = await getBotState().catch(() => ({ enabled: false, dry_run: true, paused: false }))
   if (botState.paused) {
     console.log('[lp-monitor] bot is paused — skipping tick')
     return stats
@@ -56,145 +34,28 @@ async function runTick(): Promise<{ checked: number; closed: number; claimed: nu
   tickCount++
   console.log('[lp-monitor] tick start')
 
-  // ── Moonboy ──────────────────────────────────────────────────────────────
-  await checkMoonboyPositions().catch(err =>
-    console.error('[monitor] moonboy check failed:', err),
-  )
+  await checkMoonboyPositions().catch(err => console.error('[monitor] moonboy failed:', err))
+  await retryStrandedSells().catch(err => console.error('[monitor] stranded sells failed:', err))
 
-  // ── Stranded sells ───────────────────────────────────────────────────────
-  await retryStrandedSells().catch(err =>
-    console.error('[monitor] retryStrandedSells failed:', err),
-  )
-
-  // ── Live Meteora snapshot ─────────────────────────────────────────────────
-  const liveSolPriceUsd = await fetchLiveSolPriceUsd()
-
-  let snapshot: Awaited<ReturnType<typeof fetchLiveMeteoraSnapshot>> | null = null
-  try {
-    snapshot = await fetchLiveMeteoraSnapshot()
-    resetSyncFailCount()
-  } catch (err) {
-    const failCount = await incrementSyncFailCount()
-    console.error(`[monitor] live Meteora sync failed (${failCount}):`, err)
-    if (failCount >= SYNC_FAIL_ALERT_THRESHOLD) {
-      await sendAlert({
-        type: 'sync_failure_alert',
-        reason: `live_sync_failed_${failCount}x`,
-        error: err instanceof Error ? err.message : String(err),
-      }).catch(() => {})
-    }
-  }
-
-  const livePositions = snapshot?.positions ?? []
-
-  // Sync DB from live snapshot
-  if (snapshot) {
-    await syncAllMeteoraPositions().catch(err =>
-      console.error('[monitor] syncAllMeteoraPositions failed:', err),
-    )
-  }
-
-  // ── Orphan detection (every N ticks) ─────────────────────────────────────
-  if (tickCount % ORPHAN_CHECK_EVERY_N === 0) {
-    console.log(`[monitor] tick ${tickCount} — reconciling wallet positions from Meteora`)
-    await detectAllOrphanedPositions().catch(err =>
-      console.error('[monitor] orphan detection failed:', err),
-    )
-  }
-
-  if (!LP_MONITOR_ENABLED || !MONITOR_EXITS_ENABLED) {
-    console.log('[lp-monitor] exits disabled — tick done')
+  if (!LP_MONITOR_ENABLED) {
+    console.log('[lp-monitor] disabled')
     return stats
   }
 
-  // ── Fetch open DB positions ───────────────────────────────────────────────
-  const dbRows = await sbSelect<any>(
-    'lp_positions',
-    `status=in.(${OPEN_LP_STATUSES.join(',')})&select=*`,
-  ).catch(err => {
-    console.error('[monitor] DB fetch failed:', err)
-    return [] as any[]
-  })
-
-  const openRows = dbRows.filter(isLpPositionRow)
-  const merged = mergeDbAndLiveLpPositions(openRows, livePositions)
-
-  // ── RPC cooldown refresh ──────────────────────────────────────────────────
-  await refreshRpcProviderCooldown('helius').catch(err =>
-    console.error('[monitor] refreshRpcProviderCooldown failed:', err),
-  )
-
-  // ── Per-position checks ───────────────────────────────────────────────────
-  for (const position of merged) {
-    const strategyId = position.strategy_id ?? ''
-    stats.checked++
-
-
-
-    // Live-cache rows (adopted positions)
-    if (strategyId === 'meteora-live') {
-      const posId = String(position.id)
-      const now = Date.now()
-      const lastAlertAt = _unmanagedLiveAlertAt.get(posId) ?? 0
-
-      // Adopted / unknown positions: use configured fallback or default to evil-panda for safety
-      const effectiveExitStrategyId = LIVE_CACHE_EXIT_STRATEGY_ID || 'evil-panda'
-
-      if (!LIVE_CACHE_EXIT_STRATEGY_ID) {
-        console.log(`[monitor] using default evil-panda fallback for adopted/unknown position id=${posId} symbol=${position.symbol}`)
-      }
-
-      const adoptedStrategy: Strategy | undefined =
-        STRATEGIES.find((s: Strategy) => s.id === effectiveExitStrategyId) as Strategy | undefined
-
-      if (!adoptedStrategy) {
-        if (now - lastAlertAt > LIVE_CACHE_ALERT_INTERVAL_MS) {
-          _unmanagedLiveAlertAt.set(posId, now)
-          console.warn(`[monitor] fallback exit strategy not found id=${effectiveExitStrategyId} position=${posId}`)
-        }
-        continue
-      }
-
-      console.log(`[monitor] adopted row evaluating under exit strategy=${effectiveExitStrategyId} id=${posId} symbol=${position.symbol}`)
-      await checkDlmmPosition(position, adoptedStrategy, stats, liveSolPriceUsd).catch(err =>
-        console.error(`[monitor][${position.symbol}][adopted:${adoptedStrategy.id}] tick error:`, err),
-      )
-      continue
-    }
-
-    // DLMM positions — match against known strategies
-    const strategy: Strategy | undefined =
-      STRATEGIES.find((s: Strategy) => s.id === strategyId) as Strategy | undefined
-    if (!strategy) {
-      console.warn(`[monitor][${position.symbol}] unknown strategy_id="${strategyId}" — skipping`)
-      continue
-    }
-
-    await checkDlmmPosition(position, strategy, stats, liveSolPriceUsd).catch(err =>
-      console.error(`[monitor][${position.symbol}][${strategy.id}] tick error:`, err),
-    )
-  }
-
-  console.log(
-    `[lp-monitor] tick done — checked=${stats.checked} closed=${stats.closed} ` +
-    `claimed=${stats.claimed} rebalanced=${stats.rebalanced}`,
-  )
-
+  // Future: LP exit logic will be re-added here using local-state + on-chain DLMM queries only.
+  console.log('[lp-monitor] tick done')
   return stats
 }
 
-// ── Main loop ───────────────────────────────────────────────────────────────
-async function main(): Promise<void> {
-  await sendStartupAlert('lp-monitor-dlmm')
-
-  await runTick().catch(err => console.error('[lp-monitor] first tick failed:', err))
+async function main() {
+  await runTick().catch(err => console.error('[lp-monitor] first tick error:', err))
 
   setInterval(() => {
-    runTick().catch(err => console.error('[lp-monitor] tick failed:', err))
+    runTick().catch(err => console.error('[lp-monitor] tick error:', err))
   }, MONITOR_INTERVAL_MS)
 }
 
 main().catch(err => {
-  console.error('[lp-monitor] fatal startup error:', err)
+  console.error('[lp-monitor] fatal error:', err)
   process.exit(1)
 })
