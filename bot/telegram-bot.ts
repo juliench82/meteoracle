@@ -84,13 +84,6 @@ async function sendMessage(text: string, chatId = CHAT_ID) {
     await setBotState({ dry_run: false });
     await sendMessage('LIVE mode ENABLED — real money at risk.', chatId);
     return;
-  }    await sendMessage(msg, chatId);
-    return;
-  }    msg += `Open LP positions: ${lp.length}\n`
-    msg += `Open Moonboy: ${mb.length}/3`
-
-    await sendMessage(msg, chatId)
-    return
   }
 
   if (text === '/positions') {

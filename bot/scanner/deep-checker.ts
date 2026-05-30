@@ -701,6 +701,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     let rangeUpPct: number | undefined
     let maxBinsForSelection: number | undefined
 
+    if (lane === 'evil-panda') {
       // Evil Panda: wide range strategy
       rangeDownPct = -50
       rangeUpPct = 100
@@ -897,7 +898,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
 
     const strategy =
-      getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
+      getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ?? null
 
     let decision = 'REJECTED'
     let rejectionReason: string | null = null
@@ -925,7 +926,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       )
       breakdown = getMomentumRegainBreakdown(metrics) // simplified during refactor cleanup
       finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
-    }
+
       const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
       // Two-track system
