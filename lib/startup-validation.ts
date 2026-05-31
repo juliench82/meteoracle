@@ -1,4 +1,4 @@
 // Stub for simplified stack
-export function validateStartup() {
-  // no-op
+export async function validateStartup(_label?: string) {
+  // no-op in simplified stack
 }

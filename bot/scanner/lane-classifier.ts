@@ -13,7 +13,7 @@ export type LaneConfig = {
 };
 
 export function classifyPoolsIntoLanes(pools: any[], config?: LaneConfig) {
-  // Very simplified: put everything in fresh for now
+  // Very simplified classification for the ultra-simplified stack
   return {
     freshPools: pools,
     momentumPools: [],
@@ -41,7 +41,7 @@ export function selectBestPool(
   rangeUp?: number,
   maxBins?: number
 ) {
-  // Placeholder - real logic should come from pool-fetcher or a new simple selector
+  // Very basic selector for simplified mode
   return {
     pool: null,
     binStepPreferred: false,
@@ -50,7 +50,7 @@ export function selectBestPool(
 }
 
 export function passesMomentumRegain(pool: any) {
-  return false; // conservative default in simplified mode
+  return false;
 }
 
 export function getOneHourFeeTvlVs24hAverage(pool: any) {

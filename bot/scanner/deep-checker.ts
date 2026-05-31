@@ -19,7 +19,7 @@ import {
 import type { TokenMetrics } from '@/lib/types'
 // (DAMM v2 edge automation fully removed)
 import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
-// (scalp-spike strategy removed in simplified stack)
+import { scalpSpikeStrategy } from '@/strategies/scalp-spike' // stub for simplified stack compatibility
 import { openMoonboyPosition } from '../moonboy-executor'
 import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'

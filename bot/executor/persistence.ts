@@ -44,7 +44,7 @@ export async function persistPosition(
     mint:            metrics.address,
     symbol:          safeSymbol,
     pool_address:    metrics.poolAddress,
-    position_pubkey: positionPubKey ?? null,
+    position_pubkey: positionPubKey ?? '',
     strategy_id:     strategy.id,
     position_type:   'dlmm',
     token_amount:    tokenAmount,
@@ -170,12 +170,9 @@ export async function sendCloseAlert(
  */
 export async function findExistingActivePosition(mint: string): Promise<{ id: string } | null> {
   try {
-    const { data, error } = await supabase
-      .select('id')
-      .eq('mint', mint)
-      .in('status', OPEN_LP_STATUSES)
-      .limit(1)
-      .single()
+    const positions = getOpenLpPositions();
+    const match = positions.find((p: any) => p.mint === mint && OPEN_LP_STATUSES.includes(p.status));
+    return match ? { id: match.id } : null;
 
     if (error || !data) return null
     return { id: data.id }

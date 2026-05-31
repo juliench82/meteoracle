@@ -31,7 +31,7 @@ async function tickMonitor() {
   try {
     log('monitor tick start')
     const stats = await monitorPositions()
-    log(`monitor tick done — checked=${stats.checked} closed=${stats.closed} rebalanced=${stats.rebalanced}`)
+    log(`monitor tick done — checked=${stats.checked} closed=${stats.closed}`)
   } catch (err) {
     console.error('[worker] monitor tick error:', err)
   }

@@ -556,7 +556,6 @@ async function openPositionToken2022(
   solIsTokenX: boolean,
   attemptLabel: string,
   priorityFee: number,
-  supabase: any,
   DRY_RUN: boolean,
   positionKeypair: Keypair
 ): Promise<string | null> {
