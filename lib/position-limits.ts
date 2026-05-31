@@ -16,6 +16,7 @@ export type OpenLpLimitState = {
   countSource?: string
   liveFetchOk?: boolean
   dlmmOk?: boolean
+  livePositions?: any[]   // compatibility for restored scanner code during transition
 }
 
 export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitState> {
@@ -28,6 +29,7 @@ export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitS
       countSource: 'local-state',
       liveFetchOk: true,
       dlmmOk: true,
+      livePositions: [],
     }
   } catch {
     return {
@@ -37,6 +39,7 @@ export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitS
       countSource: 'local-state',
       liveFetchOk: false,
       dlmmOk: false,
+      livePositions: [],
     }
   }
 }

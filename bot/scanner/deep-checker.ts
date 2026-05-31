@@ -688,23 +688,25 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     // 1. Skip if there is currently an open/active position for this mint.
     // 2. Skip if there was a recent position for this mint (last 6 hours) that was closed with a "bad" reason
     //    (e.g. pnl_unavailable). This prevents rapid re-opening the same mint after a failed/bad close attempt.
+    // Strong per-mint dedup using local state only (simplified stack)
     const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
-    const posResult = await withTimeout(
-      // lp_positions Supabase query removed in simplified stack
-      null as any
-        .select('id, status, close_reason, closed_at')
-        .eq('mint', tokenAddress)
-        .or(`status.in.(${OPEN_LP_STATUSES.join(',')}),and(status.eq.closed,closed_at.gte.${recentClosedCutoff})`)
-        .limit(1),
-      SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
-    );
+    const allPositions = getOpenLpPositions();
 
-    if (posResult?.data && posResult.data.length > 0) {
-      const existing = posResult.data[0];
-      if (OPEN_LP_STATUSES.includes(existing.status)) {
-        console.log(`[scanner] ${symbol} — skip: existing open LP position for mint (id=${existing.id})`);
+    const conflicting = allPositions.find((p: any) => {
+      if (p.mint !== tokenAddress) return false;
+      if (OPEN_LP_STATUSES.includes(p.status)) return true;
+      if (p.status === 'closed' && p.closed_at && p.closed_at >= recentClosedCutoff) {
+        const reason = p.close_reason || '';
+        if (reason.startsWith('pnl_unavailable') || reason.startsWith('bad')) return true;
+      }
+      return false;
+    });
+
+    if (conflicting) {
+      if (OPEN_LP_STATUSES.includes(conflicting.status)) {
+        console.log(`[scanner] ${symbol} — skip: existing open LP position for mint (id=${conflicting.id})`);
       } else {
-        console.log(`[scanner] ${symbol} — skip: recent bad close for this mint (id=${existing.id}, reason=${existing.close_reason})`);
+        console.log(`[scanner] ${symbol} — skip: recent bad close for this mint (id=${conflicting.id}, reason=${conflicting.close_reason})`);
       }
       continue;
     }
@@ -929,22 +931,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     // (DAMM v2 edge path was fully removed from the bot)
 
-    const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : classifyToken({
-      address:        metrics.address,
-      mcUsd:          metrics.mcUsd,
-      volume24h:      metrics.volume24h,
-      volume1h:       vol1h,
-      volume5m:       vol5m,
-      liquidityUsd:   metrics.liquidityUsd,
-      ageHours:       metrics.ageHours,
-      topHolderPct:   metrics.topHolderPct,
-      holderCount:    metrics.holderCount,
-      rugcheckScore:  metrics.rugcheckScore,
-      quoteTokenMint: metrics.quoteTokenMint,
-      feeTvl1hPct:    metrics.feeTvl1hPct,
-      feeTvl5mPct:    metrics.feeTvl5mPct,
-      feeTvl24hPct:   metrics.feeTvl24hPct,
-    })
+    const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : (classifyToken() as any)?.type || 'unknown'
 
     const momentumRegain = lane === 'momentum' && passesMomentumRegain(bestPool)
     const strategy =
