@@ -40,7 +40,7 @@ export function getStrategyForToken(token: TokenMetrics, forcedStrategyId?: Stra
   const f = s.filters
 
   if (
-    token.ageHours <= 1.5 &&
+    token.ageHours <= f.maxAgeHours &&
     token.liquidityUsd >= f.minLiquidityUsd &&
     token.rugcheckScore >= f.minRugcheckScore &&
     token.topHolderPct <= f.maxTopHolderPct &&
@@ -60,7 +60,7 @@ export function explainNoStrategy(t: TokenMetrics): string {
   const f = s.filters
   const reasons: string[] = []
 
-  if (t.ageHours > 1.5) reasons.push(`age=${t.ageHours.toFixed(1)}h > 1.5h`)
+  if (t.ageHours > f.maxAgeHours) reasons.push(`age=${t.ageHours.toFixed(1)}h > ${f.maxAgeHours}h`)
   if (t.liquidityUsd < f.minLiquidityUsd) reasons.push('liquidity too low')
   if (t.rugcheckScore < f.minRugcheckScore) reasons.push('rugcheck too low')
   if (t.topHolderPct > f.maxTopHolderPct) reasons.push('top holder too high')

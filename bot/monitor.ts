@@ -22,8 +22,20 @@ let tickCount = 0
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1000
 const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
 
-const DEFAULT_OOR_MINUTES = 30
-const DEFAULT_MAX_DURATION_HOURS = 12
+// Fallbacks only used if a position record is missing the values persisted at open time
+const FALLBACK_OOR_MINUTES = 30
+const FALLBACK_MAX_DURATION_HOURS = 12
+
+function getPositionExitRules(pos: any) {
+  // Values are persisted from the strategy at open time (see persistence.ts + evil-panda.ts)
+  // This ensures each position respects the exact parameters that were active when it was opened.
+  return {
+    outOfRangeMinutes: pos.out_of_range_minutes ?? pos.metadata?.out_of_range_minutes ?? FALLBACK_OOR_MINUTES,
+    maxDurationHours:  pos.max_duration_hours  ?? pos.metadata?.maxDurationHours  ?? FALLBACK_MAX_DURATION_HOURS,
+    claimFeesBeforeClose: pos.claim_fees_before_close ?? pos.metadata?.claimFeesBeforeClose ?? true,
+    minFeesToClaim:       pos.min_fees_to_claim       ?? pos.metadata?.minFeesToClaim       ?? 0.001,
+  }
+}
 
 export async function monitorPositions() {
   return runTick()
@@ -76,6 +88,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         const { lowerBinId, upperBinId } = onChainPos.positionData
         const isOOR = activeBin.binId < lowerBinId || activeBin.binId > upperBinId
 
+        const rules = getPositionExitRules(pos)
         const now = Date.now()
         let oorSince = pos.oor_since ? new Date(pos.oor_since).getTime() : null
 
@@ -83,36 +96,31 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           if (!oorSince) {
             oorSince = now
             pos.oor_since = new Date(oorSince).toISOString()
-            // persist the timestamp immediately
             const all = getOpenLpPositions()
             const idx = all.findIndex((p: any) => p.id === pos.id)
             if (idx !== -1) { all[idx].oor_since = pos.oor_since; saveOpenLpPositions(all) }
           }
 
           const oorMinutes = (now - oorSince) / 1000 / 60
-          const oorLimit = pos.out_of_range_minutes ?? DEFAULT_OOR_MINUTES
-
-          if (oorMinutes >= oorLimit) {
-            console.log(`[monitor] OOR exit → ${pos.symbol} (out ${Math.round(oorMinutes)}m / ${oorLimit}m)`)
+          if (oorMinutes >= rules.outOfRangeMinutes) {
+            console.log(`[monitor] OOR exit → ${pos.symbol} (out ${Math.round(oorMinutes)}m / ${rules.outOfRangeMinutes}m, claimFees=${rules.claimFeesBeforeClose}, minFees=${rules.minFeesToClaim})`)
             const ok = await closePosition(pos.id, 'oor_monitor').catch(() => false)
             if (ok) stats.closed++
             continue
           }
         } else if (oorSince) {
-          // back in range — clear the timer
           delete pos.oor_since
           const all = getOpenLpPositions()
           const idx = all.findIndex((p: any) => p.id === pos.id)
           if (idx !== -1) { delete all[idx].oor_since; saveOpenLpPositions(all) }
         }
 
-        // Max duration guard
+        // Max duration guard (using persisted strategy value)
         const openedAt = pos.created_at || pos.opened_at
         if (openedAt) {
           const hoursOpen = (now - new Date(openedAt).getTime()) / 1000 / 3600
-          const maxH = pos.max_duration_hours ?? DEFAULT_MAX_DURATION_HOURS
-          if (hoursOpen >= maxH) {
-            console.log(`[monitor] max-duration exit → ${pos.symbol} (${hoursOpen.toFixed(1)}h / ${maxH}h)`)
+          if (hoursOpen >= rules.maxDurationHours) {
+            console.log(`[monitor] max-duration exit → ${pos.symbol} (${hoursOpen.toFixed(1)}h / ${rules.maxDurationHours}h, claimFees=${rules.claimFeesBeforeClose}, minFees=${rules.minFeesToClaim})`)
             const ok = await closePosition(pos.id, 'max_duration_monitor').catch(() => false)
             if (ok) stats.closed++
           }

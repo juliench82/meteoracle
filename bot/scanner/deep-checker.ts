@@ -570,6 +570,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       volume5m: getPoolVolume(bestPool, '5m'),
       feeTvl5mPct: getFeeTvlPct(bestPool, '5m'),
       bondingCurvePct, launchpadSource,
+      binStep: bestPool.pool_config?.bin_step,
       // dropped (not required by current evil-panda + persist + alerts): volumeGrowth1h, momentumScore
     }
 

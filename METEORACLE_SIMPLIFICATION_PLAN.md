@@ -167,8 +167,9 @@ We are currently in **aggressive simplification mode** (Option A) on the scanner
 **Polish (Phase 5) + Final Polish Wave (this session)**
 - Removed the entire legacy Supabase DB warm-cache system from pool-fetcher.ts (load/persist/cleanup + wiring + flag + imports + big warning comments). Only the fast in-memory cache remains.
 - All remaining "simplified stack" phrasing reduced or eliminated outside the historical plan document.
+- Strategy filter alignment: getStrategyForToken + explainNoStrategy now respect the actual strategy.filters.maxAgeHours (no more hardcoded 1.5h).
 - README.md updated to accurately describe current minimal Supabase posture.
-- monitor.ts OOR logic polished (better logging, minor robustness).
+- monitor.ts OOR logic significantly improved: now robustly uses per-position persisted exit rules (out_of_range_minutes, max_duration_hours, claimFeesBeforeClose, minFeesToClaim) with clean fallbacks. Added getPositionExitRules helper.
 - Final static verification: zero imports of removed heavy modules (rebalance, orphan-detector, etc.) in any runtime .ts files. Only the shim files themselves contain the old names.
 
 ### Success Criteria — All Met
