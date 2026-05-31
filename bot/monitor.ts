@@ -41,8 +41,6 @@ export async function monitorPositions() {
   return runTick()
 }
 
-console.log('[monitor] ultra-minimal (local-state + on-chain OOR + duration exits)')
-
 async function runTick(): Promise<{ checked: number; closed: number }> {
   const stats = { checked: 0, closed: 0 }
 
@@ -52,8 +50,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
     return stats
   }
 
-  tickCount++
-  console.log('[lp-monitor] tick start')
+  tickCount++ // incremented for potential future use / debugging
 
   await checkMoonboyPositions().catch(err => console.error('[monitor] moonboy failed:', err))
   await retryStrandedSells().catch(err => console.error('[monitor] stranded sells failed:', err))
@@ -131,19 +128,5 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
     }
   }
 
-  console.log('[lp-monitor] tick done')
   return stats
 }
-
-async function main() {
-  await runTick().catch(err => console.error('[lp-monitor] first tick error:', err))
-
-  setInterval(() => {
-    runTick().catch(err => console.error('[lp-monitor] tick error:', err))
-  }, MONITOR_INTERVAL_MS)
-}
-
-main().catch(err => {
-  console.error('[lp-monitor] fatal error:', err)
-  process.exit(1)
-})

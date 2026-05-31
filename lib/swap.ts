@@ -190,8 +190,7 @@ export async function swapTokenToSol(
  */
 export async function retryStrandedSells(): Promise<{ retried: number; recovered: number }> {
   // TODO: Re-implement real stranded sell recovery using local-state files.
-  // Currently a safe no-op so the simplified bot can run without it.
-  console.log('[swap] retryStrandedSells is currently a no-op')
+  // Currently a safe no-op in the ultra-simplified model.
   return { retried: 0, recovered: 0 }
 }
 
