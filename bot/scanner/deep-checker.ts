@@ -496,16 +496,14 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   console.log('[scanner] step 1/4 — fetching Meteora pools')
   const laneConfig = {
-    scannerEarlyMaxAgeMinutes: SCANNER_EARLY_MAX_AGE_MINUTES,
     freshMaxAgeMinutes: FRESH_MAX_AGE_MINUTES,
     freshMinLiquidityUsd: FRESH_MIN_LIQUIDITY_USD,
-    momentumPoolLimit: MOMENTUM_POOL_LIMIT,
     momentumMinVolume5mUsd: MOMENTUM_MIN_VOLUME_5M_USD,
     momentumMinFeeTvl5mPct: MOMENTUM_MIN_FEE_TVL_5M_PCT,
-    scalpSpikeVolRatio: SCALP_SPIKE_VOL_RATIO,
     maxFreshDeepChecks: MAX_FRESH_DEEP_CHECKS,
     maxMomentumDeepChecks: MAX_MOMENTUM_DEEP_CHECKS,
   }
+
   const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools({
     ...METEORA_FILTERED_FETCH,
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
@@ -521,60 +519,22 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     return finish({ error: fetchError, openBlockedReason: 'pool_fetch_failed' })
   }
 
-  const {
-    pools,
-    earlyAgePools,
-    momentumSpikePools,
-    momentumRegainPools,
-    freshPools,
-    momentumPools,
-    freshSurvivors,
-    momentumSurvivors,
-    allSurvivors,
-    freshRejectedAge,
-    freshRejectedLiquidity,
-    momentumRejectedSpike,
-  } = classifyPoolsIntoLanes(fetchedPools, laneConfig)
+  const { freshPools, momentumPools, freshSurvivors, momentumSurvivors } =
+    classifyPoolsIntoLanes(fetchedPools, laneConfig)
 
   console.log(
-    `[scanner] step 1/4 — got ${fetchedPools.length} JS-filtered pools; ` +
-    `${pools.length} lane-eligible`,
-  )
-  console.log(
-    `[scanner] early age gate — snipe(<=${FRESH_SNIPE_MAX_AGE_MINUTES}min): ${earlyAgePools.length} + ` +
-    `momentum exceptions: ${momentumSpikePools.length + momentumRegainPools.length}`,
+    `[scanner] lanes — fresh=${freshPools.length}, momentum=${momentumPools.length} (from ${fetchedPools.length} pools)`
   )
 
-  console.log(
-    `[scanner] lanes — fresh=${freshPools.length}/${pools.length} <=${FRESH_MAX_AGE_MINUTES}min, ` +
-    `momentum=${momentumPools.length}/${pools.length} spike/regain candidates`,
-  )
-  console.log('[scanner] *** HEAVY OBSERVATION LOGGING ENABLED for dry-run period ***')
-
-  console.log('[scanner] step 2/4 — lane pre-screen')
-  console.log(
-    `[scanner] step 2/4 — fresh survivors=${freshSurvivors.length} ` +
-    `(ageRejected=${freshRejectedAge}, liquidityRejected=${freshRejectedLiquidity}); ` +
-    `momentum survivors=${momentumSurvivors.length} (spikeRejected=${momentumRejectedSpike})`,
-  )
-
-  if (allSurvivors.length === 0) {
-    console.log('[scanner] done — no lane survivors')
-    return finish({ scanned: fetchedPools.length, survivors: 0 })
-  }
-
-  // Supabase removed - using local state + logger only
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
   const survivors = pickDeepCheckSurvivors(freshSurvivors, momentumSurvivors, recentlyClosedOorMints, laneConfig)
 
-  if (recentlyClosedOorMints.size > 0) {
-    const queuedMints = new Set(survivors.map(survivorTokenAddress))
-    const missed = Array.from(recentlyClosedOorMints).filter(mint => !queuedMints.has(mint))
-    console.log(
-      `[scanner] OOR recheck priority — ${recentlyClosedOorMints.size - missed.length} token(s) queued` +
-      `${missed.length ? `, ${missed.length} did not pass lane filters` : ''}`,
-    )
+  if (survivors.length === 0) {
+    console.log('[scanner] done — no survivors after lane filters')
+    return finish({ scanned: fetchedPools.length, survivors: 0 })
   }
+
+  console.log(`[scanner] deep checks on ${survivors.length} survivors`)
 
   console.log('[scanner] step 3/4 — live Meteora exposure + DB fallback check')
 
@@ -608,16 +568,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
   }
 
-  console.log(
-    `[scanner] step 4/4 — deep checks on ${survivors.length} lane survivors ` +
-    `(fresh cap=${MAX_FRESH_DEEP_CHECKS}, momentum cap=${MAX_MOMENTUM_DEEP_CHECKS}, total queued from ${allSurvivors.length})`,
-  )
+  console.log(`[scanner] step 4/4 — deep checks on ${survivors.length} survivors`)
   let candidateCount = 0
   let openedCount = 0
-  let openedDammCountThisTick = 0
   let openSkippedCount = 0
-  let binStepPreferredCount = 0
-  let lowBinQualitySelections = 0   // WS3 diagnostic: how many times we picked a pool with weak bin compatibility
   let dailyLossLimitHit: boolean | null = null
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
   const openedMintsThisTick = new Set<string>()
@@ -697,74 +651,15 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       }
     }
 
-    // Pass strategy range info so selectBestPool can prefer pools whose bin_step
-    // produces a good position width for the lane's primary strategy.
-    let rangeDownPct: number | undefined
-    let rangeUpPct: number | undefined
-    let maxBinsForSelection: number | undefined
-
-    if (lane === 'fresh') {
-      // Evil Panda: wide range strategy
-      rangeDownPct = -50
-      rangeUpPct = 100
-      maxBinsForSelection = 150
-    } else {
-      // Momentum lane — improved detection
-      // Strong 5m signals (high feeTvl5m or volume5m) → prefer Scalp-Spike tight ranges
-      // Otherwise → fall back to Evil Panda wider ranges for steadier momentum
-      const hasStrong5mSignal = survivors.some((s: any) => {
-        const p = s.pool
-        const fee5m = getFeeTvlPct(p, '5m') || 0
-        const vol5m = getPoolVolume(p, '5m') || 0
-        return fee5m > 5 || vol5m > 5000
-      })
-
-      if (hasStrong5mSignal) {
-        rangeDownPct = -20
-        rangeUpPct = 40
-        maxBinsForSelection = 100
-      } else {
-        rangeDownPct = -50
-        rangeUpPct = 100
-        maxBinsForSelection = 150
-      }
-    }
-
+    // Simplified pool selection (aggressive simplification pass)
     const result = selectBestPool(
       lane === 'fresh' ? freshPools : momentumPools,
-      tokenAddress,
-      lane,
-      rangeDownPct,
-      rangeUpPct,
-      maxBinsForSelection
+      tokenAddress
     )
-
     const bestPool = result.pool
 
-    if (result.binStepPreferred) {
-      binStepPreferredCount++
-      const binInfo = result.chosenBinCompatibility !== undefined
-        ? ` (binScore=${result.chosenBinCompatibility.toFixed(2)})`
-        : ''
-      console.log(
-        `[scanner] ${symbol} — best pool chosen with bin_step preference for ${lane} lane ` +
-        `(chose binStep ${result.chosenBinStep ?? '?'} over fee-only ${result.feeOnlyBinStep ?? '?'})${binInfo}`
-      )
-    }
-
-    // WS3 diagnostic logging (non-aggressive): surface when the chosen pool has weak bin compatibility
-    if (result.pool && result.chosenBinCompatibility !== undefined && result.chosenBinCompatibility < 0.4) {
-      lowBinQualitySelections++
-      const bestPossible = result.bestPossibleBinCompatibility !== undefined
-        ? result.bestPossibleBinCompatibility.toFixed(2)
-        : '?'
-      console.log(
-        `[scanner] ${symbol} — note: chosen pool has relatively low bin compatibility ` +
-        `(${result.chosenBinCompatibility.toFixed(2)}, best available: ${bestPossible}) for the target range`
-      )
-    }
     if (!bestPool) {
-      console.log(`[scanner] ${symbol} — skip: no qualifying pool found after best-pool selection`)
+      console.log(`[scanner] ${symbol} — skip: no pool found for token`)
       continue
     }
     const liveBestPoolPosition = findLiveOpenPosition(limitState, tokenAddress, bestPool.address)
@@ -773,7 +668,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       continue
     }
 
-    const poolAgeHours  = getPoolAgeMinutes(bestPool) / 60
     const liqUsd        = getPoolTvl(bestPool)
     const feeTvl24hPct  = getFeeTvlPct(bestPool, '24h')
     const feeTvl1hPct   = getFeeTvlPct(bestPool, '1h')
@@ -789,19 +683,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const vol24h  = getPoolVolume(bestPool, '24h')
     const vol1h   = getPoolVolume(bestPool, '1h')
     const vol5m   = getPoolVolume(bestPool, '5m')
-    const binStep: number | undefined = bestPool.pool_config?.bin_step
-    const binStepDisplay = binStep ?? '?'
-
-    // Rich diagnostic log for dry-run observation (added for visibility)
-    console.log(
-      `[scanner][pool] ${symbol} — SELECTED best pool: binStep=${binStepDisplay} ` +
-      `tvl=$${liqUsd.toFixed(0)} fee1h=${feeTvl1hPct.toFixed(2)}% vol1h=$${vol1h.toFixed(0)} ` +
-      `momentum=${momentumScore} age=${poolAgeHours.toFixed(1)}h`
-    )
-
-    if (bestPool.address !== representativePool.address) {
-      console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStepDisplay}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)}`)
-    }
+    const binStepDisplay = bestPool.pool_config?.bin_step ?? '?'
+    console.log(`[scanner] ${symbol} — selected pool (lane=${lane}, binStep=${binStepDisplay})`)
 
     // Improved MC: always try DexScreener for scalp-spike candidates or when Meteora MC is low/stale
     let resolvedMc = mcUsd
@@ -907,8 +790,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     // (DAMM v2 edge path was fully removed from the bot)
 
-    const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : (classifyToken() as any)?.type || 'unknown'
-
     const momentumRegain = lane === 'momentum' && passesMomentumRegain(bestPool)
     const strategy =
       getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
@@ -934,116 +815,47 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       decision = 'REJECTED'
       console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) in ${lane} lane: ${rejectionReason}`)
     } else {
-      if (strategy.id === 'scalp-spike' && momentumRegain) {
-        console.log(
-          `[scanner] ${symbol} — scalp-spike momentum-regain ` +
-          `vol1h/24hAvg=${getOneHourVolumeVs24hAverage(bestPool).toFixed(2)}x ` +
-          `fee1h/24hAvg=${getOneHourFeeTvlVs24hAverage(bestPool).toFixed(2)}x`,
-        )
-      }
-
-      breakdown = strategy.id === 'scalp-spike' && momentumRegain
-        ? getMomentumRegainBreakdown(metrics)
-        : scoreCandidateWithBreakdown(metrics, strategy)
+      breakdown = scoreCandidateWithBreakdown(metrics, strategy)
       finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
-      const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
-      // Two-track system
-      const ageMinutes = metrics.ageHours * 60
-      const isSnipe = ageMinutes <= FRESH_SNIPE_MAX_AGE_MINUTES
-      const track = isSnipe ? 'snipe' : 'mature'
+      // Simplified single threshold (aggressive simplification)
+      const meetsOpen = finalScore >= MIN_SCORE_TO_OPEN
 
-      // Insert threshold (what gets recorded in candidates table)
-      const insertThreshold = isSnipe ? 0 : MIN_SCORE_TO_OPEN
-      // Open threshold (what actually triggers trying to open a position)
-      const openThreshold   = isSnipe ? 0 : MATURE_MIN_SCORE_TO_OPEN
-
-      const meetsInsert = finalScore >= insertThreshold
-      const meetsOpen   = finalScore >= openThreshold
-
-      if (!meetsInsert) {
-        rejectionReason = isSnipe
-          ? 'snipe safety check failed'
-          : `score ${finalScore} < insert threshold ${MIN_SCORE_TO_OPEN}`
+      if (!meetsOpen) {
+        rejectionReason = `score ${finalScore} < ${MIN_SCORE_TO_OPEN}`
         decision = 'REJECTED'
       } else {
         decision = 'ACCEPTED'
       }
 
-      console.log(
-        `[scanner][decision] ${symbol} — ${decision} (lane=${lane}, track=${track}, strategy=${strategy?.id ?? 'none'}, score=${finalScore}, binStep=${binStepDisplay}${bondingInfo})`
-      )
-
-      console.log(JSON.stringify({
-        event:     'candidate_evaluated',
-        mint:      tokenAddress,
-        symbol,
-        score:     finalScore,
-        breakdown: {
-          score_volmc:       breakdown.volMcScore,
-          score_holders:     breakdown.holderScore,
-          score_freshness:   breakdown.freshnessScore,
-          score_fee_efficiency: breakdown.feeEfficiencyScore,
-          score_volume_tvl:  breakdown.volumeTvlScore,
-          score_curve_bonus: breakdown.curveBonus,
-          final_score:       finalScore,
-        },
-        launchpad: launchpadSource,
-        lane,
-        track: isSnipe ? 'snipe' : 'mature',
-        decision,
-        reason:    rejectionReason,
-      }))
+      console.log(`[scanner][decision] ${symbol} — ${decision} (lane=${lane}, strategy=${strategy?.id ?? 'none'}, score=${finalScore})`)
     }
 
-    // Dedup check removed in simplified stack (was using candidates table)
-    // For now we allow duplicates in local logging.
-
-    // candidates insert removed in simplified stack - already logged above
     if (decision === 'ACCEPTED' && strategy) {
       candidateCount++
-      const candidateTrack = (ageHours * 60) <= FRESH_SNIPE_MAX_AGE_MINUTES ? 'snipe' : 'mature';
-      console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (${lane} lane, ${candidateTrack} track, class=${tokenClass}, quote=${quoteTokenMint}, score=${finalScore}, mc=$${resolvedMc.toFixed(0)}, vol=$${vol24h.toFixed(0)}, vol1h=$${vol1h.toFixed(0)}, vol5m=$${vol5m.toFixed(0)}, feeTvl24h=${feeTvl24hPct.toFixed(2)}%, feeTvl1h=${feeTvl1hPct.toFixed(2)}%, feeTvl5m=${feeTvl5mPct.toFixed(2)}%, volTvl1h=${volumeTvl1hRatio.toFixed(2)}, momentum=${momentumScore}, holders=${holderCountForFilter}, rug=${rugScore}, age=${ageHours.toFixed(1)}h, binStep=${binStepDisplay})`)
+      console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (lane=${lane}, score=${finalScore})`)
 
-      // Extra verbose context for dry-run observation
-      console.log(
-        `[scanner][candidate] ${symbol} — bestPool binStep=${binStepDisplay} tvl=$${liqUsd.toFixed(0)} ` +
-        `fee1h=${feeTvl1hPct.toFixed(2)}% momentum=${momentumScore} bondingCurve=${bondingCurvePct ?? 'n/a'}%`
-      )
       await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
-      // For mature track, we only attempt to open if score >= MATURE_MIN_SCORE_TO_OPEN (even if we recorded it at MIN_SCORE_TO_OPEN+)
-      const canOpenThisCandidate = (ageHours * 60) <= FRESH_SNIPE_MAX_AGE_MINUTES || finalScore >= MATURE_MIN_SCORE_TO_OPEN
-      if (!canOpenThisCandidate) {
-        openSkippedCount++
-        console.log(`[scanner] ${symbol} recorded (score ${finalScore}) but below open threshold ${MATURE_MIN_SCORE_TO_OPEN} on mature track`)
-        continue
-      }
-
+      // Open guards (simplified)
       const disabledReason = getDisabledStrategyReason(strategy.id)
       if (disabledReason) {
         openSkippedCount++
-        console.log(`[scanner] ${symbol} qualifies for ${strategy.id} but open skipped: ${disabledReason}`)
+        console.log(`[scanner] ${symbol} open skipped: ${disabledReason}`)
         continue
       }
-
       if (openBlockedReason || openedCount >= availableOpenSlots) {
         openSkippedCount++
-        const reason = openBlockedReason ?? 'slots_filled_this_tick'
-        console.log(`[scanner] ${symbol} qualifies but open skipped: ${reason}`)
+        console.log(`[scanner] ${symbol} open skipped: ${openBlockedReason ?? 'no_slots'}`)
         continue
       }
-
       if (!await isOpenAllowedToday()) {
         openSkippedCount++
-        console.log(`[scanner] ${symbol} qualifies but open skipped: daily loss circuit breaker`)
+        console.log(`[scanner] ${symbol} open skipped: daily loss circuit breaker`)
         continue
       }
 
-      // Moonboy is tied to the scanner having accepted the candidate based on its criteria,
-      // not on whether the LP position itself successfully opened (Jupiter failures etc. are common on fresh tokens).
-      // We fire Moonboy here, before attempting the (potentially failing) openPosition call.
-      console.log(`[scanner] ${symbol} — candidate passed all criteria, triggering Moonboy companion buy (if eligible)`)
+      // Fire Moonboy companion (core simplified behavior)
       void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
 
       const positionId = await openPosition(metrics, strategy)
@@ -1054,34 +866,17 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
         console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`)
 
-        // Simplified stack: claim via local state
-        let claimSuccess = false;
-        const positions = getOpenLpPositions();
-        for (let attempt = 1; attempt <= 3 && !claimSuccess; attempt++) {
-          try {
-            const idx = positions.findIndex((p: any) => p.id === positionId);
-            if (idx !== -1) {
-              positions[idx].strategy_id = strategy.id;
-              positions[idx].symbol = symbol;
-              positions[idx].metadata = {
-                ...(positions[idx].metadata || {}),
-                claimed_by_scanner_at: new Date().toISOString(),
-                original_strategy_id: strategy.id,
-              };
-              saveOpenLpPositions(positions);
-              claimSuccess = true;
-            }
-          } catch (claimErr) {
-            if (attempt === 3) {
-              console.warn(`[scanner] failed to claim strategy/symbol for position ${positionId} after 3 attempts:`, claimErr);
-            } else {
-              await new Promise(r => setTimeout(r, 500 * attempt));
-            }
+        // Claim strategy/symbol in local state (simplified)
+        try {
+          const positions = getOpenLpPositions();
+          const idx = positions.findIndex((p: any) => p.id === positionId);
+          if (idx !== -1) {
+            positions[idx].strategy_id = strategy.id;
+            positions[idx].symbol = symbol;
+            saveOpenLpPositions(positions);
           }
-        }
-        if (claimSuccess) {
-          console.log(`[scanner] successfully claimed position ${positionId} with strategy=${strategy.id} and real symbol`);
-        }
+        } catch {}
+
 
         await sendAlert({
           type: 'position_opened',
@@ -1116,15 +911,12 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   void cleanupOldPoolCache()
 
   console.log(
-    `[scanner] done — scanned: ${pools.length}, survivors: ${allSurvivors.length}, ` +
-    `deep-checked: ${survivors.length}, candidates: ${candidateCount}, opened: ${openedCount}, ` +
-    `open-skipped: ${openSkippedCount}${openBlockedReason ? ` (${openBlockedReason})` : ''}, ` +
-    `binStepPreferred: ${binStepPreferredCount}, lowBinQuality: ${lowBinQualitySelections} ` +
-    `(fresh survivors: ${freshSurvivors?.length ?? 0}, momentum survivors: ${momentumSurvivors?.length ?? 0})`
+    `[scanner] done — scanned=${fetchedPools.length}, survivors=${survivors.length}, ` +
+    `candidates=${candidateCount}, opened=${openedCount}, skipped=${openSkippedCount}`
   )
   return finish({
     scanned: fetchedPools.length,
-    survivors: allSurvivors.length,
+    survivors: survivors.length,
     deepChecked: survivors.length,
     candidates: candidateCount,
     opened: openedCount,
