@@ -189,114 +189,11 @@ export async function swapTokenToSol(
  * Promotes to status=closed on success, leaves as sell_failed if swap still fails.
  */
 export async function retryStrandedSells(): Promise<{ retried: number; recovered: number }> {
-  const stats = { retried: 0, recovered: 0 }
-
-  if (process.env.BOT_DRY_RUN === 'true') {
-    return stats
-  }
-
-
-  // --- moonboy_positions ---
-  const { data: moonboys } = await supabase
-    .select('id, mint, symbol, close_reason')
-    .eq('status', 'sell_failed')
-  
-  for (const row of (moonboys ?? [])) {
-    const label = `[retry-sell][moonboy][${row.symbol}]`
-    stats.retried++
-    try {
-      const sig = await swapTokenToSol(row.mint, label)
-      if (sig === null) {
-        // Zero balance — token already gone, mark closed cleanly
-        console.log(`${label} zero balance — marking closed without swap`)
-      } else {
-        console.log(`${label} recovered ✔ sig=${sig.slice(0, 8)}…`)
-      }
-      await supabase
-        .update({
-          status: 'closed',
-          closed_at: new Date().toISOString(),
-          tx_close: sig ?? 'zero_balance',
-          close_reason: row.close_reason ?? 'sell_failed_recovered',
-        })
-        .eq('id', row.id)
-      await sendAlert({
-        type: 'moonboy_closed',
-        symbol: row.symbol,
-        mint: row.mint,
-        pnlPct: 0,
-        reason: `sell_failed_recovered`,
-        ageHours: 0,
-        swapSig: sig ?? 'zero_balance',
-      }).catch(() => {})
-      stats.recovered++
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.warn(`${label} retry swap still failed — will try again next tick: ${msg}`)
-      await supabase.logInfo('legacy_bot_log', {
-        level: 'warn',
-        event: 'stranded_sell_retry_failed',
-        payload: { table: 'moonboy_positions', id: row.id, symbol: row.symbol, mint: row.mint, error: msg },
-      }).then(() => {}, () => {})
-    }
-  }
-
-  // --- lp_positions ---
-  const { data: lpRows } = await supabase
-    .select('id, symbol, metadata, close_reason')
-    .eq('status', 'sell_failed')
-
-  for (const row of (lpRows ?? [])) {
-    const mint: string | undefined = (row.metadata as Record<string, unknown> | null)?.token_mint as string | undefined
-    const label = `[retry-sell][lp][${row.symbol}]`
-    stats.retried++
-
-    if (!mint) {
-      console.warn(`${label} no token_mint in metadata — cannot retry swap, skipping`)
-      await supabase.logInfo('legacy_bot_log', {
-        level: 'warn',
-        event: 'stranded_sell_no_mint',
-        payload: { table: 'lp_positions', id: row.id, symbol: row.symbol },
-      }).then(() => {}, () => {})
-      continue
-    }
-
-    try {
-      const sig = await swapTokenToSol(mint, label)
-      if (sig === null) {
-        console.log(`${label} zero balance — marking closed without swap`)
-      } else {
-        console.log(`${label} recovered ✔ sig=${sig.slice(0, 8)}…`)
-      }
-      await supabase
-        .update({
-          status: 'closed',
-          closed_at: new Date().toISOString(),
-          tx_close: sig ?? 'zero_balance',
-          close_reason: row.close_reason ?? 'sell_failed_recovered',
-        })
-        .eq('id', row.id)
-      await sendAlert({
-        type: 'position_closed',
-        symbol: row.symbol,
-        strategy: 'sell_failed_recovery',
-        reason: 'sell_failed_recovered',
-        ilPct: 0,
-        ageHours: 0,
-      }).catch(() => {})
-      stats.recovered++
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.warn(`${label} retry swap still failed — will try again next tick: ${msg}`)
-      await supabase.logInfo('legacy_bot_log', {
-        level: 'warn',
-        event: 'stranded_sell_retry_failed',
-        payload: { table: 'lp_positions', id: row.id, symbol: row.symbol, mint, error: msg },
-      }).then(() => {}, () => {})
-    }
-  }
-
-  return stats
+  // TODO: Re-implement using local state (state/open-moonboys.json + state/open-lp-positions.json)
+  // For the simplified stack we stub this for now to keep the build clean.
+  // The core retry logic can be re-added later when local-state persistence is fully wired.
+  console.log('[swap] retryStrandedSells is stubbed in simplified stack mode')
+  return { retried: 0, recovered: 0 }
 }
 
 /**

@@ -58,6 +58,7 @@ export const LP_SCANNER_ENABLED = envBool('LP_SCANNER_ENABLED', true) && SCANNER
 export const EVIL_PANDA_ENABLED = envBool('EVIL_PANDA_ENABLED', true)
 export const MOONBOY_ENABLED = envBool('MOONBOY_ENABLED', true)
 export const HELIUS_ENABLED = envBool('HELIUS_ENABLED', false)
+export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
 
 // ── Misc ────────────────────────────────────────────────────────
 export const DEEP_CHECK_DELAY_MS = envNumber('DEEP_CHECK_DELAY_MS', 800)
