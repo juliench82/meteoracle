@@ -35,6 +35,9 @@ export function getStrategyForToken(token: {
   rugcheckScore: number
   topHolderPct: number
   holderCount: number
+  volume1h?: number
+  volume5m?: number
+  [key: string]: unknown
 }, forcedStrategyId?: StrategyId): Strategy | null {
   if (forcedStrategyId) {
     const forced = getStrategyById(forcedStrategyId)
@@ -68,6 +71,7 @@ export function explainNoStrategy(t: {
   rugcheckScore: number
   topHolderPct: number
   holderCount: number
+  [key: string]: unknown
 }): string {
   const s = evilPandaStrategy
   const f = s.filters

@@ -66,8 +66,15 @@ import {
   scoreMeteoraMomentum,
   cleanupOldPoolCache,
 } from './pool-fetcher'
-// lane-classifier removed as part of simplified stack
-// Its functionality has been inlined or simplified into pool-fetcher + deep-checker
+import {
+  classifyPoolsIntoLanes,
+  pickDeepCheckSurvivors,
+  survivorTokenAddress,
+  selectBestPool,
+  passesMomentumRegain,
+  getOneHourVolumeVs24hAverage,
+  getOneHourFeeTvlVs24hAverage,
+} from './lane-classifier'
 
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 
@@ -475,23 +482,12 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   await refreshRpcProviderCooldown('helius')
 
   if (tickMode) {
-    console.log('[scanner] tickMode=true — skipping pool-fetcher, reporting last 1h candidates')
-    // Supabase removed - using local state + logger only
-    const since = new Date(Date.now() - 60 * 60 * 1_000).toISOString()
-    // candidates table removed in simplified stack - using local logic or skipping
-    const recentCandidates: any[] = []
-      .select('symbol, score, strategy_id')
-      .gte('scanned_at', since)
-      .order('score', { ascending: false })
-      .limit(5)
-
-    const topSymbols = (recentCandidates ?? []).map(c => `${c.symbol}(${c.score})`).join(', ')
-    console.log(`[scanner] tickMode — recent candidates (1h): ${topSymbols || 'none'}`)
+    console.log('[scanner] tickMode=true — skipping pool-fetcher (simplified stack: no candidates table)')
     return finish({
       scanned: 0,
       survivors: 0,
       deepChecked: 0,
-      candidates: recentCandidates?.length ?? 0,
+      candidates: 0,
       opened: 0,
       openSkipped: 0,
       openBlockedReason: 'tick_mode_no_open',
@@ -716,7 +712,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       // Momentum lane — improved detection
       // Strong 5m signals (high feeTvl5m or volume5m) → prefer Scalp-Spike tight ranges
       // Otherwise → fall back to Evil Panda wider ranges for steadier momentum
-      const hasStrong5mSignal = survivors.some(s => {
+      const hasStrong5mSignal = survivors.some((s: any) => {
         const p = s.pool
         const fee5m = getFeeTvlPct(p, '5m') || 0
         const vol5m = getPoolVolume(p, '5m') || 0
