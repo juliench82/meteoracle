@@ -72,12 +72,11 @@ async function handleUpdate(update: any) {
       '/positions — detailed list of open LP + Moonboy',
       '/tick — force one scanner + monitor cycle',
       '/start — enable the bot (soft, recommended)',
-      '/reload — full restart of the processes (aggressive)',
+      '/stop — disable the bot',
       '/dry — enable dry-run mode',
       '/live — enable live trading',
-      '/stop — emergency stop',
+      '/reload — full restart of the processes (use after code changes)',
       '/close <id> — force close one position',
-      '/add <id> <SOL> — add liquidity to position',
       '/help — this message',
       '',
       'All state from local files (state/ folder).',
@@ -177,11 +176,10 @@ async function handleUpdate(update: any) {
   }
 
   if (cmd === '/restart') {
-    // Soft version for convenience / backward compatibility
     await setBotState({ enabled: true, paused: false })
     await sendMessage(
-      'Bot enabled (soft).\n' +
-      'Use /reload if you need a full process restart (e.g. after code changes).',
+      'Bot enabled.\n' +
+      '(Note: `/restart` is now soft. Use `/reload` for a full process restart after code changes.)',
       chatId
     )
     return
