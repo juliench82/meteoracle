@@ -455,221 +455,35 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
-  for (const { pool: representativePool, ageHours, lane } of survivors) {
-    await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
+  const openedCountRef = { value: openedCount };
+  const openSkippedCountRef = { value: openSkippedCount };
+  const candidateCountRef = { value: candidateCount };
+  const dailyLossLimitHitRef = { value: dailyLossLimitHit };
 
-    const token = getTradableToken(representativePool)
-    const tokenAddress = token.address
-    const symbol = representativePool.name ?? token.symbol
-    const launchpadSource = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora'
-    const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address)
+  const tickContext: ScannerTickContext = {
+    freshPools,
+    momentumPools,
+    limitState,
+    openBlockedReason,
+    availableOpenSlots,
+    openedMintsThisTick,
+    heliusRpcUrl,
+    liveSolPriceUsd,
+    openedCount: { value: openedCount },
+    openSkippedCount: { value: openSkippedCount },
+    candidateCount: { value: candidateCount },
+    dailyLossLimitHit: { value: dailyLossLimitHit },
+  };
 
-    if (openedMintsThisTick.has(tokenAddress)) {
-      console.log(`[scanner] ${symbol} — skip ${lane} lane: position already opened earlier this tick`)
-      continue
-    }
-
-    if (CANDIDATE_DEDUP_HOURS > 0) {
-      // Per-mint dedup is handled via local state below; no Supabase path.
-    }
-
-    if (liveOpenPosition) {
-      console.log(`[scanner] ${symbol} — skip: live Meteora position already exists (${liveOpenPosition.position_pubkey})`)
-      continue
-    }
-
-    // Per-mint dedup using local state (skip open or recent bad closes)
-    const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
-    const allPositions = getOpenLpPositions();
-
-    const conflicting = allPositions.find((p: any) => {
-      if (p.mint !== tokenAddress) return false;
-      if (OPEN_LP_STATUSES.includes(p.status)) return true;
-      if (p.status === 'closed' && p.closed_at && p.closed_at >= recentClosedCutoff) {
-        const reason = p.close_reason || '';
-        if (reason.startsWith('pnl_unavailable') || reason.startsWith('bad')) return true;
-      }
-      return false;
-    });
-
-    if (conflicting) {
-      if (OPEN_LP_STATUSES.includes(conflicting.status)) {
-        console.log(`[scanner] ${symbol} — skip: existing open LP position for mint (id=${conflicting.id})`);
-      } else {
-        console.log(`[scanner] ${symbol} — skip: recent bad close for this mint (id=${conflicting.id}, reason=${conflicting.close_reason})`);
-      }
-      continue;
-    }
-
-    // Pool selection: When multiple tiers exist for a token, we prefer highest liquidity (see selectBestPool)
-    const result = selectBestPool(
-      lane === 'fresh' ? freshPools : momentumPools,
-      tokenAddress
-    )
-    const bestPool = result.pool
-
-    // Optional observability: log when we had choice
-    const tokenPoolsInLane = (lane === 'fresh' ? freshPools : momentumPools).filter(p =>
-      getTradableToken(p)?.address === tokenAddress
-    );
-    if (tokenPoolsInLane.length > 1 && bestPool) {
-      const chosenTvl = getPoolTvl(bestPool);
-      console.log(`[scanner] ${symbol} — multiple pools for token (${tokenPoolsInLane.length}), selected highest liquidity pool (TVL=$${chosenTvl.toLocaleString()})`);
-    }
-
-    if (!bestPool) {
-      console.log(`[scanner] ${symbol} — skip: no pool found for token`)
-      continue
-    }
-    const liveBestPoolPosition = findLiveOpenPosition(limitState, tokenAddress, bestPool.address)
-    if (liveBestPoolPosition) {
-      console.log(`[scanner] ${symbol} — skip: live Meteora position already exists for best pool (${liveBestPoolPosition.position_pubkey})`)
-      continue
-    }
-
-    // MC resolution (DexScreener fallback for low/stale Meteora data)
-    // Prefer token's market_cap from Meteora if present, otherwise DexScreener
-    let resolvedMc = token.market_cap || 0
-    if (!resolvedMc || resolvedMc < 1) {
-      resolvedMc = await withTimeout(
-        fetchMcFromDexScreener(tokenAddress, token.price),
-        EXTERNAL_CALL_TIMEOUT_MS,
-        `fetchMcFromDexScreener ${symbol}`,
-      ).then(v => v ?? 0)
-    }
-    if (!resolvedMc || resolvedMc < 1) {
-      if (lane !== 'fresh') continue
-      resolvedMc = 0
-    }
-
-    let holderCount = 0, topHolderPct = 0, holderReliable = false
-    if (USE_HELIUS) {
-      const h = await withTimeout(checkHolders(tokenAddress), EXTERNAL_CALL_TIMEOUT_MS, `checkHolders ${symbol}`)
-      if (h) {
-        holderCount = h.holderCount; topHolderPct = h.topHolderPct; holderReliable = h.reliable
-        if (!h.reliable && token.holders) holderCount = Math.max(holderCount, token.holders)
-      } else {
-        holderCount = token.holders ?? 0
-      }
-    } else {
-      holderCount = token.holders ?? 0
-    }
-
-    const rugScore = await withTimeout(getRugscore(tokenAddress, symbol), EXTERNAL_CALL_TIMEOUT_MS, `getRugscore ${symbol}`).then(v => v ?? 0)
-    const holderCountForFilter = holderCount || (token.holders ?? 0)
-
-    const bondingCurvePct: number | undefined =
-      (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48)
-        ? (await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl))?.progressPct
-        : undefined
-
-    const metrics: TokenMetrics = {
-      address: tokenAddress, symbol,
-      mcUsd: resolvedMc,
-      liquidityUsd: getPoolTvl(bestPool),
-      topHolderPct, holderCount: holderCountForFilter, holderReliable, ageHours,
-      rugcheckScore: rugScore, priceUsd: token.price,
-      poolAddress: bestPool.address, dexId: 'meteora',
-      feeTvl24hPct: getFeeTvlPct(bestPool, '24h'),
-      feeTvl1hPct: getFeeTvlPct(bestPool, '1h'),
-      volume24h: getPoolVolume(bestPool, '24h'),
-      volumeTvl1hRatio: getVolumeTvlRatio(bestPool, '1h'),
-      quoteTokenMint: getQuoteTokenMint(bestPool),
-      volume1h: getPoolVolume(bestPool, '1h'),
-      volume5m: getPoolVolume(bestPool, '5m'),
-      feeTvl5mPct: getFeeTvlPct(bestPool, '5m'),
-      bondingCurvePct, launchpadSource,
-      binStep: bestPool.pool_config?.bin_step,
-      // dropped (not required by current evil-panda + persist + alerts): volumeGrowth1h, momentumScore
-    }
-
-    // Strategy: unified on evil-panda (lanes give basic momentum filtering)
-    const strategy = getStrategyForToken(metrics, 'evil-panda')
-
-    let decision = 'REJECTED'
-    let rejectionReason: string | null = null
-    let finalScore = 0
-
-    if (!strategy) {
-      rejectionReason = explainNoStrategy(metrics)
-      decision = 'REJECTED'
-      console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) lane=${lane}: ${rejectionReason}`)
-    } else {
-      finalScore = getScannerAdjustedScore(metrics, strategy.id)
-
-      const meetsOpen = finalScore >= MIN_SCORE_TO_OPEN
-      if (!meetsOpen) {
-        rejectionReason = `score ${finalScore} < ${MIN_SCORE_TO_OPEN}`
-        decision = 'REJECTED'
-      } else {
-        decision = 'ACCEPTED'
-      }
-
-      console.log(`[scanner][decision] ${symbol} — ${decision} (lane=${lane}, score=${finalScore})`)
-    }
-
-    if (decision === 'ACCEPTED' && strategy) {
-      candidateCount++
-      await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
-
-      // Open guards (simplified)
-      const disabledReason = getDisabledStrategyReason(strategy.id)
-      if (disabledReason) {
-        openSkippedCount++
-        console.log(`[scanner] ${symbol} open skipped: ${disabledReason}`)
-        continue
-      }
-      if (openBlockedReason || openedCount >= availableOpenSlots) {
-        openSkippedCount++
-        console.log(`[scanner] ${symbol} open skipped: ${openBlockedReason ?? 'no_slots'}`)
-        continue
-      }
-      if (!await isOpenAllowedToday()) {
-        openSkippedCount++
-        console.log(`[scanner] ${symbol} open skipped: daily loss circuit breaker`)
-        continue
-      }
-
-      // Fire Moonboy companion (core simplified behavior)
-      void maybeTriggerMoonboy(metrics, liveSolPriceUsd)
-
-      const positionId = await openPosition(metrics, strategy)
-      if (positionId) {
-        openedCount++
-        dailyLossLimitHit = null
-        openedMintsThisTick.add(tokenAddress)
-
-        console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`)
-
-        // Update local state with strategy/symbol
-        try {
-          const positions = getOpenLpPositions()
-          const idx = positions.findIndex((p: any) => p.id === positionId)
-          if (idx !== -1) {
-            positions[idx].strategy_id = strategy.id
-            positions[idx].symbol = symbol
-            saveOpenLpPositions(positions)
-          }
-        } catch {}
-
-        await sendAlert({
-          type: 'position_opened',
-          symbol,
-          strategy: strategy.id,
-          solDeposited: MARKET_LP_SOL_PER_POSITION,
-          entryPrice: metrics.priceUsd,
-          entryPriceUsd: metrics.priceUsd,
-          meteoracleScore: finalScore,
-          poolAddress: metrics.poolAddress,
-          mint: metrics.address,
-          positionId,
-        })
-      } else {
-        openSkippedCount++
-        console.warn(`[scanner] ${symbol} — openPosition returned null (executor did not open despite ACCEPT)`)
-      }
-    }
+  for (const survivor of survivors) {
+    await processSurvivor(survivor, tickContext);
   }
+
+  // Sync counters back from context
+  openedCount = tickContext.openedCount.value;
+  openSkippedCount = tickContext.openSkippedCount.value;
+  candidateCount = tickContext.candidateCount.value;
+  dailyLossLimitHit = tickContext.dailyLossLimitHit.value;
 
   console.log(
     `[scanner] done — scanned=${fetchedPools.length}, survivors=${survivors.length}, ` +
@@ -697,4 +511,331 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
   } catch {
     return 0
   }
+}
+
+type SurvivorProcessResult = {
+  wasCandidate: boolean;
+  wasOpened: boolean;
+  wasSkipped: boolean;
+};
+
+interface ScannerTickContext {
+  freshPools: any[];
+  momentumPools: any[];
+  limitState: any;
+  openBlockedReason: string | undefined;
+  availableOpenSlots: number;
+  openedMintsThisTick: Set<string>;
+  heliusRpcUrl: string;
+  liveSolPriceUsd: number;
+
+  // Mutable counters (passed by ref via object)
+  openedCount: { value: number };
+  openSkippedCount: { value: number };
+  candidateCount: { value: number };
+  dailyLossLimitHit: { value: boolean | null };
+}
+
+/**
+ * Processes a single survivor from the lane classification.
+ * Extracted for readability. Uses a context object to reduce parameter count.
+ */
+async function processSurvivor(
+  survivor: { pool: any; ageHours: number; lane: 'fresh' | 'momentum' },
+  ctx: ScannerTickContext
+): Promise<SurvivorProcessResult> {
+  const {
+    freshPools,
+    momentumPools,
+    limitState,
+    openBlockedReason,
+    availableOpenSlots,
+    openedMintsThisTick,
+    heliusRpcUrl,
+    liveSolPriceUsd,
+    openedCount: openedCountRef,
+    openSkippedCount: openSkippedCountRef,
+    candidateCount: candidateCountRef,
+    dailyLossLimitHit: dailyLossLimitHitRef,
+  } = ctx;
+
+  const { pool: representativePool, ageHours, lane } = survivor;
+
+  await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS));
+
+  const token = getTradableToken(representativePool);
+  const tokenAddress = token.address;
+  const symbol = representativePool.name ?? token.symbol;
+  const launchpadSource = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora';
+  const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address);
+
+  if (openedMintsThisTick.has(tokenAddress)) {
+    console.log(`[scanner] ${symbol} — skip ${lane} lane: position already opened earlier this tick`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
+  if (CANDIDATE_DEDUP_HOURS > 0) {
+    // Per-mint dedup is handled via local state below; no Supabase path.
+  }
+
+  if (liveOpenPosition) {
+    console.log(`[scanner] ${symbol} — skip: live Meteora position already exists (${liveOpenPosition.position_pubkey})`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
+  const conflicting = findConflictingLocalPosition(tokenAddress);
+  if (conflicting) {
+    if (OPEN_LP_STATUSES.includes(conflicting.status)) {
+      console.log(`[scanner] ${symbol} — skip: existing open LP position for mint (id=${conflicting.id})`);
+    } else {
+      console.log(`[scanner] ${symbol} — skip: recent bad close for this mint (id=${conflicting.id}, reason=${conflicting.close_reason})`);
+    }
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
+  // Pool selection: When multiple tiers exist for a token, we prefer highest liquidity
+  const result = selectBestPool(
+    lane === 'fresh' ? freshPools : momentumPools,
+    tokenAddress
+  );
+  const bestPool = result.pool;
+
+  // Optional observability
+  const tokenPoolsInLane = (lane === 'fresh' ? freshPools : momentumPools).filter(p =>
+    getTradableToken(p)?.address === tokenAddress
+  );
+  if (tokenPoolsInLane.length > 1 && bestPool) {
+    const chosenTvl = getPoolTvl(bestPool);
+    console.log(`[scanner] ${symbol} — multiple pools for token (${tokenPoolsInLane.length}), selected highest liquidity pool (TVL=$${chosenTvl.toLocaleString()})`);
+  }
+
+  if (!bestPool) {
+    console.log(`[scanner] ${symbol} — skip: no pool found for token`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
+  const liveBestPoolPosition = findLiveOpenPosition(limitState, tokenAddress, bestPool.address);
+  if (liveBestPoolPosition) {
+    console.log(`[scanner] ${symbol} — skip: live Meteora position already exists for best pool (${liveBestPoolPosition.position_pubkey})`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
+  // MC resolution
+  let resolvedMc = token.market_cap || 0;
+  if (!resolvedMc || resolvedMc < 1) {
+    resolvedMc = await withTimeout(
+      fetchMcFromDexScreener(tokenAddress, token.price),
+      EXTERNAL_CALL_TIMEOUT_MS,
+      `fetchMcFromDexScreener ${symbol}`,
+    ).then(v => v ?? 0);
+  }
+  if (!resolvedMc || resolvedMc < 1) {
+    if (lane !== 'fresh') return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+    resolvedMc = 0;
+  }
+
+  let holderCount = 0, topHolderPct = 0, holderReliable = false;
+  if (USE_HELIUS) {
+    const h = await withTimeout(checkHolders(tokenAddress), EXTERNAL_CALL_TIMEOUT_MS, `checkHolders ${symbol}`);
+    if (h) {
+      holderCount = h.holderCount; topHolderPct = h.topHolderPct; holderReliable = h.reliable;
+      if (!h.reliable && token.holders) holderCount = Math.max(holderCount, token.holders);
+    } else {
+      holderCount = token.holders ?? 0;
+    }
+  } else {
+    holderCount = token.holders ?? 0;
+  }
+
+  const rugScore = await withTimeout(getRugscore(tokenAddress, symbol), EXTERNAL_CALL_TIMEOUT_MS, `getRugscore ${symbol}`).then(v => v ?? 0);
+  const holderCountForFilter = holderCount || (token.holders ?? 0);
+
+  const bondingCurvePct: number | undefined =
+    (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48)
+      ? (await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl))?.progressPct
+      : undefined;
+
+  const metrics = buildTokenMetrics({
+    tokenAddress,
+    symbol,
+    resolvedMc,
+    bestPool,
+    topHolderPct,
+    holderCountForFilter,
+    holderReliable,
+    ageHours,
+    rugScore,
+    token,
+    launchpadSource,
+    bondingCurvePct,
+  });
+
+  const { strategy, decision, rejectionReason, finalScore } = evaluateCandidate(metrics, lane, symbol);
+
+  if (decision === 'ACCEPTED' && strategy) {
+    candidateCountRef.value++;
+    await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct });
+
+    const disabledReason = getDisabledStrategyReason(strategy.id);
+    if (disabledReason) {
+      openSkippedCountRef.value++;
+      console.log(`[scanner] ${symbol} open skipped: ${disabledReason}`);
+      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+    }
+    if (openBlockedReason || openedCountRef.value >= availableOpenSlots) {
+      openSkippedCountRef.value++;
+      console.log(`[scanner] ${symbol} open skipped: ${openBlockedReason ?? 'no_slots'}`);
+      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+    }
+    if (!await isOpenAllowedToday()) {
+      openSkippedCountRef.value++;
+      console.log(`[scanner] ${symbol} open skipped: daily loss circuit breaker`);
+      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+    }
+
+    void maybeTriggerMoonboy(metrics, liveSolPriceUsd);
+
+    const positionId = await openPosition(metrics, strategy);
+    if (positionId) {
+      openedCountRef.value++;
+      dailyLossLimitHitRef.value = null;
+      openedMintsThisTick.add(tokenAddress);
+
+      console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`);
+
+      try {
+        const positions = getOpenLpPositions();
+        const idx = positions.findIndex((p: any) => p.id === positionId);
+        if (idx !== -1) {
+          positions[idx].strategy_id = strategy.id;
+          positions[idx].symbol = symbol;
+          saveOpenLpPositions(positions);
+        }
+      } catch {}
+
+      await sendAlert({
+        type: 'position_opened',
+        symbol,
+        strategy: strategy.id,
+        solDeposited: MARKET_LP_SOL_PER_POSITION,
+        entryPrice: metrics.priceUsd,
+        entryPriceUsd: metrics.priceUsd,
+        meteoracleScore: finalScore,
+        poolAddress: metrics.poolAddress,
+        mint: metrics.address,
+        positionId,
+      });
+
+      return { wasCandidate: true, wasOpened: true, wasSkipped: false };
+    } else {
+      openSkippedCountRef.value++;
+      console.warn(`[scanner] ${symbol} — openPosition returned null (executor did not open despite ACCEPT)`);
+      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+    }
+  }
+
+  return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+}
+
+function evaluateCandidate(
+  metrics: TokenMetrics,
+  lane: 'fresh' | 'momentum',
+  symbol: string
+) {
+  const strategy = getStrategyForToken(metrics, 'evil-panda');
+
+  let decision = 'REJECTED';
+  let rejectionReason: string | null = null;
+  let finalScore = 0;
+
+  if (!strategy) {
+    rejectionReason = explainNoStrategy(metrics);
+    decision = 'REJECTED';
+    console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) lane=${lane}: ${rejectionReason}`);
+  } else {
+    finalScore = getScannerAdjustedScore(metrics, strategy.id);
+
+    const meetsOpen = finalScore >= MIN_SCORE_TO_OPEN;
+    if (!meetsOpen) {
+      rejectionReason = `score ${finalScore} < ${MIN_SCORE_TO_OPEN}`;
+      decision = 'REJECTED';
+    } else {
+      decision = 'ACCEPTED';
+    }
+
+    console.log(`[scanner][decision] ${symbol} — ${decision} (lane=${lane}, score=${finalScore})`);
+  }
+
+  return { strategy, decision, rejectionReason, finalScore };
+}
+
+function findConflictingLocalPosition(tokenAddress: string) {
+  const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+  const allPositions = getOpenLpPositions();
+
+  return allPositions.find((p: any) => {
+    if (p.mint !== tokenAddress) return false;
+    if (OPEN_LP_STATUSES.includes(p.status)) return true;
+    if (p.status === 'closed' && p.closed_at && p.closed_at >= recentClosedCutoff) {
+      const reason = p.close_reason || '';
+      if (reason.startsWith('pnl_unavailable') || reason.startsWith('bad')) return true;
+    }
+    return false;
+  });
+}
+
+function buildTokenMetrics(params: {
+  tokenAddress: string;
+  symbol: string;
+  resolvedMc: number;
+  bestPool: any;
+  topHolderPct: number;
+  holderCountForFilter: number;
+  holderReliable: boolean;
+  ageHours: number;
+  rugScore: number;
+  token: any;
+  launchpadSource: string;
+  bondingCurvePct?: number;
+}): TokenMetrics {
+  const {
+    tokenAddress,
+    symbol,
+    resolvedMc,
+    bestPool,
+    topHolderPct,
+    holderCountForFilter,
+    holderReliable,
+    ageHours,
+    rugScore,
+    token,
+    launchpadSource,
+    bondingCurvePct,
+  } = params;
+
+  return {
+    address: tokenAddress,
+    symbol,
+    mcUsd: resolvedMc,
+    liquidityUsd: getPoolTvl(bestPool),
+    topHolderPct,
+    holderCount: holderCountForFilter,
+    holderReliable,
+    ageHours,
+    rugcheckScore: rugScore,
+    priceUsd: token.price,
+    poolAddress: bestPool.address,
+    dexId: 'meteora',
+    feeTvl24hPct: getFeeTvlPct(bestPool, '24h'),
+    feeTvl1hPct: getFeeTvlPct(bestPool, '1h'),
+    volume24h: getPoolVolume(bestPool, '24h'),
+    volumeTvl1hRatio: getVolumeTvlRatio(bestPool, '1h'),
+    quoteTokenMint: getQuoteTokenMint(bestPool),
+    volume1h: getPoolVolume(bestPool, '1h'),
+    volume5m: getPoolVolume(bestPool, '5m'),
+    feeTvl5mPct: getFeeTvlPct(bestPool, '5m'),
+    bondingCurvePct,
+    launchpadSource,
+    binStep: bestPool.pool_config?.bin_step,
+  };
 }
