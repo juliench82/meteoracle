@@ -3,7 +3,7 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
 import axios from 'axios'
-import { createServerClient } from '@/lib/supabase'
+// Supabase fully removed in simplified stack - using local-state + local-logger only
 import { getBotState } from '@/lib/botState'
 import { getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
 import { scoreCandidateWithBreakdown, type ScoreBreakdown } from '../scorer'
@@ -149,22 +149,8 @@ export async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label:
 }
 
 export async function logScannerTick(result: ScannerResult, durationMs: number, source = 'scanner'): Promise<void> {
-  try {
-    const insertResult = await withTimeout(
-      createServerClient().from('bot_logs').insert({
-        level: result.error ? 'error' : 'info',
-        event: result.error ? 'scanner_tick_failed' : 'scanner_tick',
-        payload: { ...result, durationMs, source },
-      }),
-      SUPABASE_TIMEOUT_MS,
-      'bot_logs insert scanner_tick',
-    )
-    if (insertResult && 'error' in insertResult && insertResult.error) {
-      console.warn('[scanner] bot_logs insert failed:', insertResult.error.message)
-    }
-  } catch (err) {
-    console.warn('[scanner] bot_logs insert failed:', err)
-  }
+  // Simplified stack: use the proper local logger
+  logInfo(result.error ? 'scanner_tick_failed' : 'scanner_tick', { ...result, durationMs, source })
 }
 
 export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'interval'): Promise<void> {
@@ -177,16 +163,8 @@ export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'in
         source,
       },
     }
-    const upsertResult = await withTimeout(
-      createServerClient()
-        .from('bot_health')
-        .upsert(payload),  // uses primary key (service) automatically
-      SUPABASE_TIMEOUT_MS,
-      'bot_health upsert scanner',
-    )
-    if (upsertResult && 'error' in upsertResult && upsertResult.error) {
-      console.warn('[scanner] bot_health upsert failed:', upsertResult.error.message)
-    }
+    // Simplified stack: just log locally
+    logInfo('scanner_heartbeat', payload)
   } catch (err) {
     console.warn('[scanner] bot_health upsert failed:', err)
   }
@@ -520,7 +498,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   if (tickMode) {
     console.log('[scanner] tickMode=true — skipping pool-fetcher, reporting last 1h candidates')
-    const supabase = createServerClient()
+    // Supabase removed - using local state + logger only
     const since = new Date(Date.now() - 60 * 60 * 1_000).toISOString()
     const { data: recentCandidates } = await supabase
       .from('candidates')
@@ -611,7 +589,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     return finish({ scanned: fetchedPools.length, survivors: 0 })
   }
 
-  const supabase = createServerClient()
+  // Supabase removed - using local state + logger only
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints(supabase)
   const survivors = pickDeepCheckSurvivors(freshSurvivors, momentumSurvivors, recentlyClosedOorMints, laneConfig)
 
