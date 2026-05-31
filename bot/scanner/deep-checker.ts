@@ -337,22 +337,6 @@ async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   return new Set()
 }
 
-  if (!result || ('error' in result && result.error)) {
-    const message = result && 'error' in result ? result.error?.message : 'timeout'
-    console.warn(`[scanner] recent OOR recheck lookup failed: ${message}`)
-    return new Set()
-  }
-
-  const rows = 'data' in result ? (result.data ?? []) : []
-  return new Set(
-    rows
-      .filter((row: { mint?: string | null; close_reason?: string | null }) =>
-        Boolean(row.mint) && String(row.close_reason ?? '').startsWith('out_of_range_'),
-      )
-      .map((row: { mint: string }) => row.mint),
-  )
-}
-
 /**
  * Attempt a Moonboy companion spot-buy ($10) right after a successful LP open.
  * This is the single authoritative trigger point for Moonboy.
@@ -670,13 +654,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
 
     if (CANDIDATE_DEDUP_HOURS > 0) {
-      const recentResult = await withTimeout(
-        // candidates dedup via Supabase removed in simplified stack
-        null as any
-          .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString()).limit(1),
-        SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
-      )
-      if (recentResult?.data && recentResult.data.length > 0) { console.log(`[scanner] ${symbol} — skip: scanned in last ${CANDIDATE_DEDUP_HOURS}h`); continue }
+      // candidates dedup via Supabase removed in simplified stack.
+      // For now we skip the DB dedup (or implement simple local dedup later).
+      // To keep the simplified behavior, we just continue without the check for now.
     }
 
     if (liveOpenPosition) {
@@ -1020,83 +1000,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       }))
     }
 
-    // Dedup check to avoid polluting the table with repeated rejections
-    if (CANDIDATE_DEDUP_HOURS > 0) {
-      const dedupCheck = await withTimeout(
-        // candidates Supabase operations removed in simplified stack
-        null as any
-          .select('id')
-          .eq('token_address', tokenAddress)
-          .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString())
-          .limit(1),
-        SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
-      )
-      if (dedupCheck?.data && dedupCheck.data.length > 0) {
-        console.log(`[scanner] ${symbol} — already evaluated in last ${CANDIDATE_DEDUP_HOURS}h, skipping insert`)
-        continue
-      }
-    }
+    // Dedup check removed in simplified stack (was using candidates table)
+    // For now we allow duplicates in local logging.
 
-    const insertResult = await withTimeout(
-      // candidates Supabase removed in simplified stack
-      null as any
-        .upsert({
-          token_address:     metrics.address,
-          symbol:            metrics.symbol,
-          score:             finalScore,
-          strategy_matched:  strategy ? strategy.id : null,
-          strategy_id:       strategy ? strategy.id : null,
-          token_class:       tokenClass,
-          scanner_lane:      lane,
-          pool_address:      metrics.poolAddress,
-          mc_at_scan:        metrics.mcUsd,
-          volume_24h:        metrics.volume24h,
-          volume_1h:         vol1h,
-          volume_5m:         vol5m,
-          liquidity_usd:     metrics.liquidityUsd,
-          fee_tvl_24h_pct:   feeTvl24hPct,
-          fee_tvl_1h_pct:    feeTvl1hPct,
-          fee_tvl_5m_pct:   feeTvl5mPct,
-          holder_count:      metrics.holderCount,
-          rugcheck_score:    metrics.rugcheckScore,
-          top_holder_pct:    metrics.topHolderPct,
-          bin_step:          binStep,
-          scanned_at:        new Date(new Date().setMinutes(0, 0, 0)).toISOString(),
-          score_volmc:       breakdown.volMcScore,
-          score_holders:     breakdown.holderScore,
-          score_freshness:   breakdown.freshnessScore,
-          score_fee_efficiency: breakdown.feeEfficiencyScore,
-          score_volume_tvl:  breakdown.volumeTvlScore,
-          score_curve_bonus: breakdown.curveBonus,
-          launchpad_source:  launchpadSource,
-          decision:          decision,
-          rejection_reason:  rejectionReason,
-          metadata:          {},
-        },
-        {
-          onConflict: 'token_address',
-          ignoreDuplicates: false,
-        }),
-      SUPABASE_TIMEOUT_MS, `candidates insert ${symbol}`
-    )
-
-    const insertOk = insertResult !== null && !('error' in insertResult && insertResult.error)
-    if (!insertOk) {
-      const errorDetails = insertResult && 'error' in insertResult ? insertResult.error : null
-
-      // Only log real errors — ignore duplicate key conflicts (we use ignoreDuplicates: false)
-      if (errorDetails?.code !== '23505') {
-        console.error(`[scanner] candidates insert failed for ${symbol}:`, {
-          error: errorDetails,
-          rawResult: insertResult,
-          symbol,
-          tokenAddress: metrics.address,
-          decision,
-        })
-      }
-      continue
-    }
-
+    // candidates insert removed in simplified stack - already logged above
     if (decision === 'ACCEPTED' && strategy) {
       candidateCount++
       const candidateTrack = (ageHours * 60) <= FRESH_SNIPE_MAX_AGE_MINUTES ? 'snipe' : 'mature';
