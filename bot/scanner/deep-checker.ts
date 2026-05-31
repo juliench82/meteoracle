@@ -494,8 +494,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     console.log('[scanner] tickMode=true — skipping pool-fetcher, reporting last 1h candidates')
     // Supabase removed - using local state + logger only
     const since = new Date(Date.now() - 60 * 60 * 1_000).toISOString()
-    const { data: recentCandidates } = await supabase
-      .from('candidates')
+    // candidates table removed in simplified stack - using local logic or skipping
+    const recentCandidates: any[] = []
       .select('symbol, score, strategy_id')
       .gte('scanned_at', since)
       .order('score', { ascending: false })
@@ -1051,8 +1051,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
 
     const insertResult = await withTimeout(
-      supabase
-        .from('candidates')
+      // candidates Supabase removed in simplified stack
+      null as any
         .upsert({
           token_address:     metrics.address,
           symbol:            metrics.symbol,
