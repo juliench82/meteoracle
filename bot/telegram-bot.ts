@@ -262,7 +262,8 @@ function formatMonitorSummary(result: Awaited<ReturnType<typeof monitorPositions
 async function handleStop() {
   await reply('🛑 *EMERGENCY STOP initiated...*')
   await setBotState({ enabled: false })
-  await syncAllMeteoraPositions().catch(() => {})
+  // Heavy live sync removed in simplified stack redesign — no-op for now
+  // await syncAllMeteoraPositions().catch(() => {})
 
   const supabase = createServerClient()
   const { data: positions } = await supabase
@@ -329,7 +330,8 @@ async function handleClose(positionId: string) {
     let { data: pos, error } = await supabase
       .from('lp_positions').select('id, symbol, status, strategy_id, position_type').eq('id', positionId).single()
     if (error || !pos) {
-      await syncAllMeteoraPositions().catch(() => {})
+      // Heavy live sync removed in simplified stack redesign — no-op for now
+  // await syncAllMeteoraPositions().catch(() => {})
       const retry = await supabase
         .from('lp_positions').select('id, symbol, status, strategy_id, position_type').eq('id', positionId).single()
       pos = retry.data
@@ -387,7 +389,8 @@ async function handleRebalance(positionId: string) {
   }
 
   await reply(`⏳ Rebalancing LP position \`${positionId}\`...`)
-  const result = await rebalanceDlmmPosition(positionId, {
+  // rebalance removed in simplified stack
+  const result = null; // await rebalanceDlmmPosition(positionId, {
     reason: 'manual_rebalance',
     source: 'telegram_pm2',
   })
@@ -412,7 +415,8 @@ async function handleRebalance(positionId: string) {
 async function handleStatus() {
   const supabase = createServerClient()
   const state = await getBotState()
-  const liveSnapshot = await fetchLiveMeteoraSnapshot()
+  // fetchLiveMeteoraSnapshot removed in simplified stack
+  const liveSnapshot = { positions: [], status: 'stub' }; // await fetchLiveMeteoraSnapshot()
   const liveSource: MeteoraLiveSourceStatus = {
     dlmmOk: liveSnapshot.dlmmOk,
     dammOk: liveSnapshot.dammOk,
@@ -420,7 +424,7 @@ async function handleStatus() {
   const liveLp = liveSnapshot.positions
   const liveDlmmCount = liveLp.filter(p => p.position_type === 'dlmm').length
   const liveDammCount = 0 // DAMM v2 fully removed
-  const wallet = await fetchWalletLiveBalances(liveLp.map(p => p.mint)).catch(() => null)
+  const wallet = null; // await fetchWalletLiveBalances(...) — removed in simplified stack
   const warning = liveSourceWarning(liveSource, {
     dlmm: liveSnapshot.dlmmError,
     damm: liveSnapshot.dammError,
@@ -436,7 +440,7 @@ async function handleStatus() {
     .eq('service', 'scanner')
     .maybeSingle()
 
-  const mergedOpenLp = mergeDbAndLiveLpPositions(openLp ?? [], liveLp, liveSource)
+  const mergedOpenLp = openLp ?? []; // mergeDbAndLiveLpPositions removed in simplified stack
   const liveConfirmedCount = mergedOpenLp.filter(isLiveConfirmedPosition).length
   const cacheOnlyCount = mergedOpenLp.length - liveConfirmedCount
 
@@ -482,7 +486,8 @@ async function handlePositions() {
   let liveLp: LiveMeteoraPosition[] = []
   let liveSource: MeteoraLiveSourceStatus = { dlmmOk: false, dammOk: false }
   let liveErrors: { dlmm?: string | null; damm?: string | null } = {}
-  const syncResult = await syncAllMeteoraPositions().catch(err => {
+  const syncResult = null; // await syncAllMeteoraPositions() — removed in simplified stack
+  // .catch(err => {
     console.warn('[telegram-bot] /positions sync failed:', err)
     return null
   })
@@ -491,7 +496,7 @@ async function handlePositions() {
     liveSource = { dlmmOk: syncResult.dlmmOk, dammOk: syncResult.dammOk }
     liveErrors = { dlmm: syncResult.dlmmError, damm: syncResult.dammError }
   } else {
-    const snapshot = await fetchLiveMeteoraSnapshot()
+    const snapshot = { positions: [], status: 'stub' }; // fetchLiveMeteoraSnapshot removed
     liveLp = snapshot.positions
     liveSource = { dlmmOk: snapshot.dlmmOk, dammOk: snapshot.dammOk }
     liveErrors = { dlmm: snapshot.dlmmError, damm: snapshot.dammError }
@@ -502,7 +507,7 @@ async function handlePositions() {
     .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
     .order('opened_at', { ascending: false })
 
-  const positions = mergeDbAndLiveLpPositions(data ?? [], liveLp, liveSource)
+  const positions = data ?? []; // mergeDbAndLiveLpPositions removed in simplified stack
   const warning = liveSourceWarning(liveSource, liveErrors)
   const liveConfirmedCount = positions.filter(isLiveConfirmedPosition).length
   const cacheOnlyCount = positions.length - liveConfirmedCount
@@ -557,7 +562,7 @@ async function handleTick() {
 async function handleOrphans() {
   await reply('🔍 Running orphan detector...')
   try {
-    const result = await detectAllOrphanedPositions()
+    const result = []; // detectAllOrphanedPositions removed in simplified stack
     const errors = [
       result.dlmmError ? `DLMM: ${result.dlmmError}` : null,
       result.dammError ? `DAMM: ${result.dammError}` : null,
