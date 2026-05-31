@@ -19,8 +19,7 @@ import {
 import type { TokenMetrics } from '@/lib/types'
 // (DAMM v2 edge automation fully removed)
 import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
-import { scalpSpikeStrategy } from '@/strategies/scalp-spike'
-// (DAMM v2 imports and logic fully removed)
+// (scalp-spike strategy removed in simplified stack)
 import { openMoonboyPosition } from '../moonboy-executor'
 import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
@@ -50,7 +49,6 @@ import {
   LP_SCANNER_ENABLED,
   EVIL_PANDA_ENABLED,
   SCALP_SPIKE_ENABLED,
-  // (DAMM v2 fully removed — no edge path remains)
 } from '@/lib/strategy-config'
 import {
   WSOL,
