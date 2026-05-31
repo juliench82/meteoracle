@@ -145,7 +145,7 @@ export async function addLiquidityToPosition(
     const sig = await sendLegacyTx(tx, [wallet], label)
 
     // TODO: persist updated sol_deposited via local state once the refactor lands
-    // (Supabase path removed)
+    // local-state only
 
     logInfo('add_liquidity_success', { positionId, symbol, solAmount, strategy: strategy.id, txSignature: sig })
 

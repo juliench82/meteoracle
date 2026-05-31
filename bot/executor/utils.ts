@@ -25,7 +25,7 @@ export const NATIVE_MINT_STR = 'So11111111111111111111111111111111111111112';
 export const METEORA_RENT_RESERVE_SOL = 0.07;
 export const ADD_LIQUIDITY_FALLBACK_CU = 1_400_000;
 
-export const DLMM_ZAP_SWAP_SLIPPAGE_BPS = 100;
+export const DLMM_ZAP_SWAP_SLIPPAGE_BPS = 200; // Aligned with SWAP_SLIPPAGE_BPS default (Section 6.5)
 export const DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE = 10;
 export const DLMM_ZAP_MAX_ACCOUNTS = 48;
 export const DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE = 2;
@@ -92,7 +92,7 @@ export async function getTotalDeployedSolForCap(
     return { totalDeployed, source: limitState.countSource ?? 'live' as const };
   }
 
-  // Use local state (no Supabase)
+  // Use local state only
   const openPositions = getOpenLpPositions();
   const totalDeployed = openPositions
     .filter((p: any) => OPEN_LP_STATUSES.includes(p.status))
@@ -157,6 +157,41 @@ export function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: strin
     if (isFinite(price) && price > 0) return price;
   } catch {}
   return parseFloat(activeBin.pricePerToken);
+}
+
+/**
+ * Calculates the actual bin range needed for a strategy's % range on a specific pool's binStep.
+ * Applies proportional shrinking if the range would exceed the strategy's max bins.
+ */
+export function calculateValidatedBinRange(
+  activeBinId: number,
+  binStep: number,
+  rangeDownPct: number,
+  rangeUpPct: number,
+  maxBins: number,
+  label: string
+): { minBinId: number; maxBinId: number; binRange: number; wasShrunk: boolean } {
+  let binsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
+  let binsUp = Math.round((rangeUpPct / 100) / (binStep / 10000));
+  let binRange = binsDown + binsUp;
+  let wasShrunk = false;
+
+  if (binRange > maxBins) {
+    const shrinkRatio = maxBins / binRange;
+    binsDown = Math.floor(binsDown * shrinkRatio);
+    binsUp = maxBins - binsDown;
+    binRange = binsDown + binsUp;
+    wasShrunk = true;
+
+    console.log(
+      `${label} bin range auto-shrunk to respect strategy limit (${binRange} bins instead of ~${Math.round(binRange / shrinkRatio)})`
+    );
+  }
+
+  const minBinId = activeBinId - binsDown;
+  const maxBinId = activeBinId + binsUp;
+
+  return { minBinId, maxBinId, binRange, wasShrunk };
 }
 
 export async function getPositionWithRetry(

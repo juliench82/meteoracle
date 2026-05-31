@@ -30,9 +30,9 @@ export const evilPandaStrategy: Strategy = {
     minHolderCount: EVIL_PANDA_MIN_HOLDER_COUNT,
     maxAgeHours: EVIL_PANDA_MAX_AGE_HOURS,
     minRugcheckScore: EVIL_PANDA_MIN_RUGCHECK_SCORE,
-    requireSocialSignal: false,
-    minFeeTvl24hPct: 0,
-    // minBinStep removed — runtime validation + shrinking in open.ts now handles all bin range safety
+    // Note: requireSocialSignal, minFeeTvl24hPct, and minBinStep are defined in the Strategy type
+    // but are not active filters in the current ultra-simplified Evil Panda path.
+    // Bin range safety is handled at open time in executor/open.ts instead.
   },
   position: {
     binStep: envNumber('EVIL_PANDA_BIN_STEP', 100),

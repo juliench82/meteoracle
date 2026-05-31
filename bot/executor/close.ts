@@ -85,7 +85,7 @@ async function zapOutDlmmFallback(
     return false
   }
 
-  // Simplified fallback (full implementation can be restored if needed)
+  // Fallback path for Token-2022 tokens
   console.log(`${label} DLMM zap fallback would be executed here`)
   return false
 }

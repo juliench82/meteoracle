@@ -187,6 +187,9 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     current_price_usd: metrics.priceUsd ?? 0,
     pnl_pct: 0,
     metadata: {
+      // Moonboy exits are intentionally read live from moonboyStrategy at decision time
+      // (unlike LP positions which snapshot strategy exits at open time - see 6.4 in plan).
+      // This is acceptable in the simplified model because Moonboy strategy is very stable.
       take_profit_pct:        moonboyStrategy.exits.takeProfitPct,
       stop_loss_pct:          moonboyStrategy.exits.stopLossPct,
       max_duration_hours:     moonboyStrategy.exits.maxDurationHours,
@@ -196,6 +199,9 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
       age_hours:              metrics.ageHours,
       dex_pair_created_at:    dexData.pairCreatedAt,
       token_age_minutes_at_open: tokenAgeMinutesAtOpen,
+      // Fields for sophisticated trailing exit logic (Section 6.1)
+      highest_price_since_80pct: null,
+      last_high_timestamp: null,
     },
   }
 
@@ -273,6 +279,52 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       `${label} price=$${currentPriceUsd ? currentPriceUsd.toFixed(6) : 'n/a'} entry=$${entryPriceUsd.toFixed(6)} ` +
       `pnl=${pnlPct.toFixed(1)}% age=${ageHours.toFixed(1)}h`,
     )
+
+    // === Sophisticated Moonboy trailing exit logic (Section 6.1) ===
+    // We track highest price and last high time once we cross 80% of the way to 2x.
+    if (!closeReason && currentPriceUsd && entryPriceUsd > 0) {
+      const targetPrice = entryPriceUsd * 2;
+      const profitPctOfTarget = ((currentPriceUsd - entryPriceUsd) / (targetPrice - entryPriceUsd)) * 100;
+
+      // Load or initialize tracking fields from metadata
+      let highestSince = pos.metadata?.highest_price_since_80pct ?? null;
+      let lastHighTs = pos.metadata?.last_high_timestamp ? new Date(pos.metadata.last_high_timestamp).getTime() : now;
+
+      if (profitPctOfTarget >= 80) {
+        // Update peak tracking
+        if (highestSince === null || currentPriceUsd > highestSince) {
+          highestSince = currentPriceUsd;
+          lastHighTs = now;
+        }
+
+        const minutesSinceLastHigh = (now - lastHighTs) / 60_000;
+
+        const decision = shouldSellMoonboy(
+          entryPriceUsd,
+          currentPriceUsd,
+          highestSince,
+          minutesSinceLastHigh
+        );
+
+        if (decision.shouldSell) {
+          closeReason = decision.reason;
+        }
+      }
+
+      // Persist updated tracking fields (fire-and-forget, same pattern as current price)
+      if (highestSince !== pos.metadata?.highest_price_since_80pct || lastHighTs !== (pos.metadata?.last_high_timestamp ? new Date(pos.metadata.last_high_timestamp).getTime() : null)) {
+        void Promise.resolve().then(() => {
+          const all = getOpenMoonboys();
+          const idx = all.findIndex((p: any) => p.id === pos.id);
+          if (idx !== -1) {
+            if (!all[idx].metadata) all[idx].metadata = {};
+            all[idx].metadata.highest_price_since_80pct = highestSince;
+            all[idx].metadata.last_high_timestamp = new Date(lastHighTs).toISOString();
+            saveOpenMoonboys(all);
+          }
+        }).catch(() => {});
+      }
+    }
 
     // Update current price in local state (fire-and-forget)
     void Promise.resolve().then(() => {

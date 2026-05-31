@@ -3,7 +3,7 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
 import axios from 'axios'
-// Local state + local logger only (Supabase removed from hot paths)
+// Local state + local logger only
 import { getBotState } from '@/lib/botState'
 import { getStrategyForToken, explainNoStrategy } from '@/strategies'
 import { openPosition } from '../executor'
@@ -501,12 +501,21 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       continue;
     }
 
-    // Pool selection (simple exact + fallback)
+    // Pool selection: When multiple tiers exist for a token, we prefer highest liquidity (see selectBestPool)
     const result = selectBestPool(
       lane === 'fresh' ? freshPools : momentumPools,
       tokenAddress
     )
     const bestPool = result.pool
+
+    // Optional observability: log when we had choice
+    const tokenPoolsInLane = (lane === 'fresh' ? freshPools : momentumPools).filter(p =>
+      getTradableToken(p)?.address === tokenAddress
+    );
+    if (tokenPoolsInLane.length > 1 && bestPool) {
+      const chosenTvl = getPoolTvl(bestPool);
+      console.log(`[scanner] ${symbol} — multiple pools for token (${tokenPoolsInLane.length}), selected highest liquidity pool (TVL=$${chosenTvl.toLocaleString()})`);
+    }
 
     if (!bestPool) {
       console.log(`[scanner] ${symbol} — skip: no pool found for token`)

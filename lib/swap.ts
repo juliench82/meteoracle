@@ -14,7 +14,7 @@ const SLIPPAGE_LADDER_BPS = [100, 300, 500, 1000, 2000, 5000]
 const MAX_SLIPPAGE_BPS = 2000; // Hard roof for slippage (reasonable max per user preference)
 
 function baseSlippageBps(): number {
-  return parseInt(process.env.SWAP_SLIPPAGE_BPS ?? '100')
+  return parseInt(process.env.SWAP_SLIPPAGE_BPS ?? '200')
 }
 
 // Returns the ladder starting from the configured base slippage, capped at MAX_SLIPPAGE_BPS.

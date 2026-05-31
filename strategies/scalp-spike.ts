@@ -3,5 +3,5 @@ export const scalpSpikeStrategy = {
   id: 'scalp-spike',
   name: 'Scalp Spike (stub)',
   enabled: false,
-  filters: {}, // expected by restored deep-checker code
+  filters: {}, // legacy stub - no longer used
 } as any;

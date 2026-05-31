@@ -81,6 +81,10 @@ import {
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
+// =============================================================================
+// SECTION: Main openPosition flow
+// =============================================================================
+
 
 
 
@@ -91,7 +95,6 @@ const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 export async function openPosition(
   metrics: TokenMetrics,
   strategy: Strategy,
-  options: { rebalanceFromPositionId?: string } = {},
 ): Promise<string | null> {
   const label = `[executor][${strategy.id}][${metrics.symbol}]`
   console.log(`${label} opening position`)
@@ -139,11 +142,7 @@ export async function openPosition(
 
     let limitState: any = await getOpenLpLimitState()
 
-    // Legacy call-site compatibility (ignored)
-    if (options.rebalanceFromPositionId) {
-      // When rebalancing, pretend we have one less open slot
-      limitState = { ...limitState, effectiveOpenCount: Math.max(0, (limitState.effectiveOpenCount || 0) - 1) }
-    }
+    // rebalanceFromPositionId option removed in simplified model (no rebalancing)
 
     const effectiveOpenCountForCap = limitState.effectiveOpenCount || 0
 
@@ -233,30 +232,19 @@ export async function openPosition(
 
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
-    // === EARLY BIN RANGE VALIDATION (before any Jupiter/Zap work) ===
-    // We calculate how many bins the strategy's intended % range actually requires
-    // on this specific pool's binStep. If it exceeds the strategy's max, we proportionally
-    // shrink the range to stay valid. We only reject early if the range is still invalid
-    // after shrinking.
-    let binsDown = Math.abs(Math.round((strategy.position.rangeDownPct / 100) / (binStep / 10000)));
-    let binsUp   = Math.round((strategy.position.rangeUpPct / 100) / (binStep / 10000));
-    let binRange = binsDown + binsUp;
-
+    // =============================================================================
+    // SECTION: Early Bin Range Validation (prevents InvalidPositionWidth)
+    // =============================================================================
     const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT;
 
-    if (binRange > maxBins) {
-      const shrinkRatio = maxBins / binRange;
-      binsDown = Math.floor(binsDown * shrinkRatio);
-      binsUp   = maxBins - binsDown;
-      binRange = binsDown + binsUp;
-
-      console.log(
-        `${label} bin range auto-shrunk to respect strategy limit (${binRange} bins instead of ~${Math.round(binRange / shrinkRatio)})`
-      );
-    }
-
-    const minBinId = activeBinId - binsDown;
-    const maxBinId = activeBinId + binsUp;
+    const { minBinId, maxBinId, binRange, wasShrunk } = calculateValidatedBinRange(
+      activeBinId,
+      binStep,
+      strategy.position.rangeDownPct,
+      strategy.position.rangeUpPct,
+      maxBins,
+      label
+    );
 
     if (binRange < 2 || binRange > maxBins) {
       console.warn(`${label} bin range still invalid after shrinking — rejecting early`, {
@@ -274,7 +262,9 @@ export async function openPosition(
     }
 
     console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
-    // === END EARLY VALIDATION ===
+    // =============================================================================
+    // END: Early Bin Range Validation
+    // =============================================================================
 
     // === TOKEN-2022 / pump.fun GRADUATE PATH (primary for these tokens) ===
     // Historical note (from git history):
@@ -297,7 +287,7 @@ export async function openPosition(
         solIsTokenX,
         label,
         await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-        // supabase removed - local-state only
+        // local-state only
         DRY_RUN,
         new Keypair()
       );
@@ -479,7 +469,7 @@ export async function openPosition(
           solIsTokenX,
           label,
           await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-          // supabase removed - local-state only
+          // local-state only
           DRY_RUN,
           new Keypair()
         )
@@ -578,6 +568,9 @@ async function openPositionToken2022(
 
     // 1. Swap SOL → token using Jupiter (reliable for Token-2022)
     console.log(`${label} swapping ${solAmount} SOL → ${metrics.symbol} via Jupiter...`)
+    // =============================================================================
+    // SECTION: Jupiter Swap Fallback (for Token-2022)
+    // =============================================================================
     // Jupiter swap for fresh Token-2022 tokens.
     // The helper now uses your SWAP_SLIPPAGE_BPS + a ladder + retries for live reliability.
     const tokenAmountOut = await swapSolToTokenViaJupiter(
@@ -962,7 +955,7 @@ async function swapSolToTokenViaJupiter(
   const MAX_SLIPPAGE_BPS = 2000; // Hard cap for live trading safety
 
   // Build slippage ladder starting from user's setting (or safe default)
-  let baseSlippage = slippageBps ?? parseInt(process.env.SWAP_SLIPPAGE_BPS ?? '300');
+  let baseSlippage = slippageBps ?? parseInt(process.env.SWAP_SLIPPAGE_BPS ?? '200');
 
   if (baseSlippage > MAX_SLIPPAGE_BPS) {
     console.warn(`[executor] SWAP_SLIPPAGE_BPS=${baseSlippage} exceeds hard cap of ${MAX_SLIPPAGE_BPS}. Capping to ${MAX_SLIPPAGE_BPS}.`);

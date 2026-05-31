@@ -23,15 +23,6 @@ type AlertPayload =
       mint?: string
     }
   | {
-      type: 'position_adopted'
-      symbol: string
-      positionPubkey: string
-      solDeposited: number
-      poolAddress?: string
-      mint?: string
-      positionValueUsd?: number
-    }
-  | {
       type: 'position_closed'
       symbol: string
       strategy: string
@@ -50,40 +41,8 @@ type AlertPayload =
       binRangeUpper: number
       oorExitMinutes: number
     }
-  | {
-      type: 'position_fee_yield_extended'
-      symbol: string
-      strategy: string
-      totalFees: string
-      feeYieldPct: string
-      avgDailyYield: string | null
-      extensions: number
-      extraHours?: number
-      effectiveMaxDurationHours: number
-      positionId: string
-    }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
-  | { type: 'position_rebalanced'; symbol: string; strategy: string; reason: string; oldPositionId: string; newPositionId: string; feeTvl24hPct?: number; volume24hUsd?: number; liquidityUsd?: number }
-  | { type: 'orphan_detected'; symbol: string; positionPubKey: string; poolAddress: string; mint?: string; positionType?: string }
-  | { type: 'pre_grad_pool_created'; symbol: string; mint: string; pool: string; sol: number }
-  | { type: 'pre_grad_create_failed'; mint: string; error: string }
-  | {
-      type: 'pre_grad_closed'
-      symbol: string
-      positionId: string
-      ageMin: number
-      reason: string
-      claimableFeesUsd?: number
-      positionValueUsd?: number
-      /** Realized PnL from Meteora API, available after zap-out confirms. */
-      realizedPnlUsd?: number
-    }
-  | { type: 'pre_grad_graduated'; symbol: string; finalFees?: number; positionId?: string; bondingCurvePct?: number }
-  | { type: 'low_balance_warning'; currentSol: number; minSol: number }
-  | { type: 'high_il_warning'; symbol: string; ilPct: number; claimableFeesUsd?: number; netPnlSol: number }
   | { type: 'pnl_unavailable_warning'; symbol: string; strategy: string; positionId: string; reason: string; ageHours: number }
-  | { type: 'sync_failure_alert'; reason: string; error: string }
-  | { type: 'rpc_fallback_warning'; reason: string; message: string }
   | {
       type: 'moonboy_opened'
       symbol: string
@@ -113,7 +72,7 @@ export async function sendAlert(payload: AlertPayload): Promise<void> {
 
 function strategyBadge(strategy: string): string {
   const s = strategy.toLowerCase()
-  if (s.includes('damm') || s.includes('pre_grad') || s.includes('pre-grad')) {
+  if (s.includes('damm')) {
   }
   return '📊 DLMM'
 }
@@ -189,108 +148,13 @@ function formatMessage(payload: AlertPayload): string {
         `Will close in: ${payload.oorExitMinutes}min if not recovered`,
       ].join('\n')
 
-    case 'position_fee_yield_extended': {
-      const dailyLine = payload.avgDailyYield !== null
-        ? `Daily Yield: ${payload.avgDailyYield}%`
-        : `Daily Yield: N/A (< 24h old)`
-      return [
-        `🚀 *FEE-YIELD EXTENDED* ${payload.symbol}`,
-        `Total Fees: *${payload.totalFees} SOL* (${payload.feeYieldPct}% of deployed)`,
-        dailyLine,
-        `Extensions: ${payload.extensions} | +${payload.extraHours ?? '?'}h added`,
-        `New Max Duration: ${payload.effectiveMaxDurationHours}h`,
-      ].join('\n')
-    }
+    // position_fee_yield_extended removed in simplified model
 
     // candidate_found intentionally produces no Telegram message (noise reduction)
     case 'candidate_found':
       return ''
 
-    case 'position_rebalanced':
-      return [
-        `🔄 *REBALANCED* ${payload.symbol}`,
-        `Reason: ${payload.reason}`,
-        `Strategy: ${payload.strategy}`,
-        `Old: \`${payload.oldPositionId}\``,
-        `New: \`${payload.newPositionId}\``,
-        payload.feeTvl24hPct != null ? `24h Fees/TVL: ${payload.feeTvl24hPct.toFixed(2)}%` : null,
-        payload.volume24hUsd != null ? `24h Volume: $${payload.volume24hUsd.toFixed(0)}` : null,
-        payload.liquidityUsd != null ? `Liquidity: $${payload.liquidityUsd.toFixed(0)}` : null,
-      ].filter(Boolean).join('\n')
-
-    case 'orphan_detected':
-      return [
-        `👻 *Orphaned Position Detected*`,
-        `Symbol: \`${payload.symbol}\``,
-        payload.positionType ? `Type: \`${payload.positionType}\`` : null,
-        payload.mint ? `Mint: \`${payload.mint}\`` : null,
-        `Position: \`${payload.positionPubKey}\``,
-        `Pool: \`${payload.poolAddress}\``,
-        `_On-chain in Meteora but missing from Supabase cache — inserted automatically_`,
-      ].filter(Boolean).join('\n')
-
-    case 'pre_grad_pool_created':
-      return [
-        `Token: \`${payload.symbol}\``,
-        `Mint: \`${payload.mint}\``,
-        `Pool: \`${payload.pool}\``,
-        `Deployed: ${payload.sol.toFixed(4)} SOL`,
-      ].join('\n')
-
-    case 'pre_grad_create_failed':
-      return [
-        `❌ *Pre-Grad Pool Create Failed*`,
-        `Mint: \`${payload.mint}\``,
-        `Error: ${payload.error}`,
-      ].join('\n')
-
-
-    case 'pre_grad_closed': {
-      const valueLine      = payload.positionValueUsd  != null
-        ? `Value: *$${payload.positionValueUsd.toFixed(2)}*`
-        : null
-      const pnlSign        = (payload.realizedPnlUsd ?? 0) >= 0 ? '+' : ''
-      const pnlLine        = payload.realizedPnlUsd    != null
-        ? `Realized PnL: *${pnlSign}$${payload.realizedPnlUsd.toFixed(2)}*`
-        : null
-      const feesLine       = payload.claimableFeesUsd  != null
-        ? `Claimable Fees: *$${payload.claimableFeesUsd.toFixed(2)}*`
-        : null
-      return [
-        `🌿 *Pre-Grad Position Closed*`,
-        `Token: \`${payload.symbol}\``,
-        `ID: \`${payload.positionId}\``,
-        `Reason: ${payload.reason}`,
-        `Age: ${payload.ageMin}min`,
-        valueLine,
-        pnlLine,
-        feesLine,
-      ].filter(Boolean).join('\n')
-    }
-
-    case 'pre_grad_graduated':
-      return [
-        `🎉 *PRE-GRAD GRADUATED* ${payload.symbol}`,
-        `Moved to Raydium successfully.`,
-        `Final Fees: ${payload.finalFees ?? 0} SOL`,
-      ].join('\n')
-
-    case 'low_balance_warning':
-      return [
-        `⚠️ *LOW BALANCE WARNING*`,
-        `Current SOL: ${payload.currentSol}`,
-        `Recommended minimum: ${payload.minSol}`,
-        `Please top up your wallet.`,
-      ].join('\n')
-
-    case 'high_il_warning':
-      return [
-        `📉 *HIGH IL WARNING* ${payload.symbol}`,
-        `Current IL: ${payload.ilPct.toFixed(2)}%`,
-        `Claimable Fees: ${payload.claimableFeesUsd != null ? `$${payload.claimableFeesUsd.toFixed(2)}` : 'N/A'}`,
-        `Net PNL: ${payload.netPnlSol} SOL`,
-        `Consider closing manually if IL keeps growing.`,
-      ].join('\n')
+    // position_rebalanced removed in simplified model
 
     case 'pnl_unavailable_warning':
       return [
@@ -300,21 +164,6 @@ function formatMessage(payload: AlertPayload): string {
         `Reason: ${payload.reason}`,
         `Age: ${payload.ageHours}h`,
         `Stop-loss/take-profit protection is degraded.`,
-      ].join('\n')
-
-    case 'sync_failure_alert':
-      return [
-        `⚠️ *Meteora Sync Failure*`,
-        `Reason: ${payload.reason}`,
-        `Error: ${payload.error}`,
-        `Position exits are paused until live sync recovers.`,
-      ].join('\n')
-
-    case 'rpc_fallback_warning':
-      return [
-        `⚠️ *RPC Fallback Active*`,
-        `Reason: ${payload.reason}`,
-        payload.message,
       ].join('\n')
 
     case 'moonboy_opened': {

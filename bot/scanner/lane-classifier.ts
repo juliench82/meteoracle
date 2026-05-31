@@ -114,8 +114,14 @@ export function survivorTokenAddress(s: Survivor | MeteoraPool | any): string {
 }
 
 /**
- * Very simple best pool selection for the simplified model.
- * No fake bin compatibility scoring.
+ * Best pool selection for the simplified model.
+ *
+ * Rule (per Section 6.2 of the simplification plan):
+ * When multiple Meteora pools/tiers exist for the same token,
+ * prefer the one with the **highest liquidity (TVL)**.
+ *
+ * This is the primary quality filter for pool tier selection.
+ * Future tie-breakers (binStep compatibility, fee/TVL, etc.) can be added here.
  */
 export function selectBestPool(
   pools: MeteoraPool[] | any,
@@ -124,12 +130,26 @@ export function selectBestPool(
   const list: MeteoraPool[] = Array.isArray(pools) ? pools : [];
   if (list.length === 0) return { pool: null };
 
-  // Exact match on the tradable token
-  const exact = list.find(p => getTradableToken(p)?.address === tokenAddress);
-  if (exact) return { pool: exact };
+  // All pools that match this exact tradable token
+  const candidates = list.filter(p => getTradableToken(p)?.address === tokenAddress);
 
-  // Fallback: first pool in the list for this token group
-  return { pool: list[0] };
+  if (candidates.length === 0) {
+    // Fallback to first in the broader list (should be rare)
+    return { pool: list[0] };
+  }
+
+  if (candidates.length === 1) {
+    return { pool: candidates[0] };
+  }
+
+  // Multiple tiers exist for this token → pick the one with highest liquidity (TVL)
+  const best = candidates.reduce((prev, curr) => {
+    const prevTvl = getPoolTvl(prev);
+    const currTvl = getPoolTvl(curr);
+    return currTvl > prevTvl ? curr : prev;
+  });
+
+  return { pool: best };
 }
 
 /** Simple momentum regain signal (used by pool-fetcher lane pre-filter) */

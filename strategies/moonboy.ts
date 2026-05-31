@@ -26,8 +26,7 @@ export const moonboyStrategy: Strategy = {
     maxTopHolderPct:    80,
     minHolderCount:     0,
     minRugcheckScore:   0,
-    requireSocialSignal: false,
-    minFeeTvl24hPct:    0,
+    // requireSocialSignal and minFeeTvl24hPct are not active in the simplified Moonboy path.
   },
   // position block is unused for spot buys but required by the Strategy type
   position: {
