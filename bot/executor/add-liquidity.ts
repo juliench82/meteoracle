@@ -97,7 +97,7 @@ export async function addLiquidityToPosition(
   }
 
   const maxTotalDeployed = MAX_MARKET_LP_SOL_DEPLOYED
-  const { totalDeployed } = await getTotalDeployedSolForCap(supabase, await getOpenLpLimitState('market'));
+  const { totalDeployed } = await getTotalDeployedSolForCap(await getOpenLpLimitState());
 
   if (totalDeployed + solAmount > maxTotalDeployed) {
     return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: `global exposure cap hit` }

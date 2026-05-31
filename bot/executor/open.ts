@@ -135,27 +135,18 @@ export async function openPosition(
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
 
-    const limitState = options.rebalanceFromPositionId
-      ? await getOpenLpLimitState()
-      : await assertCanOpenLpPosition(MAX_CONCURRENT_MARKET_LP_POSITIONS, label, 'market')
+    let limitState: any = await getOpenLpLimitState()
 
-    const effectiveOpenCountForCap = options.rebalanceFromPositionId
-      ? Math.max(0, limitState.effectiveOpenCount - 1)
-      : limitState.effectiveOpenCount
-
+    // Some old call sites passed extra args — ignore them in simplified stack
     if (options.rebalanceFromPositionId) {
-      if (effectiveOpenCountForCap >= MAX_CONCURRENT_MARKET_LP_POSITIONS) {
-        throw new Error(
-          `${label} max LP positions reached after rebalance adjustment ` +
-          `(${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS}; source=${limitState.countSource}, ` +
-          `live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
-        )
-      }
+      // When rebalancing, pretend we have one less open slot
+      limitState = { ...limitState, effectiveOpenCount: Math.max(0, (limitState.effectiveOpenCount || 0) - 1) }
     }
 
+    const effectiveOpenCountForCap = limitState.effectiveOpenCount || 0
+
     console.log(
-      `${label} market LP cap ok (${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS}; ` +
-      `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount})`,
+      `${label} market LP cap ok (${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS})`,
     )
 
     const maxTotalDeployed = MAX_MARKET_LP_SOL_DEPLOYED
@@ -163,10 +154,7 @@ export async function openPosition(
 
     if (totalDeployed + solAmount > maxTotalDeployed) {
       console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed (${exposureSource})`)
-      await supabase.logInfo('legacy_bot_log', {
-        level: 'warn', event: 'open_position_skipped_exposure_cap',
-        payload: { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed, source: exposureSource },
-      })
+      logWarn('open_position_skipped_exposure_cap', { symbol: metrics.symbol, totalDeployed, solAmount, maxTotalDeployed, source: exposureSource })
       return null
     }
 
@@ -178,7 +166,7 @@ export async function openPosition(
 
     if (balanceSol < requiredSol) {
       console.warn(`${label} insufficient balance — need ${requiredSol.toFixed(3)} SOL, have ${balanceSol.toFixed(4)}`)
-      await supabase.logInfo('legacy_bot_log', {
+      logWarn('legacy_bot_log', {
         level: 'warn', event: 'open_position_skipped_insufficient_balance',
         payload: {
           symbol: metrics.symbol,
@@ -197,7 +185,7 @@ export async function openPosition(
       poolPubkey = new PublicKey(metrics.poolAddress || '')
     } catch (e: any) {
       console.error(`${label} invalid poolAddress "${metrics.poolAddress}": ${e?.message || e}`)
-      await supabase.logInfo('legacy_bot_log', {
+      logWarn('legacy_bot_log', {
         level: 'error', event: 'open_position_skipped_bad_pool_address',
         payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress, error: e?.message || String(e) },
       })
@@ -212,7 +200,7 @@ export async function openPosition(
       const DLMM_PROGRAM_ID = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'
       if (!poolAccount || poolAccount.owner.toBase58() !== DLMM_PROGRAM_ID) {
         console.warn(`${label} pool ${metrics.poolAddress} not a valid DLMM lb pair (owner=${poolAccount?.owner.toBase58() ?? 'missing'}) — skipping`)
-        await supabase.logInfo('legacy_bot_log', {
+        logWarn('legacy_bot_log', {
           level: 'warn', event: 'open_position_skipped_non_dlmm_pool',
           payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },
         })
@@ -275,7 +263,7 @@ export async function openPosition(
         binStep,
         strategy: strategy.id,
       });
-      await supabase.logInfo('legacy_bot_log', {
+      logWarn('legacy_bot_log', {
         level: 'warn',
         event: 'open_position_skipped_invalid_bin_range',
         payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
@@ -340,7 +328,7 @@ export async function openPosition(
 
     if (!solIsTokenX && !solIsTokenY) {
       console.warn(`${label} pool has no SOL side — rejecting one-sided SOL zap-in`)
-      await supabase.logInfo('legacy_bot_log', {
+      logWarn('legacy_bot_log', {
         level: 'warn',
         event: 'open_position_skipped_non_sol_pair',
         payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },

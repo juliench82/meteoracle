@@ -115,7 +115,7 @@ export async function closePosition(
 
   if (ENV_DRY_RUN_FORCED) {
     console.warn(`${label} BOT_DRY_RUN=true — refusing to close live on-chain position`)
-    await supabase.logInfo('legacy_bot_log', {
+    logWarn('legacy_bot_log', {
       level: 'warn',
       event: 'close_position_skipped_env_dry_run',
       payload: { positionId, reason },
@@ -214,7 +214,7 @@ export async function closePosition(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} close failed:`, message)
-    await supabase.logInfo('legacy_bot_log', {
+    logWarn('legacy_bot_log', {
       level: 'error', event: 'close_position_failed',
       payload: { positionId, reason, error: message },
     })
