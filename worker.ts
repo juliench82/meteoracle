@@ -28,18 +28,22 @@ function log(msg: string) {
 async function tickMonitor() {
   if (!BOT_ENABLED) { log('monitor skipped — BOT_ENABLED=false'); return }
   if (!LP_MONITOR_ENABLED) { log('monitor skipped — LP_MONITOR_ENABLED=false'); return }
+  inFlightMonitor = true
   try {
     log('monitor tick start')
     const stats = await monitorPositions()
     log(`monitor tick done — checked=${stats.checked} closed=${stats.closed}`)
   } catch (err) {
     console.error('[worker] monitor tick error:', err)
+  } finally {
+    inFlightMonitor = false
   }
 }
 
 async function tickScanner() {
   if (!BOT_ENABLED) { log('scanner skipped — BOT_ENABLED=false'); return }
   if (!LP_SCANNER_ENABLED) { log('scanner skipped — LP_SCANNER_ENABLED=false'); return }
+  inFlightScanner = true
   try {
     log('scanner tick start')
     const stats = await runScanner()
@@ -51,6 +55,8 @@ async function tickScanner() {
     )
   } catch (err) {
     console.error('[worker] scanner tick error:', err)
+  } finally {
+    inFlightScanner = false
   }
 }
 
@@ -66,8 +72,15 @@ async function main() {
   log(`────────────────────────────────────────`)
 
   // Run both immediately on startup
-  await tickMonitor()
-  await tickScanner()
+  inFlightMonitor = true
+  inFlightScanner = true
+  try {
+    await tickMonitor()
+    await tickScanner()
+  } finally {
+    inFlightMonitor = false
+    inFlightScanner = false
+  }
 
   // Then on independent intervals
   setInterval(tickMonitor, MONITOR_INTERVAL_MS)
@@ -76,9 +89,34 @@ async function main() {
 
 let isShuttingDown = false
 
+// Simple in-flight tracking for diagnostics
+let inFlightMonitor = false
+let inFlightScanner = false
+
 function gracefulShutdown(signal: string) {
   if (isShuttingDown) return
   isShuttingDown = true
+
+  const mem = process.memoryUsage()
+  const cpu = process.cpuUsage()
+  const uptime = process.uptime()
+
+  console.error('=== GRACEFUL SHUTDOWN TRIGGERED ===')
+  console.error(`Signal: ${signal}`)
+  console.error(`Time: ${new Date().toISOString()}`)
+  console.error(`Uptime: ${uptime.toFixed(1)}s`)
+  console.error(`In-flight: monitor=${inFlightMonitor}, scanner=${inFlightScanner}`)
+  console.error('Memory usage (bytes):', {
+    rss: mem.rss,
+    heapTotal: mem.heapTotal,
+    heapUsed: mem.heapUsed,
+    external: mem.external,
+    arrayBuffers: mem.arrayBuffers,
+  })
+  console.error('CPU usage (microseconds):', cpu)
+  console.error('Active handles count:', (process as any)._getActiveHandles?.()?.length ?? 'n/a')
+  console.error('Active requests count:', (process as any)._getActiveRequests?.()?.length ?? 'n/a')
+  console.error('=====================================')
 
   log(`received ${signal} — starting graceful shutdown`)
 
