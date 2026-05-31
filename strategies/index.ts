@@ -1,4 +1,4 @@
-import type { Strategy } from '@/lib/types'
+import type { Strategy, TokenMetrics } from '@/lib/types'
 import { evilPandaStrategy } from './evil-panda'
 import { moonboyStrategy } from './moonboy'
 import { scalpSpikeStrategy } from './scalp-spike' // stubbed for restored code during transition
@@ -29,16 +29,7 @@ export function classifyToken() {
   return { type: 'unknown' };
 }
 
-export function getStrategyForToken(token: {
-  ageHours: number
-  liquidityUsd: number
-  rugcheckScore: number
-  topHolderPct: number
-  holderCount: number
-  volume1h?: number
-  volume5m?: number
-  [key: string]: unknown
-}, forcedStrategyId?: StrategyId): Strategy | null {
+export function getStrategyForToken(token: TokenMetrics, forcedStrategyId?: StrategyId): Strategy | null {
   if (forcedStrategyId) {
     const forced = getStrategyById(forcedStrategyId)
     return forced?.enabled ? forced : null
@@ -65,14 +56,7 @@ export function getStrategyForToken(token: {
 /**
  * Simple rejection reason for logging.
  */
-export function explainNoStrategy(t: {
-  ageHours: number
-  liquidityUsd: number
-  rugcheckScore: number
-  topHolderPct: number
-  holderCount: number
-  [key: string]: unknown
-}): string {
+export function explainNoStrategy(t: TokenMetrics): string {
   const s = evilPandaStrategy
   const f = s.filters
   const reasons: string[] = []
