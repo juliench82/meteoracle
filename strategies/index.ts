@@ -1,6 +1,7 @@
 import type { Strategy } from '@/lib/types'
 import { evilPandaStrategy } from './evil-panda'
 import { moonboyStrategy } from './moonboy'
+import { scalpSpikeStrategy } from './scalp-spike' // stubbed for restored code during transition
 
 /**
  * Minimal strategy registry for the current architecture.
