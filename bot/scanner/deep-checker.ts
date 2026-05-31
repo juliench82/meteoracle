@@ -201,7 +201,7 @@ function findLiveOpenPosition(
   tokenAddress: string,
   poolAddress?: string,
 ) {
-  return limitState?.livePositions.find(position =>
+  return (limitState?.livePositions || []).find((position: any) =>
     position.mint === tokenAddress ||
     (!!poolAddress && position.pool_address === poolAddress),
   ) ?? null

@@ -60,3 +60,13 @@ export function getOneHourFeeTvlVs24hAverage(pool: any) {
 export function getOneHourVolumeVs24hAverage(pool: any) {
   return 1.0;
 }
+
+// Extra shims for restored deep-checker code during simplified stack transition
+export const scalpSpikeStrategy = {
+  enabled: false,
+  filters: {},
+} as any;
+
+export function passesMomentumRegainStrategyFilters(metrics: any) {
+  return false;
+}

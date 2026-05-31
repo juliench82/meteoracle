@@ -284,8 +284,8 @@ async function loadDbPoolCache(): Promise<MeteoraPool[] | null> {
     if (!data || data.length === 0) return null
 
     const pools = data
-      .map((row) => normalizeMeteoraPool(row.metadata))
-      .filter((p): p is MeteoraPool => p !== null)
+      .map((row: any) => normalizeMeteoraPool(row.metadata))
+      .filter((p: any): p is MeteoraPool => p !== null)
 
     if (pools.length === 0) return null
 

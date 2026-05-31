@@ -173,9 +173,6 @@ export async function findExistingActivePosition(mint: string): Promise<{ id: st
     const positions = getOpenLpPositions();
     const match = positions.find((p: any) => p.mint === mint && OPEN_LP_STATUSES.includes(p.status));
     return match ? { id: match.id } : null;
-
-    if (error || !data) return null
-    return { id: data.id }
   } catch {
     return null
   }
