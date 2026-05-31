@@ -12,7 +12,7 @@ import { getConnection, getWallet } from '@/lib/solana'
 import { swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions } from '@/lib/local-state'
-import { logWarn } from '@/lib/log'
+import { logWarn, logInfo } from '@/lib/log'
 
 import {
   simulateAndCheck,

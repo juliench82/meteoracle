@@ -64,15 +64,8 @@ import {
   scoreMeteoraMomentum,
   cleanupOldPoolCache,
 } from './pool-fetcher'
-import {
-  classifyPoolsIntoLanes,
-  getOneHourFeeTvlVs24hAverage,
-  getOneHourVolumeVs24hAverage,
-  passesMomentumRegain,
-  pickDeepCheckSurvivors,
-  selectBestPool,
-  survivorTokenAddress,
-} from './lane-classifier'
+// lane-classifier removed as part of simplified stack
+// Its functionality has been inlined or simplified into pool-fetcher + deep-checker
 
 const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
 

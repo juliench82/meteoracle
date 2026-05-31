@@ -83,9 +83,9 @@ export async function persistPosition(
     },
   }
 
-  const existing = getOpenLpPositions()
-  existing.push(newPosition)
-  saveOpenLpPositions(existing)
+  const allPositions = getOpenLpPositions()
+  allPositions.push(newPosition)
+  saveOpenLpPositions(allPositions)
 
   return newPosition.id
 }
