@@ -130,13 +130,12 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   // This prevents multiple small buys for the exact same token in a short window (which happened with ALIENS).
   const recentCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // last 2 hours
   // Simplified stack - local state only
-  const recent: any[] = [] // TODO: implement recent moonboy filtering via local state if needed
-    .select('id')
-    .eq('mint', metrics.address)
-    .or(`status.eq.open,opened_at.gte.${recentCutoff}`)
-    .limit(1);
+  const recent = getOpenMoonboys().filter((m: any) =>
+    m.mint === metrics.address &&
+    (m.status === 'open' || (m.opened_at && m.opened_at >= recentCutoff))
+  );
 
-  if (recent && recent.length > 0) {
+  if (recent.length > 0) {
     console.log(`${label} already have recent Moonboy activity for this mint — skipping duplicate buy`)
     return null
   }
@@ -171,38 +170,38 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     ? (nowMs - dexData.pairCreatedAt) / 60_000
     : null
 
-  const data: any = null; const error = null; // local-state migration in progress
-    .insert({
-      mint:            metrics.address,
-      symbol:          metrics.symbol,
-      entry_price_usd: metrics.priceUsd ?? 0,
-      token_amount:    tokenAmountOut.toString(),
-      sol_spent:       solSpent,
-      status:          'open',
-      opened_at:       new Date().toISOString(),
-      tx_open:         sig,
-      strategy_id:     'moonboy',
-      dry_run:         isDryRun,
-      sol_price_usd:   solPriceUsd,
-      metadata: {
-        take_profit_pct:        moonboyStrategy.exits.takeProfitPct,
-        stop_loss_pct:          moonboyStrategy.exits.stopLossPct,
-        max_duration_hours:     moonboyStrategy.exits.maxDurationHours,
-        buy_usd:                MOONBOY_BUY_USD,
-        market_cap_usd:         metrics.mcUsd,
-        volume_24h_usd:         metrics.volume24h,
-        age_hours:              metrics.ageHours,
-        dex_pair_created_at:    dexData.pairCreatedAt,
-        token_age_minutes_at_open: tokenAgeMinutesAtOpen,
-      },
-    })
-    .select('id')
-    .single()
-
-  if (error || !data) {
-    console.error(`${label} moonboy DB insert failed:`, error?.message)
-    return null
+  // Simplified stack: persist to local state
+  const newMoonboy = {
+    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+    mint:            metrics.address,
+    symbol:          metrics.symbol,
+    entry_price_usd: metrics.priceUsd ?? 0,
+    token_amount:    tokenAmountOut.toString(),
+    sol_spent:       solSpent,
+    status:          'open',
+    opened_at:       new Date().toISOString(),
+    tx_open:         sig,
+    strategy_id:     'moonboy',
+    dry_run:         isDryRun,
+    sol_price_usd:   solPriceUsd,
+    current_price_usd: metrics.priceUsd ?? 0,
+    pnl_pct: 0,
+    metadata: {
+      take_profit_pct:        moonboyStrategy.exits.takeProfitPct,
+      stop_loss_pct:          moonboyStrategy.exits.stopLossPct,
+      max_duration_hours:     moonboyStrategy.exits.maxDurationHours,
+      buy_usd:                MOONBOY_BUY_USD,
+      market_cap_usd:         metrics.mcUsd,
+      volume_24h_usd:         metrics.volume24h,
+      age_hours:              metrics.ageHours,
+      dex_pair_created_at:    dexData.pairCreatedAt,
+      token_age_minutes_at_open: tokenAgeMinutesAtOpen,
+    },
   }
+
+  const existingMoonboys = getOpenMoonboys()
+  existingMoonboys.push(newMoonboy)
+  saveOpenMoonboys(existingMoonboys)
 
   await sendAlert({
     type: 'moonboy_opened',
@@ -215,18 +214,16 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     stopLossPct: moonboyStrategy.exits.stopLossPct,
   }).catch(() => {})
 
-  console.log(`${label} position opened ✔ id=${data.id} (sig=${sig.slice(0, 8)}…)`)
-  return data.id
+  console.log(`${label} position opened ✔ id=${newMoonboy.id} (sig=${sig.slice(0, 8)}…)`)
+  return newMoonboy.id
 }
 
 export async function checkMoonboyPositions(): Promise<{ checked: number; closed: number }> {
   const stats = { checked: 0, closed: 0 }
 
-  const positions: any[] = getOpenLpPositions() as any[]; const error = null; // local-state migration
-    .select('*')
-    .eq('status', 'open')
+  const positions = getOpenMoonboys().filter((p: any) => p.status === 'open')
 
-  if (error || !positions?.length) return stats
+  if (!positions?.length) return stats
 
   const now = Date.now()
 
@@ -277,12 +274,16 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       `pnl=${pnlPct.toFixed(1)}% age=${ageHours.toFixed(1)}h`,
     )
 
-    // Update current price in DB (fire-and-forget, non-fatal)
-    void Promise.resolve(
-      // supabase removed - local-state only
-        .update({ current_price_usd: currentPriceUsd, pnl_pct: Math.round(pnlPct * 100) / 100 })
-        .eq('id', pos.id),
-    ).catch(() => {})
+    // Update current price in local state (fire-and-forget)
+    void Promise.resolve().then(() => {
+      const all = getOpenMoonboys()
+      const idx = all.findIndex((p: any) => p.id === pos.id)
+      if (idx !== -1) {
+        all[idx].current_price_usd = currentPriceUsd
+        all[idx].pnl_pct = Math.round(pnlPct * 100) / 100
+        saveOpenMoonboys(all)
+      }
+    }).catch(() => {})
 
     if (!closeReason) {
       if (pnlPct >= moonboyStrategy.exits.takeProfitPct) {
@@ -315,14 +316,16 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       }
     }
 
-    // await supabase - migrated to local-state
-      .update({
-        status: 'closed',
-        closed_at: new Date().toISOString(),
-        close_reason: closeReason,
-        tx_close: swapSig ?? 'DRY_RUN',
-      })
-      .eq('id', pos.id)
+    // Update in local state
+    const allMoonboys = getOpenMoonboys()
+    const closeIdx = allMoonboys.findIndex((p: any) => p.id === pos.id)
+    if (closeIdx !== -1) {
+      allMoonboys[closeIdx].status = 'closed'
+      allMoonboys[closeIdx].closed_at = new Date().toISOString()
+      allMoonboys[closeIdx].close_reason = closeReason
+      allMoonboys[closeIdx].tx_close = swapSig ?? 'DRY_RUN'
+      saveOpenMoonboys(allMoonboys)
+    }
 
     await sendAlert({
       type: 'moonboy_closed',

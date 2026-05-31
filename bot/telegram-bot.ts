@@ -389,46 +389,25 @@ async function handleRebalance(positionId: string) {
   }
 
   await reply(`⏳ Rebalancing LP position \`${positionId}\`...`)
-  // rebalance removed in simplified stack
-  const result = null; // await rebalanceDlmmPosition(positionId, {
-    reason: 'manual_rebalance',
-    source: 'telegram_pm2',
-  })
-
-  if (result.reopened && result.newPositionId) {
-    await reply([
-      `✅ *Rebalance complete* for ${result.symbol}`,
-      `Old: \`${result.oldPositionId}\` closed`,
-      `New: \`${result.newPositionId}\` opened centered at current price`,
-    ].join('\n'))
-    return
-  }
-
-  if (result.closed) {
-    await reply(`⚠️ \`${result.oldPositionId}\` closed but reopen failed: ${result.error ?? 'unknown error'}`)
-    return
-  }
-
-  await reply(`❌ Rebalance skipped for \`${positionId}\`: ${result.error ?? 'unknown error'}`)
+  // Rebalance feature removed in simplified stack
+  await reply(`Rebalance is not available in the current simplified build.`)
+  return
 }
 
 async function handleStatus() {
-  const supabase = createServerClient()
   const state = await getBotState()
-  // fetchLiveMeteoraSnapshot removed in simplified stack
-  const liveSnapshot = { positions: [], status: 'stub' }; // await fetchLiveMeteoraSnapshot()
-  const liveSource: MeteoraLiveSourceStatus = {
-    dlmmOk: liveSnapshot.dlmmOk,
-    dammOk: liveSnapshot.dammOk,
-  }
-  const liveLp = liveSnapshot.positions
-  const liveDlmmCount = liveLp.filter(p => p.position_type === 'dlmm').length
-  const liveDammCount = 0 // DAMM v2 fully removed
-  const wallet = null; // await fetchWalletLiveBalances(...) — removed in simplified stack
-  const warning = liveSourceWarning(liveSource, {
-    dlmm: liveSnapshot.dlmmError,
-    damm: liveSnapshot.dammError,
-  })
+  const lp = getOpenLpPositions()
+  const mb = getOpenMoonboys()
+
+  let msg = `*Bot Status*\n`
+  msg += `Enabled: ${state.enabled}\n`
+  msg += `Dry-run: ${state.dry_run}\n`
+  msg += `Paused: ${state.paused}\n\n`
+  msg += `Open LP: ${lp.length}\n`
+  msg += `Open Moonboy: ${mb.length}\n`
+
+  await reply(msg)
+}
 
   const { data: openLp } = await supabase
     .from('lp_positions')
@@ -482,51 +461,47 @@ async function handleStatus() {
 }
 
 async function handlePositions() {
-  const supabase = createServerClient()
-  let liveLp: LiveMeteoraPosition[] = []
-  let liveSource: MeteoraLiveSourceStatus = { dlmmOk: false, dammOk: false }
-  let liveErrors: { dlmm?: string | null; damm?: string | null } = {}
-  const syncResult = null; // await syncAllMeteoraPositions() — removed in simplified stack
-  // .catch(err => {
-    console.warn('[telegram-bot] /positions sync failed:', err)
-    return null
-  })
-  if (syncResult) {
-    liveLp = syncResult.positions
-    liveSource = { dlmmOk: syncResult.dlmmOk, dammOk: syncResult.dammOk }
-    liveErrors = { dlmm: syncResult.dlmmError, damm: syncResult.dammError }
+  // Simplified stack — only local state
+  const lp = getOpenLpPositions()
+  const mb = getOpenMoonboys()
+
+  let msg = '*Open Positions*\n\n'
+
+  if (lp.length === 0 && mb.length === 0) {
+    msg += 'No open positions.'
   } else {
-    const snapshot = { positions: [], status: 'stub' }; // fetchLiveMeteoraSnapshot removed
-    liveLp = snapshot.positions
-    liveSource = { dlmmOk: snapshot.dlmmOk, dammOk: snapshot.dammOk }
-    liveErrors = { dlmm: snapshot.dlmmError, damm: snapshot.dammError }
-  }
-  const { data } = await supabase
-    .from('lp_positions')
-    .select('id, symbol, status, sol_deposited, pool_address, opened_at, position_pubkey, strategy_id, position_type, claimable_fees_usd, position_value_usd, pnl_usd, current_price, metadata')
-    .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
-    .order('opened_at', { ascending: false })
-
-  const positions = data ?? []; // mergeDbAndLiveLpPositions removed in simplified stack
-  const warning = liveSourceWarning(liveSource, liveErrors)
-  const liveConfirmedCount = positions.filter(isLiveConfirmedPosition).length
-  const cacheOnlyCount = positions.length - liveConfirmedCount
-
-  if (positions.length === 0) {
-    await reply(warning ? `${warning}\n\n🏊 No cached open LP positions.` : '🏊 No open LP positions.')
-    return
+    if (lp.length > 0) {
+      msg += `*LP Positions (${lp.length})*\n`
+      lp.forEach((p: any) => {
+        msg += `• ${p.symbol} — ${p.sol_deposited} SOL\n`
+      })
+    }
+    if (mb.length > 0) {
+      msg += `\n*Moonboy Positions (${mb.length})*\n`
+      mb.forEach((p: any) => {
+        msg += `• ${p.symbol}\n`
+      })
+    }
   }
 
-  const lines = [
-    `🏊 *LP Positions (${positions.length})*`,
-    `Live-confirmed: ${liveConfirmedCount} | Cache-only: ${cacheOnlyCount}`,
-    ``,
-  ]
-  if (warning) lines.push(warning, '')
-  if (cacheOnlyCount > 0) {
-    lines.push(`Cache-only rows are Supabase snapshots and may be stale until Meteora live fetch recovers.`, '')
-  }
-  for (const p of positions) {
+  await reply(msg)
+  return
+}
+
+async function handleStatus() {
+  const state = await getBotState()
+  const lp = getOpenLpPositions()
+  const mb = getOpenMoonboys()
+
+  let msg = `*Bot Status*\n`
+  msg += `Enabled: ${state.enabled}\n`
+  msg += `Dry-run: ${state.dry_run}\n`
+  msg += `Paused: ${state.paused}\n\n`
+  msg += `Open LP: ${lp.length}\n`
+  msg += `Open Moonboy: ${mb.length}\n`
+
+  await reply(msg)
+}
     const age = Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60_000)
     const oor = p.status === 'out_of_range' ? ' ⚠️OOR' : ''
     const source = isLiveConfirmedPosition(p) ? ' | live' : ' | cache'
@@ -560,49 +535,12 @@ async function handleTick() {
 }
 
 async function handleOrphans() {
-  await reply('🔍 Running orphan detector...')
-  try {
-    const result = []; // detectAllOrphanedPositions removed in simplified stack
-    const errors = [
-      result.dlmmError ? `DLMM: ${result.dlmmError}` : null,
-      result.dammError ? `DAMM: ${result.dammError}` : null,
-    ].filter(Boolean)
-    await reply([
-      `👻 *Orphan detection complete*`,
-      `Live: ${result.live}`,
-      `Inserted: ${result.inserted}`,
-      `Updated: ${result.updated}`,
-      `Externally closed: ${result.externallyClosed}`,
-      `DLMM: ${result.dlmmLive} live / ${result.dlmmInserted} inserted`,
-      `DAMM: ${result.dammLive} live / ${result.dammInserted} inserted`,
-      errors.length > 0 ? `Errors: ${errors.join(' | ')}` : null,
-    ].filter(Boolean).join('\n'))
-  } catch (err) {
-    await reply(`❌ Orphan detection failed: ${err instanceof Error ? err.message : String(err)}`)
-  }
+  await reply('👻 Orphan detection is not available in the current simplified build.')
 }
 
 async function handleCandidates() {
-  const supabase = createServerClient()
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-  const { data, error } = await supabase
-    .from('scan_candidates')
-    .select('symbol, score, strategy_id, created_at, metadata')
-    .gte('created_at', since)
-    .order('score', { ascending: false })
-    .limit(10)
-
-  if (error) {
-    await reply(`❌ Could not load candidates: ${error.message}`)
-    return
-  }
-
-  if (!data || data.length === 0) {
-    await reply('📭 No candidates found in the last 24h.')
-    return
-  }
-
-  const lines = [`📋 *Top Candidates (last 24h)*`, ``]
+  await reply('Candidates listing is not fully implemented in the simplified stack yet.')
+}
   for (const c of data) {
     const age = Math.round((Date.now() - new Date(c.created_at).getTime()) / 60_000)
     lines.push(`• *${c.symbol}* — score ${c.score} | ${c.strategy_id} | ${age}min ago`)
