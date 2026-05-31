@@ -327,31 +327,6 @@ export async function openPosition(
       }
     }
 
-    if (!openSig && lastZapErr) {
-      console.warn(`${label} Zap path exhausted after 2 attempts — trying ONE manual fallback (Jupiter + DLMM SDK)`)
-      try {
-        return await openPositionToken2022(
-          metrics,
-          strategy,
-          dlmmPool,
-          poolPubkey,
-          outputMint,
-          outputTokenProgram,
-          solAmount,
-          minBinId,
-          maxBinId,
-          solIsTokenX,
-          label,
-          await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-          DRY_RUN,
-          new Keypair()
-        )
-      } catch (manualErr) {
-        console.error(`${label} manual fallback also failed — giving up on ${metrics.symbol}`)
-        throw manualErr
-      }
-    }
-
     if (openSig) {
       console.log(`${label} position opened successfully via Zap path`)
     }

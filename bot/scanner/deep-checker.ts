@@ -718,7 +718,7 @@ async function attemptOpenAndNotify(params: {
     availableOpenSlots,
   } = params;
 
-  candidateCountRef.value++;  // Note: this uses outer scope for now; will clean in next micro-step if needed
+  candidateCountRef.value++;
   await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct });
 
   const disabledReason = getDisabledStrategyReason(strategy.id);
@@ -748,15 +748,7 @@ async function attemptOpenAndNotify(params: {
 
     console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`);
 
-    try {
-      const positions = getOpenLpPositions();
-      const idx = positions.findIndex((p: any) => p.id === positionId);
-      if (idx !== -1) {
-        positions[idx].strategy_id = strategy.id;
-        positions[idx].symbol = symbol;
-        saveOpenLpPositions(positions);
-      }
-    } catch {}
+    patchOpenPositionMetadata(positionId, strategy.id, symbol);
 
     await sendAlert({
       type: 'position_opened',
@@ -824,6 +816,23 @@ function findConflictingLocalPosition(tokenAddress: string) {
     }
     return false;
   });
+}
+
+/**
+ * Patches strategy_id + symbol onto a freshly persisted open LP position in local state.
+ * This is a transitional patch because the core persist/open path does not yet receive these fields.
+ * Small dedicated helper so the hot path stays readable.
+ */
+function patchOpenPositionMetadata(positionId: string, strategyId: string, symbol: string): void {
+  try {
+    const positions = getOpenLpPositions();
+    const idx = positions.findIndex((p: any) => p.id === positionId);
+    if (idx !== -1) {
+      positions[idx].strategy_id = strategyId;
+      positions[idx].symbol = symbol;
+      saveOpenLpPositions(positions);
+    }
+  } catch {}
 }
 
 function buildTokenMetrics(params: {
