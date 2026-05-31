@@ -10,6 +10,7 @@ import {
   writeScannerHeartbeat,
   type ScannerResult,
 } from './scanner/deep-checker'
+import { validateStartup } from '@/lib/startup-validation'
 
 export { runScanner, type ScannerResult }
 

@@ -1,10 +1,12 @@
 import axios from 'axios'
+import { createServerClient } from '@/lib/supabase'
 import { summarizeError } from '@/lib/logging'
 
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM = 'https://dlmm-api.meteora.ag'
 
 // Simple in-process cache — pools change slowly.
+// Reduced to 5min default to keep momentum signals (vol5m, feeTvl5m) fresher for scalp-spike / evil-panda triggers.
 let meteoraPoolsCache: { pools: MeteoraPool[]; ts: number } | null = null
 const METEORA_CACHE_TTL_MS = parseInt(
   process.env.METEORA_POOLS_CACHE_TTL_MS ?? '300000',
@@ -272,6 +274,7 @@ export function getTradableToken(pool: MeteoraPool): MeteoraToken {
 async function loadDbPoolCache(): Promise<MeteoraPool[] | null> {
   try {
     const cutoff = new Date(Date.now() - METEORA_CACHE_TTL_MS).toISOString()
+    const { data, error } = await createServerClient()
       .from('scanner_pool_cache')
       .select('metadata')
       .gte('last_seen_at', cutoff)
@@ -333,8 +336,18 @@ function persistDbPoolCache(pools: MeteoraPool[]): void {
   const chunks: typeof rows[] = []
   for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK))
 
-  // Supabase cache upsert removed during refactor — local state only for now
-  // Promise.allSettled(...) stubbed
+  Promise.allSettled(
+    chunks.map((chunk) =>
+      createServerClient()
+        .from('scanner_pool_cache')
+        .upsert(chunk, { onConflict: 'pool_address', ignoreDuplicates: false }),
+    ),
+  ).then((results) => {
+    const failed = results.filter((r) => r.status === 'rejected')
+    if (failed.length > 0) {
+      console.warn(`[scanner] scanner_pool_cache upsert: ${failed.length}/${chunks.length} chunks failed`)
+    }
+  }).catch(() => { /* never throws */ })
 }
 
 /**
@@ -355,6 +368,7 @@ export async function cleanupOldPoolCache(): Promise<number> {
   try {
     const cutoff = new Date(Date.now() - POOL_CACHE_RETENTION_HOURS * 60 * 60 * 1000).toISOString()
 
+    const { error, count } = await createServerClient()
       .from('scanner_pool_cache')
       .delete({ count: 'exact' })
       .lt('last_seen_at', cutoff)
@@ -504,51 +518,4 @@ function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): Met
     if (!isFresh && !hasMomentumVolume && !isRegain) return false
     return true
   })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Light "Best Fee Tier" selection (new simplified architecture)
-// Goal: Among pools of the same token, pick the one with highest liquidity.
-// This is simple, cheap, and often the most relevant signal.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function selectBestPoolByHighestLiquidity(pools: MeteoraPool[]): MeteoraPool | null {
-  if (pools.length === 0) return null;
-  if (pools.length === 1) return pools[0];
-
-  return pools.reduce((best, current) => {
-    const bestTvl = getPoolTvl(best);
-    const currentTvl = getPoolTvl(current);
-    return currentTvl > bestTvl ? current : best;
-  });
-}
-
-/**
- * Groups pools by mint and returns the best one (by liquidity) per mint.
- * Use this after your age + evil-panda filters.
- */
-export function groupByMintAndPickBestByLiquidity(pools: MeteoraPool[]): MeteoraPool[] {
-  const byMint = new Map<string, MeteoraPool[]>();
-
-  for (const pool of pools) {
-    const mint = getTradableToken(pool).address;
-    if (!byMint.has(mint)) byMint.set(mint, []);
-    byMint.get(mint)!.push(pool);
-  }
-
-  const bestPools: MeteoraPool[] = [];
-  for (const [, poolsForMint] of byMint) {
-    const best = selectBestPoolByHighestLiquidity(poolsForMint);
-    if (best) bestPools.push(best);
-  }
-
-  return bestPools;
-}
-
-// Early aggressive age filter (important for free tier API optimization)
-export function filterPoolsByMaxAge(pools: MeteoraPool[], maxAgeMinutes: number): MeteoraPool[] {
-  return pools.filter(pool => {
-    const age = getPoolAgeMinutes(pool);
-    return age <= maxAgeMinutes;
-  });
 }

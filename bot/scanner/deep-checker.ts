@@ -3,28 +3,30 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
 import axios from 'axios'
+import { createServerClient } from '@/lib/supabase'
 import { getBotState } from '@/lib/botState'
-
-
+import { getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
+import { scoreCandidateWithBreakdown, type ScoreBreakdown } from '../scorer'
 import { openPosition } from '../executor'
 import { sendAlert } from '../alerter'
 import { checkHolders } from '@/lib/helius'
-// Rugcheck removed for minimalism - basic default
+import { getRugscore, getRugcheckCacheSize } from '../rugcheck-cache'
 import {
   fetchBondingCurve,
   isPumpFunToken,
   isMoonshotToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
+// (DAMM v2 edge automation fully removed)
 import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
-
+import { scalpSpikeStrategy } from '@/strategies/scalp-spike'
+// (DAMM v2 imports and logic fully removed)
 import { openMoonboyPosition } from '../moonboy-executor'
 import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
-import { logInfo, logError } from '@/lib/log'
 import {
   SCAN_INTERVAL_MS,
   SCANNER_TICK_TIMEOUT_MS,
@@ -37,6 +39,7 @@ import {
   FRESH_MIN_LIQUIDITY_USD,
   MOMENTUM_MIN_VOLUME_5M_USD,
   MOMENTUM_MIN_FEE_TVL_5M_PCT,
+  SCALP_SPIKE_VOL_RATIO,
   MAX_DEEP_CHECKS,
   DEEP_CHECK_DELAY_MS,
   MAX_FRESH_DEEP_CHECKS,
@@ -46,8 +49,10 @@ import {
   MOMENTUM_POOL_LIMIT,
   LP_SCANNER_ENABLED,
   EVIL_PANDA_ENABLED,
+  SCALP_SPIKE_ENABLED,
+  // (DAMM v2 fully removed — no edge path remains)
 } from '@/lib/strategy-config'
-import { filterPoolsByMaxAge } from "./pool-fetcher";import { groupByMintAndPickBestByLiquidity } from "./pool-fetcher";import {
+import {
   WSOL,
   fetchMeteoraPools,
   getFeeTvlPct,
@@ -154,9 +159,20 @@ export async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label:
 
 export async function logScannerTick(result: ScannerResult, durationMs: number, source = 'scanner'): Promise<void> {
   try {
-    logInfo(result.error ? 'scanner_tick_failed' : 'scanner_tick', { ...result, durationMs, source })
+    const insertResult = await withTimeout(
+      createServerClient().from('bot_logs').insert({
+        level: result.error ? 'error' : 'info',
+        event: result.error ? 'scanner_tick_failed' : 'scanner_tick',
+        payload: { ...result, durationMs, source },
+      }),
+      SUPABASE_TIMEOUT_MS,
+      'bot_logs insert scanner_tick',
+    )
+    if (insertResult && 'error' in insertResult && insertResult.error) {
+      console.warn('[scanner] bot_logs insert failed:', insertResult.error.message)
+    }
   } catch (err) {
-    console.warn('[scanner] logScannerTick failed:', err)
+    console.warn('[scanner] bot_logs insert failed:', err)
   }
 }
 
@@ -170,7 +186,16 @@ export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'in
         source,
       },
     }
-    logInfo('scanner_heartbeat', payload)
+    const upsertResult = await withTimeout(
+      createServerClient()
+        .from('bot_health')
+        .upsert(payload),  // uses primary key (service) automatically
+      SUPABASE_TIMEOUT_MS,
+      'bot_health upsert scanner',
+    )
+    if (upsertResult && 'error' in upsertResult && upsertResult.error) {
+      console.warn('[scanner] bot_health upsert failed:', upsertResult.error.message)
+    }
   } catch (err) {
     console.warn('[scanner] bot_health upsert failed:', err)
   }
@@ -212,6 +237,7 @@ function findLiveOpenPosition(
 }
 
 function getDisabledStrategyReason(strategyId: string): string | null {
+  if (strategyId === 'scalp-spike' && !SCALP_SPIKE_ENABLED) return 'SCALP_SPIKE_ENABLED is not true'
   if (strategyId === 'evil-panda' && !EVIL_PANDA_ENABLED) return 'EVIL_PANDA_ENABLED is not true'
   return null
 }
@@ -318,8 +344,10 @@ function getScannerAdjustedScore(
   return total
 }
 
-function meetsFilters(metrics: TokenMetrics, f: any): boolean {
+function passesMomentumRegainStrategyFilters(metrics: TokenMetrics): boolean {
+  const f = scalpSpikeStrategy.filters
   return (
+    scalpSpikeStrategy.enabled &&
     metrics.mcUsd >= f.minMcUsd &&
     metrics.mcUsd <= f.maxMcUsd &&
     metrics.liquidityUsd >= f.minLiquidityUsd &&
@@ -331,11 +359,35 @@ function meetsFilters(metrics: TokenMetrics, f: any): boolean {
   )
 }
 
-/** Stubbed during Supabase removal — returns empty for now */
-function getRecentOORMints(): Set<string> {
+async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createServerClient>): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
-  // TODO: implement using local state if needed
-  return new Set()
+
+  const result = await withTimeout(
+    supabase
+      .from('lp_positions')
+      .select('mint, symbol, closed_at, close_reason')
+      .eq('status', 'closed')
+      .gte('closed_at', new Date(Date.now() - OOR_RECHECK_HOURS * 3_600_000).toISOString())
+      .order('closed_at', { ascending: false })
+      .limit(50),
+    SUPABASE_TIMEOUT_MS,
+    'recent OOR recheck rows',
+  )
+
+  if (!result || ('error' in result && result.error)) {
+    const message = result && 'error' in result ? result.error?.message : 'timeout'
+    console.warn(`[scanner] recent OOR recheck lookup failed: ${message}`)
+    return new Set()
+  }
+
+  const rows = 'data' in result ? (result.data ?? []) : []
+  return new Set(
+    rows
+      .filter((row: { mint?: string | null; close_reason?: string | null }) =>
+        Boolean(row.mint) && String(row.close_reason ?? '').startsWith('out_of_range_'),
+      )
+      .map((row: { mint: string }) => row.mint),
+  )
 }
 
 /**
@@ -477,6 +529,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   if (tickMode) {
     console.log('[scanner] tickMode=true — skipping pool-fetcher, reporting last 1h candidates')
+    const supabase = createServerClient()
     const since = new Date(Date.now() - 60 * 60 * 1_000).toISOString()
     const { data: recentCandidates } = await supabase
       .from('candidates')
@@ -506,6 +559,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     momentumPoolLimit: MOMENTUM_POOL_LIMIT,
     momentumMinVolume5mUsd: MOMENTUM_MIN_VOLUME_5M_USD,
     momentumMinFeeTvl5mPct: MOMENTUM_MIN_FEE_TVL_5M_PCT,
+    scalpSpikeVolRatio: SCALP_SPIKE_VOL_RATIO,
     maxFreshDeepChecks: MAX_FRESH_DEEP_CHECKS,
     maxMomentumDeepChecks: MAX_MOMENTUM_DEEP_CHECKS,
   }
@@ -520,10 +574,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     isMomentumRegain: passesMomentumRegain,
   })
   if (fetchError) {
-  // Apply age filter as early as possible (saves a lot of downstream API calls on free tiers)
-  const maxAge = FRESH_MAX_AGE_MINUTES || 90;
-  const ageFiltered = filterPoolsByMaxAge(fetchedPools, maxAge);
-  console.log(`[scanner] Age filter (early): ${ageFiltered.length} / ${fetchedPools.length} pools kept (<= ${maxAge}min)`);
     console.error('[scanner] fetch failed:', fetchError)
     return finish({ error: fetchError, openBlockedReason: 'pool_fetch_failed' })
   }
@@ -532,6 +582,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     pools,
     earlyAgePools,
     momentumSpikePools,
+    momentumRegainPools,
     freshPools,
     momentumPools,
     freshSurvivors,
@@ -547,11 +598,13 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     `${pools.length} lane-eligible`,
   )
   console.log(
-    `[scanner] early age gate — snipe(<=${FRESH_SNIPE_MAX_AGE_MINUTES}min): ${earlyAgePools.length}`
+    `[scanner] early age gate — snipe(<=${FRESH_SNIPE_MAX_AGE_MINUTES}min): ${earlyAgePools.length} + ` +
+    `momentum exceptions: ${momentumSpikePools.length + momentumRegainPools.length}`,
   )
 
   console.log(
-    `[scanner] lanes — fresh=${freshPools.length}/${pools.length} <=${FRESH_MAX_AGE_MINUTES}min`
+    `[scanner] lanes — fresh=${freshPools.length}/${pools.length} <=${FRESH_MAX_AGE_MINUTES}min, ` +
+    `momentum=${momentumPools.length}/${pools.length} spike/regain candidates`,
   )
   console.log('[scanner] *** HEAVY OBSERVATION LOGGING ENABLED for dry-run period ***')
 
@@ -567,6 +620,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     return finish({ scanned: fetchedPools.length, survivors: 0 })
   }
 
+  const supabase = createServerClient()
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints(supabase)
   const survivors = pickDeepCheckSurvivors(freshSurvivors, momentumSurvivors, recentlyClosedOorMints, laneConfig)
 
@@ -596,7 +650,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   } else {
     openCount = limitState.effectiveOpenCount
     if (!limitState.liveFetchOk) {
-      console.warn(`[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk})`)
+      console.warn(
+        `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}) — ` +
+        `using Supabase cache fallback for open caps (DAMM v2 support removed)`,
+      )
     }
     availableOpenSlots = Math.max(0, MAX_CONCURRENT_MARKET_LP_POSITIONS - openCount)
     if (availableOpenSlots === 0) {
@@ -618,12 +675,14 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   let openSkippedCount = 0
   let binStepPreferredCount = 0
   let lowBinQualitySelections = 0   // WS3 diagnostic: how many times we picked a pool with weak bin compatibility
+  let dailyLossLimitHit: boolean | null = null
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
   const openedMintsThisTick = new Set<string>()
-
-  // (daily loss limit check stubbed during refactor cleanup)
-  function canOpenNewPositions(): boolean {
-    if (isDailyLossLimitHit()) {
+  const isOpenAllowedToday = async (): Promise<boolean> => {
+    if (dailyLossLimitHit === null) {
+      dailyLossLimitHit = await isDailyLossLimitHit()
+    }
+    if (dailyLossLimitHit) {
       console.warn('[scanner] daily loss limit hit — no new positions')
       return false
     }
@@ -632,14 +691,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
-  // ── Best fee tier selection (light & liquidity-based) ─────────────────────
-  // Among pools that passed filters, keep only the one with highest liquidity per mint.
-  // This is the simplified intelligent replacement for the old heavy "selectBestPool".
-  const bestPools = groupByMintAndPickBestByLiquidity(survivors.map(s => s.pool || s));
-  console.log(`[scanner] After liquidity-based best pool selection: ${bestPools.length} pools (from ${survivors.length} candidates)`);
-  const poolsToProcess = bestPools.length > 0 ? bestPools : survivors.map(s => s.pool || s);
 
-  for (const pool of poolsToProcess) {
+  for (const { pool: representativePool, mcUsd, ageHours, lane } of survivors) {
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
 
     const token = getTradableToken(representativePool)
@@ -672,8 +725,14 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     // 2. Skip if there was a recent position for this mint (last 6 hours) that was closed with a "bad" reason
     //    (e.g. pnl_unavailable). This prevents rapid re-opening the same mint after a failed/bad close attempt.
     const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
-    // Supabase dedup removed — using local state only for now
-    const posResult = null;
+    const posResult = await withTimeout(
+      supabase.from('lp_positions')
+        .select('id, status, close_reason, closed_at')
+        .eq('mint', tokenAddress)
+        .or(`status.in.(${OPEN_LP_STATUSES.join(',')}),and(status.eq.closed,closed_at.gte.${recentClosedCutoff})`)
+        .limit(1),
+      SUPABASE_TIMEOUT_MS, `lp_positions fallback dedup ${symbol}`
+    );
 
     if (posResult?.data && posResult.data.length > 0) {
       const existing = posResult.data[0];
@@ -701,7 +760,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     let rangeUpPct: number | undefined
     let maxBinsForSelection: number | undefined
 
-    if (lane === 'evil-panda') {
+    if (lane === 'fresh') {
       // Evil Panda: wide range strategy
       rangeDownPct = -50
       rangeUpPct = 100
@@ -729,6 +788,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
 
     const result = selectBestPool(
+      lane === 'fresh' ? freshPools : momentumPools,
       tokenAddress,
       lane,
       rangeDownPct,
@@ -779,6 +839,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const volumeGrowth1h = getRecentVolumeGrowth(bestPool)
     const momentumScore = scoreMeteoraMomentum(bestPool)
 
+    // (DAMM v2 support fully removed)
 
     const quoteTokenMint = getQuoteTokenMint(bestPool)
 
@@ -799,7 +860,11 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       console.log(`[scanner] ${symbol} — best pool upgraded: bin_step=${binStepDisplay}, feeTvl=${feeTvl24hPct.toFixed(2)}%, tvl=$${liqUsd.toFixed(0)}`)
     }
 
+    // Improved MC: always try DexScreener for scalp-spike candidates or when Meteora MC is low/stale
     let resolvedMc = mcUsd
+    const forcedStrategyId = lane === 'momentum' ? 'scalp-spike' : 'evil-panda'
+    const isScalpSpikeCandidate = lane === 'momentum' || forcedStrategyId === 'scalp-spike'
+    if (!resolvedMc || resolvedMc < 1 || (isScalpSpikeCandidate && resolvedMc < 500_000)) {
       resolvedMc = await withTimeout(
         fetchMcFromDexScreener(tokenAddress, token.price),
         EXTERNAL_CALL_TIMEOUT_MS,
@@ -897,8 +962,29 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       launchpadSource,
     }
 
+    // (DAMM v2 edge path was fully removed from the bot)
+
+    const tokenClass = lane === 'momentum' ? 'SCALP_SPIKE' : classifyToken({
+      address:        metrics.address,
+      mcUsd:          metrics.mcUsd,
+      volume24h:      metrics.volume24h,
+      volume1h:       vol1h,
+      volume5m:       vol5m,
+      liquidityUsd:   metrics.liquidityUsd,
+      ageHours:       metrics.ageHours,
+      topHolderPct:   metrics.topHolderPct,
+      holderCount:    metrics.holderCount,
+      rugcheckScore:  metrics.rugcheckScore,
+      quoteTokenMint: metrics.quoteTokenMint,
+      feeTvl1hPct:    metrics.feeTvl1hPct,
+      feeTvl5mPct:    metrics.feeTvl5mPct,
+      feeTvl24hPct:   metrics.feeTvl24hPct,
+    })
+
+    const momentumRegain = lane === 'momentum' && passesMomentumRegain(bestPool)
     const strategy =
-      getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ?? null
+      getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
+      (momentumRegain && passesMomentumRegainStrategyFilters(metrics) ? scalpSpikeStrategy : null)
 
     let decision = 'REJECTED'
     let rejectionReason: string | null = null
@@ -920,13 +1006,18 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       decision = 'REJECTED'
       console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) in ${lane} lane: ${rejectionReason}`)
     } else {
-      console.log(
-        `vol1h/24hAvg=${getOneHourVolumeVs24hAverage(bestPool).toFixed(2)}x ` +
-        `fee1h/24hAvg=${getOneHourFeeTvlVs24hAverage(bestPool).toFixed(2)}x`,
-      )
-      breakdown = getMomentumRegainBreakdown(metrics) // simplified during refactor cleanup
-      finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
+      if (strategy.id === 'scalp-spike' && momentumRegain) {
+        console.log(
+          `[scanner] ${symbol} — scalp-spike momentum-regain ` +
+          `vol1h/24hAvg=${getOneHourVolumeVs24hAverage(bestPool).toFixed(2)}x ` +
+          `fee1h/24hAvg=${getOneHourFeeTvlVs24hAverage(bestPool).toFixed(2)}x`,
+        )
+      }
 
+      breakdown = strategy.id === 'scalp-spike' && momentumRegain
+        ? getMomentumRegainBreakdown(metrics)
+        : scoreCandidateWithBreakdown(metrics, strategy)
+      finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
       const bondingInfo = bondingCurvePct !== undefined ? `, curve=${bondingCurvePct.toFixed(1)}%` : ''
 
       // Two-track system
@@ -1087,7 +1178,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         continue
       }
 
-      if (!canOpenNewPositions()) {
+      if (!await isOpenAllowedToday()) {
         openSkippedCount++
         console.log(`[scanner] ${symbol} qualifies but open skipped: daily loss circuit breaker`)
         continue
@@ -1102,6 +1193,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       const positionId = await openPosition(metrics, strategy)
       if (positionId) {
         openedCount++
+        dailyLossLimitHit = null
         openedMintsThisTick.add(tokenAddress)
 
         console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`)
@@ -1109,10 +1201,12 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         // Explicitly claim/lock the strategy + symbol on the DB row so position-sync cannot overwrite them later.
         // This ensures that anything the lp-scanner successfully opens keeps the correct strategy_id and real token symbol.
         // We retry a couple of times because DB contention or transient issues can occur.
+        const supabase = (await import('@/lib/supabase')).createServerClient();
         let claimSuccess = false;
         for (let attempt = 1; attempt <= 3 && !claimSuccess; attempt++) {
           try {
             await supabase
+              .from('lp_positions')
               .update({
                 strategy_id: strategy.id,
                 symbol: symbol,   // force the real token symbol from scanner (prevents "LIVE")
@@ -1155,6 +1249,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         )
       }
     }
+  }
 
   if (USE_HELIUS) {
     const { getHolderCacheSize } = await import('@/lib/helius')
