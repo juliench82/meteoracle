@@ -27,6 +27,7 @@ export async function getOpenLpLimitState(): Promise<OpenLpLimitState> {
   }
 }
 
-export function assertCanOpenLpPosition(_state: OpenLpLimitState): void {
+export function assertCanOpenLpPosition(..._args: any[]): void {
   // Simplified stack — no-op for now (can be enhanced later)
+  // Accepts old call signatures for compatibility during transition
 }

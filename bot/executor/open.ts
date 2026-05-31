@@ -136,7 +136,7 @@ export async function openPosition(
       : envCap
 
     const limitState = options.rebalanceFromPositionId
-      ? await getOpenLpLimitState('market')
+      ? await getOpenLpLimitState()
       : await assertCanOpenLpPosition(MAX_CONCURRENT_MARKET_LP_POSITIONS, label, 'market')
 
     const effectiveOpenCountForCap = options.rebalanceFromPositionId
@@ -159,7 +159,7 @@ export async function openPosition(
     )
 
     const maxTotalDeployed = MAX_MARKET_LP_SOL_DEPLOYED
-    const { totalDeployed, source: exposureSource } = await getTotalDeployedSolForCap(supabase, limitState)
+    const { totalDeployed, source: exposureSource } = await getTotalDeployedSolForCap(limitState)
 
     if (totalDeployed + solAmount > maxTotalDeployed) {
       console.warn(`${label} global exposure cap hit — ${totalDeployed.toFixed(3)} SOL deployed (${exposureSource})`)

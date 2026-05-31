@@ -15,6 +15,7 @@ import {
 import { getConnection } from '@/lib/solana';
 import type { Strategy } from '@/lib/types';
 import { OPEN_LP_STATUSES, type OpenLpLimitState } from '@/lib/position-limits';
+import { getOpenLpPositions } from '@/lib/local-state';
 import { STRATEGIES } from '@/strategies';
 
 // ─────────────────────────────────────────────────────────────
@@ -75,45 +76,29 @@ export async function getTotalDeployedSolForCap(
   limitState: OpenLpLimitState,
 ): Promise<{ totalDeployed: number; source: OpenLpLimitState['countSource'] }> {
   if (limitState.liveFetchOk) {
-    const livePubkeys = limitState.livePositions
-      .map((p) => p.position_pubkey)
-      .filter(Boolean);
+    const livePubkeys = (limitState as any).livePositions
+      ?.map((p: any) => p.position_pubkey)
+      .filter(Boolean) ?? [];
 
     if (livePubkeys.length === 0) {
       return { totalDeployed: 0, source: limitState.countSource };
     }
 
-    const { data, error } = await supabase
-      .select('position_pubkey, sol_deposited')
-      .in('position_pubkey', livePubkeys);
+    // In simplified stack we don't have the old DB join — use live data only
+    const totalDeployed = (limitState as any).livePositions?.reduce((sum: number, position: any) => {
+      return sum + Number(position.sol_deposited ?? 0);
+    }, 0) ?? 0;
 
-    if (error) {
-      console.warn(`[executor] live exposure DB join failed; using Meteora live estimates: ${error.message}`);
-    }
-
-    const cachedSolByPubkey = new Map(
-      (data ?? []).map((row: any) => [row.position_pubkey, Number(row.sol_deposited ?? 0)])
-    );
-
-    const totalDeployed = limitState.livePositions.reduce((sum, position) => {
-      const cachedSol = cachedSolByPubkey.get(position.position_pubkey) ?? 0;
-      const liveSol = Number(position.sol_deposited ?? 0);
-      return sum + (cachedSol > 0 ? cachedSol : liveSol);
-    }, 0);
-
-    return { totalDeployed, source: limitState.countSource };
+    return { totalDeployed, source: limitState.countSource ?? 'live' as const };
   }
 
-  const { data: openPositions } = await supabase
-    .select('sol_deposited')
-    .in('status', OPEN_LP_STATUSES);
+  // Simplified stack: use local state instead of Supabase
+  const openPositions = getOpenLpPositions();
+  const totalDeployed = openPositions
+    .filter((p: any) => OPEN_LP_STATUSES.includes(p.status))
+    .reduce((sum: number, p: any) => sum + Number(p.sol_deposited ?? 0), 0);
 
-  const totalDeployed = (openPositions ?? []).reduce(
-    (sum: number, row: { sol_deposited: number | null }) => sum + Number(row.sol_deposited ?? 0),
-    0
-  );
-
-  return { totalDeployed, source: 'supabase-cache' as const };
+  return { totalDeployed, source: 'local-state' as const };
 }
 
 export async function getTokenProgramId(mint: PublicKey | string): Promise<PublicKey> {
