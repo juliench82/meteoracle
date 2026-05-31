@@ -82,3 +82,18 @@ export const MATURE_MIN_SCORE_TO_OPEN = envNumber('MATURE_MIN_SCORE_TO_OPEN', 70
 export const MOMENTUM_POOL_LIMIT = envNumber('MOMENTUM_POOL_LIMIT', 80)
 export const SCALP_SPIKE_ENABLED = envBool('SCALP_SPIKE_ENABLED', true)
 export const SCALP_SPIKE_VOL_RATIO = envNumber('SCALP_SPIKE_VOL_RATIO', 3.0)
+
+// Additional constants referenced by restored scanner code
+export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
+export const classifyToken = () => ({})
+export const HARD_MAX_TOKEN_AGE_MINUTES = envNumber('HARD_MAX_TOKEN_AGE_MINUTES', 240)
+export const SCANNER_EARLY_MAX_AGE_MINUTES = envNumber('SCANNER_EARLY_MAX_AGE_MINUTES', 30)
+export const FRESH_SNIPE_MAX_AGE_MINUTES = envNumber('FRESH_SNIPE_MAX_AGE_MINUTES', 90)
+export const FRESH_MAX_AGE_MINUTES = envNumber('FRESH_MAX_AGE_MINUTES', 120)
+export const FRESH_MIN_LIQUIDITY_USD = envNumber('FRESH_MIN_LIQUIDITY_USD', 8000)
+export const MOMENTUM_MIN_VOLUME_5M_USD = envNumber('MOMENTUM_MIN_VOLUME_5M_USD', 3000)
+export const MOMENTUM_MIN_FEE_TVL_5M_PCT = envNumber('MOMENTUM_MIN_FEE_TVL_5M_PCT', 0.5)
+export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 8)
+export const MAX_MOMENTUM_DEEP_CHECKS = envNumber('MAX_MOMENTUM_DEEP_CHECKS', 6)
+export const MATURE_MIN_SCORE_TO_OPEN = envNumber('MATURE_MIN_SCORE_TO_OPEN', 70)
+export const MOMENTUM_POOL_LIMIT = envNumber('MOMENTUM_POOL_LIMIT', 80)

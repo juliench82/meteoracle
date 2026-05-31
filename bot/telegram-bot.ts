@@ -30,14 +30,12 @@ import { promisify } from 'util'
 import { createServerClient } from '@/lib/supabase'
 import { getBotState, setBotState } from '@/lib/botState'
 import { addLiquidityToPosition, closePosition } from '@/bot/executor'
+import { getOpenLpPositions, getOpenMoonboys } from '@/lib/local-state'
 // closeDammPosition import removed — DAMM v2 fully deleted
-import { rebalanceDlmmPosition } from '@/bot/rebalance'
 import { runScanner, type ScannerResult } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { detectAllOrphanedPositions } from '@/bot/orphan-detector'
-import { fetchLiveMeteoraSnapshot, mergeDbAndLiveLpPositions, type MeteoraLiveSourceStatus, type LiveMeteoraPosition } from '@/lib/meteora-live'
-import { syncAllMeteoraPositions } from '@/lib/position-sync'
-import { fetchWalletLiveBalances } from '@/lib/wallet-live'
+// Heavy live-sync / rebalance / orphan features removed in simplified stack
+// (rebalanceDlmmPosition, detectAllOrphanedPositions, meteora-live, position-sync, wallet-live removed)
 import { getTelegramAllowedUsers, isTelegramCommandAllowed } from '@/lib/telegram-auth'
 
 const execAsync = promisify(exec)
@@ -134,19 +132,9 @@ async function resolveAddTarget(args: string[]): Promise<{
   solAmount: number | null
   error?: string
 }> {
-  await syncAllMeteoraPositions().catch(() => {})
-
-  const supabase = createServerClient()
-  const { data: positions, error } = await supabase
-    .from('lp_positions')
-    .select('id, symbol, status, strategy_id, position_type')
-    .in('status', ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry'])
-
-  if (error) {
-    return { positionId: null, solAmount: null, error: `Could not load positions: ${error.message}` }
-  }
-
-  const dlmmPositions = (positions ?? []).filter(position => true) // DAMM v2 fully removed — treat all as DLMM
+  // Simplified stack: use local state only
+  const positions = getOpenLpPositions() as any[]
+  const dlmmPositions = positions.filter((p: any) => p.position_type !== 'damm') // DAMM v2 fully removed
 
   if (args.length === 1) {
     const solAmount = parseSolAmount(args[0])

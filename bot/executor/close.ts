@@ -11,6 +11,7 @@ import BN from 'bn.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
+import { getOpenLpPositions } from '@/lib/local-state'
 
 import {
   simulateAndCheck,
@@ -93,10 +94,11 @@ export async function closePosition(
   reason: string,
 ): Promise<boolean> {
 
-  const { data: position, error } = await supabase
+  const positions = getOpenLpPositions() as any[]
+  const position = positions.find((p: any) => p.id === positionId)
 
-  if (error || !position) {
-    console.error(`[executor] closePosition: LP position ${positionId} not found`)
+  if (!position) {
+    console.error(`[executor] closePosition: LP position ${positionId} not found in local state`)
     return false
   }
 
