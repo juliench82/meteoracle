@@ -441,16 +441,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   let dailyLossLimitHit: boolean | null = null
   const heliusRpcUrl = getHeliusRpcEndpoint() ?? ''
   const openedMintsThisTick = new Set<string>()
-  const isOpenAllowedToday = async (): Promise<boolean> => {
-    if (dailyLossLimitHit === null) {
-      dailyLossLimitHit = await isDailyLossLimitHit()
-    }
-    if (dailyLossLimitHit) {
-      console.warn('[scanner] daily loss limit hit — no new positions')
-      return false
-    }
-    return true
-  }
 
   // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
@@ -686,7 +676,6 @@ async function processSurvivor(
       openBlockedReason,
       availableOpenSlots,
       candidateCountRef,
-      isOpenAllowedToday,
     });
   }
 
@@ -706,7 +695,6 @@ async function attemptOpenAndNotify(params: {
   openBlockedReason: string | undefined;
   availableOpenSlots: number;
   candidateCountRef: { value: number };
-  isOpenAllowedToday: () => Promise<boolean>;
 }): Promise<SurvivorProcessResult> {
   const {
     metrics,
@@ -721,7 +709,6 @@ async function attemptOpenAndNotify(params: {
     openBlockedReason,
     availableOpenSlots,
     candidateCountRef: candidateCountRefParam,
-    isOpenAllowedToday,
   } = params;
 
   candidateCountRefParam.value++;
@@ -738,10 +725,16 @@ async function attemptOpenAndNotify(params: {
     console.log(`[scanner] ${symbol} open skipped: ${openBlockedReason ?? 'no_slots'}`);
     return { wasCandidate: true, wasOpened: false, wasSkipped: true };
   }
-  if (!await isOpenAllowedToday()) {
-    openSkippedCountRef.value++;
-    console.log(`[scanner] ${symbol} open skipped: daily loss circuit breaker`);
-    return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+
+  // Daily loss check using the ref (no closure dependency)
+  if (!dailyLossLimitHitRef.value) {
+    const hit = await isDailyLossLimitHit();
+    dailyLossLimitHitRef.value = hit;
+    if (hit) {
+      openSkippedCountRef.value++;
+      console.log(`[scanner] ${symbol} open skipped: daily loss circuit breaker`);
+      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+    }
   }
 
   void maybeTriggerMoonboy(metrics, liveSolPriceUsd);
@@ -852,7 +845,7 @@ function buildTokenMetrics(params: {
   ageHours: number;
   rugScore: number;
   token: any;
-  launchpadSource: string;
+  launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora';
   bondingCurvePct?: number;
 }): TokenMetrics {
   const {
