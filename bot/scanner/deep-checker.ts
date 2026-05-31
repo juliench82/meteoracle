@@ -78,8 +78,8 @@ const METEORA_FETCH_TIMEOUT_MS = 45_000
 const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
-// Re-export central scanner timing so bot/scanner.ts keeps working without changes
-export { SCAN_INTERVAL_MS } from '@/lib/strategy-config'
+// Re-export values needed by bot/scanner.ts
+export { SCAN_INTERVAL_MS, MAX_CONCURRENT_MARKET_LP_POSITIONS, MARKET_LP_SOL_PER_POSITION } from '@/lib/strategy-config'
 
 const _bondingCurveCache = new Map<string, { pct: number; complete: boolean | null; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
@@ -455,7 +455,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
-  for (const { pool: representativePool, mcUsd, ageHours, lane } of survivors) {
+  for (const { pool: representativePool, ageHours, lane } of survivors) {
     await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS))
 
     const token = getTradableToken(representativePool)
@@ -519,7 +519,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
 
     // MC resolution (DexScreener fallback for low/stale Meteora data)
-    let resolvedMc = mcUsd
+    // Prefer token's market_cap from Meteora if present, otherwise DexScreener
+    let resolvedMc = token.market_cap || 0
     if (!resolvedMc || resolvedMc < 1) {
       resolvedMc = await withTimeout(
         fetchMcFromDexScreener(tokenAddress, token.price),
