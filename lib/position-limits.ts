@@ -18,12 +18,26 @@ export type OpenLpLimitState = {
   dlmmOk?: boolean
 }
 
-export async function getOpenLpLimitState(): Promise<OpenLpLimitState> {
+export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitState> {
   try {
     const local = getOpenLpPositions()
-    return { effectiveOpenCount: local.length }
+    return {
+      effectiveOpenCount: local.length,
+      liveOpenCount: local.length,
+      cachedOpenCount: 0,
+      countSource: 'local-state',
+      liveFetchOk: true,
+      dlmmOk: true,
+    }
   } catch {
-    return { effectiveOpenCount: 0 }
+    return {
+      effectiveOpenCount: 0,
+      liveOpenCount: 0,
+      cachedOpenCount: 0,
+      countSource: 'local-state',
+      liveFetchOk: false,
+      dlmmOk: false,
+    }
   }
 }
 

@@ -297,7 +297,7 @@ export async function openPosition(
         solIsTokenX,
         label,
         await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-        supabase,
+        // supabase removed - local-state only
         DRY_RUN,
         new Keypair()
       );
@@ -479,7 +479,7 @@ export async function openPosition(
           solIsTokenX,
           label,
           await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-          supabase,
+          // supabase removed - local-state only
           DRY_RUN,
           new Keypair()
         )

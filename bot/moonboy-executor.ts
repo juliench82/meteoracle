@@ -7,7 +7,7 @@ import { buyTokenWithSol, swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { TokenMetrics } from '@/lib/types'
 import { moonboyStrategy } from '@/strategies/moonboy'
-import { getOpenLpPositions, getOpenMoonboys } from '@/lib/local-state'
+import { getOpenLpPositions, getOpenMoonboys, saveOpenMoonboys } from '@/lib/local-state'
 import { logError } from '@/lib/log'
 
 const MOONBOY_BUY_USD = parseFloat(process.env.MOONBOY_BUY_USD ?? '10')
