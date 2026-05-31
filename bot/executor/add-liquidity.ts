@@ -23,6 +23,7 @@ import {
 
 import { persistPosition } from './persistence'
 import { logInfo, logError } from '@/lib/log'
+import { getOpenLpPositions } from '@/lib/local-state'
 import {
   getDLMM,
   getStrategyType,
@@ -50,13 +51,12 @@ export async function addLiquidityToPosition(
     return { success: false, dryRun: false, txSignature: '', symbol: positionId, solAdded: solAmount, error: 'SOL amount must be greater than 0' }
   }
 
-  const { data: position, error } = await supabase
-    .select('*')
-    .eq('id', positionId)
-    .single()
+  // Simplified stack: use local state instead of Supabase
+  const positions = getOpenLpPositions()
+  const position = positions.find(p => p.id === positionId)
 
-  if (error || !position) {
-    return { success: false, dryRun: false, txSignature: '', symbol: positionId, solAdded: solAmount, error: `position not found: ${error?.message ?? 'null row'}` }
+  if (!position) {
+    return { success: false, dryRun: false, txSignature: '', symbol: positionId, solAdded: solAmount, error: `position not found in local state` }
   }
 
   const symbol = position.symbol ?? position.mint ?? positionId
