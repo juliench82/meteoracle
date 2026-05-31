@@ -38,7 +38,7 @@ export async function persistPosition(
   // Safety: never allow the literal string "LIVE" as symbol, even in edge cases.
   const safeSymbol = (metrics.symbol && metrics.symbol !== 'LIVE') ? metrics.symbol : metrics.address;
 
-  // Simplified stack: write to local state (JSON files)
+  // Write to local state (JSON files in state/)
   const newPosition = {
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
     mint:            metrics.address,

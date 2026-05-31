@@ -1,6 +1,6 @@
 /**
  * lib/circuit-breaker.ts
- * Minimal stub for simplified stack.
+ * Daily loss circuit breaker — currently disabled (always returns false) in the simplified model.
  */
 export function isDailyLossLimitHit(): boolean {
   return false

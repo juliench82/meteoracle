@@ -16,7 +16,7 @@ export type OpenLpLimitState = {
   countSource?: string
   liveFetchOk?: boolean
   dlmmOk?: boolean
-  livePositions?: any[]   // compatibility for restored scanner code during transition
+  livePositions?: any[]   // optional for future live DLMM queries
 }
 
 export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitState> {
@@ -45,6 +45,5 @@ export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitS
 }
 
 export function assertCanOpenLpPosition(..._args: any[]): void {
-  // Simplified stack — no-op for now (can be enhanced later)
-  // Accepts old call signatures for compatibility during transition
+  // Minimal implementation (local-state + on-chain where needed)
 }

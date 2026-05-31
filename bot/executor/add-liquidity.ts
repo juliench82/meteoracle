@@ -51,7 +51,7 @@ export async function addLiquidityToPosition(
     return { success: false, dryRun: false, txSignature: '', symbol: positionId, solAdded: solAmount, error: 'SOL amount must be greater than 0' }
   }
 
-  // Simplified stack: use local state instead of Supabase
+  // Use local state (JSON) for position lookup
   const positions = getOpenLpPositions()
   const position = positions.find(p => p.id === positionId)
 

@@ -139,7 +139,7 @@ export async function openPosition(
 
     let limitState: any = await getOpenLpLimitState()
 
-    // Some old call sites passed extra args — ignore them in simplified stack
+    // Legacy call-site compatibility (ignored)
     if (options.rebalanceFromPositionId) {
       // When rebalancing, pretend we have one less open slot
       limitState = { ...limitState, effectiveOpenCount: Math.max(0, (limitState.effectiveOpenCount || 0) - 1) }

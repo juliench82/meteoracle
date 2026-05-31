@@ -129,7 +129,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   // Dedup: skip if there is already an open Moonboy or one that was opened/closed very recently for this mint.
   // This prevents multiple small buys for the exact same token in a short window (which happened with ALIENS).
   const recentCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // last 2 hours
-  // Simplified stack - local state only
+  // Local state only
   const recent = getOpenMoonboys().filter((m: any) =>
     m.mint === metrics.address &&
     (m.status === 'open' || (m.opened_at && m.opened_at >= recentCutoff))
@@ -170,7 +170,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     ? (nowMs - dexData.pairCreatedAt) / 60_000
     : null
 
-  // Simplified stack: persist to local state
+  // Persist to local state (state/open-moonboys.json)
   const newMoonboy = {
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
     mint:            metrics.address,

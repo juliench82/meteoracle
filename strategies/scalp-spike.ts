@@ -1,4 +1,4 @@
-// Stub — scalp-spike strategy was removed in the simplified stack
+// Removed from simplified model — kept only to avoid import errors in any stray legacy code
 export const scalpSpikeStrategy = {
   id: 'scalp-spike',
   name: 'Scalp Spike (stub)',

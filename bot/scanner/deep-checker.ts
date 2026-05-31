@@ -3,10 +3,9 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
 import axios from 'axios'
-// Supabase fully removed in simplified stack - using local-state + local-logger only
+// Local state + local logger only (Supabase removed from hot paths)
 import { getBotState } from '@/lib/botState'
-import { getStrategyForToken, classifyToken, explainNoStrategy } from '@/strategies'
-import { scoreCandidateWithBreakdown, type ScoreBreakdown } from '../scorer'
+import { getStrategyForToken, explainNoStrategy } from '@/strategies'
 import { openPosition } from '../executor'
 import { sendAlert } from '../alerter'
 import { checkHolders } from '@/lib/helius'
@@ -17,40 +16,32 @@ import {
   isMoonshotToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
-// (DAMM v2 edge automation fully removed)
 import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
-import { scalpSpikeStrategy } from '@/strategies/scalp-spike' // stub for simplified stack compatibility
 import { openMoonboyPosition } from '../moonboy-executor'
 import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
-import { logInfo, logError } from '@/lib/log'
+import { logInfo } from '@/lib/log'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
 import {
   SCAN_INTERVAL_MS,
   SCANNER_TICK_TIMEOUT_MS,
   CANDIDATE_DEDUP_HOURS,
   OOR_RECHECK_HOURS,
-  HARD_MAX_TOKEN_AGE_MINUTES,
-  SCANNER_EARLY_MAX_AGE_MINUTES,
-  FRESH_SNIPE_MAX_AGE_MINUTES,
   FRESH_MAX_AGE_MINUTES,
   FRESH_MIN_LIQUIDITY_USD,
   MOMENTUM_MIN_VOLUME_5M_USD,
   MOMENTUM_MIN_FEE_TVL_5M_PCT,
-  SCALP_SPIKE_VOL_RATIO,
-  MAX_DEEP_CHECKS,
   DEEP_CHECK_DELAY_MS,
   MAX_FRESH_DEEP_CHECKS,
   MAX_MOMENTUM_DEEP_CHECKS,
   MIN_SCORE_TO_OPEN,
-  MATURE_MIN_SCORE_TO_OPEN,
-  MOMENTUM_POOL_LIMIT,
   LP_SCANNER_ENABLED,
   EVIL_PANDA_ENABLED,
-  SCALP_SPIKE_ENABLED,
+  MAX_CONCURRENT_MARKET_LP_POSITIONS,
+  MARKET_LP_SOL_PER_POSITION,
 } from '@/lib/strategy-config'
 import {
   WSOL,
@@ -64,36 +55,16 @@ import {
   getTradableToken,
   getVolumeTvlRatio,
   scoreMeteoraMomentum,
-  cleanupOldPoolCache,
 } from './pool-fetcher'
 import {
   classifyPoolsIntoLanes,
   pickDeepCheckSurvivors,
-  survivorTokenAddress,
   selectBestPool,
   passesMomentumRegain,
-  getOneHourVolumeVs24hAverage,
-  getOneHourFeeTvlVs24hAverage,
 } from './lane-classifier'
 
-const DEXSCREENER     = 'https://api.dexscreener.com/latest/dex/tokens'
-
+const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
 const JUP_PRICE_URL = 'https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112'
-
-const PRE_FILTER = {
-  minLiquidityUsd: 20_000,
-  maxLiquidityUsd: 500_000_000,
-}
-
-export const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
-  process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5',
-)
-const MARKET_LP_SOL_PER_POSITION = parseFloat(
-  process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
-  process.env.MARKET_LP_SOL_PER_POSITION ??
-  process.env.MAX_SOL_PER_POSITION ??
-  '0.1',
-)
 
 
 const METEORA_FILTERED_FETCH = {
@@ -103,9 +74,6 @@ const METEORA_FILTERED_FETCH = {
   limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '800'),
 }
 
-// (DAMM-related new listing constants removed)
-
-const SUPABASE_TIMEOUT_MS      = 10_000
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
@@ -120,8 +88,6 @@ type CachedBondingCurve = {
   progressPct: number
   complete: boolean | null
 }
-
-const PUMPFUN_HIGHCURVE_THRESHOLD  = 95
 
 export type ScannerResult = {
   scanned: number
@@ -138,12 +104,6 @@ export type ScannerResult = {
   tickMode?: boolean
 }
 
-function detectLaunchpadSource(tokenAddress: string): 'pumpfun' | 'moonshot' | 'meteora' {
-  if (isPumpFunToken(tokenAddress)) return 'pumpfun'
-  if (isMoonshotToken(tokenAddress)) return 'moonshot'
-  return 'meteora'
-}
-
 export async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
   let timerId: ReturnType<typeof setTimeout>
   const timer = new Promise<null>((resolve) => {
@@ -158,24 +118,19 @@ export async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label:
 }
 
 export async function logScannerTick(result: ScannerResult, durationMs: number, source = 'scanner'): Promise<void> {
-  // Simplified stack: use the proper local logger
   logInfo(result.error ? 'scanner_tick_failed' : 'scanner_tick', { ...result, durationMs, source })
 }
 
 export async function writeScannerHeartbeat(source: 'interval' | 'startup' = 'interval'): Promise<void> {
   try {
     const nowIso = new Date().toISOString()
-    const payload: Record<string, unknown> = {
+    logInfo('scanner_heartbeat', {
       service: 'scanner',
       last_scan_at: nowIso,
-      metadata: {
-        source,
-      },
-    }
-    // Simplified stack: just log locally
-    logInfo('scanner_heartbeat', payload)
+      metadata: { source },
+    })
   } catch (err) {
-    console.warn('[scanner] bot_health upsert failed:', err)
+    console.warn('[scanner] heartbeat log failed:', err)
   }
 }
 
@@ -215,130 +170,44 @@ function findLiveOpenPosition(
 }
 
 function getDisabledStrategyReason(strategyId: string): string | null {
-  if (strategyId === 'scalp-spike' && !SCALP_SPIKE_ENABLED) return 'SCALP_SPIKE_ENABLED is not true'
   if (strategyId === 'evil-panda' && !EVIL_PANDA_ENABLED) return 'EVIL_PANDA_ENABLED is not true'
   return null
 }
 
-// getOpenDammEdgeCount removed (DAMM Edge scoring deleted)
-
-function scoreFeeTvl1hPct(pct: number): number {
-  if (pct >= 8) return 100
-  if (pct >= 5) return 85
-  if (pct >= 3) return 65
-  if (pct >= 1.5) return 40
-  if (pct >= 0.5) return 20
-  return 0
-}
-
-function scoreVolumeTvl1hRatio(ratio: number): number {
-  if (ratio >= 1.5) return 100
-  if (ratio >= 1.0) return 90
-  if (ratio >= 0.5) return 75
-  if (ratio >= 0.2) return 55
-  if (ratio >= 0.1) return 30
-  return 0
-}
-
-function scoreHolderCount(holderCount: number, reliable: boolean = true): number {
-  if (!reliable) {
-    return 0 // Do not contribute holder score if data is unreliable (Helius DAS fallback / capped)
-  }
-
-  if (holderCount >= 5000) return 100
-  if (holderCount >= 2000) return 80
-  if (holderCount >= 1000) return 65
-  if (holderCount >= 500) return 45
-  if (holderCount >= 200) return 25
-  return 10
-}
-
-function getMomentumRegainBreakdown(
-  metrics: TokenMetrics,
-): ReturnType<typeof scoreCandidateWithBreakdown> {
-  const rugScore = Math.max(0, Math.min(100, metrics.rugcheckScore))
-  const holderScore = scoreHolderCount(metrics.holderCount, metrics.holderReliable ?? true)
-  const feeEfficiencyScore = scoreFeeTvl1hPct(metrics.feeTvl1hPct ?? 0)
-  const volumeTvlScore = scoreVolumeTvl1hRatio(metrics.volumeTvl1hRatio ?? 0)
-  const freshnessScore =
-    metrics.ageHours <= 6 ? 100 :
-    metrics.ageHours <= 12 ? 85 :
-    metrics.ageHours <= 24 ? 70 :
-    55
-  const total = Math.round(
-    Math.min(
-      100,
-      feeEfficiencyScore * 0.35 +
-      volumeTvlScore * 0.35 +
-      rugScore * 0.15 +
-      holderScore * 0.10 +
-      freshnessScore * 0.05,
-    ),
-  )
-
-  return {
-    total,
-    volMcScore: 0,
-    rugScore,
-    holderScore,
-    freshnessScore,
-    feeEfficiencyScore,
-    volumeTvlScore,
-    curveBonus: 0,
-  }
-}
+// (old DAMM edge count removed)
 
 function getScannerAdjustedScore(
   metrics: TokenMetrics,
   strategyId: string,
-  breakdown: ReturnType<typeof scoreCandidateWithBreakdown>,
 ): number {
-  if (strategyId !== 'evil-panda') return breakdown.total
+  if (strategyId !== 'evil-panda') return 0
 
-  const weights = EVIL_PANDA_SCANNER_SCORE_WEIGHTS
-  const totalWeight =
-    weights.freshness +
-    weights.rugcheck +
-    weights.holders +
-    weights.feeTvl1h +
-    weights.volumeTvl1h
+  const w = EVIL_PANDA_SCANNER_SCORE_WEIGHTS
+  const tw = w.freshness + w.rugcheck + w.holders + w.feeTvl1h + w.volumeTvl1h
+  if (tw <= 0) return 0
 
-  if (totalWeight <= 0) return breakdown.total
+  // Inline component scorers (evil-panda only path after simplification)
+  const h = metrics.holderCount ?? 0
+  const holderScore = (metrics.holderReliable ?? true)
+    ? (h >= 5000 ? 100 : h >= 2000 ? 80 : h >= 1000 ? 65 : h >= 500 ? 45 : h >= 200 ? 25 : 10)
+    : 0
 
-  const feeTvl1hScore = scoreFeeTvl1hPct(metrics.feeTvl1hPct ?? 0)
-  const volumeTvl1hScore = scoreVolumeTvl1hRatio(metrics.volumeTvl1hRatio ?? 0)
-  const weighted =
-    (breakdown.freshnessScore * weights.freshness +
-      breakdown.rugScore * weights.rugcheck +
-      breakdown.holderScore * weights.holders +
-      feeTvl1hScore * weights.feeTvl1h +
-      volumeTvl1hScore * weights.volumeTvl1h) / totalWeight
+  const age = metrics.ageHours ?? 0
+  const freshnessScore = age <= 1.5 ? 100 : age <= 6 ? 85 : age <= 24 ? 70 : 55
 
-  const total = Math.round(Math.min(100, Math.max(0, weighted + breakdown.curveBonus)))
-  console.log(
-    `[scanner] ${metrics.symbol} — evil-panda weighted score ` +
-    `fee1h=${feeTvl1hScore} volTvl1h=${volumeTvl1hScore} raw=${breakdown.total} → ${total}`,
-  )
-  return total
+  const f1 = metrics.feeTvl1hPct ?? 0
+  const feeTvl1hScore = f1 >= 8 ? 100 : f1 >= 5 ? 85 : f1 >= 3 ? 65 : f1 >= 1.5 ? 40 : f1 >= 0.5 ? 20 : 0
+
+  const v1 = metrics.volumeTvl1hRatio ?? 0
+  const volumeTvl1hScore = v1 >= 1.5 ? 100 : v1 >= 1.0 ? 90 : v1 >= 0.5 ? 75 : v1 >= 0.2 ? 55 : v1 >= 0.1 ? 30 : 0
+
+  const rugScore = Math.max(0, Math.min(100, metrics.rugcheckScore ?? 0))
+
+  const weighted = (freshnessScore * w.freshness + rugScore * w.rugcheck + holderScore * w.holders + feeTvl1hScore * w.feeTvl1h + volumeTvl1hScore * w.volumeTvl1h) / tw
+  return Math.round(Math.min(100, Math.max(0, weighted)))
 }
 
-function passesMomentumRegainStrategyFilters(metrics: TokenMetrics): boolean {
-  const f = scalpSpikeStrategy.filters
-  return (
-    scalpSpikeStrategy.enabled &&
-    metrics.mcUsd >= f.minMcUsd &&
-    metrics.mcUsd <= f.maxMcUsd &&
-    metrics.liquidityUsd >= f.minLiquidityUsd &&
-    metrics.topHolderPct <= f.maxTopHolderPct &&
-    metrics.holderCount >= f.minHolderCount &&
-    metrics.ageHours <= f.maxAgeHours &&
-    metrics.rugcheckScore >= f.minRugcheckScore &&
-    metrics.feeTvl24hPct >= f.minFeeTvl24hPct
-  )
-}
-
-// Simplified stack: OOR recheck via Supabase removed for now.
-// Returns empty set (feature disabled until re-implemented on local state if desired).
+// OOR recheck disabled in simplified model (local-state only for now)
 async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
   return new Set()
@@ -482,7 +351,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   await refreshRpcProviderCooldown('helius')
 
   if (tickMode) {
-    console.log('[scanner] tickMode=true — skipping pool-fetcher (simplified stack: no candidates table)')
+    console.log('[scanner] tickMode=true — skipping (no open in tick mode)')
     return finish({
       scanned: 0,
       survivors: 0,
@@ -494,7 +363,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     })
   }
 
-  console.log('[scanner] step 1/4 — fetching Meteora pools')
+  // fetching Meteora pools (lane classification + deep checks below)
   const laneConfig = {
     freshMaxAgeMinutes: FRESH_MAX_AGE_MINUTES,
     freshMinLiquidityUsd: FRESH_MIN_LIQUIDITY_USD,
@@ -509,8 +378,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
     freshMaxAgeMinutes: FRESH_MAX_AGE_MINUTES,
     freshMinLiquidityUsd: FRESH_MIN_LIQUIDITY_USD,
-    minLiquidityUsd: PRE_FILTER.minLiquidityUsd,
-    maxLiquidityUsd: PRE_FILTER.maxLiquidityUsd,
+    minLiquidityUsd: 20_000,
+    maxLiquidityUsd: 500_000_000,
     momentumMinVolume5mUsd: MOMENTUM_MIN_VOLUME_5M_USD,
     isMomentumRegain: passesMomentumRegain,
   })
@@ -536,7 +405,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   console.log(`[scanner] deep checks on ${survivors.length} survivors`)
 
-  console.log('[scanner] step 3/4 — live Meteora exposure + DB fallback check')
+  console.log('[scanner] checking position limits')
 
   const limitState = await withTimeout(
     getOpenLpLimitState('market'),
@@ -553,10 +422,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   } else {
     openCount = limitState.effectiveOpenCount
     if (!limitState.liveFetchOk) {
-      console.warn(
-        `[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}) — ` +
-        `using Supabase cache fallback for open caps (DAMM v2 support removed)`,
-      )
+      console.warn(`[scanner] live position count incomplete (dlmmOk=${limitState.dlmmOk}) — using cached count`)
     }
     availableOpenSlots = Math.max(0, MAX_CONCURRENT_MARKET_LP_POSITIONS - openCount)
     if (availableOpenSlots === 0) {
@@ -568,7 +434,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
   }
 
-  console.log(`[scanner] step 4/4 — deep checks on ${survivors.length} survivors`)
+  console.log(`[scanner] deep-checking ${survivors.length} survivors`)
   let candidateCount = 0
   let openedCount = 0
   let openSkippedCount = 0
@@ -595,7 +461,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     const token = getTradableToken(representativePool)
     const tokenAddress = token.address
     const symbol = representativePool.name ?? token.symbol
-    const launchpadSource = detectLaunchpadSource(tokenAddress)
+    const launchpadSource = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora'
     const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address)
 
     if (openedMintsThisTick.has(tokenAddress)) {
@@ -604,9 +470,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
 
     if (CANDIDATE_DEDUP_HOURS > 0) {
-      // candidates dedup via Supabase removed in simplified stack.
-      // For now we skip the DB dedup (or implement simple local dedup later).
-      // To keep the simplified behavior, we just continue without the check for now.
+      // Per-mint dedup is handled via local state below; no Supabase path.
     }
 
     if (liveOpenPosition) {
@@ -614,11 +478,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       continue
     }
 
-    // Strong per-mint dedup for LP positions.
-    // 1. Skip if there is currently an open/active position for this mint.
-    // 2. Skip if there was a recent position for this mint (last 6 hours) that was closed with a "bad" reason
-    //    (e.g. pnl_unavailable). This prevents rapid re-opening the same mint after a failed/bad close attempt.
-    // Strong per-mint dedup using local state only (simplified stack)
+    // Per-mint dedup using local state (skip open or recent bad closes)
     const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     const allPositions = getOpenLpPositions();
 
@@ -641,17 +501,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       continue;
     }
 
-    if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
-      const curve = await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
-      const progress = curve?.progressPct ?? 0
-      if (progress >= PUMPFUN_HIGHCURVE_THRESHOLD && curve?.complete === false) {
-        console.log(`[scanner] ${symbol} — pump.fun high-curve ${progress.toFixed(1)}% — scoring normally (+curveBonus)`)
-      } else {
-        console.log(`[scanner] ${symbol} — pump.fun curve ${progress.toFixed(1)}% (complete=${curve?.complete ?? 'unknown'})`)
-      }
-    }
-
-    // Simplified pool selection (aggressive simplification pass)
+    // Pool selection (simple exact + fallback)
     const result = selectBestPool(
       lane === 'fresh' ? freshPools : momentumPools,
       tokenAddress
@@ -668,29 +518,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       continue
     }
 
-    const liqUsd        = getPoolTvl(bestPool)
-    const feeTvl24hPct  = getFeeTvlPct(bestPool, '24h')
-    const feeTvl1hPct   = getFeeTvlPct(bestPool, '1h')
-    const feeTvl5mPct   = getFeeTvlPct(bestPool, '5m')
-    const volumeTvl1hRatio = getVolumeTvlRatio(bestPool, '1h')
-    const volumeGrowth1h = getRecentVolumeGrowth(bestPool)
-    const momentumScore = scoreMeteoraMomentum(bestPool)
-
-    // (DAMM v2 support fully removed)
-
-    const quoteTokenMint = getQuoteTokenMint(bestPool)
-
-    const vol24h  = getPoolVolume(bestPool, '24h')
-    const vol1h   = getPoolVolume(bestPool, '1h')
-    const vol5m   = getPoolVolume(bestPool, '5m')
-    const binStepDisplay = bestPool.pool_config?.bin_step ?? '?'
-    console.log(`[scanner] ${symbol} — selected pool (lane=${lane}, binStep=${binStepDisplay})`)
-
-    // Improved MC: always try DexScreener for scalp-spike candidates or when Meteora MC is low/stale
+    // MC resolution (DexScreener fallback for low/stale Meteora data)
     let resolvedMc = mcUsd
-    const forcedStrategyId = lane === 'momentum' ? 'scalp-spike' : 'evil-panda'
-    const isScalpSpikeCandidate = lane === 'momentum' || forcedStrategyId === 'scalp-spike'
-    if (!resolvedMc || resolvedMc < 1 || (isScalpSpikeCandidate && resolvedMc < 500_000)) {
+    if (!resolvedMc || resolvedMc < 1) {
       resolvedMc = await withTimeout(
         fetchMcFromDexScreener(tokenAddress, token.price),
         EXTERNAL_CALL_TIMEOUT_MS,
@@ -698,129 +528,65 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       ).then(v => v ?? 0)
     }
     if (!resolvedMc || resolvedMc < 1) {
-      if (lane !== 'fresh') {
-        console.log(`[scanner] ${symbol} — skip: no market_cap`)
-        continue
-      }
+      if (lane !== 'fresh') continue
       resolvedMc = 0
-      console.log(`[scanner] ${symbol} — no market_cap yet; fresh lane will rely on liquidity + Rugcheck`)
     }
 
-    let holderCount  = 0
-    let topHolderPct = 0
-    let holderReliable = false
-
+    let holderCount = 0, topHolderPct = 0, holderReliable = false
     if (USE_HELIUS) {
-      console.log(`[scanner] ${symbol} — calling Helius`)
-      const holderData = await withTimeout(
-        checkHolders(tokenAddress),
-        EXTERNAL_CALL_TIMEOUT_MS,
-        `checkHolders ${symbol}`,
-      )
-      if (holderData) {
-        holderCount  = holderData.holderCount
-        topHolderPct = holderData.topHolderPct
-        holderReliable = holderData.reliable
-        if (!holderData.reliable) {
-          console.log(`[scanner] ${symbol} — using unreliable holder data (holder score contribution disabled)`)
-          if (token.holders) {
-            holderCount = Math.max(holderCount, token.holders)
-          }
-        }
+      const h = await withTimeout(checkHolders(tokenAddress), EXTERNAL_CALL_TIMEOUT_MS, `checkHolders ${symbol}`)
+      if (h) {
+        holderCount = h.holderCount; topHolderPct = h.topHolderPct; holderReliable = h.reliable
+        if (!h.reliable && token.holders) holderCount = Math.max(holderCount, token.holders)
       } else {
-        holderCount  = token.holders ?? 0
-        topHolderPct = 0
-        holderReliable = false
-        console.warn(`[scanner] ${symbol} — Helius timeout, falling back to Meteora holders (${holderCount})`)
+        holderCount = token.holders ?? 0
       }
     } else {
-      holderCount  = token.holders ?? 0
-      topHolderPct = 0
-      holderReliable = false
-      console.log(`[scanner] ${symbol} — using Meteora holders (Helius disabled)`)
+      holderCount = token.holders ?? 0
     }
 
+    const rugScore = await withTimeout(getRugscore(tokenAddress, symbol), EXTERNAL_CALL_TIMEOUT_MS, `getRugscore ${symbol}`).then(v => v ?? 0)
+    const holderCountForFilter = holderCount || (token.holders ?? 0)
 
-
-    console.log(`[scanner] ${symbol} — calling Rugcheck`)
-    const rugScore = await withTimeout(
-      getRugscore(tokenAddress, symbol),
-      EXTERNAL_CALL_TIMEOUT_MS,
-      `getRugscore ${symbol}`,
-    ).then(v => v ?? 0)
-
-    const holderCountForFilter = holderCount > 0 ? holderCount : (token.holders ?? 0)
-
-    let bondingCurvePct: number | undefined = undefined
-    if (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48) {
-      const curve = await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl)
-      bondingCurvePct = curve?.progressPct ?? undefined
-      if (bondingCurvePct !== undefined) {
-        console.log(`[pumpfun] ${symbol} bonding curve: ${bondingCurvePct.toFixed(1)}% (complete=${curve?.complete ?? 'unknown'})`)
-      }
-    }
+    const bondingCurvePct: number | undefined =
+      (isPumpFunToken(tokenAddress) && heliusRpcUrl && ageHours < 48)
+        ? (await getCachedPumpFunBondingCurve(tokenAddress, heliusRpcUrl))?.progressPct
+        : undefined
 
     const metrics: TokenMetrics = {
-      address:        tokenAddress,
-      symbol,
-      mcUsd:          resolvedMc,
-      volume24h:      vol24h,
-      liquidityUsd:   liqUsd,
-      topHolderPct,
-      holderCount:    holderCountForFilter,
-      holderReliable,
-      ageHours,
-      rugcheckScore:  rugScore,
-      priceUsd:       token.price,
-      poolAddress:    bestPool.address,
-      dexId:          'meteora',
-      feeTvl24hPct,
-      feeTvl1hPct,
-      feeTvl5mPct:    feeTvl5mPct,
-      volume1h:       vol1h,
-      volume5m:       vol5m,
-      volumeTvl1hRatio,
-      volumeGrowth1h,
-      momentumScore,
-      bondingCurvePct,
-      quoteTokenMint,
-      binStep,
-      launchpadSource,
+      address: tokenAddress, symbol,
+      mcUsd: resolvedMc,
+      liquidityUsd: getPoolTvl(bestPool),
+      topHolderPct, holderCount: holderCountForFilter, holderReliable, ageHours,
+      rugcheckScore: rugScore, priceUsd: token.price,
+      poolAddress: bestPool.address, dexId: 'meteora',
+      feeTvl24hPct: getFeeTvlPct(bestPool, '24h'),
+      feeTvl1hPct: getFeeTvlPct(bestPool, '1h'),
+      volume24h: getPoolVolume(bestPool, '24h'),
+      volumeTvl1hRatio: getVolumeTvlRatio(bestPool, '1h'),
+      quoteTokenMint: getQuoteTokenMint(bestPool),
+      volume1h: getPoolVolume(bestPool, '1h'),
+      volume5m: getPoolVolume(bestPool, '5m'),
+      feeTvl5mPct: getFeeTvlPct(bestPool, '5m'),
+      bondingCurvePct, launchpadSource,
+      // dropped (not required by current evil-panda + persist + alerts): volumeGrowth1h, momentumScore
     }
 
-    // (DAMM v2 edge path was fully removed from the bot)
-
-    const momentumRegain = lane === 'momentum' && passesMomentumRegain(bestPool)
-    const strategy =
-      getStrategyForToken({ ...metrics, volume1h: vol1h, volume5m: vol5m }, forcedStrategyId) ??
-      (momentumRegain && passesMomentumRegainStrategyFilters(metrics) ? scalpSpikeStrategy : null)
+    // Strategy: unified on evil-panda (lanes give basic momentum filtering)
+    const strategy = getStrategyForToken(metrics, 'evil-panda')
 
     let decision = 'REJECTED'
     let rejectionReason: string | null = null
     let finalScore = 0
-    let strategyMatched: string | null = null
-    let breakdown: ScoreBreakdown = {
-      total: 0,
-      volMcScore: 0,
-      rugScore: 0,
-      holderScore: 0,
-      freshnessScore: 0,
-      feeEfficiencyScore: 0,
-      volumeTvlScore: 0,
-      curveBonus: 0,
-    }
 
     if (!strategy) {
       rejectionReason = explainNoStrategy(metrics)
       decision = 'REJECTED'
-      console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) in ${lane} lane: ${rejectionReason}`)
+      console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) lane=${lane}: ${rejectionReason}`)
     } else {
-      breakdown = scoreCandidateWithBreakdown(metrics, strategy)
-      finalScore = getScannerAdjustedScore(metrics, strategy.id, breakdown)
+      finalScore = getScannerAdjustedScore(metrics, strategy.id)
 
-      // Simplified single threshold (aggressive simplification)
       const meetsOpen = finalScore >= MIN_SCORE_TO_OPEN
-
       if (!meetsOpen) {
         rejectionReason = `score ${finalScore} < ${MIN_SCORE_TO_OPEN}`
         decision = 'REJECTED'
@@ -828,13 +594,11 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         decision = 'ACCEPTED'
       }
 
-      console.log(`[scanner][decision] ${symbol} — ${decision} (lane=${lane}, strategy=${strategy?.id ?? 'none'}, score=${finalScore})`)
+      console.log(`[scanner][decision] ${symbol} — ${decision} (lane=${lane}, score=${finalScore})`)
     }
 
     if (decision === 'ACCEPTED' && strategy) {
       candidateCount++
-      console.log(`[scanner] CANDIDATE: ${symbol} → ${strategy.id} (lane=${lane}, score=${finalScore})`)
-
       await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct })
 
       // Open guards (simplified)
@@ -866,17 +630,16 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
         console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`)
 
-        // Claim strategy/symbol in local state (simplified)
+        // Update local state with strategy/symbol
         try {
-          const positions = getOpenLpPositions();
-          const idx = positions.findIndex((p: any) => p.id === positionId);
+          const positions = getOpenLpPositions()
+          const idx = positions.findIndex((p: any) => p.id === positionId)
           if (idx !== -1) {
-            positions[idx].strategy_id = strategy.id;
-            positions[idx].symbol = symbol;
-            saveOpenLpPositions(positions);
+            positions[idx].strategy_id = strategy.id
+            positions[idx].symbol = symbol
+            saveOpenLpPositions(positions)
           }
         } catch {}
-
 
         await sendAlert({
           type: 'position_opened',
@@ -892,23 +655,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         })
       } else {
         openSkippedCount++
-        console.warn(
-          `[scanner] ${symbol} — openPosition returned null (candidate was ACCEPTED but executor did not open). ` +
-          `Check recent [executor][${strategy.id}][${symbol}] logs and bot_logs table for 'open_position_failed' or 'open_position_skipped_*' events.`
-        )
+        console.warn(`[scanner] ${symbol} — openPosition returned null (executor did not open despite ACCEPT)`)
       }
     }
   }
-
-  if (USE_HELIUS) {
-    const { getHolderCacheSize } = await import('@/lib/helius')
-    console.log(`[scanner] Helius cache: ${getHolderCacheSize()} entries`)
-  }
-  console.log(`[scanner] Rugcheck cache: ${getRugcheckCacheSize()} entries`)
-
-  // Periodically clean the scanner_pool_cache table. This is important because the persist path
-  // (when enabled) writes a lot of data. Even when disabled, old data from previous runs can accumulate.
-  void cleanupOldPoolCache()
 
   console.log(
     `[scanner] done — scanned=${fetchedPools.length}, survivors=${survivors.length}, ` +

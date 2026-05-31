@@ -1,7 +1,7 @@
 /**
  * bot/telegram-bot.ts
  *
- * Telegram control bot for Meteoracle (simplified stack - local state only).
+ * Telegram control bot for Meteoracle (local-state only).
  * Full control from Telegram: start/stop, dry/live, status, positions, tick, close, add, etc.
  */
 
@@ -210,7 +210,7 @@ async function getUpdates(offset = 0) {
 }
 
 async function main() {
-  console.log('[telegram-bot] starting (long polling, simplified stack)...')
+  console.log('[telegram-bot] starting (long polling, local-state only)...')
   let offset = 0
 
   while (true) {

@@ -84,7 +84,7 @@ export async function getTotalDeployedSolForCap(
       return { totalDeployed: 0, source: limitState.countSource };
     }
 
-    // In simplified stack we don't have the old DB join — use live data only
+    // Use local-state + live on-chain data (no DB join)
     const totalDeployed = (limitState as any).livePositions?.reduce((sum: number, position: any) => {
       return sum + Number(position.sol_deposited ?? 0);
     }, 0) ?? 0;
@@ -92,7 +92,7 @@ export async function getTotalDeployedSolForCap(
     return { totalDeployed, source: limitState.countSource ?? 'live' as const };
   }
 
-  // Simplified stack: use local state instead of Supabase
+  // Use local state (no Supabase)
   const openPositions = getOpenLpPositions();
   const totalDeployed = openPositions
     .filter((p: any) => OPEN_LP_STATUSES.includes(p.status))

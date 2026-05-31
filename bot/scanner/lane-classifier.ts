@@ -132,29 +132,10 @@ export function selectBestPool(
   return { pool: list[0] };
 }
 
-/** Simple momentum regain signal */
+/** Simple momentum regain signal (used by pool-fetcher lane pre-filter) */
 export function passesMomentumRegain(pool: MeteoraPool | any): boolean {
   if (!pool) return false;
   const fee5m = getFeeTvlPct(pool, '5m') || 0;
   const vol5m = getPoolVolume(pool, '5m') || 0;
   return fee5m >= 1.2 || vol5m >= 2500;
-}
-
-// --- Compatibility shims (kept minimal) ---
-export const scalpSpikeStrategy = { id: 'scalp-spike', enabled: false } as any;
-
-export function getOneHourFeeTvlVs24hAverage(pool: any) {
-  const f1 = getFeeTvlPct(pool, '1h') || 0;
-  const f24 = getFeeTvlPct(pool, '24h') || 0;
-  return f24 > 0 ? Math.min(4, f1 / f24) : 1;
-}
-
-export function getOneHourVolumeVs24hAverage(pool: any) {
-  const v1 = getPoolVolume(pool, '1h') || 0;
-  const v24 = getPoolVolume(pool, '24h') || 0;
-  return v24 > 0 ? Math.min(4, v1 / v24) : 1;
-}
-
-export function passesMomentumRegainStrategyFilters(_: any) {
-  return false;
 }

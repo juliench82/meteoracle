@@ -189,10 +189,9 @@ export async function swapTokenToSol(
  * Promotes to status=closed on success, leaves as sell_failed if swap still fails.
  */
 export async function retryStrandedSells(): Promise<{ retried: number; recovered: number }> {
-  // TODO: Re-implement using local state (state/open-moonboys.json + state/open-lp-positions.json)
-  // For the simplified stack we stub this for now to keep the build clean.
-  // The core retry logic can be re-added later when local-state persistence is fully wired.
-  console.log('[swap] retryStrandedSells is stubbed in simplified stack mode')
+  // TODO: Re-implement real stranded sell recovery using local-state files.
+  // Currently a safe no-op so the simplified bot can run without it.
+  console.log('[swap] retryStrandedSells is currently a no-op')
   return { retried: 0, recovered: 0 }
 }
 

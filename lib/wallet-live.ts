@@ -1,7 +1,3 @@
-// Stub — live wallet balances removed in simplified stack
-export async function fetchWalletLiveBalances() {
-  console.warn('[wallet-live] fetchWalletLiveBalances is stubbed');
-  return {};
-}
-
+// Live wallet balances removed in ultra-simplified model
+export const fetchWalletLiveBalances = async () => ({});
 export const detectAllOrphanedPositions = async () => [];

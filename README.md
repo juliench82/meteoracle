@@ -8,7 +8,7 @@ Minimal Solana DLMM liquidity bot.
 - Maximum 3 concurrent Moonboy positions.
 - Moonboy exits at +100% (2x), with basic risk controls.
 - Runtime state lives in local JSON files (`state/`), not in the database.
-- Supabase is used only for lightweight logging.
+- Supabase usage is minimal / legacy-only (hot paths use local state + on-chain only).
 
 No dashboard. No multi-strategy system. No hybrid DB + on-chain position syncing.
 

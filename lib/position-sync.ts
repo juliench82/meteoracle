@@ -1,6 +1,3 @@
-// Stub — position sync removed in simplified stack
-export async function syncAllMeteoraPositions() {
-  console.warn('[position-sync] syncAllMeteoraPositions is stubbed');
-}
-
+// Position sync removed in ultra-simplified model
+export const syncAllMeteoraPositions = async () => {};
 export const mergeDbAndLiveLpPositions = () => [];

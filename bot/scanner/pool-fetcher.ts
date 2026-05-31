@@ -1,23 +1,15 @@
 import axios from 'axios'
-import { createServerClient } from '@/lib/supabase'
-import { summarizeError } from '@/lib/logging'
 
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM = 'https://dlmm-api.meteora.ag'
 
 // Simple in-process cache — pools change slowly.
-// Reduced to 5min default to keep momentum signals (vol5m, feeTvl5m) fresher for scalp-spike / evil-panda triggers.
+// Reduced TTL to keep 5m momentum signals fresh for lane classification.
 let meteoraPoolsCache: { pools: MeteoraPool[]; ts: number } | null = null
 const METEORA_CACHE_TTL_MS = parseInt(
   process.env.METEORA_POOLS_CACHE_TTL_MS ?? '300000',
   10,
 )
-
-// WARNING: Persisting the full Meteora pool list (often 1000-5000+ rows with large JSONB metadata + GIN index)
-// to Supabase on every cache refresh is extremely expensive on Disk I/O.
-// This is a primary contributor to "Disk IO budget" exhaustion warnings.
-// Default is now OFF to protect Supabase resources. Only enable temporarily if you really need cross-restart warm cache.
-const ENABLE_DB_POOL_CACHE_PERSIST = (process.env.SCANNER_PERSIST_POOL_CACHE ?? 'false').toLowerCase() === 'true'
 
 function getCachedMeteoraPools(): MeteoraPool[] | null {
   if (!meteoraPoolsCache) return null
@@ -269,123 +261,6 @@ export function getTradableToken(pool: MeteoraPool): MeteoraToken {
   return QUOTE_ASSETS.has(pool.token_x.address) ? pool.token_y : pool.token_x
 }
 
-// ─── Supabase persistent cache ────────────────────────────────────────────────
-
-async function loadDbPoolCache(): Promise<MeteoraPool[] | null> {
-  try {
-    const cutoff = new Date(Date.now() - METEORA_CACHE_TTL_MS).toISOString()
-    const { data, error } = await createServerClient()
-      .from('scanner_pool_cache')
-      .select('metadata')
-      .gte('last_seen_at', cutoff)
-      .eq('is_blacklisted', false)
-
-    if (error) throw error
-    if (!data || data.length === 0) return null
-
-    const pools = data
-      .map((row: any) => normalizeMeteoraPool(row.metadata))
-      .filter((p: any): p is MeteoraPool => p !== null)
-
-    if (pools.length === 0) return null
-
-    console.log(`[scanner] warm-start: loaded ${pools.length} pools from scanner_pool_cache`)
-    return pools
-  } catch (err) {
-    console.warn(`[scanner] scanner_pool_cache read failed: ${summarizeError(err)}`)
-    return null
-  }
-}
-
-function persistDbPoolCache(pools: MeteoraPool[]): void {
-  if (!ENABLE_DB_POOL_CACHE_PERSIST) {
-    return // Disabled by default — full pool cache persistence is a major Disk IO consumer (large JSONB + GIN index)
-  }
-  if (pools.length === 0) return
-
-  const now = new Date().toISOString()
-
-  const rows = pools.map((pool) => {
-    const tradable = getTradableToken(pool)
-    const createdAt = getPoolCreatedAt(pool)
-    return {
-      pool_address: pool.address,
-      token_address: tradable.address,
-      symbol: tradable.symbol,
-      scanner_lane: 'meteora',
-      pool_created_at: createdAt ? new Date(createdAt * 1000).toISOString() : null,
-      age_minutes: Math.round(getPoolAgeMinutes(pool)),
-      liquidity_usd: getPoolTvl(pool),
-      market_cap_usd: tradable.market_cap > 0 ? tradable.market_cap : null,
-      volume_24h: getPoolVolume(pool, '24h') || null,
-      volume_1h: getPoolVolume(pool, '1h') || null,
-      volume_5m: getPoolVolume(pool, '5m') || null,
-      fee_tvl_24h_pct: getFeeTvlPct(pool, '24h') || null,
-      fee_tvl_1h_pct: getFeeTvlPct(pool, '1h') || null,
-      fee_tvl_5m_pct: getFeeTvlPct(pool, '5m') || null,
-      volume_spike_ratio: getRecentVolumeGrowth(pool) || null,
-      momentum_score: scoreMeteoraMomentum(pool),
-      is_blacklisted: pool.is_blacklisted,
-      last_seen_at: now,
-      metadata: pool as unknown as Record<string, unknown>,
-      updated_at: now,
-    }
-  })
-
-  const CHUNK = 200
-  const chunks: typeof rows[] = []
-  for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK))
-
-  Promise.allSettled(
-    chunks.map((chunk) =>
-      createServerClient()
-        .from('scanner_pool_cache')
-        .upsert(chunk, { onConflict: 'pool_address', ignoreDuplicates: false }),
-    ),
-  ).then((results) => {
-    const failed = results.filter((r) => r.status === 'rejected')
-    if (failed.length > 0) {
-      console.warn(`[scanner] scanner_pool_cache upsert: ${failed.length}/${chunks.length} chunks failed`)
-    }
-  }).catch(() => { /* never throws */ })
-}
-
-/**
- * Cleans up old rows from scanner_pool_cache to protect Supabase Disk I/O budget.
- * Keeps rows seen in the last RETENTION_HOURS (default 48).
- *
- * This is now called automatically at the end of every scanner tick.
- *
- * WARNING: The full persist path (when SCANNER_PERSIST_POOL_CACHE=true) is extremely I/O heavy
- * due to large JSONB + GIN index maintenance. It is disabled by default for this reason.
- */
-const POOL_CACHE_RETENTION_HOURS = parseInt(
-  process.env.SCANNER_POOL_CACHE_RETENTION_HOURS ?? '48',
-  10
-)
-
-export async function cleanupOldPoolCache(): Promise<number> {
-  try {
-    const cutoff = new Date(Date.now() - POOL_CACHE_RETENTION_HOURS * 60 * 60 * 1000).toISOString()
-
-    const { error, count } = await createServerClient()
-      .from('scanner_pool_cache')
-      .delete({ count: 'exact' })
-      .lt('last_seen_at', cutoff)
-
-    if (error) throw error
-
-    const deleted = count ?? 0
-    if (deleted > 0) {
-      console.log(`[scanner] cleaned ${deleted} old rows from scanner_pool_cache (retention=${POOL_CACHE_RETENTION_HOURS}h)`)
-    }
-    return deleted
-  } catch (err) {
-    console.warn(`[scanner] scanner_pool_cache cleanup failed: ${summarizeError(err)}`)
-    return 0
-  }
-}
-
 // ─── Meteora API fetchers ─────────────────────────────────────────────────────
 
 async function fetchMeteoraPoolsPage(
@@ -451,16 +326,7 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
     return { pools }
   }
 
-  // 2. Persistent DB cache (warm across restarts, same TTL window)
-  const dbPools = await loadDbPoolCache()
-  if (dbPools && dbPools.length > 0) {
-    meteoraPoolsCache = { pools: dbPools, ts: Date.now() }
-    const pools = applyJsPreFilter(dbPools, config)
-    console.log(`[scanner] warm-start: ${dbPools.length} pools from DB; ${pools.length} passed JS pre-filter`)
-    return { pools }
-  }
-
-  // 3. Live fetch from Meteora API
+  // 2. Live fetch from Meteora API (no persistent DB warm cache in simplified model)
   let allPools: MeteoraPool[] = []
   for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
     try {
@@ -483,13 +349,6 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
 
   meteoraPoolsCache = { pools: allPools, ts: Date.now() }
   console.log(`[scanner] cached ${allPools.length} Meteora pools for ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min`)
-
-  if (ENABLE_DB_POOL_CACHE_PERSIST) {
-    persistDbPoolCache(allPools)
-  } else {
-    // Default behavior: skip the very expensive full-pool upsert to Supabase.
-    // This dramatically reduces Disk I/O. Warm-start will only work from whatever data is already in the table.
-  }
 
   const pools = applyJsPreFilter(allPools, config)
   console.log(

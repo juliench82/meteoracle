@@ -1,4 +1,4 @@
-// Stub for old scorer (restored code during simplified stack transition)
+// Legacy scorer stub (no longer used by simplified deep-checker; evil-panda scoring inlined)
 export type ScoreBreakdown = {
   total: number;
   volMcScore: number;
