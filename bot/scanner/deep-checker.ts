@@ -26,6 +26,8 @@ import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/
 import { getHeliusRpcEndpoint } from '@/lib/solana'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
+import { logInfo, logError } from '@/lib/log'
+import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
 import {
   SCAN_INTERVAL_MS,
   SCANNER_TICK_TIMEOUT_MS,
@@ -328,20 +330,12 @@ function passesMomentumRegainStrategyFilters(metrics: TokenMetrics): boolean {
   )
 }
 
-async function fetchRecentlyClosedOorMints(supabase: ReturnType<typeof createServerClient>): Promise<Set<string>> {
+// Simplified stack: OOR recheck via Supabase removed for now.
+// Returns empty set (feature disabled until re-implemented on local state if desired).
+async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
-
-  const result = await withTimeout(
-    supabase
-      .from('lp_positions')
-      .select('mint, symbol, closed_at, close_reason')
-      .eq('status', 'closed')
-      .gte('closed_at', new Date(Date.now() - OOR_RECHECK_HOURS * 3_600_000).toISOString())
-      .order('closed_at', { ascending: false })
-      .limit(50),
-    SUPABASE_TIMEOUT_MS,
-    'recent OOR recheck rows',
-  )
+  return new Set()
+}
 
   if (!result || ('error' in result && result.error)) {
     const message = result && 'error' in result ? result.error?.message : 'timeout'
@@ -590,7 +584,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   }
 
   // Supabase removed - using local state + logger only
-  const recentlyClosedOorMints = await fetchRecentlyClosedOorMints(supabase)
+  const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
   const survivors = pickDeepCheckSurvivors(freshSurvivors, momentumSurvivors, recentlyClosedOorMints, laneConfig)
 
   if (recentlyClosedOorMints.size > 0) {
@@ -677,7 +671,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
     if (CANDIDATE_DEDUP_HOURS > 0) {
       const recentResult = await withTimeout(
-        supabase.from('candidates').select('id').eq('token_address', tokenAddress)
+        // candidates dedup via Supabase removed in simplified stack
+        null as any
           .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString()).limit(1),
         SUPABASE_TIMEOUT_MS, `candidates dedup ${symbol}`
       )
@@ -695,7 +690,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     //    (e.g. pnl_unavailable). This prevents rapid re-opening the same mint after a failed/bad close attempt.
     const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     const posResult = await withTimeout(
-      supabase.from('lp_positions')
+      // lp_positions Supabase query removed in simplified stack
+      null as any
         .select('id, status, close_reason, closed_at')
         .eq('mint', tokenAddress)
         .or(`status.in.(${OPEN_LP_STATUSES.join(',')}),and(status.eq.closed,closed_at.gte.${recentClosedCutoff})`)
@@ -1040,7 +1036,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     // Dedup check to avoid polluting the table with repeated rejections
     if (CANDIDATE_DEDUP_HOURS > 0) {
       const dedupCheck = await withTimeout(
-        supabase.from('candidates')
+        // candidates Supabase operations removed in simplified stack
+        null as any
           .select('id')
           .eq('token_address', tokenAddress)
           .gte('scanned_at', new Date(Date.now() - CANDIDATE_DEDUP_HOURS * 60 * 60 * 1000).toISOString())
@@ -1167,25 +1164,23 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
         console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`)
 
-        // Explicitly claim/lock the strategy + symbol on the DB row so position-sync cannot overwrite them later.
-        // This ensures that anything the lp-scanner successfully opens keeps the correct strategy_id and real token symbol.
-        // We retry a couple of times because DB contention or transient issues can occur.
-        const supabase = (await import('@/lib/supabase')).createServerClient();
+        // Simplified stack: claim via local state
         let claimSuccess = false;
+        const positions = getOpenLpPositions();
         for (let attempt = 1; attempt <= 3 && !claimSuccess; attempt++) {
           try {
-            await supabase
-              .from('lp_positions')
-              .update({
-                strategy_id: strategy.id,
-                symbol: symbol,   // force the real token symbol from scanner (prevents "LIVE")
-                metadata: {
-                  claimed_by_scanner_at: new Date().toISOString(),
-                  original_strategy_id: strategy.id,
-                }
-              })
-              .eq('id', positionId);
-            claimSuccess = true;
+            const idx = positions.findIndex((p: any) => p.id === positionId);
+            if (idx !== -1) {
+              positions[idx].strategy_id = strategy.id;
+              positions[idx].symbol = symbol;
+              positions[idx].metadata = {
+                ...(positions[idx].metadata || {}),
+                claimed_by_scanner_at: new Date().toISOString(),
+                original_strategy_id: strategy.id,
+              };
+              saveOpenLpPositions(positions);
+              claimSuccess = true;
+            }
           } catch (claimErr) {
             if (attempt === 3) {
               console.warn(`[scanner] failed to claim strategy/symbol for position ${positionId} after 3 attempts:`, claimErr);
