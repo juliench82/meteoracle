@@ -10,3 +10,9 @@ export async function fetchLiveMeteoraSnapshot() {
 export function mergeDbAndLiveLpPositions() {
   return [];
 }
+
+// Extra exports some restored code expects
+export const syncAllMeteoraPositions = async () => {};
+export const rebalanceDlmmPosition = async () => null;
+export const fetchWalletLiveBalances = async () => ({});
+export const detectAllOrphanedPositions = async () => [];

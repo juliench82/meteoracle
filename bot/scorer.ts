@@ -1,5 +1,16 @@
 // Stub for old scorer (restored code during simplified stack transition)
-export function scoreCandidateWithBreakdown(metrics: any, strategy?: any) {
+export type ScoreBreakdown = {
+  total: number;
+  volMcScore: number;
+  rugScore: number;
+  holderScore: number;
+  freshnessScore: number;
+  feeEfficiencyScore: number;
+  volumeTvlScore: number;
+  curveBonus: number;
+};
+
+export function scoreCandidateWithBreakdown(metrics: any, strategy?: any): ScoreBreakdown {
   return {
     total: 0,
     volMcScore: 0,

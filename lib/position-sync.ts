@@ -2,3 +2,5 @@
 export async function syncAllMeteoraPositions() {
   console.warn('[position-sync] syncAllMeteoraPositions is stubbed');
 }
+
+export const mergeDbAndLiveLpPositions = () => [];

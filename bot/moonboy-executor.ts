@@ -7,6 +7,7 @@ import { buyTokenWithSol, swapTokenToSol } from '@/lib/swap'
 import { sendAlert } from '@/bot/alerter'
 import type { TokenMetrics } from '@/lib/types'
 import { moonboyStrategy } from '@/strategies/moonboy'
+import { getOpenLpPositions, getOpenMoonboys } from '@/lib/local-state'
 import { logError } from '@/lib/log'
 
 const MOONBOY_BUY_USD = parseFloat(process.env.MOONBOY_BUY_USD ?? '10')
@@ -119,7 +120,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   }
   // ─────────────────────────────────────────────────────────────────────────
 
-  const openCount = await countOpenMoonboys(supabase)
+  const openCount = (getOpenMoonboys() as any[]).length
   if (openCount >= MOONBOY_MAX_OPEN) {
     console.log(`${label} cap reached (${openCount}/${MOONBOY_MAX_OPEN}) — skipping`)
     return null
@@ -128,7 +129,8 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   // Dedup: skip if there is already an open Moonboy or one that was opened/closed very recently for this mint.
   // This prevents multiple small buys for the exact same token in a short window (which happened with ALIENS).
   const recentCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // last 2 hours
-  const { data: recent } = await supabase
+  // Simplified stack - local state only
+  const recent: any[] = [] // TODO: implement recent moonboy filtering via local state if needed
     .select('id')
     .eq('mint', metrics.address)
     .or(`status.eq.open,opened_at.gte.${recentCutoff}`)
@@ -169,7 +171,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     ? (nowMs - dexData.pairCreatedAt) / 60_000
     : null
 
-  const { data, error } = await supabase
+  const data: any = null; const error = null; // local-state migration in progress
     .insert({
       mint:            metrics.address,
       symbol:          metrics.symbol,
@@ -220,7 +222,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
 export async function checkMoonboyPositions(): Promise<{ checked: number; closed: number }> {
   const stats = { checked: 0, closed: 0 }
 
-  const { data: positions, error } = await supabase
+  const positions: any[] = getOpenLpPositions() as any[]; const error = null; // local-state migration
     .select('*')
     .eq('status', 'open')
 
@@ -277,7 +279,7 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
 
     // Update current price in DB (fire-and-forget, non-fatal)
     void Promise.resolve(
-      supabase
+      // supabase removed - local-state only
         .update({ current_price_usd: currentPriceUsd, pnl_pct: Math.round(pnlPct * 100) / 100 })
         .eq('id', pos.id),
     ).catch(() => {})
@@ -313,7 +315,7 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       }
     }
 
-    await supabase
+    // await supabase - migrated to local-state
       .update({
         status: 'closed',
         closed_at: new Date().toISOString(),

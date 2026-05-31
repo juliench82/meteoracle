@@ -3,3 +3,5 @@ export async function fetchWalletLiveBalances() {
   console.warn('[wallet-live] fetchWalletLiveBalances is stubbed');
   return {};
 }
+
+export const detectAllOrphanedPositions = async () => [];

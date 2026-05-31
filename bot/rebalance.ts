@@ -3,3 +3,5 @@ export async function rebalanceDlmmPosition() {
   console.warn('[rebalance] rebalanceDlmmPosition is stubbed in simplified stack');
   return null;
 }
+
+export const fetchLiveMeteoraSnapshot = async () => ({ positions: [], status: 'stub' });

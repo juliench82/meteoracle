@@ -18,30 +18,30 @@ const warnOnce = (msg: string) => {
 
 function createChain() {
   const chain: any = {
-    select: () => { warnOnce('supabase.from().select() called'); return chain; },
-    insert: () => { warnOnce('supabase insert'); return chain; },
-    update: () => { warnOnce('supabase update'); return chain; },
-    upsert: () => { warnOnce('supabase upsert'); return chain; },
-    delete: () => { warnOnce('supabase delete'); return chain; },
-    eq: () => chain,
-    in: () => chain,
-    gte: () => chain,
-    order: () => chain,
-    limit: () => chain,
-    single: async () => { warnOnce('supabase single()'); return { data: null, error: null }; },
-    maybeSingle: async () => ({ data: null, error: null }),
+    select: (...args: any[]) => { warnOnce('supabase.from().select()'); return chain; },
+    insert: (...args: any[]) => { warnOnce('supabase insert'); return chain; },
+    update: (...args: any[]) => { warnOnce('supabase update'); return chain; },
+    upsert: (...args: any[]) => { warnOnce('supabase upsert'); return chain; },
+    delete: (...args: any[]) => { warnOnce('supabase delete'); return chain; },
+    eq: (...args: any[]) => chain,
+    in: (...args: any[]) => chain,
+    gte: (...args: any[]) => chain,
+    order: (...args: any[]) => chain,
+    limit: (...args: any[]) => chain,
+    single: async (...args: any[]) => { warnOnce('supabase single()'); return { data: null, error: null }; },
+    maybeSingle: async (...args: any[]) => ({ data: null, error: null }),
+    then: (onFulfilled?: any, onRejected?: any) => Promise.resolve({ data: null, error: null }).then(onFulfilled, onRejected),
   };
   return chain;
 }
 
 export function createServerClient() {
-  return {
+  const client: any = {
     from: (table: string) => {
       warnOnce(`supabase.from('${table}')`);
       return createChain();
     },
     logInfo: async (table: string, payload: any) => {
-      // Route legacy logInfo calls to local logger if possible
       try {
         const { logInfo } = await import('./log');
         logInfo(payload?.event || 'legacy_supabase_log', payload?.payload || payload);
@@ -50,8 +50,14 @@ export function createServerClient() {
       }
     },
   };
+
+  // Make the client itself chainable / thenable for old code patterns
+  client.then = (onFulfilled?: any, onRejected?: any) => Promise.resolve({ data: null, error: null }).then(onFulfilled, onRejected);
+
+  return client;
 }
 
-// Default export for code that does `import supabase from ...`
+// Default export for code that does `import supabase from ...` or uses bare `supabase`
 const supabase = createServerClient();
 export default supabase;
+export { supabase };

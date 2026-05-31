@@ -23,6 +23,8 @@ import {
   NATIVE_MINT,
 } from '@solana/spl-token'
 import BN from 'bn.js'
+import { logInfo, logError, logWarn } from '@/lib/log'
+import { getOpenLpPositions } from '@/lib/local-state'
 import type { StrategyType } from '@meteora-ag/dlmm'
 import type { ZapInDlmmResponse } from '@meteora-ag/zap-sdk'
 

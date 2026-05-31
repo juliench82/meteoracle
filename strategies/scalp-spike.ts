@@ -3,4 +3,4 @@ export const scalpSpikeStrategy = {
   id: 'scalp-spike',
   name: 'Scalp Spike (stub)',
   enabled: false,
-};
+} as any;
