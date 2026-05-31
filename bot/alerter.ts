@@ -105,23 +105,6 @@ function formatMessage(payload: AlertPayload): string {
       ].join('\n')
     }
 
-    case 'position_adopted': {
-      const dexUrl = payload.poolAddress || payload.mint
-        ? `https://dexscreener.com/solana/${payload.poolAddress || payload.mint}`
-        : null
-      const valuePart = payload.positionValueUsd != null && payload.positionValueUsd > 0
-        ? `\n💵 Est. Value: $${payload.positionValueUsd.toFixed(2)}`
-        : ''
-      return [
-        `⚠️ *Adopted Position* ${payload.symbol}`,
-        `💰 Deposited: ${payload.solDeposited.toFixed(4)} SOL${valuePart}`,
-        `🔑 Pubkey: \`${payload.positionPubkey.slice(0, 12)}…\``,
-        `🧠 Strategy: evil-panda (adopted — no bot entry)`,
-        dexUrl ? `📈 ${dexUrl}` : null,
-        `_Position discovered on-chain — exit rules now active_`,
-      ].filter(Boolean).join('\n')
-    }
-
     case 'position_closed': {
       const netPnl = payload.netPnlSol ?? 0
       const netSign = netPnl >= 0 ? '+' : ''

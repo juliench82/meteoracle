@@ -566,7 +566,7 @@ async function processSurvivor(
   const token = getTradableToken(representativePool);
   const tokenAddress = token.address;
   const symbol = representativePool.name ?? token.symbol;
-  const launchpadSource = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora';
+  const launchpadSource: 'pumpfun' | 'moonshot' | 'meteora' = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora';
   const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address);
 
   if (openedMintsThisTick.has(tokenAddress)) {
@@ -685,6 +685,8 @@ async function processSurvivor(
       dailyLossLimitHitRef,
       openBlockedReason,
       availableOpenSlots,
+      candidateCountRef,
+      isOpenAllowedToday,
     });
   }
 
@@ -703,6 +705,8 @@ async function attemptOpenAndNotify(params: {
   dailyLossLimitHitRef: { value: boolean | null };
   openBlockedReason: string | undefined;
   availableOpenSlots: number;
+  candidateCountRef: { value: number };
+  isOpenAllowedToday: () => Promise<boolean>;
 }): Promise<SurvivorProcessResult> {
   const {
     metrics,
@@ -716,10 +720,12 @@ async function attemptOpenAndNotify(params: {
     dailyLossLimitHitRef,
     openBlockedReason,
     availableOpenSlots,
+    candidateCountRef: candidateCountRefParam,
+    isOpenAllowedToday,
   } = params;
 
-  candidateCountRef.value++;
-  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct });
+  candidateCountRefParam.value++;
+  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct: metrics.bondingCurvePct });
 
   const disabledReason = getDisabledStrategyReason(strategy.id);
   if (disabledReason) {

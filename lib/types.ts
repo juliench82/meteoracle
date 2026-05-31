@@ -99,9 +99,9 @@ export interface TokenFilters {
   minHolderCount: number
   maxAgeHours: number
   minRugcheckScore: number
-  requireSocialSignal: boolean
+  requireSocialSignal?: boolean
   /** Minimum 24h Fee/TVL % required to enter this pool. Strategy-dependent. */
-  minFeeTvl24hPct: number
+  minFeeTvl24hPct?: number
   /**
    * If set, reject pools whose bin step is below this value.
    * Evil Panda uses 80 to block stable/USDC pools (binStep 1–20) that produce

@@ -51,6 +51,7 @@ import {
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   MAX_MARKET_LP_SOL_DEPLOYED,
   WALLET_MIN_SOL_RESERVE,
+  calculateValidatedBinRange,
 } from './utils'
 
 import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '@/lib/solana'
@@ -140,7 +141,7 @@ export async function openPosition(
       ? Math.min(strategy.position.maxSolPerPosition, envCap)
       : envCap
 
-    const eligibility = await validateOpenEligibility(label, metrics, strategy, solAmount, connection);
+    const eligibility = await validateOpenEligibility(label, metrics, strategy, solAmount, connection, wallet);
     if (!eligibility.ok) {
       return null;
     }
@@ -537,7 +538,8 @@ async function validateOpenEligibility(
   metrics: TokenMetrics,
   strategy: Strategy,
   solAmount: number,
-  connection: Connection
+  connection: Connection,
+  wallet: Keypair
 ): Promise<
   | { ok: false }
   | {

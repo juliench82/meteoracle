@@ -35,6 +35,10 @@ type MoonboyRow = {
   strategy_id: string
   dry_run: boolean
   sol_price_usd: number
+  metadata?: {
+    highest_price_since_80pct?: number | null
+    last_high_timestamp?: string | null
+  }
 }
 
 type DexScreenerResult = {
