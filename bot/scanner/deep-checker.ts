@@ -673,68 +673,110 @@ async function processSurvivor(
   const { strategy, decision, rejectionReason, finalScore } = evaluateCandidate(metrics, lane, symbol);
 
   if (decision === 'ACCEPTED' && strategy) {
-    candidateCountRef.value++;
-    await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct });
-
-    const disabledReason = getDisabledStrategyReason(strategy.id);
-    if (disabledReason) {
-      openSkippedCountRef.value++;
-      console.log(`[scanner] ${symbol} open skipped: ${disabledReason}`);
-      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
-    }
-    if (openBlockedReason || openedCountRef.value >= availableOpenSlots) {
-      openSkippedCountRef.value++;
-      console.log(`[scanner] ${symbol} open skipped: ${openBlockedReason ?? 'no_slots'}`);
-      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
-    }
-    if (!await isOpenAllowedToday()) {
-      openSkippedCountRef.value++;
-      console.log(`[scanner] ${symbol} open skipped: daily loss circuit breaker`);
-      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
-    }
-
-    void maybeTriggerMoonboy(metrics, liveSolPriceUsd);
-
-    const positionId = await openPosition(metrics, strategy);
-    if (positionId) {
-      openedCountRef.value++;
-      dailyLossLimitHitRef.value = null;
-      openedMintsThisTick.add(tokenAddress);
-
-      console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`);
-
-      try {
-        const positions = getOpenLpPositions();
-        const idx = positions.findIndex((p: any) => p.id === positionId);
-        if (idx !== -1) {
-          positions[idx].strategy_id = strategy.id;
-          positions[idx].symbol = symbol;
-          saveOpenLpPositions(positions);
-        }
-      } catch {}
-
-      await sendAlert({
-        type: 'position_opened',
-        symbol,
-        strategy: strategy.id,
-        solDeposited: MARKET_LP_SOL_PER_POSITION,
-        entryPrice: metrics.priceUsd,
-        entryPriceUsd: metrics.priceUsd,
-        meteoracleScore: finalScore,
-        poolAddress: metrics.poolAddress,
-        mint: metrics.address,
-        positionId,
-      });
-
-      return { wasCandidate: true, wasOpened: true, wasSkipped: false };
-    } else {
-      openSkippedCountRef.value++;
-      console.warn(`[scanner] ${symbol} — openPosition returned null (executor did not open despite ACCEPT)`);
-      return { wasCandidate: true, wasOpened: false, wasSkipped: true };
-    }
+    return await attemptOpenAndNotify({
+      metrics,
+      strategy,
+      symbol,
+      finalScore,
+      liveSolPriceUsd,
+      openedMintsThisTick,
+      openedCountRef,
+      openSkippedCountRef,
+      dailyLossLimitHitRef,
+      openBlockedReason,
+      availableOpenSlots,
+    });
   }
 
   return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+}
+
+async function attemptOpenAndNotify(params: {
+  metrics: TokenMetrics;
+  strategy: any;
+  symbol: string;
+  finalScore: number;
+  liveSolPriceUsd: number;
+  openedMintsThisTick: Set<string>;
+  openedCountRef: { value: number };
+  openSkippedCountRef: { value: number };
+  dailyLossLimitHitRef: { value: boolean | null };
+  openBlockedReason: string | undefined;
+  availableOpenSlots: number;
+}): Promise<SurvivorProcessResult> {
+  const {
+    metrics,
+    strategy,
+    symbol,
+    finalScore,
+    liveSolPriceUsd,
+    openedMintsThisTick,
+    openedCountRef,
+    openSkippedCountRef,
+    dailyLossLimitHitRef,
+    openBlockedReason,
+    availableOpenSlots,
+  } = params;
+
+  candidateCountRef.value++;  // Note: this uses outer scope for now; will clean in next micro-step if needed
+  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct });
+
+  const disabledReason = getDisabledStrategyReason(strategy.id);
+  if (disabledReason) {
+    openSkippedCountRef.value++;
+    console.log(`[scanner] ${symbol} open skipped: ${disabledReason}`);
+    return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+  }
+  if (openBlockedReason || openedCountRef.value >= availableOpenSlots) {
+    openSkippedCountRef.value++;
+    console.log(`[scanner] ${symbol} open skipped: ${openBlockedReason ?? 'no_slots'}`);
+    return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+  }
+  if (!await isOpenAllowedToday()) {
+    openSkippedCountRef.value++;
+    console.log(`[scanner] ${symbol} open skipped: daily loss circuit breaker`);
+    return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+  }
+
+  void maybeTriggerMoonboy(metrics, liveSolPriceUsd);
+
+  const positionId = await openPosition(metrics, strategy);
+  if (positionId) {
+    openedCountRef.value++;
+    dailyLossLimitHitRef.value = null;
+    openedMintsThisTick.add(metrics.address);
+
+    console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`);
+
+    try {
+      const positions = getOpenLpPositions();
+      const idx = positions.findIndex((p: any) => p.id === positionId);
+      if (idx !== -1) {
+        positions[idx].strategy_id = strategy.id;
+        positions[idx].symbol = symbol;
+        saveOpenLpPositions(positions);
+      }
+    } catch {}
+
+    await sendAlert({
+      type: 'position_opened',
+      symbol,
+      strategy: strategy.id,
+      solDeposited: MARKET_LP_SOL_PER_POSITION,
+      entryPrice: metrics.priceUsd,
+      entryPriceUsd: metrics.priceUsd,
+      meteoracleScore: finalScore,
+      poolAddress: metrics.poolAddress,
+      mint: metrics.address,
+      positionId,
+    });
+
+    return { wasCandidate: true, wasOpened: true, wasSkipped: false };
+  } else {
+    openSkippedCountRef.value++;
+    console.warn(`[scanner] ${symbol} — openPosition returned null (executor did not open despite ACCEPT)`);
+    return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+  }
 }
 
 function evaluateCandidate(
