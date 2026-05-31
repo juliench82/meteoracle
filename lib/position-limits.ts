@@ -9,12 +9,24 @@ import { getOpenLpPositions } from './local-state'
 
 export const OPEN_LP_STATUSES = ['active', 'open', 'out_of_range', 'orphaned', 'pending_retry']
 
-export async function getOpenLpLimitState(): Promise<{ effectiveOpenCount: number }> {
+export type OpenLpLimitState = {
+  effectiveOpenCount: number
+  liveOpenCount?: number
+  cachedOpenCount?: number
+  countSource?: string
+  liveFetchOk?: boolean
+  dlmmOk?: boolean
+}
+
+export async function getOpenLpLimitState(): Promise<OpenLpLimitState> {
   try {
-    // Primary source: local state
     const local = getOpenLpPositions()
     return { effectiveOpenCount: local.length }
   } catch {
     return { effectiveOpenCount: 0 }
   }
+}
+
+export function assertCanOpenLpPosition(_state: OpenLpLimitState): void {
+  // Simplified stack — no-op for now (can be enhanced later)
 }

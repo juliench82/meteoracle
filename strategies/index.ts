@@ -24,6 +24,10 @@ export function getStrategyById(id: StrategyId): Strategy | null {
 /**
  * Returns evil-panda only if the token is fresh enough and passes basic safety.
  */
+export function classifyToken() {
+  return { type: 'unknown' };
+}
+
 export function getStrategyForToken(token: {
   ageHours: number
   liquidityUsd: number
