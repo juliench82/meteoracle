@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'meteoracle-worker',
       script: 'node',
-      args: '-r tsconfig-paths/register dist/worker.js',
+      args: 'dist/worker.js',
       cwd: './',
       env: {
         NODE_ENV: 'production'
@@ -16,7 +16,7 @@ module.exports = {
     {
       name: 'meteoracle-telegram',
       script: 'node',
-      args: '-r tsconfig-paths/register dist/bot/telegram-bot.js',
+      args: 'dist/bot/telegram-bot.js',
       cwd: './',
       env: {
         NODE_ENV: 'production'
