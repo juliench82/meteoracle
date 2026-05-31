@@ -64,17 +64,18 @@ async function handleUpdate(update: any) {
   const [rawCmd, ...args] = text.split(/\s+/)
   const cmd = rawCmd?.toLowerCase()
 
-  if (cmd === '/help' || cmd === '/start') {
+  if (cmd === '/help') {
     const help = [
       '*Meteoracle Commands*',
       '',
       '/status — current state + positions count',
       '/positions — detailed list of open LP + Moonboy',
       '/tick — force one scanner + monitor cycle',
+      '/start — enable the bot (soft, recommended)',
+      '/reload — full restart of the processes (aggressive)',
       '/dry — enable dry-run mode',
       '/live — enable live trading',
       '/stop — emergency stop',
-      '/restart — resume workers',
       '/close <id> — force close one position',
       '/add <id> <SOL> — add liquidity to position',
       '/help — this message',
@@ -82,6 +83,17 @@ async function handleUpdate(update: any) {
       'All state from local files (state/ folder).',
     ].join('\n')
     await sendMessage(help, chatId)
+    return
+  }
+
+  if (cmd === '/start') {
+    await setBotState({ enabled: true, paused: false })
+    await sendMessage(
+      'Bot enabled (soft start).\n' +
+      'It will pick up work on the next scheduled tick (within ~60s).\n' +
+      'Use /tick to force an immediate cycle.',
+      chatId
+    )
     return
   }
 
@@ -165,12 +177,23 @@ async function handleUpdate(update: any) {
   }
 
   if (cmd === '/restart') {
+    // Soft version for convenience / backward compatibility
+    await setBotState({ enabled: true, paused: false })
+    await sendMessage(
+      'Bot enabled (soft).\n' +
+      'Use /reload if you need a full process restart (e.g. after code changes).',
+      chatId
+    )
+    return
+  }
+
+  if (cmd === '/reload') {
     await setBotState({ enabled: true, paused: false })
     try {
       await execAsync(`${PM2} restart meteoracle-worker meteoracle-telegram`)
-      await sendMessage('Bot restarted.', chatId)
+      await sendMessage('Full reload triggered (processes restarted).', chatId)
     } catch {
-      await sendMessage('Restart command sent.', chatId)
+      await sendMessage('Reload command sent.', chatId)
     }
     return
   }
