@@ -24,6 +24,7 @@ type AlertPayload =
       topHolderPct?: number
       poolAddress?: string
       mint?: string
+      ageMinutes?: number
     }
   | {
       type: 'position_closed'
@@ -61,6 +62,7 @@ type AlertPayload =
       entryPriceUsd: number
       takeProfitPct: number
       stopLossPct: number
+      ageMinutes?: number
     }
   | {
       type: 'moonboy_closed'
@@ -121,14 +123,19 @@ function formatMessage(payload: AlertPayload): string {
         ? `👥 Holders: ${payload.holderCount.toLocaleString()} (top ${payload.topHolderPct}%)`
         : '👥 Holders: N/A'
 
+      const ageLine = payload.ageMinutes != null
+        ? `🕒 Meteora pool age: ${payload.ageMinutes} min`
+        : ''
+
       return [
         `🟢 *BUY* ${safeSymbol}`,
         `💰 Deployed: ${payload.solDeposited} SOL`,
         `💵 Entry Price: ${formatUsdPrice(entryUsd)}${entrySolPart}`,
         rugLine,
         holdersLine,
+        ageLine,
         `📈 [Dexscreener](${dexUrl})`,
-      ].join('\n')
+      ].filter(Boolean).join('\n')
     }
 
     case 'position_closed': {
@@ -198,13 +205,18 @@ function formatMessage(payload: AlertPayload): string {
       const safeSymbol = escapeMarkdown(payload.symbol)
       const dexUrl = `https://dexscreener.com/solana/${payload.mint}`
       const pnlSign = payload.takeProfitPct >= 0 ? '+' : ''
+      const ageLine = payload.ageMinutes != null
+        ? `🕒 Meteora pool age: ${payload.ageMinutes} min`
+        : ''
+
       return [
         `🌙 *MOONBOY BUY* ${safeSymbol}`,
         `💵 Buy Size: $${payload.buyUsd} (~${payload.solSpent.toFixed(4)} SOL)`,
         `📊 Entry: ${formatUsdPrice(payload.entryPriceUsd)}`,
         `🎯 TP: ${pnlSign}${payload.takeProfitPct}% | SL: ${payload.stopLossPct}%`,
+        ageLine,
         `📈 [Dexscreener](${dexUrl})`,
-      ].join('\n')
+      ].filter(Boolean).join('\n')
     }
 
     case 'moonboy_closed': {

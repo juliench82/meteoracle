@@ -125,7 +125,7 @@ sequenceDiagram
     M->>M: Check paused
     M->>MB: checkMoonboyPositions()
     MB->>MB: For each open moonboy
-    MB->>MB: Jupiter price
+    MB->>MB: DexScreener price (Jupiter price removed for free-tier reliability)
     MB->>MB: PnL + Age checks (takeProfit / stopLoss / maxDuration)
     MB->>MB: pnl_unavailable handling (alert + force exit after N ticks)
     alt Close condition met

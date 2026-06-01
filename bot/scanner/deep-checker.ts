@@ -68,7 +68,6 @@ import {
 } from './fresh-pool-filter'
 
 const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
-const JUP_PRICE_URL = 'https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112'
 
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 const EXTERNAL_CALL_TIMEOUT_MS = 8_000
@@ -221,15 +220,24 @@ async function triggerMoonboyOnCandidate(
   }
 }
 
-/** Resolve SOL price in USD — now uses live Jupiter (same source as monitor) with env fallback. */
+/** Resolve SOL price in USD using DexScreener (free tier friendly, reliable for SOL).
+ * Falls back to env var or 150.
+ */
 async function resolveSolPriceUsd(): Promise<number> {
   try {
-    const res = await fetch(JUP_PRICE_URL, { signal: AbortSignal.timeout(4_000) })
+    const res = await fetch(`${DEXSCREENER}/So11111111111111111111111111111111111111112`, {
+      signal: AbortSignal.timeout(5_000),
+    })
     if (res.ok) {
-      const json = await res.json() as { data?: Record<string, { price?: string | number }> }
-      const rawPrice = json.data?.['So11111111111111111111111111111111111111112']?.price
-      const price = typeof rawPrice === 'string' ? parseFloat(rawPrice) : rawPrice
-      if (typeof price === 'number' && price > 0) return price
+      const json = await res.json() as any
+      const pairs = json?.pairs || []
+      // Prefer stable quote for accurate SOL price
+      const solPair = pairs.find((p: any) =>
+        (p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT') &&
+        p.chainId === 'solana'
+      ) || pairs[0]
+      const price = parseFloat(solPair?.priceUsd || '0')
+      if (price > 0) return price
     }
   } catch {}
   const envSolPrice = parseFloat(process.env.SOL_PRICE_USD ?? '')
@@ -391,7 +399,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
       openBlockedReason = 'max_positions_reached'
       console.log(
         `[scanner] max market LP positions reached (${openCount}/${MAX_CONCURRENT_MARKET_LP_POSITIONS}; ` +
-        `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount}) — scoring candidates only`,
+        `source=${limitState.countSource}, live=${limitState.liveOpenCount}, cached=${limitState.cachedOpenCount}) — refusing to open new positions`,
       )
     }
   }
@@ -442,6 +450,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     `[scanner] summary — fresh=${freshCandidates.length}, opened=${openedCount}, skipped=${openSkippedCount}, ` +
     `openSlots=${availableOpenSlots}, dailyLossHit=${dailyLossLimitHit ?? false}`
   )
+
+  // Moonboy summary (now triggered on candidates, not just LP opens)
+  // (logged via the per-candidate Moonboy logs above + this aggregate if we tracked more)
 
   return finish({
     scanned: fetchedPools.length,
@@ -711,22 +722,6 @@ async function attemptOpenAndNotify(params: {
     console.log(`${label} LP position opened ✔ (id=${positionId})`);
 
     patchOpenPositionMetadata(positionId, strategy.id, symbol);
-
-    await sendAlert({
-      type: 'position_opened',
-      symbol,
-      strategy: strategy.id,
-      solDeposited: MARKET_LP_SOL_PER_POSITION,
-      entryPrice: metrics.priceUsd,
-      entryPriceUsd: metrics.priceUsd,
-      poolAddress: metrics.poolAddress,
-      mint: metrics.address,
-      positionId,
-      rugcheckScore: metrics.rugcheckScore,
-      rugcheckUrl: metrics.rugcheckUrl,
-      holderCount: metrics.holderCount,
-      topHolderPct: metrics.topHolderPct,
-    });
 
     return { wasCandidate: true, wasOpened: true, wasSkipped: false };
   } else {

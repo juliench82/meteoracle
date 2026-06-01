@@ -14,8 +14,6 @@ const MOONBOY_BUY_USD = parseFloat(process.env.MOONBOY_BUY_USD ?? '10')
 const MOONBOY_MAX_OPEN = parseInt(process.env.MOONBOY_MAX_OPEN ?? '3')
 const DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex/tokens'
 
-const JUPITER_PRICE_API = 'https://api.jup.ag/price/v2'
-
 const isDryRun = process.env.BOT_DRY_RUN === 'true';
 const PNL_UNAVAILABLE_ALERT_TICKS = parseInt(
   process.env.MOONBOY_PNL_UNAVAILABLE_ALERT_TICKS ?? (isDryRun ? '5' : '3')
@@ -69,39 +67,17 @@ async function getDexScreenerData(mint: string): Promise<DexScreenerResult> {
   }
 }
 
-async function getJupiterPriceUsd(mint: string): Promise<number | null> {
-  try {
-    const res = await fetch(`${JUPITER_PRICE_API}?ids=${mint}`, {
-      signal: AbortSignal.timeout(5_000),
-    })
-    if (!res.ok) return null
-    const data = await res.json()
-    const price = data?.data?.[mint]?.price
-    return typeof price === 'number' && price > 0 ? price : null
-  } catch {
-    return null
-  }
-}
-
 /** Backward-compat wrapper used by checkMoonboyPositions price refresh. */
 async function getTokenPriceUsd(mint: string): Promise<number | null> {
   return (await getDexScreenerData(mint)).priceUsd
 }
 
 /**
- * Primary price source for ongoing Moonboy PnL tracking.
- * Tries Jupiter first (fast + reliable for most tokens), then falls back to DexScreener.
- * This is important for very fresh pump.fun graduates where Jupiter often lags or returns nothing.
+ * Price source for ongoing Moonboy PnL tracking.
+ * Uses DexScreener (reliable on free/public tier, especially for fresh tokens).
+ * Jupiter price polling removed due to rate limits on free tier.
  */
 async function getMoonboyPriceUsd(mint: string): Promise<number | null> {
-  // Try Jupiter first
-  const jup = await getJupiterPriceUsd(mint);
-  if (jup !== null) {
-    return jup;
-  }
-
-  // Fallback to DexScreener (often better for brand new tokens)
-  console.warn(`[moonboy] Jupiter price unavailable for ${mint} — falling back to DexScreener`);
   return (await getDexScreenerData(mint)).priceUsd;
 }
 
@@ -218,6 +194,7 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     entryPriceUsd: metrics.priceUsd ?? 0,
     takeProfitPct: moonboyStrategy.exits.takeProfitPct,
     stopLossPct: moonboyStrategy.exits.stopLossPct,
+    ageMinutes: metrics.ageHours != null ? Math.round(metrics.ageHours * 60) : undefined,
   }).catch(() => {})
 
   console.log(`${label} position opened ✔ id=${newMoonboy.id} (sig=${sig.slice(0, 8)}…)`)
@@ -275,9 +252,10 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
       ? ((currentPriceUsd - entryPriceUsd) / entryPriceUsd) * 100
       : 0
 
+    const ageMin = Math.round(ageHours * 60);
     console.log(
       `${label} price=$${currentPriceUsd ? currentPriceUsd.toFixed(6) : 'n/a'} entry=$${entryPriceUsd.toFixed(6)} ` +
-      `pnl=${pnlPct.toFixed(1)}% age=${ageHours.toFixed(1)}h`,
+      `pnl=${pnlPct.toFixed(1)}% age=${ageMin}min`,
     )
 
     // === Sophisticated Moonboy trailing exit logic (Section 6.1) ===
