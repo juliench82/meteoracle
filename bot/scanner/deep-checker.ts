@@ -3,15 +3,16 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
 /**
- * Ultra-simplified deep-check / decision layer.
+ * Ultra-minimal deep-check / decision layer (age-only model).
  *
- * Current model (post-simplification):
- * - Only tokens with pool age ≤ MAX_POOL_AGE_MINUTES are considered
- * - No scoring is performed for the opening decision
- * - Rugcheck and holder data are fetched for informational purposes only
- *   (they appear in rich Telegram notifications)
- * - Best pool is chosen by highest liquidity
- * - Evil Panda position is opened + Moonboy is triggered
+ * - Hard gate: pool age ≤ MAX_POOL_AGE_MINUTES (30 by default)
+ * - Very light pre-filter (only basic TVL floor + must have SOL/USDC/USDT quote)
+ * - No fee/TVL or volume/TVL requirements in the hot path
+ * - No scoring, no momentum lanes
+ * - Best pool per token chosen purely by highest liquidity (TVL)
+ * - Then deep-check enrichment + accept (if fresh) → open + Moonboy
+ *
+ * Rugcheck + holders are fetched only for rich Telegram notifications (informational).
  */
 
 import axios from 'axios'
@@ -68,14 +69,6 @@ import {
 
 const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
 const JUP_PRICE_URL = 'https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112'
-
-
-const METEORA_FILTERED_FETCH = {
-  minTvlUsd: parseFloat(process.env.METEORA_MIN_TVL_USD ?? '8000'),
-  minFeeTvlRatio1h: parseFloat(process.env.METEORA_MIN_FEE_TVL_RATIO_1H ?? '0.001'),
-  minVolumeTvl1hRatio: parseFloat(process.env.METEORA_MIN_VOLUME_TVL_1H_RATIO ?? '0.20'),
-  limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '800'),
-}
 
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 const EXTERNAL_CALL_TIMEOUT_MS = 8_000
@@ -331,17 +324,24 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     })
   }
 
-  // fetching Meteora pools (ultra-simplified model: only fresh age filter)
+  // fetching Meteora pools — ultra-minimal model (Option B)
+  // Primary gate is age (MAX_POOL_AGE_MINUTES) + basic sanity only.
+  // No meaningful fee/TVL or volume/TVL requirements in the pre-filter.
+  // Highest-liquidity pool selection + the new filterFreshPools/selectFreshCandidates
+  // are the real decision logic.
   const freshConfig = {
     maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
     maxCandidates: MAX_FRESH_DEEP_CHECKS,
   }
 
   const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools({
-    ...METEORA_FILTERED_FETCH,
+    minTvlUsd: parseFloat(process.env.METEORA_MIN_TVL_USD ?? '3000'),
+    minFeeTvlRatio1h: 0,
+    minVolumeTvl1hRatio: 0,
+    limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '1200'),
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
     maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
-    minLiquidityUsd: 20_000,
+    minLiquidityUsd: parseFloat(process.env.METEORA_MIN_LIQUIDITY_USD_FOR_FRESH ?? '3000'),
     maxLiquidityUsd: 500_000_000,
   })
   if (fetchError) {
