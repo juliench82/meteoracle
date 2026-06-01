@@ -65,7 +65,7 @@ import {
   filterFreshPools,
   selectFreshCandidates,
   selectBestPool,
-} from './lane-classifier'
+} from './fresh-pool-filter'
 
 const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
 const JUP_PRICE_URL = 'https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112'
@@ -334,14 +334,16 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     maxCandidates: MAX_FRESH_DEEP_CHECKS,
   }
 
+  // Ultra-minimal scanner fetch: ONLY age gate + basic quote asset sanity.
+  // No minimum TVL, no minimum liquidity — as repeatedly specified.
   const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools({
-    minTvlUsd: parseFloat(process.env.METEORA_MIN_TVL_USD ?? '3000'),
+    minTvlUsd: 0,
     minFeeTvlRatio1h: 0,
     minVolumeTvl1hRatio: 0,
     limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '1200'),
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
     maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
-    minLiquidityUsd: parseFloat(process.env.METEORA_MIN_LIQUIDITY_USD_FOR_FRESH ?? '3000'),
+    minLiquidityUsd: 0,
     maxLiquidityUsd: 500_000_000,
   })
   if (fetchError) {

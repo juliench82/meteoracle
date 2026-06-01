@@ -55,8 +55,6 @@ export interface MeteoraPool {
 
 export type PoolFetchConfig = {
   minTvlUsd: number
-  minFeeTvlRatio1h: number
-  minVolumeTvl1hRatio: number
   limit: number
   timeoutMs: number
   maxPoolAgeMinutes: number
@@ -224,7 +222,7 @@ export function getRecentVolumeGrowth(pool: MeteoraPool): number {
   return vol5mAnnualizedTo1h / vol1h
 }
 
-// scoreMeteoraMomentum fully removed in simplification cleanup (no longer used)
+// (scoreMeteoraMomentum fully removed — no longer used)
 
 export function getQuoteTokenMint(pool: MeteoraPool): string {
   return QUOTE_ASSETS.has(pool.token_x.address)
@@ -323,9 +321,7 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
   const pools = applyJsPreFilter(allPools, config)
   console.log(
     `[scanner] ${allPools.length} filtered Meteora pools fetched; ${pools.length} passed JS pre-filter ` +
-    `(minTvl=$${config.minTvlUsd}, ` +
-    `minFeeTvl1h=${(config.minFeeTvlRatio1h * 100).toFixed(1)}%, ` +
-    `minVolTvl1h=${config.minVolumeTvl1hRatio.toFixed(2)})`,
+    `(minTvl=$${config.minTvlUsd})`,
   )
   return { pools }
 }
@@ -339,9 +335,6 @@ function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): Met
     if (getPoolTvl(pool) > config.maxLiquidityUsd) return false
     const hasQuote = QUOTE_ASSETS.has(pool.token_x.address) || QUOTE_ASSETS.has(pool.token_y.address)
     if (!hasQuote) return false
-    const hasFeeTvl = getFeeTvlRatio(pool, '1h') >= config.minFeeTvlRatio1h
-    const hasVolumeTvl = getVolumeTvlRatio(pool, '1h') >= config.minVolumeTvl1hRatio
-    if (!hasFeeTvl && !hasVolumeTvl) return false
     return true
   })
 }

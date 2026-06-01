@@ -63,9 +63,9 @@ export async function persistPosition(
       strategy_version:      strategy.version,
       bin_range_down:        strategy.position.rangeDownPct,
       bin_range_up:          strategy.position.rangeUpPct,
+      // Legacy exit fields removed for ultra-minimal LP model.
+      // Only duration + OOR fallback values are kept for getPositionExitRules compatibility.
       maxDurationHours:      strategy.exits.maxDurationHours,
-      stop_loss_pct:         strategy.exits.stopLossPct,
-      take_profit_pct:       strategy.exits.takeProfitPct,
       out_of_range_minutes:  strategy.exits.outOfRangeMinutes,
       market_cap_usd:        metrics.mcUsd,
       volume_24h_usd:        metrics.volume24h,
@@ -124,16 +124,12 @@ export async function sendOpenAlert(
     await sendAlert({
       type: 'position_opened',
       symbol: metrics.symbol,
-      strategy: strategy.id,
       solDeposited,
       entryPrice: metrics.priceUsd ?? 0,
       positionId,
-      takeProfitPct: strategy.exits.takeProfitPct,
-      stopLossPct: strategy.exits.stopLossPct,
       volume24h: metrics.volume24h,
       entryPriceUsd: metrics.priceUsd ?? 0,
       entryPriceSol,
-      meteoracleScore: metrics.score,
       rugcheckScore: metrics.rugcheckScore,
       rugcheckUrl: metrics.rugcheckUrl,
       holderCount: metrics.holderCount,

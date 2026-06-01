@@ -230,6 +230,12 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
 // ── Helpers for the 4-rule exit engine ──────────────────────────────────────────
 
+/**
+ * Rough net PnL approximation for LP exit decisions during dry-run observation.
+ * This is intentionally heuristic (active bin price + crude side valuation + pending fees).
+ * It is NOT a full on-chain position valuation (token amounts × prices + all claimed + unclaimed fees).
+ * Good enough to start collecting data on the -30% rule; can be improved later with better valuation.
+ */
 function computeNetPnlApprox(
   pos: any,
   onChainPos: any,

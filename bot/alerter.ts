@@ -17,7 +17,7 @@ type AlertPayload =
       volume24h?: number
       entryPriceUsd?: number
       entryPriceSol?: number
-      meteoracleScore?: number
+      // meteoracleScore removed for ultra-minimal LP model (no scoring)
       rugcheckScore?: number | string
       rugcheckUrl?: string
       holderCount?: number
@@ -97,16 +97,22 @@ function formatScore(score: number | undefined): string {
   return `${Math.round(score)}/100`
 }
 
+function escapeMarkdown(text: string): string {
+  // Escape special Markdown characters
+  return text.replace(/([_*[\]()~`>#+\-=|{}.!])/g, '\\$1');
+}
+
 function formatMessage(payload: AlertPayload): string {
   switch (payload.type) {
     case 'position_opened': {
+      const safeSymbol = escapeMarkdown(payload.symbol)
       const dexUrl = `https://dexscreener.com/solana/${payload.poolAddress || payload.mint || ''}`
       const entryUsd = payload.entryPriceUsd ?? payload.entryPrice
       const entrySol = payload.entryPriceSol ?? ''
       const entrySolPart = entrySol ? ` | ${entrySol} SOL` : ''
 
       const rugLine = payload.rugcheckScore != null && payload.rugcheckUrl
-        ? `📊 Rugcheck: ${payload.rugcheckScore}/100\n   → ${payload.rugcheckUrl}`
+        ? `📊 Rugcheck: ${payload.rugcheckScore}/100\n   → [Rugcheck](${payload.rugcheckUrl})`
         : payload.rugcheckScore != null
           ? `📊 Rugcheck: ${payload.rugcheckScore}/100`
           : '📊 Rugcheck: N/A'
@@ -116,19 +122,21 @@ function formatMessage(payload: AlertPayload): string {
         : '👥 Holders: N/A'
 
       return [
-        `🟢 *BUY* ${payload.symbol}`,
+        `🟢 *BUY* ${safeSymbol}`,
         `💰 Deployed: ${payload.solDeposited} SOL`,
         `💵 Entry Price: ${formatUsdPrice(entryUsd)}${entrySolPart}`,
         rugLine,
         holdersLine,
-        `📈 ${dexUrl}`,
+        `📈 [Dexscreener](${dexUrl})`,
       ].join('\n')
     }
 
     case 'position_closed': {
+      const safeSymbol = escapeMarkdown(payload.symbol)
+      const safeReason = escapeMarkdown(payload.reason)
       const lines = [
-        `🔴 *SELL* ${payload.symbol}`,
-        `Reason: ${payload.reason}`,
+        `🔴 *SELL* ${safeSymbol}`,
+        `Reason: ${safeReason}`,
       ]
 
       if (payload.claimableFeesUsd != null) {
@@ -187,36 +195,39 @@ function formatMessage(payload: AlertPayload): string {
       ].join('\n')
 
     case 'moonboy_opened': {
+      const safeSymbol = escapeMarkdown(payload.symbol)
       const dexUrl = `https://dexscreener.com/solana/${payload.mint}`
       const pnlSign = payload.takeProfitPct >= 0 ? '+' : ''
       return [
-        `🌙 *MOONBOY BUY* ${payload.symbol}`,
+        `🌙 *MOONBOY BUY* ${safeSymbol}`,
         `💵 Buy Size: $${payload.buyUsd} (~${payload.solSpent.toFixed(4)} SOL)`,
         `📊 Entry: ${formatUsdPrice(payload.entryPriceUsd)}`,
         `🎯 TP: ${pnlSign}${payload.takeProfitPct}% | SL: ${payload.stopLossPct}%`,
-        `📈 ${dexUrl}`,
+        `📈 [Dexscreener](${dexUrl})`,
       ].join('\n')
     }
 
     case 'moonboy_closed': {
+      const safeSymbol = escapeMarkdown(payload.symbol)
+      const safeReason = escapeMarkdown(payload.reason)
       const pnlSign = payload.pnlPct >= 0 ? '+' : ''
       const pnlEmoji = payload.pnlPct >= 0 ? '🟢' : '🔴'
       const dexUrl = `https://dexscreener.com/solana/${payload.mint}`
       return [
-        `${pnlEmoji} *MOONBOY SELL* ${payload.symbol}`,
+        `${pnlEmoji} *MOONBOY SELL* ${safeSymbol}`,
         `PnL: *${pnlSign}${payload.pnlPct.toFixed(2)}%*`,
-        `Reason: ${payload.reason}`,
+        `Reason: ${safeReason}`,
         `Held: ${payload.ageHours}h`,
         `Sig: \`${payload.swapSig.slice(0, 12)}…\``,
-        `📈 ${dexUrl}`,
+        `📈 [Dexscreener](${dexUrl})`,
       ].join('\n')
     }
 
     case 'warning':
-      return `⚠️ *Warning*\n${payload.message}`
+      return `⚠️ *Warning*\n${escapeMarkdown(payload.message)}`
 
     case 'error':
-      return `❌ *Bot Error*\n${payload.message}`
+      return `❌ *Bot Error*\n${escapeMarkdown(payload.message)}`
 
     default:
       return `🤖 Meteoracle event`

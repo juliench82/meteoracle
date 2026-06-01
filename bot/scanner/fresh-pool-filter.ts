@@ -1,14 +1,14 @@
 /**
- * lane-classifier.ts  (legacy name — to be renamed in future)
+ * fresh-pool-filter.ts
  *
- * Ultra-simple fresh-only filter for the minimal scanner.
+ * Ultra-minimal fresh-only filter for the age-based scanner.
  *
  * Responsibilities:
  * - Age gate: only pools with age <= MAX_POOL_AGE_MINUTES
- * - Cap the number of candidates we deep-check
+ * - Cap the number of candidates we process
  * - Highest-liquidity pool selection when multiple tiers exist for one token
  *
- * No lanes. No momentum. No scoring.
+ * This is the entire "brain" for the ultra-simple model. No lanes. No momentum. No scoring.
  */
 
 import type { MeteoraPool } from './pool-fetcher';
@@ -20,7 +20,7 @@ import {
   getTradableToken,
 } from './pool-fetcher';
 
-// Minimal config for the fresh-only path (no lanes, no momentum)
+// Minimal config for the fresh-only age-based path
 export type FreshFilterConfig = {
   maxPoolAgeMinutes?: number;
   maxCandidates?: number;   // how many fresh pools we will deep-check per tick
@@ -127,4 +127,4 @@ export function selectBestPool(
   return { pool: best };
 }
 
-// passesMomentumRegain fully removed in simplification cleanup (no longer used)
+// (passesMomentumRegain fully removed — no longer used)

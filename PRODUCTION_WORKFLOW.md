@@ -51,7 +51,7 @@ sequenceDiagram
     participant W as worker.ts
     participant S as runScanner (deep-checker)
     participant F as fetchMeteoraPools
-    participant L as lane-classifier
+    participant F as fresh-pool-filter
     participant D as deep-check loop
     participant E as executor/open.ts
     participant M as moonboy-executor

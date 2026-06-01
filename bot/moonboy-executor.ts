@@ -12,15 +12,17 @@ import { logError } from '@/lib/log'
 
 const MOONBOY_BUY_USD = parseFloat(process.env.MOONBOY_BUY_USD ?? '10')
 const MOONBOY_MAX_OPEN = parseInt(process.env.MOONBOY_MAX_OPEN ?? '3')
-const MOONBOY_MAX_TOKEN_AGE_MINUTES = parseFloat(
-  process.env.MOONBOY_MAX_TOKEN_AGE_MINUTES ?? '30',
-)
 const DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex/tokens'
 
 const JUPITER_PRICE_API = 'https://api.jup.ag/price/v2'
 
-const PNL_UNAVAILABLE_ALERT_TICKS = 3
-const PNL_UNAVAILABLE_FORCE_EXIT_TICKS = 10
+const isDryRun = process.env.BOT_DRY_RUN === 'true';
+const PNL_UNAVAILABLE_ALERT_TICKS = parseInt(
+  process.env.MOONBOY_PNL_UNAVAILABLE_ALERT_TICKS ?? (isDryRun ? '5' : '3')
+);
+const PNL_UNAVAILABLE_FORCE_EXIT_TICKS = parseInt(
+  process.env.MOONBOY_PNL_UNAVAILABLE_FORCE_EXIT_TICKS ?? (isDryRun ? '15' : '10')
+);
 const _moonboyNullPnlTicks = new Map<string, number>()
 
 type MoonboyRow = {
@@ -86,6 +88,23 @@ async function getTokenPriceUsd(mint: string): Promise<number | null> {
   return (await getDexScreenerData(mint)).priceUsd
 }
 
+/**
+ * Primary price source for ongoing Moonboy PnL tracking.
+ * Tries Jupiter first (fast + reliable for most tokens), then falls back to DexScreener.
+ * This is important for very fresh pump.fun graduates where Jupiter often lags or returns nothing.
+ */
+async function getMoonboyPriceUsd(mint: string): Promise<number | null> {
+  // Try Jupiter first
+  const jup = await getJupiterPriceUsd(mint);
+  if (jup !== null) {
+    return jup;
+  }
+
+  // Fallback to DexScreener (often better for brand new tokens)
+  console.warn(`[moonboy] Jupiter price unavailable for ${mint} — falling back to DexScreener`);
+  return (await getDexScreenerData(mint)).priceUsd;
+}
+
 export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: number): Promise<string | null> {
   const label = `[moonboy][${metrics.symbol}]`
 
@@ -95,15 +114,6 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     console.log(`${label} strategy disabled — aborting`)
     return null
   }
-
-  // ── DexScreener age gate ──────────────────────────────────────────────────
-  // In the ultra-minimal model, Moonboy is only triggered from the scanner
-  // after a successful fresh LP open (age already ≤ MAX_POOL_AGE_MINUTES).
-  // We therefore skip the DexScreener age gate here for LP-triggered Moonboy.
-  // (The MOONBOY_MAX_TOKEN_AGE_MINUTES env is kept as a safety net for any future
-  // standalone Moonboy paths, if any are added.)
-  // No DexScreener age check for LP-triggered Moonboy.
-  // ─────────────────────────────────────────────────────────────────────────
 
   const openCount = (getOpenMoonboys() as any[]).length
   if (openCount >= MOONBOY_MAX_OPEN) {
@@ -227,7 +237,7 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
     stats.checked++
     const label = `[moonboy][${pos.symbol}]`
 
-    const currentPriceUsd = await getJupiterPriceUsd(pos.mint)
+    const currentPriceUsd = await getMoonboyPriceUsd(pos.mint)
     const previousNullPnlTicks = _moonboyNullPnlTicks.get(pos.id) ?? 0
     let currentNullPnlTicks = previousNullPnlTicks
     let closeReason: string | null = null

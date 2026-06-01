@@ -7,7 +7,7 @@ import {
   EVIL_PANDA_MIN_HOLDER_COUNT,
 } from '@/lib/strategy-config'
 
-// EVIL_PANDA_SCANNER_SCORE_WEIGHTS removed in final simplification cleanup (no scoring in entry path)
+// (Old scoring weights fully removed — no scoring in entry path)
 
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
@@ -36,16 +36,12 @@ export const evilPandaStrategy: Strategy = {
     solBias: envNumber('EVIL_PANDA_SOL_BIAS', 1),
   },
   exits: {
-    // These values are snapshotted into each LP position's metadata at open time
-    // for backward compatibility with older monitor paths.
-    // The ultra-minimal 4-rule LP exit system (see strategy-config LP_* constants + monitor.ts)
-    // is the authoritative logic for Evil Panda positions. Most of these fields are ignored at runtime.
-    stopLossPct: envNumber('EVIL_PANDA_STOP_LOSS_PCT', -25),
-    takeProfitPct: envNumber('EVIL_PANDA_TAKE_PROFIT_PCT', 50),
+    // Only OOR and duration are still snapshotted for fallback compatibility
+    // with getPositionExitRules in monitor. All other LP exit logic lives in
+    // the LP_* constants in strategy-config.ts.
     outOfRangeMinutes: envNumber('EVIL_PANDA_OOR_MINUTES', 30),
     maxDurationHours: envNumber('EVIL_PANDA_MAX_DURATION_HOURS', 12),
     claimFeesBeforeClose: true,
     minFeesToClaim: envNumber('EVIL_PANDA_MIN_FEES_TO_CLAIM', 0.001),
-    maxIlPct: envNumber('EVIL_PANDA_MAX_IL_PCT', -15),
   },
 }
