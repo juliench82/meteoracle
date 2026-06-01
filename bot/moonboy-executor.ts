@@ -151,6 +151,11 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
     console.log(`${label} DRY RUN — would buy ~$${MOONBOY_BUY_USD}`)
   }
 
+  // Fetch DexScreener data for metadata (age at open). The main age gate
+  // is now enforced by the scanner's MAX_POOL_AGE_MINUTES before triggering Moonboy.
+  const nowMs = Date.now()
+  const dexData = await getDexScreenerData(metrics.address)
+
   const tokenAgeMinutesAtOpen = dexData.pairCreatedAt !== null
     ? (nowMs - dexData.pairCreatedAt) / 60_000
     : null

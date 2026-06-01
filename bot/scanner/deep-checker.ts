@@ -659,7 +659,7 @@ async function attemptOpenAndNotify(params: {
   } = params;
 
   candidateCountRefParam.value++;
-  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct: metrics.bondingCurvePct });
+  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: 0, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct: metrics.bondingCurvePct });
 
   const disabledReason = getDisabledStrategyReason(strategy.id);
   if (disabledReason) {
@@ -702,6 +702,7 @@ async function attemptOpenAndNotify(params: {
     await sendAlert({
       type: 'position_opened',
       symbol,
+      strategy: strategy.id,
       solDeposited: MARKET_LP_SOL_PER_POSITION,
       entryPrice: metrics.priceUsd,
       entryPriceUsd: metrics.priceUsd,

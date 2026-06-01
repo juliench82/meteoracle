@@ -68,6 +68,8 @@ export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
 
 // ── Scanner entry filter (ultra-simplified model) ──
 export const MAX_POOL_AGE_MINUTES = envNumber('MAX_POOL_AGE_MINUTES', 30)
+// Cap on how many fresh age-qualified pools we will deep-check / enrich per scanner tick.
+export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 12)
 
 // ── LP Position Exit Rules (ultra-minimal model) ──
 // 48h dry-run starting point (2026-06). Tune after observing real Fee/TVL decay curves + net PnL behavior.
