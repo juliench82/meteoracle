@@ -241,20 +241,32 @@ async function fetchMeteoraPoolsPage(
   sortBy: 'pool_created_at' | 'volume_1h' | 'volume_5m',
   config: PoolFetchConfig,
 ): Promise<MeteoraPool[]> {
-  const filters = [`tvl>=${config.minTvlUsd}`, 'is_blacklisted=false']
+  const filters = ['is_blacklisted=false']
+  if (config.minTvlUsd > 0) {
+    filters.unshift(`tvl>=${config.minTvlUsd}`)
+  }
   const params: Record<string, string | number> = {
     page: 1,
-    page_size: config.limit,
-    limit: config.limit,
+    page_size: Math.min(config.limit, 100), // API seems sensitive to large sizes sometimes
     sort_by: `${sortBy}:desc`,
     filter_by: filters.join(' && '),
   }
 
-  const res = await axios.get<unknown>(`${baseUrl}/pools`, {
-    params,
-    timeout: config.timeoutMs,
-  })
-  return normalizeMeteoraPoolsResponse(res.data)
+  // Simple retry for transient 4xx/5xx on Meteora public API
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await axios.get<unknown>(`${baseUrl}/pools`, {
+        params,
+        timeout: config.timeoutMs,
+      })
+      return normalizeMeteoraPoolsResponse(res.data)
+    } catch (err) {
+      if (attempt === 1) throw err
+      console.warn(`[scanner] ${baseUrl}/pools attempt ${attempt + 1} failed, retrying...`)
+      await new Promise(r => setTimeout(r, 300))
+    }
+  }
+  return []
 }
 
 export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchConfig): Promise<MeteoraPool[]> {
@@ -274,11 +286,9 @@ export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: Poo
     .sort((a, b) => (getPoolCreatedAt(b) ?? 0) - (getPoolCreatedAt(a) ?? 0))
   if (pools.length > 0) return pools
 
-  console.warn(`[scanner] ${baseUrl}/pools returned no usable pools; trying documented /pair/all fallback`)
-  const fallback = await axios.get<unknown>(`${baseUrl}/pair/all`, {
-    timeout: config.timeoutMs,
-  })
-  return normalizeMeteoraPoolsResponse(fallback.data)
+  // No pools from this endpoint's /pools (either empty or fetch failed inside). 
+  // /pair/all deprecated, so just return empty for this endpoint (outer logic will try next endpoint).
+  return []
 }
 
 export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pools: MeteoraPool[]; error?: string }> {
@@ -295,14 +305,17 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
   }
 
   // 2. Live fetch from Meteora API (no persistent DB warm cache in simplified model)
-  let allPools: MeteoraPool[] = []
+  // Try both endpoints and merge to be resilient to transient flakes on one.
+  const poolMap = new Map<string, MeteoraPool>()
   for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
     try {
       console.log(`[scanner] trying Meteora endpoint: ${endpoint}`)
-      allPools = await fetchMeteoraPoolsFromEndpoint(endpoint, config)
-      if (allPools.length > 0) {
-        console.log(`[scanner] ${endpoint} returned ${allPools.length} pools`)
-        break
+      const endpointPools = await fetchMeteoraPoolsFromEndpoint(endpoint, config)
+      for (const p of endpointPools) {
+        if (!poolMap.has(p.address)) poolMap.set(p.address, p)
+      }
+      if (endpointPools.length > 0) {
+        console.log(`[scanner] ${endpoint} returned ${endpointPools.length} pools`)
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -311,6 +324,7 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
     }
   }
 
+  const allPools = Array.from(poolMap.values())
   if (allPools.length === 0) {
     return { pools: [], error: 'All Meteora endpoints failed or returned empty' }
   }

@@ -380,7 +380,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   if (!limitState) {
     openBlockedReason = 'position_limit_unavailable'
-    console.warn('[scanner] position limit check unavailable — scoring candidates but refusing to open new positions')
+    console.warn('[scanner] position limit check unavailable — refusing to open new positions')
   } else {
     openCount = limitState.effectiveOpenCount
     if (!limitState.liveFetchOk) {
