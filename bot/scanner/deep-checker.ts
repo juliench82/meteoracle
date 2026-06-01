@@ -9,7 +9,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
  * - Very light pre-filter (only basic TVL floor + must have SOL/USDC/USDT quote)
  * - No fee/TVL or volume/TVL requirements in the hot path
  * - No scoring, no momentum lanes
- * - Best pool per token chosen purely by highest liquidity (TVL)
+ * - Best pool per token chosen by highest 24h Fee/TVL
  * - Then deep-check enrichment + accept (if fresh) → open + Moonboy
  *
  * Rugcheck + holders are fetched only for rich Telegram notifications (informational).
@@ -182,32 +182,38 @@ async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
  * In the minimal model the scanner already only considers fresh tokens (≤ MAX_POOL_AGE_MINUTES),
  * so we do not re-apply a separate age gate here.
  */
-async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): Promise<void> {
+async function triggerMoonboyOnCandidate(
+  metrics: TokenMetrics, 
+  solPriceUsd: number,
+  attemptsCounter?: { value: number },
+  successesCounter?: { value: number }
+): Promise<void> {
   const isDryRun = process.env.BOT_DRY_RUN === 'true'
   const label = `[moonboy][${metrics.symbol}]`
 
+  if (attemptsCounter) attemptsCounter.value++;
+
+  console.log(`${label} evaluating Moonboy on fresh candidate (age=${metrics.ageHours.toFixed(1)}h)`);
+
   if (!moonboyStrategy.enabled) {
-    if (isDryRun) {
-      console.log(`${label} would have fired companion buy (strategy disabled)`)
-    }
+    console.log(`${label} skipped — Moonboy strategy disabled`);
     return
   }
 
+  // Note: The main scanner already enforces age ≤ MAX_POOL_AGE_MINUTES.
+  // We keep this secondary check only as a safety net for standalone Moonboy paths.
   const maxAge = moonboyStrategy.filters.maxAgeHours
   if (metrics.ageHours > maxAge) {
-    if (isDryRun) {
-      console.log(`${label} would have fired but age ${metrics.ageHours.toFixed(1)}h > ${maxAge}h gate`)
-    } else {
-      console.log(`${label} skipped — age ${metrics.ageHours.toFixed(1)}h > ${maxAge}h gate`)
-    }
+    console.log(`${label} skipped — age ${metrics.ageHours.toFixed(1)}h > ${maxAge}h gate (Moonboy max age)`);
     return
   }
 
-  console.log(`${label} triggering companion spot-buy after LP open (age=${metrics.ageHours.toFixed(1)}h)`)
+  console.log(`${label} triggering companion spot-buy on fresh candidate (age=${metrics.ageHours.toFixed(1)}h)`)
 
   try {
     const moonboyId = await openMoonboyPosition(metrics, solPriceUsd)
     if (moonboyId) {
+      if (successesCounter) successesCounter.value++;
       console.log(`${label} companion spot-buy succeeded (id=${moonboyId})`)
     } else {
       console.log(`${label} companion spot-buy did not open (see moonboy logs above)`)
@@ -334,8 +340,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     maxCandidates: MAX_FRESH_DEEP_CHECKS,
   }
 
-  // Ultra-minimal scanner fetch: ONLY age gate + basic quote asset sanity.
-  // No minimum TVL, no minimum liquidity — as repeatedly specified.
+  // Ultra-minimal scanner fetch: **Only the age gate**.
+  // No TVL, liquidity, fee/TVL or volume filters are applied at fetch time.
   const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools({
     minTvlUsd: 0,
     minFeeTvlRatio1h: 0,
@@ -344,7 +350,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
     maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
     minLiquidityUsd: 0,
-    maxLiquidityUsd: 500_000_000,
+    maxLiquidityUsd: Number.MAX_SAFE_INTEGER,
   })
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
@@ -408,6 +414,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
+  // Simple counters for better tick summary (debuggability)
+  const moonboyAttempts = { value: 0 };
+  const moonboySuccesses = { value: 0 };
+
   const tickContext: ScannerTickContext = {
     freshPools,
     limitState,
@@ -420,6 +430,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     openSkippedCount: { value: openSkippedCount },
     candidateCount: { value: candidateCount },
     dailyLossLimitHit: { value: dailyLossLimitHit },
+    moonboyAttempts,
+    moonboySuccesses,
   };
 
   for (const cand of freshCandidates) {
@@ -432,10 +444,19 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   candidateCount = tickContext.candidateCount.value;
   dailyLossLimitHit = tickContext.dailyLossLimitHit.value;
 
+  // === Tick Summary for debuggability ===
   console.log(
-    `[scanner] done — scanned=${fetchedPools.length}, candidates=${freshCandidates.length}, ` +
+    `[scanner] tick done — scanned=${fetchedPools.length}, candidates=${freshCandidates.length}, ` +
     `processed=${candidateCount}, opened=${openedCount}, skipped=${openSkippedCount}`
   )
+
+  // High-level summary (very useful when debugging why nothing happened this tick)
+  console.log(
+    `[scanner] summary — fresh=${freshCandidates.length}, opened=${openedCount}, skipped=${openSkippedCount}, ` +
+    `openSlots=${availableOpenSlots}, dailyLossHit=${dailyLossLimitHit ?? false}, ` +
+    `moonboyAttempts=${tickContext.moonboyAttempts.value}, moonboySuccesses=${tickContext.moonboySuccesses.value}`
+  )
+
   return finish({
     scanned: fetchedPools.length,
     candidates: freshCandidates.length,
@@ -479,6 +500,10 @@ interface ScannerTickContext {
   openSkippedCount: { value: number };
   candidateCount: { value: number };
   dailyLossLimitHit: { value: boolean | null };
+
+  // Moonboy counters for summary
+  moonboyAttempts: { value: number };
+  moonboySuccesses: { value: number };
 }
 
 /**
@@ -510,11 +535,14 @@ async function processFreshCandidate(
   const token = getTradableToken(representativePool);
   const tokenAddress = token.address;
   const symbol = representativePool.name ?? token.symbol;
+  const label = `[scanner][${symbol}]`;
+
+  console.log(`${label} processing fresh candidate (age=${ageHours.toFixed(1)}h)`);
   const launchpadSource: 'pumpfun' | 'moonshot' | 'meteora' = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora';
   const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address);
 
   if (openedMintsThisTick.has(tokenAddress)) {
-    console.log(`[scanner] ${symbol} — skip: position already opened earlier this tick`);
+    console.log(`${label} skip: position already opened earlier this tick`);
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
@@ -523,21 +551,21 @@ async function processFreshCandidate(
   }
 
   if (liveOpenPosition) {
-    console.log(`[scanner] ${symbol} — skip: live Meteora position already exists (${liveOpenPosition.position_pubkey})`);
+    console.log(`${label} skip: live Meteora position already exists (${liveOpenPosition.position_pubkey})`);
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
   const conflicting = findConflictingLocalPosition(tokenAddress);
   if (conflicting) {
     if (OPEN_LP_STATUSES.includes(conflicting.status)) {
-      console.log(`[scanner] ${symbol} — skip: existing open LP position for mint (id=${conflicting.id})`);
+      console.log(`${label} skip: existing open LP position for mint (id=${conflicting.id})`);
     } else {
-      console.log(`[scanner] ${symbol} — skip: recent bad close for this mint (id=${conflicting.id}, reason=${conflicting.close_reason})`);
+      console.log(`${label} skip: recent bad close for this mint (id=${conflicting.id}, reason=${conflicting.close_reason})`);
     }
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
-  // Pool selection: When multiple tiers exist for a token, we prefer highest liquidity
+  // Pool selection: When multiple tiers exist for a token, we prefer highest 24h Fee/TVL
   const result = selectBestPool(freshPools, tokenAddress);
   const bestPool = result.pool;
 
@@ -547,17 +575,17 @@ async function processFreshCandidate(
   );
   if (tokenPools.length > 1 && bestPool) {
     const chosenTvl = getPoolTvl(bestPool);
-    console.log(`[scanner] ${symbol} — multiple pools for token (${tokenPools.length}), selected highest liquidity pool (TVL=$${chosenTvl.toLocaleString()})`);
+    console.log(`[scanner] ${symbol} — multiple pools for token (${tokenPools.length}), selected highest 24h Fee/TVL pool`);
   }
 
   if (!bestPool) {
-    console.log(`[scanner] ${symbol} — skip: no pool found for token`);
+    console.log(`${label} skip: no pool found for token`);
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
   const liveBestPoolPosition = findLiveOpenPosition(limitState, tokenAddress, bestPool.address);
   if (liveBestPoolPosition) {
-    console.log(`[scanner] ${symbol} — skip: live Meteora position already exists for best pool (${liveBestPoolPosition.position_pubkey})`);
+    console.log(`${label} skip: live Meteora position already exists for best pool (${liveBestPoolPosition.position_pubkey})`);
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
@@ -666,12 +694,12 @@ async function attemptOpenAndNotify(params: {
   const disabledReason = getDisabledStrategyReason(strategy.id);
   if (disabledReason) {
     openSkippedCountRef.value++;
-    console.log(`[scanner] ${symbol} open skipped: ${disabledReason}`);
+    console.log(`${label} open skipped: ${disabledReason}`);
     return { wasCandidate: true, wasOpened: false, wasSkipped: true };
   }
   if (openBlockedReason || openedCountRef.value >= availableOpenSlots) {
     openSkippedCountRef.value++;
-    console.log(`[scanner] ${symbol} open skipped: ${openBlockedReason ?? 'no_slots'}`);
+    console.log(`${label} open skipped: ${openBlockedReason ?? 'no_slots'}`);
     return { wasCandidate: true, wasOpened: false, wasSkipped: true };
   }
 
@@ -681,15 +709,14 @@ async function attemptOpenAndNotify(params: {
     dailyLossLimitHitRef.value = hit;
     if (hit) {
       openSkippedCountRef.value++;
-      console.log(`[scanner] ${symbol} open skipped: daily loss circuit breaker`);
+      console.log(`${label} open skipped: daily loss circuit breaker`);
       return { wasCandidate: true, wasOpened: false, wasSkipped: true };
     }
   }
 
-  // Moonboy is triggered on successful fresh LP open.
-  // The scanner already enforces age ≤ MAX_POOL_AGE_MINUTES, so we do not
-  // re-apply the Moonboy age gate here (per the ultra-minimal model).
-  void maybeTriggerMoonboy(metrics, liveSolPriceUsd);
+  // Moonboy is triggered on every fresh candidate the scanner picks up
+  // (independent of whether an LP position is actually opened).
+  void triggerMoonboyOnCandidate(metrics, liveSolPriceUsd, tickContext.moonboyAttempts, tickContext.moonboySuccesses);
 
   const positionId = await openPosition(metrics, strategy);
   if (positionId) {
@@ -697,7 +724,7 @@ async function attemptOpenAndNotify(params: {
     dailyLossLimitHitRef.value = null;
     openedMintsThisTick.add(metrics.address);
 
-    console.log(`[scanner] ${symbol} — LP position opened ✔ (id=${positionId})`);
+    console.log(`${label} LP position opened ✔ (id=${positionId})`);
 
     patchOpenPositionMetadata(positionId, strategy.id, symbol);
 

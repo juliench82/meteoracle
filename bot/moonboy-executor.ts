@@ -338,7 +338,10 @@ export async function checkMoonboyPositions(): Promise<{ checked: number; closed
     }).catch(() => {})
 
     if (!closeReason) {
-      if (pnlPct >= moonboyStrategy.exits.takeProfitPct) {
+      // Hard price stop-loss at -35% (in addition to strategy stopLossPct)
+      if (pnlPct <= -35) {
+        closeReason = `stoploss_price_-35pct`
+      } else if (pnlPct >= moonboyStrategy.exits.takeProfitPct) {
         closeReason = `takeprofit_${pnlPct.toFixed(1)}pct`
       } else if (pnlPct <= moonboyStrategy.exits.stopLossPct) {
         closeReason = `stoploss_${pnlPct.toFixed(1)}pct`

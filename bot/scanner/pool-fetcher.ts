@@ -331,8 +331,11 @@ function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): Met
     if (pool.is_blacklisted) return false
     const ageMin = getPoolAgeMinutes(pool)
     if (ageMin > config.maxPoolAgeMinutes) return false
-    if (getPoolTvl(pool) < config.minLiquidityUsd) return false
-    if (getPoolTvl(pool) > config.maxLiquidityUsd) return false
+
+    // Only apply liquidity filter if positive thresholds are provided
+    if (config.minLiquidityUsd > 0 && getPoolTvl(pool) < config.minLiquidityUsd) return false
+    if (config.maxLiquidityUsd > 0 && getPoolTvl(pool) > config.maxLiquidityUsd) return false
+
     const hasQuote = QUOTE_ASSETS.has(pool.token_x.address) || QUOTE_ASSETS.has(pool.token_y.address)
     if (!hasQuote) return false
     return true
