@@ -209,7 +209,6 @@ async function triggerMoonboyOnCandidate(
   try {
     const moonboyId = await openMoonboyPosition(metrics, solPriceUsd)
     if (moonboyId) {
-      if (successesCounter) successesCounter.value++;
       console.log(`${label} companion spot-buy succeeded (id=${moonboyId})`)
     } else {
       console.log(`${label} companion spot-buy did not open (see moonboy logs above)`)
