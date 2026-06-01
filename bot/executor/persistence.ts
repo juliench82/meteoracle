@@ -124,6 +124,7 @@ export async function sendOpenAlert(
     await sendAlert({
       type: 'position_opened',
       symbol: metrics.symbol,
+      strategy: strategy.id,
       solDeposited,
       entryPrice: metrics.priceUsd ?? 0,
       positionId,

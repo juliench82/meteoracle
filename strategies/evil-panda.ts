@@ -36,9 +36,10 @@ export const evilPandaStrategy: Strategy = {
     solBias: envNumber('EVIL_PANDA_SOL_BIAS', 1),
   },
   exits: {
-    // Only OOR and duration are still snapshotted for fallback compatibility
-    // with getPositionExitRules in monitor. All other LP exit logic lives in
-    // the LP_* constants in strategy-config.ts.
+    // Legacy snapshot fields — still required by ExitRules type.
+    // Real LP exits use the LP_* constants in strategy-config.ts.
+    stopLossPct: 0,
+    takeProfitPct: 0,
     outOfRangeMinutes: envNumber('EVIL_PANDA_OOR_MINUTES', 30),
     maxDurationHours: envNumber('EVIL_PANDA_MAX_DURATION_HOURS', 12),
     claimFeesBeforeClose: true,

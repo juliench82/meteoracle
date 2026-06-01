@@ -362,8 +362,6 @@ export async function getCurrentPoolFeeTvl24h(poolAddress: string): Promise<numb
   try {
     const relaxedConfig: PoolFetchConfig = {
       minTvlUsd: 0,
-      minFeeTvlRatio1h: 0,
-      minVolumeTvl1hRatio: 0,
       limit: 2000,
       timeoutMs: 20_000,
       maxPoolAgeMinutes: 60 * 24 * 30, // allow old pools for monitoring existing positions

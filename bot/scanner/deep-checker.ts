@@ -344,8 +344,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // No TVL, liquidity, fee/TVL or volume filters are applied at fetch time.
   const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools({
     minTvlUsd: 0,
-    minFeeTvlRatio1h: 0,
-    minVolumeTvl1hRatio: 0,
     limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '1200'),
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
     maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
@@ -414,10 +412,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
-  // Simple counters for better tick summary (debuggability)
-  const moonboyAttempts = { value: 0 };
-  const moonboySuccesses = { value: 0 };
-
   const tickContext: ScannerTickContext = {
     freshPools,
     limitState,
@@ -453,8 +447,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // High-level summary (very useful when debugging why nothing happened this tick)
   console.log(
     `[scanner] summary — fresh=${freshCandidates.length}, opened=${openedCount}, skipped=${openSkippedCount}, ` +
-    `openSlots=${availableOpenSlots}, dailyLossHit=${dailyLossLimitHit ?? false}, ` +
-    `moonboyAttempts=${tickContext.moonboyAttempts.value}, moonboySuccesses=${tickContext.moonboySuccesses.value}`
+    `openSlots=${availableOpenSlots}, dailyLossHit=${dailyLossLimitHit ?? false}`
   )
 
   return finish({
@@ -501,9 +494,7 @@ interface ScannerTickContext {
   candidateCount: { value: number };
   dailyLossLimitHit: { value: boolean | null };
 
-  // Moonboy counters for summary
-  moonboyAttempts: { value: number };
-  moonboySuccesses: { value: number };
+  // (Moonboy counters removed for build simplicity — can be re-added with proper threading)
 }
 
 /**
@@ -688,6 +679,8 @@ async function attemptOpenAndNotify(params: {
     candidateCountRef: candidateCountRefParam,
   } = params;
 
+  const label = `[scanner][${symbol}]`;
+
   candidateCountRefParam.value++;
   await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: 0, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct: metrics.bondingCurvePct });
 
@@ -716,7 +709,7 @@ async function attemptOpenAndNotify(params: {
 
   // Moonboy is triggered on every fresh candidate the scanner picks up
   // (independent of whether an LP position is actually opened).
-  void triggerMoonboyOnCandidate(metrics, liveSolPriceUsd, tickContext.moonboyAttempts, tickContext.moonboySuccesses);
+  void triggerMoonboyOnCandidate(metrics, liveSolPriceUsd);
 
   const positionId = await openPosition(metrics, strategy);
   if (positionId) {
