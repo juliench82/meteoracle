@@ -132,6 +132,9 @@ export async function sendOpenAlert(
       entryPriceSol,
       meteoracleScore: metrics.score,
       rugcheckScore: metrics.rugcheckScore,
+      rugcheckUrl: metrics.rugcheckUrl,
+      holderCount: metrics.holderCount,
+      topHolderPct: metrics.topHolderPct,
       poolAddress: metrics.poolAddress,
       mint: metrics.address,
     })

@@ -19,6 +19,9 @@ type AlertPayload =
       entryPriceSol?: number
       meteoracleScore?: number
       rugcheckScore?: number | string
+      rugcheckUrl?: string
+      holderCount?: number
+      topHolderPct?: number
       poolAddress?: string
       mint?: string
     }
@@ -95,12 +98,23 @@ function formatMessage(payload: AlertPayload): string {
       const entryUsd = payload.entryPriceUsd ?? payload.entryPrice
       const entrySol = payload.entryPriceSol ?? ''
       const entrySolPart = entrySol ? ` | ${entrySol} SOL` : ''
+
+      const rugLine = payload.rugcheckScore != null && payload.rugcheckUrl
+        ? `📊 Rugcheck: ${payload.rugcheckScore}/100\n   → ${payload.rugcheckUrl}`
+        : payload.rugcheckScore != null
+          ? `📊 Rugcheck: ${payload.rugcheckScore}/100`
+          : '📊 Rugcheck: N/A'
+
+      const holdersLine = (payload.holderCount != null && payload.topHolderPct != null)
+        ? `👥 Holders: ${payload.holderCount.toLocaleString()} (top ${payload.topHolderPct}%)`
+        : '👥 Holders: N/A'
+
       return [
         `🟢 *BUY* ${payload.symbol}`,
         `💰 Deployed: ${payload.solDeposited} SOL`,
-        `🎯 Meteoracle Score: *${formatScore(payload.meteoracleScore)}*`,
         `💵 Entry Price: ${formatUsdPrice(entryUsd)}${entrySolPart}`,
-        `🧠 Strategy: ${payload.strategy}`,
+        rugLine,
+        holdersLine,
         `📈 ${dexUrl}`,
       ].join('\n')
     }

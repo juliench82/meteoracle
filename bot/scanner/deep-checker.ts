@@ -2,6 +2,18 @@ import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
+/**
+ * Ultra-simplified deep-check / decision layer.
+ *
+ * Current model (post-simplification):
+ * - Only tokens with pool age ≤ MAX_POOL_AGE_MINUTES are considered
+ * - No scoring is performed for the opening decision
+ * - Rugcheck and holder data are fetched for informational purposes only
+ *   (they appear in rich Telegram notifications)
+ * - Best pool is chosen by highest liquidity
+ * - Evil Panda position is opened + Moonboy is triggered
+ */
+
 import axios from 'axios'
 // Local state + local logger only
 import { getBotState } from '@/lib/botState'
@@ -16,7 +28,6 @@ import {
   isMoonshotToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
-import { EVIL_PANDA_SCANNER_SCORE_WEIGHTS } from '@/strategies/evil-panda'
 import { openMoonboyPosition } from '../moonboy-executor'
 import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
@@ -30,14 +41,9 @@ import {
   SCANNER_TICK_TIMEOUT_MS,
   CANDIDATE_DEDUP_HOURS,
   OOR_RECHECK_HOURS,
-  FRESH_MAX_AGE_MINUTES,
-  FRESH_MIN_LIQUIDITY_USD,
-  MOMENTUM_MIN_VOLUME_5M_USD,
-  MOMENTUM_MIN_FEE_TVL_5M_PCT,
+  MAX_POOL_AGE_MINUTES,
   DEEP_CHECK_DELAY_MS,
   MAX_FRESH_DEEP_CHECKS,
-  MAX_MOMENTUM_DEEP_CHECKS,
-  MIN_SCORE_TO_OPEN,
   LP_SCANNER_ENABLED,
   EVIL_PANDA_ENABLED,
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
@@ -51,16 +57,13 @@ import {
   getPoolTvl,
   getPoolVolume,
   getQuoteTokenMint,
-  getRecentVolumeGrowth,
   getTradableToken,
   getVolumeTvlRatio,
-  scoreMeteoraMomentum,
 } from './pool-fetcher'
 import {
   classifyPoolsIntoLanes,
   pickDeepCheckSurvivors,
   selectBestPool,
-  passesMomentumRegain,
 } from './lane-classifier'
 
 const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
@@ -79,7 +82,7 @@ const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
 // Re-export values needed by bot/scanner.ts
-export { SCAN_INTERVAL_MS, MAX_CONCURRENT_MARKET_LP_POSITIONS, MARKET_LP_SOL_PER_POSITION } from '@/lib/strategy-config'
+export { SCAN_INTERVAL_MS, MAX_CONCURRENT_MARKET_LP_POSITIONS, MARKET_LP_SOL_PER_POSITION, MAX_POOL_AGE_MINUTES } from '@/lib/strategy-config'
 
 const _bondingCurveCache = new Map<string, { pct: number; complete: boolean | null; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
@@ -174,39 +177,6 @@ function getDisabledStrategyReason(strategyId: string): string | null {
   return null
 }
 
-// (old DAMM edge count removed)
-
-function getScannerAdjustedScore(
-  metrics: TokenMetrics,
-  strategyId: string,
-): number {
-  if (strategyId !== 'evil-panda') return 0
-
-  const w = EVIL_PANDA_SCANNER_SCORE_WEIGHTS
-  const tw = w.freshness + w.rugcheck + w.holders + w.feeTvl1h + w.volumeTvl1h
-  if (tw <= 0) return 0
-
-  // Inline component scorers (evil-panda only path after simplification)
-  const h = metrics.holderCount ?? 0
-  const holderScore = (metrics.holderReliable ?? true)
-    ? (h >= 5000 ? 100 : h >= 2000 ? 80 : h >= 1000 ? 65 : h >= 500 ? 45 : h >= 200 ? 25 : 10)
-    : 0
-
-  const age = metrics.ageHours ?? 0
-  const freshnessScore = age <= 1.5 ? 100 : age <= 6 ? 85 : age <= 24 ? 70 : 55
-
-  const f1 = metrics.feeTvl1hPct ?? 0
-  const feeTvl1hScore = f1 >= 8 ? 100 : f1 >= 5 ? 85 : f1 >= 3 ? 65 : f1 >= 1.5 ? 40 : f1 >= 0.5 ? 20 : 0
-
-  const v1 = metrics.volumeTvl1hRatio ?? 0
-  const volumeTvl1hScore = v1 >= 1.5 ? 100 : v1 >= 1.0 ? 90 : v1 >= 0.5 ? 75 : v1 >= 0.2 ? 55 : v1 >= 0.1 ? 30 : 0
-
-  const rugScore = Math.max(0, Math.min(100, metrics.rugcheckScore ?? 0))
-
-  const weighted = (freshnessScore * w.freshness + rugScore * w.rugcheck + holderScore * w.holders + feeTvl1hScore * w.feeTvl1h + volumeTvl1hScore * w.volumeTvl1h) / tw
-  return Math.round(Math.min(100, Math.max(0, weighted)))
-}
-
 // OOR recheck disabled in simplified model (local-state only for now)
 async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
@@ -217,7 +187,8 @@ async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
  * Attempt a Moonboy companion spot-buy ($10) right after a successful LP open.
  * This is the single authoritative trigger point for Moonboy.
  *
- * Fire-and-forget. Uses the tick's live SOL price and the Moonboy strategy's age gate (1.5h).
+ * In the minimal model the scanner already only considers fresh tokens (≤ MAX_POOL_AGE_MINUTES),
+ * so we do not re-apply a separate age gate here.
  */
 async function maybeTriggerMoonboy(metrics: TokenMetrics, solPriceUsd: number): Promise<void> {
   const isDryRun = process.env.BOT_DRY_RUN === 'true'
@@ -363,47 +334,40 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     })
   }
 
-  // fetching Meteora pools (lane classification + deep checks below)
+  // fetching Meteora pools (ultra-simplified model: only fresh age filter)
   const laneConfig = {
-    freshMaxAgeMinutes: FRESH_MAX_AGE_MINUTES,
-    freshMinLiquidityUsd: FRESH_MIN_LIQUIDITY_USD,
-    momentumMinVolume5mUsd: MOMENTUM_MIN_VOLUME_5M_USD,
-    momentumMinFeeTvl5mPct: MOMENTUM_MIN_FEE_TVL_5M_PCT,
+    maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
     maxFreshDeepChecks: MAX_FRESH_DEEP_CHECKS,
-    maxMomentumDeepChecks: MAX_MOMENTUM_DEEP_CHECKS,
   }
 
   const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools({
     ...METEORA_FILTERED_FETCH,
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
-    freshMaxAgeMinutes: FRESH_MAX_AGE_MINUTES,
-    freshMinLiquidityUsd: FRESH_MIN_LIQUIDITY_USD,
+    maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
     minLiquidityUsd: 20_000,
     maxLiquidityUsd: 500_000_000,
-    momentumMinVolume5mUsd: MOMENTUM_MIN_VOLUME_5M_USD,
-    isMomentumRegain: passesMomentumRegain,
   })
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)
     return finish({ error: fetchError, openBlockedReason: 'pool_fetch_failed' })
   }
 
-  const { freshPools, momentumPools, freshSurvivors, momentumSurvivors } =
+  const { freshPools, freshSurvivors } =
     classifyPoolsIntoLanes(fetchedPools, laneConfig)
 
   console.log(
-    `[scanner] lanes — fresh=${freshPools.length}, momentum=${momentumPools.length} (from ${fetchedPools.length} pools)`
+    `[scanner] fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m): ${freshPools.length} (from ${fetchedPools.length} pools)`
   )
 
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
-  const survivors = pickDeepCheckSurvivors(freshSurvivors, momentumSurvivors, recentlyClosedOorMints, laneConfig)
+  const survivors = pickDeepCheckSurvivors(freshSurvivors, recentlyClosedOorMints, laneConfig)
 
   if (survivors.length === 0) {
-    console.log('[scanner] done — no survivors after lane filters')
+    console.log('[scanner] done — no fresh survivors after age filter')
     return finish({ scanned: fetchedPools.length, survivors: 0 })
   }
 
-  console.log(`[scanner] deep checks on ${survivors.length} survivors`)
+  console.log(`[scanner] processing ${survivors.length} fresh survivors (age ≤ ${MAX_POOL_AGE_MINUTES}m)`)
 
   console.log('[scanner] checking position limits')
 
@@ -452,7 +416,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   const tickContext: ScannerTickContext = {
     freshPools,
-    momentumPools,
     limitState,
     openBlockedReason,
     availableOpenSlots,
@@ -511,7 +474,6 @@ type SurvivorProcessResult = {
 
 interface ScannerTickContext {
   freshPools: any[];
-  momentumPools: any[];
   limitState: any;
   openBlockedReason: string | undefined;
   availableOpenSlots: number;
@@ -527,16 +489,15 @@ interface ScannerTickContext {
 }
 
 /**
- * Processes a single survivor from the lane classification.
+ * Processes a single fresh survivor (age ≤ MAX_POOL_AGE_MINUTES).
  * Extracted for readability. Uses a context object to reduce parameter count.
  */
 async function processSurvivor(
-  survivor: { pool: any; ageHours: number; lane: 'fresh' | 'momentum' },
+  survivor: { pool: any; ageHours: number },
   ctx: ScannerTickContext
 ): Promise<SurvivorProcessResult> {
   const {
     freshPools,
-    momentumPools,
     limitState,
     openBlockedReason,
     availableOpenSlots,
@@ -549,7 +510,7 @@ async function processSurvivor(
     dailyLossLimitHit: dailyLossLimitHitRef,
   } = ctx;
 
-  const { pool: representativePool, ageHours, lane } = survivor;
+  const { pool: representativePool, ageHours } = survivor;
 
   await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS));
 
@@ -560,7 +521,7 @@ async function processSurvivor(
   const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address);
 
   if (openedMintsThisTick.has(tokenAddress)) {
-    console.log(`[scanner] ${symbol} — skip ${lane} lane: position already opened earlier this tick`);
+    console.log(`[scanner] ${symbol} — skip: position already opened earlier this tick`);
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
@@ -584,19 +545,16 @@ async function processSurvivor(
   }
 
   // Pool selection: When multiple tiers exist for a token, we prefer highest liquidity
-  const result = selectBestPool(
-    lane === 'fresh' ? freshPools : momentumPools,
-    tokenAddress
-  );
+  const result = selectBestPool(freshPools, tokenAddress);
   const bestPool = result.pool;
 
-  // Optional observability
-  const tokenPoolsInLane = (lane === 'fresh' ? freshPools : momentumPools).filter(p =>
+  // Optional observability for multiple pools
+  const tokenPools = freshPools.filter(p =>
     getTradableToken(p)?.address === tokenAddress
   );
-  if (tokenPoolsInLane.length > 1 && bestPool) {
+  if (tokenPools.length > 1 && bestPool) {
     const chosenTvl = getPoolTvl(bestPool);
-    console.log(`[scanner] ${symbol} — multiple pools for token (${tokenPoolsInLane.length}), selected highest liquidity pool (TVL=$${chosenTvl.toLocaleString()})`);
+    console.log(`[scanner] ${symbol} — multiple pools for token (${tokenPools.length}), selected highest liquidity pool (TVL=$${chosenTvl.toLocaleString()})`);
   }
 
   if (!bestPool) {
@@ -620,7 +578,6 @@ async function processSurvivor(
     ).then(v => v ?? 0);
   }
   if (!resolvedMc || resolvedMc < 1) {
-    if (lane !== 'fresh') return { wasCandidate: false, wasOpened: false, wasSkipped: true };
     resolvedMc = 0;
   }
 
@@ -638,6 +595,7 @@ async function processSurvivor(
   }
 
   const rugScore = await withTimeout(getRugscore(tokenAddress, symbol), EXTERNAL_CALL_TIMEOUT_MS, `getRugscore ${symbol}`).then(v => v ?? 0);
+  const rugcheckUrl = `https://rugcheck.xyz/tokens/${tokenAddress}`;
   const holderCountForFilter = holderCount || (token.holders ?? 0);
 
   const bondingCurvePct: number | undefined =
@@ -655,19 +613,19 @@ async function processSurvivor(
     holderReliable,
     ageHours,
     rugScore,
+    rugcheckUrl,
     token,
     launchpadSource,
     bondingCurvePct,
   });
 
-  const { strategy, decision, rejectionReason, finalScore } = evaluateCandidate(metrics, lane, symbol);
+  const { strategy, decision, rejectionReason } = evaluateCandidate(metrics, symbol);
 
   if (decision === 'ACCEPTED' && strategy) {
     return await attemptOpenAndNotify({
       metrics,
       strategy,
       symbol,
-      finalScore,
       liveSolPriceUsd,
       openedMintsThisTick,
       openedCountRef,
@@ -686,7 +644,6 @@ async function attemptOpenAndNotify(params: {
   metrics: TokenMetrics;
   strategy: any;
   symbol: string;
-  finalScore: number;
   liveSolPriceUsd: number;
   openedMintsThisTick: Set<string>;
   openedCountRef: { value: number };
@@ -700,7 +657,6 @@ async function attemptOpenAndNotify(params: {
     metrics,
     strategy,
     symbol,
-    finalScore,
     liveSolPriceUsd,
     openedMintsThisTick,
     openedCountRef,
@@ -712,7 +668,7 @@ async function attemptOpenAndNotify(params: {
   } = params;
 
   candidateCountRefParam.value++;
-  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: finalScore, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct: metrics.bondingCurvePct });
+  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct: metrics.bondingCurvePct });
 
   const disabledReason = getDisabledStrategyReason(strategy.id);
   if (disabledReason) {
@@ -737,6 +693,9 @@ async function attemptOpenAndNotify(params: {
     }
   }
 
+  // Moonboy is triggered on successful fresh LP open.
+  // The scanner already enforces age ≤ MAX_POOL_AGE_MINUTES, so we do not
+  // re-apply the Moonboy age gate here (per the ultra-minimal model).
   void maybeTriggerMoonboy(metrics, liveSolPriceUsd);
 
   const positionId = await openPosition(metrics, strategy);
@@ -752,14 +711,16 @@ async function attemptOpenAndNotify(params: {
     await sendAlert({
       type: 'position_opened',
       symbol,
-      strategy: strategy.id,
       solDeposited: MARKET_LP_SOL_PER_POSITION,
       entryPrice: metrics.priceUsd,
       entryPriceUsd: metrics.priceUsd,
-      meteoracleScore: finalScore,
       poolAddress: metrics.poolAddress,
       mint: metrics.address,
       positionId,
+      rugcheckScore: metrics.rugcheckScore,
+      rugcheckUrl: metrics.rugcheckUrl,
+      holderCount: metrics.holderCount,
+      topHolderPct: metrics.topHolderPct,
     });
 
     return { wasCandidate: true, wasOpened: true, wasSkipped: false };
@@ -772,34 +733,21 @@ async function attemptOpenAndNotify(params: {
 
 function evaluateCandidate(
   metrics: TokenMetrics,
-  lane: 'fresh' | 'momentum',
   symbol: string
 ) {
   const strategy = getStrategyForToken(metrics, 'evil-panda');
 
-  let decision = 'REJECTED';
-  let rejectionReason: string | null = null;
-  let finalScore = 0;
-
   if (!strategy) {
-    rejectionReason = explainNoStrategy(metrics);
-    decision = 'REJECTED';
-    console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy) lane=${lane}: ${rejectionReason}`);
-  } else {
-    finalScore = getScannerAdjustedScore(metrics, strategy.id);
-
-    const meetsOpen = finalScore >= MIN_SCORE_TO_OPEN;
-    if (!meetsOpen) {
-      rejectionReason = `score ${finalScore} < ${MIN_SCORE_TO_OPEN}`;
-      decision = 'REJECTED';
-    } else {
-      decision = 'ACCEPTED';
-    }
-
-    console.log(`[scanner][decision] ${symbol} — ${decision} (lane=${lane}, score=${finalScore})`);
+    const rejectionReason = explainNoStrategy(metrics);
+    console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy): ${rejectionReason}`);
+    return { strategy: null, decision: 'REJECTED', rejectionReason, finalScore: 0 };
   }
 
-  return { strategy, decision, rejectionReason, finalScore };
+  // In the ultra-minimal model we no longer score for the opening decision.
+  // If we reached here after the age filter, we accept (subject to position limits etc.).
+  console.log(`[scanner][decision] ${symbol} — ACCEPTED (fresh, no scoring)`);
+
+  return { strategy, decision: 'ACCEPTED', rejectionReason: null, finalScore: 0 };
 }
 
 function findConflictingLocalPosition(tokenAddress: string) {
@@ -844,6 +792,7 @@ function buildTokenMetrics(params: {
   holderReliable: boolean;
   ageHours: number;
   rugScore: number;
+  rugcheckUrl?: string;
   token: any;
   launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora';
   bondingCurvePct?: number;
@@ -858,6 +807,7 @@ function buildTokenMetrics(params: {
     holderReliable,
     ageHours,
     rugScore,
+    rugcheckUrl,
     token,
     launchpadSource,
     bondingCurvePct,
@@ -873,6 +823,7 @@ function buildTokenMetrics(params: {
     holderReliable,
     ageHours,
     rugcheckScore: rugScore,
+    rugcheckUrl,
     priceUsd: token.price,
     poolAddress: bestPool.address,
     dexId: 'meteora',

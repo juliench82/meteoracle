@@ -13,7 +13,7 @@ import { logError } from '@/lib/log'
 const MOONBOY_BUY_USD = parseFloat(process.env.MOONBOY_BUY_USD ?? '10')
 const MOONBOY_MAX_OPEN = parseInt(process.env.MOONBOY_MAX_OPEN ?? '3')
 const MOONBOY_MAX_TOKEN_AGE_MINUTES = parseFloat(
-  process.env.MOONBOY_MAX_TOKEN_AGE_MINUTES ?? '90',
+  process.env.MOONBOY_MAX_TOKEN_AGE_MINUTES ?? '30',
 )
 const DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex/tokens'
 
@@ -97,28 +97,14 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   }
 
   // ── DexScreener age gate ──────────────────────────────────────────────────
-  // Token age is measured from pairCreatedAt in DexScreener data, not Meteora.
-  // We have both a max age (don't buy stale) and a min age for Moonboy buys (avoid the absolute worst simulation failures on ultra-fresh launches).
+  // In the ultra-minimal model, Moonboy is only triggered from the scanner
+  // after a successful fresh LP open (age already ≤ MAX_POOL_AGE_MINUTES).
+  // We therefore skip the DexScreener age gate here for LP-triggered Moonboy.
+  // The MOONBOY_MAX_TOKEN_AGE_MINUTES is kept as a safety net for any future
+  // standalone Moonboy paths (if any).
+  // No DexScreener age check for LP-triggered Moonboy.
   const dexData = await getDexScreenerData(metrics.address)
-  const nowMs = Date.now()
-  if (dexData.pairCreatedAt !== null) {
-    const tokenAgeMinutes = (nowMs - dexData.pairCreatedAt) / 60_000
-
-    // Skip ultra-fresh tokens for Moonboy — sells are extremely unreliable in the first ~45 minutes.
-    const MOONBOY_MIN_AGE_MINUTES = 45
-    if (tokenAgeMinutes < MOONBOY_MIN_AGE_MINUTES) {
-      console.log(`${label} skipped — too fresh for reliable Moonboy sell (${tokenAgeMinutes.toFixed(1)}m < ${MOONBOY_MIN_AGE_MINUTES}m)`)
-      return null
-    }
-
-    if (tokenAgeMinutes > MOONBOY_MAX_TOKEN_AGE_MINUTES) {
-      console.log(
-        `${label} skipped — DexScreener age ${tokenAgeMinutes.toFixed(1)}m > ${MOONBOY_MAX_TOKEN_AGE_MINUTES}m limit`
-      )
-      return null
-    }
-    console.log(`${label} DexScreener age gate passed (${tokenAgeMinutes.toFixed(1)}m old)`)
-  } else {
+  if (dexData.pairCreatedAt === null) {
     console.warn(`${label} moonboy age gate — pairCreatedAt unavailable from DexScreener, skipping to be safe`)
     return null
   }

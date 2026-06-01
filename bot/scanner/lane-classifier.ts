@@ -1,14 +1,16 @@
 /**
  * lane-classifier.ts
  *
- * Clean, small lane classification for the simplified architecture.
+ * Ultra-simplified fresh-only filter.
  *
- * This is now the authoritative (but intentionally simple) module for:
- * - Splitting pools into fresh vs momentum lanes
- * - Picking survivors for deep checks
- * - Basic best-pool selection
+ * In the minimal model:
+ * - Only pools with age <= MAX_POOL_AGE_MINUTES are kept
+ * - No momentum lane
  *
- * Goal: small, understandable, no fake complexity.
+ * Handles:
+ * - Age-based filtering
+ * - Limited survivor selection
+ * - Best pool by liquidity (highest TVL)
  */
 
 import type { MeteoraPool } from './pool-fetcher';
@@ -21,87 +23,63 @@ import {
 } from './pool-fetcher';
 
 export type LaneConfig = {
-  freshMaxAgeMinutes?: number;
-  freshMinLiquidityUsd?: number;
-  momentumMinVolume5mUsd?: number;
-  momentumMinFeeTvl5mPct?: number;
+  maxPoolAgeMinutes?: number;
   maxFreshDeepChecks?: number;
-  maxMomentumDeepChecks?: number;
 };
 
 export type Survivor = {
   pool: MeteoraPool;
   ageHours: number;
-  lane: 'fresh' | 'momentum';
 };
 
 /**
- * Simple classification.
- * Fresh = young + enough liquidity.
- * Momentum = showing clear recent activity (volume or fees).
+ * Ultra-minimal classification.
+ * We only keep pools that are fresh (age <= MAX_POOL_AGE_MINUTES).
  */
 export function classifyPoolsIntoLanes(pools: MeteoraPool[], config: LaneConfig = {}) {
-  const freshMax = config.freshMaxAgeMinutes ?? 90;
-  const freshMinLiq = config.freshMinLiquidityUsd ?? 15_000;
-  const momVol = config.momentumMinVolume5mUsd ?? 2500;
-  const momFee = config.momentumMinFeeTvl5mPct ?? 0.8;
+  const maxAge = config.maxPoolAgeMinutes ?? 30;
+  const maxChecks = config.maxFreshDeepChecks ?? 12;
 
   const freshPools: MeteoraPool[] = [];
-  const momentumPools: MeteoraPool[] = [];
 
   for (const p of pools) {
     const ageMin = getPoolAgeMinutes(p);
-    const liq = getPoolTvl(p);
-    const vol5m = getPoolVolume(p, '5m');
-    const fee5m = getFeeTvlPct(p, '5m');
-
-    const isFresh = ageMin <= freshMax && liq >= freshMinLiq;
-
-    if (isFresh) {
+    if (ageMin <= maxAge) {
       freshPools.push(p);
-    } else if (vol5m >= momVol || fee5m >= momFee) {
-      momentumPools.push(p);
     }
   }
 
-  const maxFresh = config.maxFreshDeepChecks ?? 12;
-  const maxMom = config.maxMomentumDeepChecks ?? 8;
-
   return {
     freshPools,
-    momentumPools,
-    freshSurvivors: freshPools.slice(0, maxFresh),
-    momentumSurvivors: momentumPools.slice(0, maxMom),
+    momentumPools: [],                    // Momentum lane fully removed
+    freshSurvivors: freshPools.slice(0, maxChecks),
+    momentumSurvivors: [],
   };
 }
 
 /**
- * Combine survivors from both lanes and filter out recently closed OOR positions.
+ * Take fresh survivors and filter out recently closed OOR positions.
  */
 export function pickDeepCheckSurvivors(
   fresh: MeteoraPool[],
-  momentum: MeteoraPool[],
   recentlyClosedOorMints: Set<string>,
   config: LaneConfig = {}
 ): Survivor[] {
   const out: Survivor[] = [];
-  const maxTotal = (config.maxFreshDeepChecks ?? 12) + (config.maxMomentumDeepChecks ?? 8);
+  const maxTotal = config.maxFreshDeepChecks ?? 12;
 
-  const add = (pool: MeteoraPool, lane: 'fresh' | 'momentum') => {
-    if (out.length >= maxTotal) return;
-    const trad = getTradableToken(pool);
+  for (const p of fresh) {
+    if (out.length >= maxTotal) break;
+
+    const trad = getTradableToken(p);
     const mint = trad?.address;
-    if (mint && recentlyClosedOorMints.has(mint)) return;
+    if (mint && recentlyClosedOorMints.has(mint)) continue;
 
     out.push({
-      pool,
-      ageHours: getPoolAgeMinutes(pool) / 60,
-      lane,
+      pool: p,
+      ageHours: getPoolAgeMinutes(p) / 60,
     });
-  };
-
-  for (const p of fresh) add(p, 'fresh');
-  for (const p of momentum) add(p, 'momentum');
+  }
 
   return out;
 }
@@ -152,7 +130,12 @@ export function selectBestPool(
   return { pool: best };
 }
 
-/** Simple momentum regain signal (used by pool-fetcher lane pre-filter) */
+/**
+ * Legacy momentum regain signal.
+ * No longer used for opening decisions in the ultra-minimal model.
+ * Kept only for temporary compatibility in pool-fetcher.
+ * TODO: Remove in cleanup pass.
+ */
 export function passesMomentumRegain(pool: MeteoraPool | any): boolean {
   if (!pool) return false;
   const fee5m = getFeeTvlPct(pool, '5m') || 0;

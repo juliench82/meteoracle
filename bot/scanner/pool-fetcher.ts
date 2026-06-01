@@ -4,7 +4,7 @@ const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM = 'https://dlmm-api.meteora.ag'
 
 // Simple in-process cache — pools change slowly.
-// Reduced TTL to keep 5m momentum signals fresh for lane classification.
+// TTL tuned for fresh token scanning (age-based) in the ultra-minimal model.
 let meteoraPoolsCache: { pools: MeteoraPool[]; ts: number } | null = null
 const METEORA_CACHE_TTL_MS = parseInt(
   process.env.METEORA_POOLS_CACHE_TTL_MS ?? '300000',
@@ -59,12 +59,9 @@ export type PoolFetchConfig = {
   minVolumeTvl1hRatio: number
   limit: number
   timeoutMs: number
-  freshMaxAgeMinutes: number
-  freshMinLiquidityUsd: number
+  maxPoolAgeMinutes: number
   minLiquidityUsd: number
   maxLiquidityUsd: number
-  momentumMinVolume5mUsd: number
-  isMomentumRegain: (pool: MeteoraPool) => boolean
 }
 
 type UnknownRecord = Record<string, unknown>
@@ -185,7 +182,7 @@ export function getPoolVolume(pool: MeteoraPool, window: '24h' | '1h' | '5m'): n
   if (Number.isFinite(direct)) return direct
 
   // Meteora currently returns 30m buckets on /pools but may omit 5m.
-  // Use the 30m average as a conservative 5m proxy so momentum scans keep working.
+  // Use the 30m average as a conservative recent activity signal (kept for compatibility during transition).
   if (window === '5m') {
     const thirtyMinuteVolume = asNumber(pool.volume?.['30m'], Number.NaN)
     if (Number.isFinite(thirtyMinuteVolume)) return thirtyMinuteVolume / 6
@@ -227,6 +224,7 @@ export function getRecentVolumeGrowth(pool: MeteoraPool): number {
   return vol5mAnnualizedTo1h / vol1h
 }
 
+// Legacy momentum scoring function – no longer used for opening decisions in the minimal model.
 export function scoreMeteoraMomentum(pool: MeteoraPool): number {
   const ageMinutes = getPoolAgeMinutes(pool)
   const feeTvl1h = getFeeTvlRatio(pool, '1h')
@@ -292,16 +290,11 @@ async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchC
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.warn(`[scanner] ${baseUrl}/pools newest-first fetch failed: ${message}`)
-  } for (const pool of newestPools) poolMap.set(pool.address, pool)
-
-  const momentumPages = await Promise.allSettled([
-    fetchMeteoraPoolsPage(baseUrl, 'volume_1h', config),
-    fetchMeteoraPoolsPage(baseUrl, 'volume_5m', config),
-  ])
-  for (const page of momentumPages) {
-    if (page.status !== 'fulfilled') continue
-    for (const pool of page.value) poolMap.set(pool.address, pool)
   }
+  for (const pool of newestPools) poolMap.set(pool.address, pool)
+
+  // In the ultra-minimal model we only care about recent pools by age (≤ MAX_POOL_AGE_MINUTES),
+  // so we skip the extra volume-sorted fetches.
   const pools = Array.from(poolMap.values())
     .sort((a, b) => (getPoolCreatedAt(b) ?? 0) - (getPoolCreatedAt(a) ?? 0))
   if (pools.length > 0) return pools
@@ -363,18 +356,15 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
 function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): MeteoraPool[] {
   return allPools.filter((pool) => {
     if (pool.is_blacklisted) return false
-    const isFresh = getPoolAgeMinutes(pool) <= config.freshMaxAgeMinutes
-    const isRegain = config.isMomentumRegain(pool)
-    const minLiquidityUsd = isFresh ? config.freshMinLiquidityUsd : config.minLiquidityUsd
-    if (getPoolTvl(pool) < minLiquidityUsd) return false
+    const ageMin = getPoolAgeMinutes(pool)
+    if (ageMin > config.maxPoolAgeMinutes) return false
+    if (getPoolTvl(pool) < config.minLiquidityUsd) return false
     if (getPoolTvl(pool) > config.maxLiquidityUsd) return false
     const hasQuote = QUOTE_ASSETS.has(pool.token_x.address) || QUOTE_ASSETS.has(pool.token_y.address)
     if (!hasQuote) return false
     const hasFeeTvl = getFeeTvlRatio(pool, '1h') >= config.minFeeTvlRatio1h
     const hasVolumeTvl = getVolumeTvlRatio(pool, '1h') >= config.minVolumeTvl1hRatio
-    if (!isRegain && !hasFeeTvl && !hasVolumeTvl) return false
-    const hasMomentumVolume = getPoolVolume(pool, '5m') >= config.momentumMinVolume5mUsd
-    if (!isFresh && !hasMomentumVolume && !isRegain) return false
+    if (!hasFeeTvl && !hasVolumeTvl) return false
     return true
   })
 }

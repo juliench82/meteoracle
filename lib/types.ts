@@ -88,6 +88,8 @@ export interface TokenMetrics {
   score?: number
   /** Detected launchpad for the token (pumpfun tokens may need special manual open path) */
   launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora'
+  /** Direct link to rugcheck page (for notifications) */
+  rugcheckUrl?: string
 }
 
 export interface TokenFilters {
