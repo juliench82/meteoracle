@@ -12,6 +12,14 @@ import {
   TOKEN_2022_PROGRAM_ID,
 } from '@solana/spl-token';
 
+export {
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+};
+
+// Re-export for consumers that need the raw constants (e.g. close.ts transfer-hook detection)
+
+
 import { getConnection } from '@/lib/solana';
 import type { Strategy } from '@/lib/types';
 import { OPEN_LP_STATUSES, type OpenLpLimitState } from '@/lib/position-limits';
