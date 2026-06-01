@@ -184,14 +184,10 @@ async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
  */
 async function triggerMoonboyOnCandidate(
   metrics: TokenMetrics, 
-  solPriceUsd: number,
-  attemptsCounter?: { value: number },
-  successesCounter?: { value: number }
+  solPriceUsd: number
 ): Promise<void> {
   const isDryRun = process.env.BOT_DRY_RUN === 'true'
   const label = `[moonboy][${metrics.symbol}]`
-
-  if (attemptsCounter) attemptsCounter.value++;
 
   console.log(`${label} evaluating Moonboy on fresh candidate (age=${metrics.ageHours.toFixed(1)}h)`);
 
@@ -424,8 +420,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     openSkippedCount: { value: openSkippedCount },
     candidateCount: { value: candidateCount },
     dailyLossLimitHit: { value: dailyLossLimitHit },
-    moonboyAttempts,
-    moonboySuccesses,
   };
 
   for (const cand of freshCandidates) {
@@ -493,8 +487,6 @@ interface ScannerTickContext {
   openSkippedCount: { value: number };
   candidateCount: { value: number };
   dailyLossLimitHit: { value: boolean | null };
-
-  // (Moonboy counters removed for build simplicity — can be re-added with proper threading)
 }
 
 /**
