@@ -80,6 +80,9 @@ export async function persistPosition(
       dex_price_usd:         metrics.priceUsd,
       entry_sol_price_usd:   entryPriceSol > 0 ? entryPriceUsd / entryPriceSol : null,
       needs_liquidity_retry: needsLiquidityRetry,
+      // New fields for minimal exit rules
+      fee_tvl_samples:       metrics.feeTvl24hPct ? [{ ts: Date.now(), fee_tvl_24h: metrics.feeTvl24hPct }] : [],
+      opened_at:             new Date().toISOString(),
     },
   }
 
@@ -149,17 +152,32 @@ export async function sendCloseAlert(
   reason: string
 ): Promise<void> {
   try {
-    const openedAt = position.opened_at ? new Date(position.opened_at).getTime() : Date.now()
-    const ageHours = parseFloat(((Date.now() - openedAt) / 3_600_000).toFixed(1))
+    const openedAtMs = position.opened_at ? new Date(position.opened_at).getTime() : Date.now()
+    const ageHours = parseFloat(((Date.now() - openedAtMs) / 3_600_000).toFixed(1))
+
+    // Rich exit diagnostics persisted by monitor
+    const feeTvl4h = position.last_fee_tvl_4h_avg ?? position.metadata?.last_fee_tvl_4h_avg
+    const netPnl = position.last_net_pnl_pct ?? position.metadata?.last_net_pnl_pct
+    const samplesCount = Array.isArray(position.fee_tvl_samples) ? position.fee_tvl_samples.length : (position.metadata?.fee_tvl_samples?.length ?? 0)
+
+    let oorMin: number | undefined
+    if (position.oor_since) {
+      oorMin = Math.round((Date.now() - new Date(position.oor_since).getTime()) / 1000 / 60)
+    }
 
     await sendAlert({
-      type:          'position_closed',
-      symbol:        position.symbol,
-      strategy:      position.metadata?.strategy_id ?? 'unknown',
+      type: 'position_closed',
+      symbol: position.symbol,
+      strategy: position.metadata?.strategy_id ?? 'unknown',
       reason,
       claimableFeesUsd: Math.round(claimableFeesUsd * 100) / 100,
-      ilPct:         0,
+      ilPct: 0,
       ageHours,
+      netPnlPct: typeof netPnl === 'number' ? Math.round(netPnl * 100) / 100 : undefined,
+      feeTvl4hAvg: typeof feeTvl4h === 'number' ? Math.round(feeTvl4h * 100) / 100 : undefined,
+      feeTvlSampleCount: samplesCount || undefined,
+      oorMinutes: oorMin,
+      triggeredRule: reason, // the precise close reason string from monitor
     })
   } catch (alertErr) {
     console.warn('[executor] sendCloseAlert failed (non-fatal):', alertErr)

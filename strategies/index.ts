@@ -21,13 +21,6 @@ export function getStrategyById(id: StrategyId): Strategy | null {
   return STRATEGIES.find((s) => s.id === id) ?? null
 }
 
-/**
- * Returns evil-panda only if the token is fresh enough and passes basic safety.
- */
-export function classifyToken() {
-  return { type: 'unknown' };
-}
-
 export function getStrategyForToken(token: TokenMetrics, forcedStrategyId?: StrategyId): Strategy | null {
   if (forcedStrategyId) {
     const forced = getStrategyById(forcedStrategyId)

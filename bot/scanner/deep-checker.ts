@@ -15,13 +15,13 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
  */
 
 import axios from 'axios'
-// Local state + local logger only
+// Local state only (no Supabase in hot paths)
 import { getBotState } from '@/lib/botState'
 import { getStrategyForToken, explainNoStrategy } from '@/strategies'
 import { openPosition } from '../executor'
 import { sendAlert } from '../alerter'
 import { checkHolders } from '@/lib/helius'
-import { getRugscore, getRugcheckCacheSize } from '../rugcheck-cache'
+import { getRugscore } from '../rugcheck-cache'
 import {
   fetchBondingCurve,
   isPumpFunToken,
@@ -61,8 +61,8 @@ import {
   getVolumeTvlRatio,
 } from './pool-fetcher'
 import {
-  classifyPoolsIntoLanes,
-  pickDeepCheckSurvivors,
+  filterFreshPools,
+  selectFreshCandidates,
   selectBestPool,
 } from './lane-classifier'
 
@@ -94,9 +94,8 @@ type CachedBondingCurve = {
 
 export type ScannerResult = {
   scanned: number
-  survivors: number
-  deepChecked: number
-  candidates: number
+  candidates: number          // fresh candidates that passed age + OOR dedup
+  processed: number           // how many we actually deep-checked / decided on
   opened: number
   openSkipped: number
   openSlots: number
@@ -177,7 +176,7 @@ function getDisabledStrategyReason(strategyId: string): string | null {
   return null
 }
 
-// OOR recheck disabled in simplified model (local-state only for now)
+// OOR recheck is a no-op stub (local-state only model)
 async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
   return new Set()
@@ -249,9 +248,8 @@ let scannerRunStartedAt = 0
 function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
   return {
     scanned: 0,
-    survivors: 0,
-    deepChecked: 0,
     candidates: 0,
+    processed: 0,
     opened: 0,
     openSkipped: 0,
     openSlots: 0,
@@ -325,9 +323,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     console.log('[scanner] tickMode=true — skipping (no open in tick mode)')
     return finish({
       scanned: 0,
-      survivors: 0,
-      deepChecked: 0,
       candidates: 0,
+      processed: 0,
       opened: 0,
       openSkipped: 0,
       openBlockedReason: 'tick_mode_no_open',
@@ -335,9 +332,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   }
 
   // fetching Meteora pools (ultra-simplified model: only fresh age filter)
-  const laneConfig = {
+  const freshConfig = {
     maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
-    maxFreshDeepChecks: MAX_FRESH_DEEP_CHECKS,
+    maxCandidates: MAX_FRESH_DEEP_CHECKS,
   }
 
   const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools({
@@ -352,22 +349,22 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     return finish({ error: fetchError, openBlockedReason: 'pool_fetch_failed' })
   }
 
-  const { freshPools, freshSurvivors } =
-    classifyPoolsIntoLanes(fetchedPools, laneConfig)
+  const { freshPools, candidates } =
+    filterFreshPools(fetchedPools, freshConfig)
 
   console.log(
     `[scanner] fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m): ${freshPools.length} (from ${fetchedPools.length} pools)`
   )
 
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
-  const survivors = pickDeepCheckSurvivors(freshSurvivors, recentlyClosedOorMints, laneConfig)
+  const freshCandidates = selectFreshCandidates(candidates, recentlyClosedOorMints, freshConfig)
 
-  if (survivors.length === 0) {
-    console.log('[scanner] done — no fresh survivors after age filter')
-    return finish({ scanned: fetchedPools.length, survivors: 0 })
+  if (freshCandidates.length === 0) {
+    console.log('[scanner] done — no fresh candidates after age filter')
+    return finish({ scanned: fetchedPools.length, candidates: 0 })
   }
 
-  console.log(`[scanner] processing ${survivors.length} fresh survivors (age ≤ ${MAX_POOL_AGE_MINUTES}m)`)
+  console.log(`[scanner] processing ${freshCandidates.length} fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m)`)
 
   console.log('[scanner] checking position limits')
 
@@ -398,7 +395,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
   }
 
-  console.log(`[scanner] deep-checking ${survivors.length} survivors`)
+  console.log(`[scanner] deep-checking ${freshCandidates.length} candidates`)
   let candidateCount = 0
   let openedCount = 0
   let openSkippedCount = 0
@@ -408,11 +405,6 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
-
-  const openedCountRef = { value: openedCount };
-  const openSkippedCountRef = { value: openSkippedCount };
-  const candidateCountRef = { value: candidateCount };
-  const dailyLossLimitHitRef = { value: dailyLossLimitHit };
 
   const tickContext: ScannerTickContext = {
     freshPools,
@@ -428,8 +420,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     dailyLossLimitHit: { value: dailyLossLimitHit },
   };
 
-  for (const survivor of survivors) {
-    await processSurvivor(survivor, tickContext);
+  for (const cand of freshCandidates) {
+    await processFreshCandidate(cand, tickContext);
   }
 
   // Sync counters back from context
@@ -439,14 +431,13 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   dailyLossLimitHit = tickContext.dailyLossLimitHit.value;
 
   console.log(
-    `[scanner] done — scanned=${fetchedPools.length}, survivors=${survivors.length}, ` +
-    `candidates=${candidateCount}, opened=${openedCount}, skipped=${openSkippedCount}`
+    `[scanner] done — scanned=${fetchedPools.length}, candidates=${freshCandidates.length}, ` +
+    `processed=${candidateCount}, opened=${openedCount}, skipped=${openSkippedCount}`
   )
   return finish({
     scanned: fetchedPools.length,
-    survivors: survivors.length,
-    deepChecked: survivors.length,
-    candidates: candidateCount,
+    candidates: freshCandidates.length,
+    processed: candidateCount,
     opened: openedCount,
     openSkipped: openSkippedCount,
     openSlots: availableOpenSlots,
@@ -466,7 +457,7 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
   }
 }
 
-type SurvivorProcessResult = {
+type FreshCandidateProcessResult = {
   wasCandidate: boolean;
   wasOpened: boolean;
   wasSkipped: boolean;
@@ -489,13 +480,13 @@ interface ScannerTickContext {
 }
 
 /**
- * Processes a single fresh survivor (age ≤ MAX_POOL_AGE_MINUTES).
+ * Processes a single fresh candidate (age ≤ MAX_POOL_AGE_MINUTES).
  * Extracted for readability. Uses a context object to reduce parameter count.
  */
-async function processSurvivor(
-  survivor: { pool: any; ageHours: number },
+async function processFreshCandidate(
+  cand: { pool: any; ageHours: number },
   ctx: ScannerTickContext
-): Promise<SurvivorProcessResult> {
+): Promise<FreshCandidateProcessResult> {
   const {
     freshPools,
     limitState,
@@ -510,7 +501,7 @@ async function processSurvivor(
     dailyLossLimitHit: dailyLossLimitHitRef,
   } = ctx;
 
-  const { pool: representativePool, ageHours } = survivor;
+  const { pool: representativePool, ageHours } = cand;
 
   await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS));
 
@@ -652,7 +643,7 @@ async function attemptOpenAndNotify(params: {
   openBlockedReason: string | undefined;
   availableOpenSlots: number;
   candidateCountRef: { value: number };
-}): Promise<SurvivorProcessResult> {
+}): Promise<FreshCandidateProcessResult> {
   const {
     metrics,
     strategy,

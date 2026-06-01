@@ -28,17 +28,16 @@ const standaloneScannerTick = async (): Promise<void> => {
     const result = await runScanner()
     const blocked = result.openBlockedReason ? ` openBlocked=${result.openBlockedReason}` : ''
     console.log(
-      `${label} tick done — scanned=${result.scanned} survivors=${result.survivors} ` +
-      `deepChecked=${result.deepChecked} candidates=${result.candidates} opened=${result.opened} ` +
+      `${label} tick done — scanned=${result.scanned} candidates=${result.candidates} ` +
+      `processed=${result.processed} opened=${result.opened} ` +
       `openSkipped=${result.openSkipped}${blocked}`,
     )
   } catch (err) {
     console.error(`${label} tick error:`, err)
     await logScannerTick({
       scanned: 0,
-      survivors: 0,
-      deepChecked: 0,
       candidates: 0,
+      processed: 0,
       opened: 0,
       openSkipped: 0,
       openSlots: 0,

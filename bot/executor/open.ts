@@ -114,7 +114,7 @@ export async function openPosition(
     console.log(`${label} DRY RUN — skipping on-chain tx`)
 
     // Idempotency guard: prevent duplicate inserts into lp_positions during long dry-run observation.
-    // Dry-run rows live only in Supabase (never in on-chain snapshot), so the deep-checker guards
+    // Dry-run rows live only in local state, so the scanner guards
     // can be bypassed on later ticks → we must defend here too.
     const existing = await findExistingActivePosition(metrics.address)
     if (existing) {

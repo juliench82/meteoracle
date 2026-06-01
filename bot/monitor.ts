@@ -8,30 +8,42 @@ import { getBotState } from '@/lib/botState'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
 import { closePosition } from '@/bot/executor/close'
 import { getConnection, getWallet } from '@/lib/solana'
-import { getDLMM } from '@/bot/executor/utils'
+import { getDLMM, getDecimalAdjustedPrice } from '@/bot/executor/utils'
+import { getCurrentPoolFeeTvl24h } from '@/bot/scanner/pool-fetcher'
 import { PublicKey } from '@solana/web3.js'
+import {
+  LP_FEE_TVL_EXIT_THRESHOLD,
+  LP_OOR_EXIT_MINUTES,
+  LP_NET_LOSS_SL_PCT,
+  LP_NET_LOSS_SL_MIN_AGE_MIN,
+  LP_MAX_DURATION_HOURS,
+  LP_FEE_TVL_SAMPLE_WINDOW_H,
+} from '@/lib/strategy-config'
 
 /**
- * Ultra-minimal monitor (local-state + on-chain only).
- * - Moonboy 2x exits
- * - Stranded sell retries
- * - Basic LP exits: out-of-range time + max duration (no heavy rebalance/orphan logic)
+ * Ultra-minimal LP + Moonboy monitor (local-state + on-chain only).
+ *
+ * LP exit rules (48h dry-run starting point — see strategy-config + .env):
+ * 1. Fee/TVL yield collapse: rolling 4h avg of pool 24h Fee/TVL < LP_FEE_TVL_EXIT_THRESHOLD (0.75%)
+ * 2. Prolonged out-of-range: OOR for >= LP_OOR_EXIT_MINUTES (45min)
+ * 3. Net PnL stop-loss: realized price move + fees (claimed + unclaimed) <= LP_NET_LOSS_SL_PCT (-30%)
+ *    after at least LP_NET_LOSS_SL_MIN_AGE_MIN (20min) grace period
+ * 4. Hard safety: position age >= LP_MAX_DURATION_HOURS (24h)
+ *
+ * All decisions + rich metrics are surfaced via Telegram close alerts.
+ * No Supabase hot path. Dry-run fully supported.
  */
 
 let tickCount = 0
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1000
 const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
 
-// Fallbacks only used if a position record is missing the values persisted at open time
-const FALLBACK_OOR_MINUTES = 30
-const FALLBACK_MAX_DURATION_HOURS = 12
-
+// Legacy per-position exit params (still read for backward compat with older opens).
+// For the 4-rule minimal model the global LP_* constants in strategy-config are authoritative.
 function getPositionExitRules(pos: any) {
-  // Values are persisted from the strategy at open time (see persistence.ts + evil-panda.ts)
-  // This ensures each position respects the exact parameters that were active when it was opened.
   return {
-    outOfRangeMinutes: pos.out_of_range_minutes ?? pos.metadata?.out_of_range_minutes ?? FALLBACK_OOR_MINUTES,
-    maxDurationHours:  pos.max_duration_hours  ?? pos.metadata?.maxDurationHours  ?? FALLBACK_MAX_DURATION_HOURS,
+    outOfRangeMinutes: pos.out_of_range_minutes ?? pos.metadata?.out_of_range_minutes ?? LP_OOR_EXIT_MINUTES,
+    maxDurationHours:  pos.max_duration_hours  ?? pos.metadata?.maxDurationHours  ?? LP_MAX_DURATION_HOURS,
     claimFeesBeforeClose: pos.claim_fees_before_close ?? pos.metadata?.claimFeesBeforeClose ?? true,
     minFeesToClaim:       pos.min_fees_to_claim       ?? pos.metadata?.minFeesToClaim       ?? 0.001,
   }
@@ -60,13 +72,14 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
     return stats
   }
 
-  // === Minimal LP exit logic (local-state + on-chain DLMM) ===
+  // === LP exit rules (4-rule ultra-minimal model) ===
   const positions = getOpenLpPositions().filter((p: any) => ['open', 'active'].includes(p.status))
   stats.checked = positions.length
 
   if (positions.length > 0) {
     const wallet = getWallet()
     const connection = getConnection()
+    const now = Date.now()
 
     for (const pos of positions) {
       try {
@@ -76,19 +89,67 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         const dlmmPool = await DLMM.create(connection, new PublicKey(pos.pool_address))
         const activeBin = await dlmmPool.getActiveBin()
 
-        // Get the actual on-chain position to read its bin range
+        // On-chain position for bin range + amounts/fees
         const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
         const onChainPos = userPositions.find((p: any) => p.publicKey.toBase58() === pos.position_pubkey)
-
         if (!onChainPos?.positionData) continue
 
         const { lowerBinId, upperBinId } = onChainPos.positionData
         const isOOR = activeBin.binId < lowerBinId || activeBin.binId > upperBinId
 
-        const rules = getPositionExitRules(pos)
-        const now = Date.now()
-        let oorSince = pos.oor_since ? new Date(pos.oor_since).getTime() : null
+        // Use global config for the new minimal rules (authoritative for 48h dry-run)
+        const oorMinutesThreshold = LP_OOR_EXIT_MINUTES
+        const maxDurationH = LP_MAX_DURATION_HOURS
+        const feeTvlThreshold = LP_FEE_TVL_EXIT_THRESHOLD
+        const netLossThreshold = LP_NET_LOSS_SL_PCT
+        const netLossGraceMin = LP_NET_LOSS_SL_MIN_AGE_MIN
+        const sampleWindowH = LP_FEE_TVL_SAMPLE_WINDOW_H
 
+        // ── 1. Rolling 4h Fee/TVL sampling + yield collapse check ─────────────────
+        let feeTvl4hAvg: number | null = null
+        try {
+          const currentFeeTvl = await getCurrentPoolFeeTvl24h(pos.pool_address)
+          if (currentFeeTvl != null && Number.isFinite(currentFeeTvl)) {
+            const samples: Array<{ ts: number; fee_tvl_24h: number }> = Array.isArray(pos.fee_tvl_samples) ? pos.fee_tvl_samples : []
+            samples.push({ ts: now, fee_tvl_24h: currentFeeTvl })
+
+            // Prune to window
+            const windowMs = sampleWindowH * 3600 * 1000
+            const pruned = samples.filter((s) => now - s.ts <= windowMs)
+
+            if (pruned.length > 0) {
+              const avg = pruned.reduce((sum, s) => sum + s.fee_tvl_24h, 0) / pruned.length
+              feeTvl4hAvg = Math.round(avg * 100) / 100
+              pos.fee_tvl_samples = pruned
+              pos.last_fee_tvl_4h_avg = feeTvl4hAvg
+            } else {
+              pos.fee_tvl_samples = pruned
+            }
+
+            // Persist samples (lightweight)
+            const all = getOpenLpPositions()
+            const idx = all.findIndex((p: any) => p.id === pos.id)
+            if (idx !== -1) {
+              all[idx].fee_tvl_samples = pos.fee_tvl_samples
+              all[idx].last_fee_tvl_4h_avg = pos.last_fee_tvl_4h_avg
+              saveOpenLpPositions(all)
+            }
+          }
+        } catch (e) {
+          // Non-fatal — we still evaluate other rules
+          console.warn(`[monitor] Fee/TVL sample failed for ${pos.symbol}:`, e instanceof Error ? e.message : e)
+        }
+
+        if (feeTvl4hAvg != null && feeTvl4hAvg < feeTvlThreshold && (pos.fee_tvl_samples?.length ?? 0) >= 3) {
+          const reason = `fee_tvl_yield_low_4havg_${feeTvl4hAvg.toFixed(2)}pct`
+          console.log(`[monitor] FEE/TVL EXIT → ${pos.symbol} (4h avg ${feeTvl4hAvg.toFixed(2)}% < ${feeTvlThreshold}%, samples=${pos.fee_tvl_samples?.length ?? 0})`)
+          const ok = await closePosition(pos.id, reason).catch(() => false)
+          if (ok) stats.closed++
+          continue
+        }
+
+        // ── 2. Out-of-range duration (OOR) ────────────────────────────────────────
+        let oorSince = pos.oor_since ? new Date(pos.oor_since).getTime() : null
         if (isOOR) {
           if (!oorSince) {
             oorSince = now
@@ -98,35 +159,116 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
             if (idx !== -1) { all[idx].oor_since = pos.oor_since; saveOpenLpPositions(all) }
           }
 
-          const oorMinutes = (now - oorSince) / 1000 / 60
-          if (oorMinutes >= rules.outOfRangeMinutes) {
-            console.log(`[monitor] OOR exit → ${pos.symbol} (out ${Math.round(oorMinutes)}m / ${rules.outOfRangeMinutes}m, claimFees=${rules.claimFeesBeforeClose}, minFees=${rules.minFeesToClaim})`)
-            const ok = await closePosition(pos.id, 'oor_monitor').catch(() => false)
+          const oorMin = (now - oorSince) / 1000 / 60
+          if (oorMin >= oorMinutesThreshold) {
+            const reason = `oor_${Math.round(oorMin)}min`
+            console.log(`[monitor] OOR EXIT → ${pos.symbol} (out ${Math.round(oorMin)}m / ${oorMinutesThreshold}m)`)
+            const ok = await closePosition(pos.id, reason).catch(() => false)
             if (ok) stats.closed++
             continue
           }
         } else if (oorSince) {
+          // Back in range — clear the timer
           delete pos.oor_since
           const all = getOpenLpPositions()
           const idx = all.findIndex((p: any) => p.id === pos.id)
           if (idx !== -1) { delete all[idx].oor_since; saveOpenLpPositions(all) }
         }
 
-        // Max duration guard (using persisted strategy value)
-        const openedAt = pos.created_at || pos.opened_at
+        // ── 3. Net PnL stop-loss (price move + fees, after grace) ─────────────────
+        const openedAt = pos.opened_at || pos.created_at
         if (openedAt) {
-          const hoursOpen = (now - new Date(openedAt).getTime()) / 1000 / 3600
-          if (hoursOpen >= rules.maxDurationHours) {
-            console.log(`[monitor] max-duration exit → ${pos.symbol} (${hoursOpen.toFixed(1)}h / ${rules.maxDurationHours}h, claimFees=${rules.claimFeesBeforeClose}, minFees=${rules.minFeesToClaim})`)
-            const ok = await closePosition(pos.id, 'max_duration_monitor').catch(() => false)
-            if (ok) stats.closed++
+          const ageMin = (now - new Date(openedAt).getTime()) / 1000 / 60
+          if (ageMin >= netLossGraceMin) {
+            const netPnl = computeNetPnlApprox(pos, onChainPos, activeBin, dlmmPool)
+            if (netPnl != null) {
+              pos.last_net_pnl_pct = Math.round(netPnl * 100) / 100
+              // Persist for alert richness
+              const all = getOpenLpPositions()
+              const idx = all.findIndex((p: any) => p.id === pos.id)
+              if (idx !== -1) { all[idx].last_net_pnl_pct = pos.last_net_pnl_pct; saveOpenLpPositions(all) }
+
+              if (netPnl <= netLossThreshold) {
+                const reason = `net_pnl_sl_${netPnl.toFixed(1)}pct`
+                console.log(`[monitor] NET PNL SL EXIT → ${pos.symbol} (net ${netPnl.toFixed(1)}% <= ${netLossThreshold}% after ${Math.round(ageMin)}m grace)`)
+                const ok = await closePosition(pos.id, reason).catch(() => false)
+                if (ok) stats.closed++
+                continue
+              }
+            }
           }
         }
+
+        // ── 4. Hard max duration safety cap ───────────────────────────────────────
+        if (openedAt) {
+          const hoursOpen = (now - new Date(openedAt).getTime()) / 1000 / 3600
+          if (hoursOpen >= maxDurationH) {
+            const reason = `max_duration_${hoursOpen.toFixed(1)}h`
+            console.log(`[monitor] MAX DURATION EXIT → ${pos.symbol} (${hoursOpen.toFixed(1)}h / ${maxDurationH}h)`)
+            const ok = await closePosition(pos.id, reason).catch(() => false)
+            if (ok) stats.closed++
+            continue
+          }
+        }
+
+        // Tick heartbeat for open positions (useful in dry-run logs)
+        if (feeTvl4hAvg != null || pos.last_net_pnl_pct != null) {
+          console.log(
+            `[monitor] ${pos.symbol} tick — 4hFeeTvlAvg=${feeTvl4hAvg?.toFixed(2) ?? 'n/a'}% ` +
+            `netPnl=${pos.last_net_pnl_pct?.toFixed(1) ?? 'n/a'}% ` +
+            `OOR=${isOOR ? 'yes' : 'no'}`
+          )
+        }
       } catch (e) {
-        console.warn(`[monitor] OOR check failed for ${pos.symbol}:`, e instanceof Error ? e.message : e)
+        console.warn(`[monitor] LP exit check failed for ${pos.symbol}:`, e instanceof Error ? e.message : e)
       }
     }
   }
 
   return stats
+}
+
+// ── Helpers for the 4-rule exit engine ──────────────────────────────────────────
+
+function computeNetPnlApprox(
+  pos: any,
+  onChainPos: any,
+  activeBin: any,
+  dlmmPool: any,
+): number | null {
+  try {
+    const solDeposited = Number(pos.sol_deposited ?? 0)
+    if (!solDeposited || solDeposited <= 0) return null
+
+    const pd = onChainPos.positionData || {}
+    const priceSolPerToken = getDecimalAdjustedPrice(dlmmPool, activeBin) || 0
+    if (!priceSolPerToken || priceSolPerToken <= 0) return null
+
+    const totalX = toNumber(pd.totalXAmount)
+    const totalY = toNumber(pd.totalYAmount)
+
+    const xPub = dlmmPool.tokenX?.publicKey?.toBase58?.() ?? ''
+    const isXSol = xPub === 'So11111111111111111111111111111111111111112'
+    const solSide = isXSol ? totalX : totalY
+    const tokenSide = isXSol ? totalY : totalX
+
+    const solValueOfTokens = tokenSide * priceSolPerToken
+    const currentLiqValueSol = (solSide / 1e9) + solValueOfTokens
+
+    const feeX = toNumber(pd.feeX ?? pd.fee_x)
+    const feeY = toNumber(pd.feeY ?? pd.fee_y)
+    const pendingFeeSolApprox = ((feeX + feeY) * priceSolPerToken) / 1e9
+
+    const netSol = currentLiqValueSol + pendingFeeSolApprox - solDeposited
+    return (netSol / solDeposited) * 100
+  } catch {
+    return null
+  }
+}
+
+function toNumber(v: any): number {
+  if (!v) return 0
+  if (typeof v === 'object' && typeof v.toNumber === 'function') return v.toNumber()
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
 }

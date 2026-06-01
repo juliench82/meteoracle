@@ -60,26 +60,23 @@ export const MOONBOY_ENABLED = envBool('MOONBOY_ENABLED', true)
 export const HELIUS_ENABLED = envBool('HELIUS_ENABLED', false)
 export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
 
-// ── Misc ────────────────────────────────────────────────────────
+// ── Misc (still referenced by current ultra-simple scanner) ──────
 export const DEEP_CHECK_DELAY_MS = envNumber('DEEP_CHECK_DELAY_MS', 800)
-export const MIN_LIQUIDITY_USD_FOR_FRESH = envNumber('MIN_LIQUIDITY_USD_FOR_FRESH', 8000) // legacy
+export const MIN_LIQUIDITY_USD_FOR_FRESH = envNumber('MIN_LIQUIDITY_USD_FOR_FRESH', 8000)
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
 export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
-export const MIN_SCORE_TO_OPEN = envNumber('MIN_SCORE_TO_OPEN', 65) // legacy – removed from fresh entry decisions
 
 // ── Scanner entry filter (ultra-simplified model) ──
 export const MAX_POOL_AGE_MINUTES = envNumber('MAX_POOL_AGE_MINUTES', 30)
 
-// ── Scanner lane / survivor limits (legacy - being removed in minimal model) ──
-// **No longer used** for opening decisions.
-// Only MAX_POOL_AGE_MINUTES controls the fresh gate.
-// These will be deleted in the cleanup pass.
-// export const FRESH_MAX_AGE_MINUTES = envNumber('FRESH_MAX_AGE_MINUTES', 120)
-// export const FRESH_MIN_LIQUIDITY_USD = envNumber('FRESH_MIN_LIQUIDITY_USD', 8000)
-// export const MOMENTUM_MIN_VOLUME_5M_USD = envNumber('MOMENTUM_MIN_VOLUME_5M_USD', 3000)
-// export const MOMENTUM_MIN_FEE_TVL_5M_PCT = envNumber('MOMENTUM_MIN_FEE_TVL_5M_PCT', 0.5)
-// export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 8)
-// export const MAX_MOMENTUM_DEEP_CHECKS = envNumber('MAX_MOMENTUM_DEEP_CHECKS', 6)
+// ── LP Position Exit Rules (ultra-minimal model) ──
+// 48h dry-run starting point (2026-06). Tune after observing real Fee/TVL decay curves + net PnL behavior.
+// Primary signal: pool-level 24h Fee/TVL efficiency sampled over rolling 4h window.
+export const LP_FEE_TVL_EXIT_THRESHOLD = envNumber('LP_FEE_TVL_EXIT_THRESHOLD', 0.75)     // last-4h avg 24h Fee/TVL % below this → exit (e.g. 0.75 = 0.75%)
+export const LP_OOR_EXIT_MINUTES       = envNumber('LP_OOR_EXIT_MINUTES', 45)             // minutes out of range before exit
+export const LP_NET_LOSS_SL_PCT        = envNumber('LP_NET_LOSS_SL_PCT', -30)             // net PnL % (price move + all fees) stop-loss
+export const LP_NET_LOSS_SL_MIN_AGE_MIN = envNumber('LP_NET_LOSS_SL_MIN_AGE_MIN', 20)     // minutes position must be open before net-PnL SL can fire
+export const LP_MAX_DURATION_HOURS     = envNumber('LP_MAX_DURATION_HOURS', 24)           // hard safety cap regardless of other signals
+export const LP_FEE_TVL_SAMPLE_WINDOW_H = 4                                               // rolling window for avg calculation (hours)
 
-// Shim (no longer referenced in simplified scanner)
-export const classifyToken = () => ({})
+// MAX_POOL_AGE_MINUTES + MAX_FRESH_DEEP_CHECKS are the main remaining scanner tunables for the ultra-simple fresh-only model.

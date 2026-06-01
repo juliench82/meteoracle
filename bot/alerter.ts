@@ -34,6 +34,12 @@ type AlertPayload =
       ilPct: number | null
       ageHours: number
       netPnlSol?: number
+      // Rich 4-rule exit diagnostics (added for ultra-minimal LP model)
+      netPnlPct?: number
+      feeTvl4hAvg?: number
+      feeTvlSampleCount?: number
+      oorMinutes?: number
+      triggeredRule?: string
     }
   | {
       type: 'position_oor'
@@ -120,19 +126,36 @@ function formatMessage(payload: AlertPayload): string {
     }
 
     case 'position_closed': {
-      const netPnl = payload.netPnlSol ?? 0
-      const netSign = netPnl >= 0 ? '+' : ''
-      const ilPct = payload.ilPct !== null && Number.isFinite(payload.ilPct)
-        ? `${payload.ilPct.toFixed(2)}%`
-        : 'N/A'
-      return [
+      const lines = [
         `🔴 *SELL* ${payload.symbol}`,
         `Reason: ${payload.reason}`,
-        `Claimable Fees: *${payload.claimableFeesUsd != null ? `$${payload.claimableFeesUsd.toFixed(2)}` : 'N/A'}*`,
-        `IL: ${ilPct} | Net PNL: ${netSign}${netPnl} SOL`,
-        `Held for: ${payload.ageHours}h`,
-        `Strategy: ${payload.strategy}`,
-      ].join('\n')
+      ]
+
+      if (payload.claimableFeesUsd != null) {
+        lines.push(`Claimable Fees: *$${payload.claimableFeesUsd.toFixed(2)}*`)
+      }
+
+      if (payload.netPnlPct != null) {
+        const sign = payload.netPnlPct >= 0 ? '+' : ''
+        lines.push(`Net PnL (price + fees): *${sign}${payload.netPnlPct.toFixed(1)}%*`)
+      } else if (payload.netPnlSol != null) {
+        const sign = payload.netPnlSol >= 0 ? '+' : ''
+        lines.push(`Net PnL: ${sign}${payload.netPnlSol} SOL`)
+      }
+
+      if (payload.feeTvl4hAvg != null) {
+        const sc = payload.feeTvlSampleCount ? ` (${payload.feeTvlSampleCount} samples)` : ''
+        lines.push(`4h Fee/TVL avg: ${payload.feeTvl4hAvg.toFixed(2)}%${sc}`)
+      }
+
+      if (payload.oorMinutes != null) {
+        lines.push(`Time OOR at close: ${payload.oorMinutes}m`)
+      }
+
+      lines.push(`Held for: ${payload.ageHours}h`)
+      lines.push(`Strategy: ${payload.strategy}`)
+
+      return lines.join('\n')
     }
 
     case 'position_oor':

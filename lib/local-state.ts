@@ -27,6 +27,15 @@ export interface OpenLpPosition {
   strategy_id: string
   sol_deposited: number
   status: string
+
+  // Exit tracking (written by monitor + open path)
+  oor_since?: string | null
+  fee_tvl_samples?: Array<{ ts: number; fee_tvl_24h: number }>
+  last_fee_tvl_4h_avg?: number
+  last_net_pnl_pct?: number
+  close_reason?: string
+
+  // Free-form bag for strategy params persisted at open time + live metrics
   [key: string]: any
 }
 

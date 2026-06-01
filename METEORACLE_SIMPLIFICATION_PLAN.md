@@ -1,3 +1,11 @@
+# Meteoracle Simplification Plan (Historical — completed)
+
+**Final state achieved:** Ultra-simple age-only scanner (no scoring/lanes) + 4-rule LP exits with rich Telegram observability. All listed legacy items (momentum, heavy scoring, old monitor, duplicate execution, etc.) have been addressed.
+
+This document is kept for archaeology. See current code + PRODUCTION_WORKFLOW.md for truth.
+
+---
+
 # Meteoracle Simplification Plan
 **Target: Ultra-Simplified Architecture (cb8c3dd vision)**
 

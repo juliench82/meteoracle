@@ -49,8 +49,8 @@ async function tickScanner() {
     const stats = await runScanner()
     const blocked = stats.openBlockedReason ? ` openBlocked=${stats.openBlockedReason}` : ''
     log(
-      `scanner tick done — scanned=${stats.scanned} survivors=${stats.survivors} ` +
-      `deepChecked=${stats.deepChecked} candidates=${stats.candidates} opened=${stats.opened} ` +
+      `scanner tick done — scanned=${stats.scanned} candidates=${stats.candidates} ` +
+      `processed=${stats.processed} opened=${stats.opened} ` +
       `openSkipped=${stats.openSkipped}${blocked}`,
     )
   } catch (err) {

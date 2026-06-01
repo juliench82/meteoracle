@@ -1,8 +1,19 @@
 # Meteoracle Production Workflow (Code-Based)
 
+**Current ultra-simplified model (post-2026-06 cleanup)**
+
+- Entries: age-only filter (MAX_POOL_AGE_MINUTES) + highest-liquidity pool + rich Telegram info alerts. **Zero scoring, zero momentum lanes.**
+- Exits (LP): 4-rule system (4h Fee/TVL avg < 0.75%, 45min OOR, -30% net PnL after 20min grace, 24h hard cap) with rich per-rule Telegram close messages.
+- All hot-path state is local JSON only. Telegram is the primary observability surface.
+- Moonboy uses its own simple 80/15/20 trailing.
+
+This document reflects the **actual running code** after the final legacy cleanup pass.
+
+---
+
 **Generated from actual source code analysis** (worker.ts, deep-checker.ts, monitor.ts, moonboy-executor.ts, executor/*, telegram-bot.ts, local-state.ts, etc.)
 
-This document describes the **real runtime behavior** when the bot runs in production (`npm run worker` or via PM2), not aspirational documentation.
+This document describes the **real runtime behavior** when the bot runs in production (`npm run worker` or via PM2).
 
 ---
 
@@ -21,15 +32,14 @@ This document describes the **real runtime behavior** when the bot runs in produ
 ┌──────────────────────┐              ┌──────────────────────┐
 │   bot/monitor.ts     │              │ bot/scanner/deep-    │
 │   (runTick)          │              │ checker.ts           │
-│                      │              │ (runScannerOnce)     │
-│ • checkMoonboy       │              │                      │
+│                      │              │ (runScanner)         │
+│ • checkMoonboy 2x    │              │                      │
 │ • retryStrandedSells │              │ • fetchMeteoraPools  │
-│ • LP OOR + Duration  │              │ • classify lanes     │
-│   exits → close      │              │ • deep checks        │
-└──────────────────────┘              │ • score + decide     │
-                                      │ • openPosition +     │
-                                      │   maybeTriggerMoonboy│
-                                      └──────────────────────┘
+│ • 4-rule LP exits    │              │ • age filter only    │
+│   (Fee/TVL, OOR,     │              │ • best liquidity pool│
+│    net PnL, max dur) │              │ • open + Moonboy     │
+│   + rich TG alerts   │              │ • rich TG open alerts│
+└──────────────────────┘              └──────────────────────┘
 ```
 
 ---
@@ -53,10 +63,10 @@ sequenceDiagram
     F->>F: In-memory cache check
     F->>F: Live Meteora API fetch (DATAPI + DLMM fallback)
     F-->>S: pools[]
-    S->>L: classifyPoolsIntoLanes(pools)
-    L-->>S: {freshPools, momentumPools, freshSurvivors, momentumSurvivors}
-    S->>L: pickDeepCheckSurvivors(...)
-    L-->>S: Survivor[] (pool + ageHours + lane)
+    S->>L: filterFreshPools(pools)
+    L-->>S: {freshPools, candidates}
+    S->>L: selectFreshCandidates(...)
+    L-->>S: FreshCandidate[] (pool + ageHours)
     S->>S: getOpenLpLimitState() → available slots
     S->>S: resolveSolPriceUsd()
 
@@ -68,8 +78,7 @@ sequenceDiagram
         alt No strategy
             S->>S: explainNoStrategy() → REJECTED
         else Strategy returned
-            S->>S: getScannerAdjustedScore()
-            alt finalScore >= MIN_SCORE_TO_OPEN
+            S->>S: ultra-simple accept (fresh + no scoring)
                 S->>S: Check disabled / slots / daily loss circuit breaker
                 S->>S: maybeTriggerMoonboy() (fire-and-forget)
                 S->>E: openPosition(metrics, strategy)
@@ -91,13 +100,13 @@ sequenceDiagram
 |-------|-------------------|---------------|
 | Bot state | Stopped / Paused | botState.enabled |
 | Pool fetch | Error / Empty | fetchMeteoraPools |
-| Lane filtering | 0 survivors | classify + pickDeepCheckSurvivors |
-| Per-survivor dedup | Skip (open / recent bad close) | local-state + live positions |
+| Age + OOR dedup | 0 candidates | filterFreshPools + selectFreshCandidates |
+| Per-candidate dedup | Skip (open / recent bad close) | local-state + live positions |
 | Strategy selection | REJECTED (explainNoStrategy) | getStrategyForToken |
-| Scoring | REJECTED (score < MIN_SCORE) | getScannerAdjustedScore + MIN_SCORE_TO_OPEN |
+| Decision | ACCEPTED (fresh only, no scoring) | ultra-minimal path |
 | Guards | disabled / no slots / daily loss | getDisabledStrategyReason + circuit breaker |
-| Open | Success / null (executor failed) | openPosition |
-| Moonboy | Triggered / Age gate / Disabled | maybeTriggerMoonboy |
+| Open | Success / null (executor failed) | openPosition + rich TG alert |
+| Moonboy | Triggered / trailing exits | maybeTriggerMoonboy |
 
 ---
 

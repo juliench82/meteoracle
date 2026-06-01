@@ -100,14 +100,9 @@ export async function openMoonboyPosition(metrics: TokenMetrics, solPriceUsd: nu
   // In the ultra-minimal model, Moonboy is only triggered from the scanner
   // after a successful fresh LP open (age already ≤ MAX_POOL_AGE_MINUTES).
   // We therefore skip the DexScreener age gate here for LP-triggered Moonboy.
-  // The MOONBOY_MAX_TOKEN_AGE_MINUTES is kept as a safety net for any future
-  // standalone Moonboy paths (if any).
+  // (The MOONBOY_MAX_TOKEN_AGE_MINUTES env is kept as a safety net for any future
+  // standalone Moonboy paths, if any are added.)
   // No DexScreener age check for LP-triggered Moonboy.
-  const dexData = await getDexScreenerData(metrics.address)
-  if (dexData.pairCreatedAt === null) {
-    console.warn(`${label} moonboy age gate — pairCreatedAt unavailable from DexScreener, skipping to be safe`)
-    return null
-  }
   // ─────────────────────────────────────────────────────────────────────────
 
   const openCount = (getOpenMoonboys() as any[]).length

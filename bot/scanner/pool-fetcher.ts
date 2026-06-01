@@ -4,14 +4,14 @@ const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 const METEORA_DLMM = 'https://dlmm-api.meteora.ag'
 
 // Simple in-process cache — pools change slowly.
-// TTL tuned for fresh token scanning (age-based) in the ultra-minimal model.
+// Cache TTL tuned for the fresh-only scanner (age ≤ MAX_POOL_AGE_MINUTES).
 let meteoraPoolsCache: { pools: MeteoraPool[]; ts: number } | null = null
 const METEORA_CACHE_TTL_MS = parseInt(
   process.env.METEORA_POOLS_CACHE_TTL_MS ?? '300000',
   10,
 )
 
-function getCachedMeteoraPools(): MeteoraPool[] | null {
+export function getCachedMeteoraPools(): MeteoraPool[] | null {
   if (!meteoraPoolsCache) return null
   if (Date.now() - meteoraPoolsCache.ts > METEORA_CACHE_TTL_MS) return null
   return meteoraPoolsCache.pools
@@ -224,30 +224,7 @@ export function getRecentVolumeGrowth(pool: MeteoraPool): number {
   return vol5mAnnualizedTo1h / vol1h
 }
 
-// Legacy momentum scoring function – no longer used for opening decisions in the minimal model.
-export function scoreMeteoraMomentum(pool: MeteoraPool): number {
-  const ageMinutes = getPoolAgeMinutes(pool)
-  const feeTvl1h = getFeeTvlRatio(pool, '1h')
-  const feeTvl5m = getFeeTvlRatio(pool, '5m')
-  const volumeTvl1h = getVolumeTvlRatio(pool, '1h')
-  const volumeGrowth = getRecentVolumeGrowth(pool)
-
-  const ageScore =
-    ageMinutes <= 30 ? 20 :
-    ageMinutes <= 60 ? 16 :
-    ageMinutes <= 90 ? 10 :
-    ageMinutes <= 120 ? 4 :
-    0
-  const feeScore = Math.min(45, feeTvl1h * 650 + feeTvl5m * 500)
-  const volumeScore = Math.min(25, volumeTvl1h * 60)
-  const growthScore =
-    volumeGrowth >= 2.5 ? 10 :
-    volumeGrowth >= 1.5 ? 7 :
-    volumeGrowth >= 1 ? 4 :
-    0
-
-  return Math.round(ageScore + feeScore + volumeScore + growthScore)
-}
+// scoreMeteoraMomentum fully removed in simplification cleanup (no longer used)
 
 export function getQuoteTokenMint(pool: MeteoraPool): string {
   return QUOTE_ASSETS.has(pool.token_x.address)
@@ -282,7 +259,7 @@ async function fetchMeteoraPoolsPage(
   return normalizeMeteoraPoolsResponse(res.data)
 }
 
-async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchConfig): Promise<MeteoraPool[]> {
+export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchConfig): Promise<MeteoraPool[]> {
   const poolMap = new Map<string, MeteoraPool>()
   let newestPools: MeteoraPool[] = []
   try {
@@ -293,8 +270,8 @@ async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchC
   }
   for (const pool of newestPools) poolMap.set(pool.address, pool)
 
-  // In the ultra-minimal model we only care about recent pools by age (≤ MAX_POOL_AGE_MINUTES),
-  // so we skip the extra volume-sorted fetches.
+  // In the ultra-minimal model we only care about recent pools by age (≤ MAX_POOL_AGE_MINUTES).
+  // Extra volume-sorted fetches have been removed.
   const pools = Array.from(poolMap.values())
     .sort((a, b) => (getPoolCreatedAt(b) ?? 0) - (getPoolCreatedAt(a) ?? 0))
   if (pools.length > 0) return pools
@@ -367,4 +344,53 @@ function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): Met
     if (!hasFeeTvl && !hasVolumeTvl) return false
     return true
   })
+}
+
+/**
+ * Returns the most recent 24h Fee/TVL % for a specific pool address.
+ * Prefers the in-memory cache populated by the scanner (fresh within TTL).
+ * Falls back to a relaxed fetch of recent pools if cache miss (used by monitor for open positions).
+ */
+export async function getCurrentPoolFeeTvl24h(poolAddress: string): Promise<number | null> {
+  // 1. Hot path: in-memory cache from last scanner tick
+  const cached = getCachedMeteoraPools()
+  if (cached) {
+    const hit = cached.find((p) => p.address === poolAddress)
+    if (hit) {
+      const v = getFeeTvlPct(hit, '24h')
+      if (Number.isFinite(v) && v > 0) return v
+    }
+  }
+
+  // 2. Cold fallback: fetch a broad recent set (no strict pre-filter) and lookup
+  try {
+    const relaxedConfig: PoolFetchConfig = {
+      minTvlUsd: 0,
+      minFeeTvlRatio1h: 0,
+      minVolumeTvl1hRatio: 0,
+      limit: 2000,
+      timeoutMs: 20_000,
+      maxPoolAgeMinutes: 60 * 24 * 30, // allow old pools for monitoring existing positions
+      minLiquidityUsd: 0,
+      maxLiquidityUsd: Number.MAX_SAFE_INTEGER,
+    }
+    // Use the internal fetcher directly to avoid heavy JS pre-filter
+    let pools: MeteoraPool[] = []
+    for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
+      try {
+        pools = await fetchMeteoraPoolsFromEndpoint(endpoint, relaxedConfig)
+        if (pools.length > 0) break
+      } catch {
+        // try next endpoint
+      }
+    }
+    const hit = pools.find((p) => p.address === poolAddress)
+    if (hit) {
+      const v = getFeeTvlPct(hit, '24h')
+      return Number.isFinite(v) && v > 0 ? v : null
+    }
+  } catch (e) {
+    console.warn(`[pool-fetcher] getCurrentPoolFeeTvl24h fallback failed for ${poolAddress}:`, e instanceof Error ? e.message : e)
+  }
+  return null
 }

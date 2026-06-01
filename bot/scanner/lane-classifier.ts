@@ -1,16 +1,14 @@
 /**
- * lane-classifier.ts
+ * lane-classifier.ts  (legacy name — to be renamed in future)
  *
- * Ultra-simplified fresh-only filter.
+ * Ultra-simple fresh-only filter for the minimal scanner.
  *
- * In the minimal model:
- * - Only pools with age <= MAX_POOL_AGE_MINUTES are kept
- * - No momentum lane
+ * Responsibilities:
+ * - Age gate: only pools with age <= MAX_POOL_AGE_MINUTES
+ * - Cap the number of candidates we deep-check
+ * - Highest-liquidity pool selection when multiple tiers exist for one token
  *
- * Handles:
- * - Age-based filtering
- * - Limited survivor selection
- * - Best pool by liquidity (highest TVL)
+ * No lanes. No momentum. No scoring.
  */
 
 import type { MeteoraPool } from './pool-fetcher';
@@ -22,51 +20,50 @@ import {
   getTradableToken,
 } from './pool-fetcher';
 
-export type LaneConfig = {
+// Minimal config for the fresh-only path (no lanes, no momentum)
+export type FreshFilterConfig = {
   maxPoolAgeMinutes?: number;
-  maxFreshDeepChecks?: number;
+  maxCandidates?: number;   // how many fresh pools we will deep-check per tick
 };
 
-export type Survivor = {
+export type FreshCandidate = {
   pool: MeteoraPool;
   ageHours: number;
 };
 
 /**
- * Ultra-minimal classification.
- * We only keep pools that are fresh (age <= MAX_POOL_AGE_MINUTES).
+ * Ultra-simple fresh filter.
+ * Returns only pools that pass the age gate, capped for processing.
  */
-export function classifyPoolsIntoLanes(pools: MeteoraPool[], config: LaneConfig = {}) {
+export function filterFreshPools(pools: MeteoraPool[], config: FreshFilterConfig = {}) {
   const maxAge = config.maxPoolAgeMinutes ?? 30;
-  const maxChecks = config.maxFreshDeepChecks ?? 12;
+  const maxCandidates = config.maxCandidates ?? 12;
 
-  const freshPools: MeteoraPool[] = [];
+  const fresh: MeteoraPool[] = [];
 
   for (const p of pools) {
     const ageMin = getPoolAgeMinutes(p);
     if (ageMin <= maxAge) {
-      freshPools.push(p);
+      fresh.push(p);
     }
   }
 
   return {
-    freshPools,
-    momentumPools: [],                    // Momentum lane fully removed
-    freshSurvivors: freshPools.slice(0, maxChecks),
-    momentumSurvivors: [],
+    freshPools: fresh,
+    candidates: fresh.slice(0, maxCandidates),
   };
 }
 
 /**
- * Take fresh survivors and filter out recently closed OOR positions.
+ * Take fresh pools, apply OOR dedup, and return capped list of candidates to deep-check.
  */
-export function pickDeepCheckSurvivors(
+export function selectFreshCandidates(
   fresh: MeteoraPool[],
   recentlyClosedOorMints: Set<string>,
-  config: LaneConfig = {}
-): Survivor[] {
-  const out: Survivor[] = [];
-  const maxTotal = config.maxFreshDeepChecks ?? 12;
+  config: FreshFilterConfig = {}
+): FreshCandidate[] {
+  const out: FreshCandidate[] = [];
+  const maxTotal = config.maxCandidates ?? 12;
 
   for (const p of fresh) {
     if (out.length >= maxTotal) break;
@@ -84,11 +81,11 @@ export function pickDeepCheckSurvivors(
   return out;
 }
 
-export function survivorTokenAddress(s: Survivor | MeteoraPool | any): string {
-  if (!s) return '';
-  const pool = s.pool ?? s;
+export function candidateTokenAddress(c: FreshCandidate | MeteoraPool | any): string {
+  if (!c) return '';
+  const pool = c.pool ?? c;
   const t = getTradableToken(pool);
-  return t?.address || pool?.address || s.mint || '';
+  return t?.address || pool?.address || (c as any).mint || '';
 }
 
 /**
@@ -130,15 +127,4 @@ export function selectBestPool(
   return { pool: best };
 }
 
-/**
- * Legacy momentum regain signal.
- * No longer used for opening decisions in the ultra-minimal model.
- * Kept only for temporary compatibility in pool-fetcher.
- * TODO: Remove in cleanup pass.
- */
-export function passesMomentumRegain(pool: MeteoraPool | any): boolean {
-  if (!pool) return false;
-  const fee5m = getFeeTvlPct(pool, '5m') || 0;
-  const vol5m = getPoolVolume(pool, '5m') || 0;
-  return fee5m >= 1.2 || vol5m >= 2500;
-}
+// passesMomentumRegain fully removed in simplification cleanup (no longer used)

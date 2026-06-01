@@ -68,15 +68,14 @@ export interface TokenMetrics {
   dexId: string
   /** 24h fees / TVL expressed as a percentage, e.g. 131.35 means 131.35% */
   feeTvl24hPct: number
-  /** 1h fees / TVL expressed as a percentage. Used by scanner v2 freshness scoring. */
+  /** 1h / 5m fees / TVL — kept for potential future use, currently informational. */
   feeTvl1hPct?: number
-  /** 5m fees / TVL expressed as a percentage. Used by scanner v2 freshness scoring. */
   feeTvl5mPct?: number
   /** 1h volume / TVL ratio, e.g. 0.8 means 80% of TVL traded in the last hour. */
   volumeTvl1hRatio?: number
   /** 5m volume annualized to 1h divided by observed 1h volume. >1 means accelerating. */
   volumeGrowth1h?: number
-  /** Meteora-native pre-Helius momentum score used to rank deep checks. */
+  /** (legacy) momentumScore — no longer populated or used in ultra-simple model */
   momentumScore?: number
   /** pump.fun bonding curve fill %, 0–100. undefined = not a pump.fun token or fetch failed. */
   bondingCurvePct?: number
@@ -127,21 +126,14 @@ export interface PositionConfig {
 }
 
 export interface ExitRules {
+  // These are snapshotted at open for compat. The actual 4-rule LP exits live in
+  // strategy-config (LP_* constants) and are enforced in bot/monitor.ts.
   stopLossPct: number
   takeProfitPct: number
   outOfRangeMinutes: number
   maxDurationHours: number
   claimFeesBeforeClose: boolean
   minFeesToClaim: number
-  /**
-   * Maximum impermanent loss % before forcing exit. Negative number, e.g. -15 means
-   * exit when IL reaches -15%. Only evaluated for DLMM positions. Leave undefined to
-   *
-   * Formula: IL% = (2√k / (1+k) − 1) × 100  where k = currentPrice / entryPrice
-   *
-   * Suggested defaults:
-   *   evil-panda:   -15  (wide range; IL at 15% ≈ 2.3× price move)
-   */
   maxIlPct?: number
 }
 
