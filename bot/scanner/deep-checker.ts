@@ -520,7 +520,7 @@ async function processFreshCandidate(
   const label = `[scanner][${symbol}]`;
 
   console.log(`${label} processing fresh candidate (age=${ageHours.toFixed(1)}h)`);
-  const launchpadSource: 'pumpfun' | 'moonshot' | 'meteora' = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora';
+  const launchpadSource: 'pumpfun' | 'moonshot' | 'meteora' | 'dbc' = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora';
   const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address);
 
   if (openedMintsThisTick.has(tokenAddress)) {
@@ -799,7 +799,7 @@ function buildTokenMetrics(params: {
   rugScore: number;
   rugcheckUrl?: string;
   token: any;
-  launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora';
+  launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora' | 'dbc'; // DBC 0.2.0+ may bring transfer-hook tokens
   bondingCurvePct?: number;
 }): TokenMetrics {
   const {

@@ -2,7 +2,7 @@
  * bot/executor/open.ts
  *
  * Position opening for Meteora DLMM.
- * Primary path: Zap SDK (with retries). One manual fallback (Jupiter + raw DLMM) for Token-2022.
+ * Primary path: Zap SDK (with retries). One manual fallback (Jupiter + raw DLMM) for Token-2022 (incl. DBC 0.2.0+ transfer-hook graduates).
  * Early real-binStep validation + proportional shrinking protects against InvalidPositionWidth.
  */
 
@@ -212,7 +212,7 @@ export async function openPosition(
     // was the reliable way to consistently open positions on pump.fun graduates.
     // We route Token-2022 tokens to the direct path as the primary route.
     if (isToken2022) {
-      console.log(`${label} Token-2022 / pump.fun graduate — routing to direct Jupiter + DLMM SDK path (primary for these tokens)`);
+      console.log(`${label} Token-2022 / pump.fun / DBC 0.2.0 graduate — routing to direct Jupiter + DLMM SDK path (primary for these tokens)`);
 
       return await openPositionToken2022(
         metrics,

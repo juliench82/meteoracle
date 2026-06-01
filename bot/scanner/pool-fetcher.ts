@@ -51,6 +51,9 @@ export interface MeteoraPool {
   token_x: MeteoraToken
   token_y: MeteoraToken
   is_blacklisted: boolean
+  // DBC 0.2.0+ transfer hook support (for graduated transfer-hook pools)
+  transfer_hook_program?: string | null
+  has_transfer_hook?: boolean
 }
 
 export type PoolFetchConfig = {
@@ -147,6 +150,8 @@ function normalizeMeteoraPool(raw: unknown): MeteoraPool | null {
     token_x: tokenX,
     token_y: tokenY,
     is_blacklisted: pool.is_blacklisted === true,
+    transfer_hook_program: asString(getRecordValue(pool, ['transfer_hook_program', 'transferHookProgram', 'transfer_hook'])) ?? undefined,
+    has_transfer_hook: !!(getRecordValue(pool, ['transfer_hook_program', 'transferHookProgram', 'has_transfer_hook', 'transfer_hook'])),
   }
 }
 

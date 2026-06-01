@@ -86,7 +86,7 @@ export interface TokenMetrics {
   /** Score assigned by the scorer — set by scanner before passing to executor. */
   score?: number
   /** Detected launchpad for the token (pumpfun tokens may need special manual open path) */
-  launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora'
+  launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora' | 'dbc' // DBC 0.2.0+ graduates may use transfer hooks
   /** Direct link to rugcheck page (for notifications) */
   rugcheckUrl?: string
 }

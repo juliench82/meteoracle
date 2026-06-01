@@ -31,6 +31,8 @@ import {
   getPositionWithRetry,
   getClaimableFeesUsd,
   NATIVE_MINT_STR,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
 } from './utils'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
@@ -162,6 +164,24 @@ export async function closePosition(
       }
     } catch (err) {
       console.warn(`${label} fee claim failed (continuing):`, err)
+    }
+
+    // Resolve transfer hook remaining accounts for Token-2022 (for removeLiquidity)
+    let hookRemainingAccounts: any[] = []
+    const tokenXProgram = await getTokenProgramId(dlmmPool.tokenX.publicKey.toBase58()).catch(() => TOKEN_PROGRAM_ID)
+    const tokenYProgram = await getTokenProgramId(dlmmPool.tokenY.publicKey.toBase58()).catch(() => TOKEN_PROGRAM_ID)
+    const hasToken2022 = tokenXProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58() || tokenYProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
+    if (hasToken2022) {
+      try {
+        // Use  the SDK helper; index may be for remove (try Liquidity context or SDK default)
+        const hookData = await dlmmPool.getPotentialToken2022IxDataAndAccounts(0 /* Liquidity / general */)
+        if (hookData && hookData.accounts && hookData.accounts.length > 0) {
+          hookRemainingAccounts = hookData.accounts
+          console.log(`${label} Adding ${hookRemainingAccounts.length} transfer hook remaining account(s) for remove/close`)
+        }
+      } catch {
+        console.log(`${label} No transfer hook accounts required for close (or resolution skipped)`)
+      }
     }
 
     if (userPosition) {

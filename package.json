@@ -27,6 +27,9 @@
   "dependencies": {
     "@meteora-ag/dlmm": "^1.9.10",
     "@meteora-ag/zap-sdk": "^1.3.1",
+    // Bump recommended before/after DBC 0.2.0 mainnet (June 3 2026) for transfer-hook DLMM support
+    // "@meteora-ag/dlmm": "^1.10.0" or latest
+    // "@meteora-ag/zap-sdk": "^1.4.0" or latest
     "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.8",
     "axios": "^1.7.9",
