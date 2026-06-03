@@ -33,10 +33,28 @@ const DEFAULT_STATE: BotState = {
   paused: false,
 }
 
+/**
+ * Compute initial bot state when no persisted file exists.
+ * Seeds from process.env so that `rm state/bot-state.json && pm2 start ... --update-env`
+ * produces a botState that matches the caller's BOT_ENABLED / BOT_DRY_RUN intent.
+ * (ENV_FORCED can still force-dry later; this just sets the persisted starting value.)
+ */
+function getInitialState(): BotState {
+  const envDry = process.env.BOT_DRY_RUN === 'true'
+  const envEnabled = process.env.BOT_ENABLED === 'true'
+  return {
+    ...DEFAULT_STATE,
+    dry_run: envDry,
+    enabled: envEnabled,
+  }
+}
+
 function readState(): BotState {
   ensureDir()
   if (!fs.existsSync(STATE_FILE)) {
-    return { ...DEFAULT_STATE }
+    const initial = getInitialState()
+    writeState(initial) // persist immediately so banner + first ticks see consistent file-backed state
+    return initial
   }
   try {
     const raw = fs.readFileSync(STATE_FILE, 'utf8')
