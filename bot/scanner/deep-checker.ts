@@ -249,7 +249,7 @@ let scannerRunPromise: Promise<ScannerResult> | null = null
 let scannerRunStartedAt = 0
 
 function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
-  return {
+  const r: any = {
     scanned: 0,
     candidates: 0,
     processed: 0,
@@ -259,6 +259,9 @@ function emptyScannerResult(result: Partial<ScannerResult>): ScannerResult {
     maxOpen: MAX_CONCURRENT_MARKET_LP_POSITIONS,
     ...result,
   }
+  if (r.openBlockedReason === undefined) delete r.openBlockedReason
+  if (r.error === undefined) delete r.error
+  return r
 }
 
 export interface RunScannerOptions {
@@ -305,6 +308,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   const startedAt = Date.now()
   const finish = async (result: Partial<ScannerResult>): Promise<ScannerResult> => {
     const fullResult = emptyScannerResult({ ...result, tickMode })
+    // Omit undefined optionals for cleaner structured logs (e.g. no "openBlockedReason: undefined")
+    if ((fullResult as any).openBlockedReason === undefined) delete (fullResult as any).openBlockedReason
+    if ((fullResult as any).error === undefined) delete (fullResult as any).error
     await logScannerTick(fullResult, Date.now() - startedAt)
     return fullResult
   }

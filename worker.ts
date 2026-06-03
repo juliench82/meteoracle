@@ -11,6 +11,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 
 import { monitorPositions } from './bot/monitor'
 import { runScanner } from './bot/scanner'
+import { getBotState } from './lib/botState'
 
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
 const SCANNER_INTERVAL_MS = parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') * 1_000
@@ -70,6 +71,12 @@ async function main() {
   log(`LP_SCANNER  : ${LP_SCANNER_ENABLED}`)
   log(`Monitor     : every ${MONITOR_INTERVAL_MS / 60_000} min`)
   log(`Scanner     : every ${SCANNER_INTERVAL_MS / 60_000} min`)
+  try {
+    const bs = await getBotState()
+    log(`botState    : enabled=${bs.enabled} dry_run=${bs.dry_run} paused=${bs.paused ?? false}`)
+  } catch {
+    log(`botState    : (unreadable, will default disabled)`)
+  }
   log(`────────────────────────────────────────`)
 
   // Run both immediately on startup

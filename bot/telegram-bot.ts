@@ -141,7 +141,11 @@ async function handleUpdate(update: any) {
 
   if (cmd === '/tick') {
     const [scanResult, monitorResult] = await Promise.allSettled([
-      runScanner().then((r: any) => `Scanner: ${r.scanned} scanned, ${r.opened} opened`),
+      runScanner().then((r: any) => {
+        const api = r.apiPools != null ? ` (apiPools=${r.apiPools})` : ''
+        const blocked = r.openBlockedReason ? ` blocked=${r.openBlockedReason}` : ''
+        return `Scanner: ${r.scanned} scanned${api}, ${r.opened} opened${blocked}`
+      }),
       monitorPositions().then((r: any) => `Monitor: ${r.checked} checked, ${r.closed} closed`),
     ])
 
