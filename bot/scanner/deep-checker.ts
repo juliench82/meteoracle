@@ -47,6 +47,7 @@ import {
   EVIL_PANDA_ENABLED,
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   MARKET_LP_SOL_PER_POSITION,
+  MAX_POOL_PRICE_DEVIATION,
 } from '@/lib/strategy-config'
 import {
   WSOL,
@@ -439,6 +440,35 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
   }
 }
 
+/**
+ * Checks how much the Meteora pool's current price deviates from the external market price (via Dexscreener).
+ * Returns the absolute relative deviation (e.g. 0.08 for 8%), or null if data unavailable.
+ * This catches cases where the DLMM pool price is misaligned with broader market (common on very new/thin pools).
+ */
+async function getPoolVsMarketPriceDeviation(pool: any, mint: string): Promise<number | null> {
+  try {
+    const res = await axios.get(`${DEXSCREENER}/${mint}`, { timeout: 6_000 })
+    const pairs: any[] = res.data?.pairs ?? []
+    if (pairs.length === 0) return null
+
+    // Prefer a SOL-quoted pair for direct comparison with Meteora current_price (which is typically in SOL)
+    const solPair = pairs.find((p: any) => 
+      (p.quoteToken?.symbol === 'SOL' || p.quoteToken?.address === 'So11111111111111111111111111111111111111112')
+    ) || pairs[0]
+
+    const externalPriceInSol = parseFloat(solPair?.priceNative || solPair?.priceUsd || '0')
+    if (!externalPriceInSol || externalPriceInSol <= 0) return null
+
+    const poolPriceInSol = pool.current_price
+    if (!poolPriceInSol || poolPriceInSol <= 0) return null
+
+    const deviation = Math.abs(poolPriceInSol - externalPriceInSol) / externalPriceInSol
+    return deviation
+  } catch {
+    return null
+  }
+}
+
 type FreshCandidateProcessResult = {
   wasCandidate: boolean;
   wasOpened: boolean;
@@ -538,6 +568,15 @@ async function processFreshCandidate(
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
+  // Pre-open quality check: skip if the DLMM pool's spot price is significantly misaligned with external market.
+  // This is the condition behind the ">5% pool price differs from market price" warning on Meteora UI.
+  // Opening around a mispriced active bin often leads to immediate OOR or poor IL when price corrects.
+  const priceDev = await getPoolVsMarketPriceDeviation(bestPool, tokenAddress);
+  if (priceDev !== null && priceDev > MAX_POOL_PRICE_DEVIATION) {
+    console.log(`${label} skip: pool price deviates ${(priceDev * 100).toFixed(1)}% from external market (threshold ${(MAX_POOL_PRICE_DEVIATION * 100)}%)`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
   const liveBestPoolPosition = findLiveOpenPosition(limitState, tokenAddress, bestPool.address);
   if (liveBestPoolPosition) {
     console.log(`${label} skip: live Meteora position already exists for best pool (${liveBestPoolPosition.position_pubkey})`);
@@ -593,6 +632,7 @@ async function processFreshCandidate(
     token,
     launchpadSource,
     bondingCurvePct,
+    poolPriceDeviation: priceDev,
   });
 
   const { strategy, decision, rejectionReason } = evaluateCandidate(metrics, symbol);
@@ -754,6 +794,7 @@ function buildTokenMetrics(params: {
   token: any;
   launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora' | 'dbc'; // DBC 0.2.0+ may bring transfer-hook tokens
   bondingCurvePct?: number;
+  poolPriceDeviation?: number;
 }): TokenMetrics {
   const {
     tokenAddress,
@@ -769,6 +810,7 @@ function buildTokenMetrics(params: {
     token,
     launchpadSource,
     bondingCurvePct,
+    poolPriceDeviation,
   } = params;
 
   return {
@@ -796,5 +838,6 @@ function buildTokenMetrics(params: {
     bondingCurvePct,
     launchpadSource,
     binStep: bestPool.pool_config?.bin_step,
+    poolPriceDeviation,
   };
 }

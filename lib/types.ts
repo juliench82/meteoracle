@@ -85,6 +85,8 @@ export interface TokenMetrics {
   binStep?: number
   /** Score assigned by the scorer — set by scanner before passing to executor. */
   score?: number
+  /** Absolute price deviation between Meteora pool price and external market price (e.g. 0.07 = 7%). Populated when the pre-open deviation check runs. */
+  poolPriceDeviation?: number
   /** Detected launchpad for the token (pumpfun tokens may need special manual open path) */
   launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora' | 'dbc' // DBC 0.2.0+ graduates may use transfer hooks
   /** Direct link to rugcheck page (for notifications) */

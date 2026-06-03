@@ -138,6 +138,7 @@ export async function sendOpenAlert(
       poolAddress: metrics.poolAddress,
       mint: metrics.address,
       ageMinutes: metrics.ageHours != null ? Math.round(metrics.ageHours * 60) : undefined,
+      poolPriceDeviation: metrics.poolPriceDeviation,
     })
   } catch (alertErr) {
     console.warn('[executor] sendOpenAlert failed (non-fatal):', alertErr)

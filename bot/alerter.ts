@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { summarizeError } from '@/lib/logging'
+import { MAX_POOL_PRICE_DEVIATION } from '@/lib/strategy-config'
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID
@@ -25,6 +26,7 @@ type AlertPayload =
       poolAddress?: string
       mint?: string
       ageMinutes?: number
+      poolPriceDeviation?: number
     }
   | {
       type: 'position_closed'
@@ -106,6 +108,10 @@ function formatMessage(payload: AlertPayload): string {
         ? `🕒 Meteora pool age: ${payload.ageMinutes} min`
         : ''
 
+      const deviationLine = payload.poolPriceDeviation != null
+        ? `⚠️ Pool vs market price: ${(payload.poolPriceDeviation * 100).toFixed(1)}% (threshold ${(MAX_POOL_PRICE_DEVIATION * 100).toFixed(0)}%)`
+        : ''
+
       const meteoraUrl = payload.poolAddress
         ? `https://app.meteora.ag/dlmm/${payload.poolAddress}`
         : null
@@ -120,6 +126,7 @@ function formatMessage(payload: AlertPayload): string {
         rugLine,
         holdersLine,
         ageLine,
+        deviationLine,
         meteoraLine,
       ].filter(Boolean).join('\n')
     }

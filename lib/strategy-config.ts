@@ -83,4 +83,8 @@ export const LP_NET_LOSS_SL_MIN_AGE_MIN = envNumber('LP_NET_LOSS_SL_MIN_AGE_MIN'
 export const LP_MAX_DURATION_HOURS     = envNumber('LP_MAX_DURATION_HOURS', 24)           // hard safety cap regardless of other signals
 export const LP_FEE_TVL_SAMPLE_WINDOW_H = 4                                               // rolling window for avg calculation (hours)
 
+// Pre-open quality gate: max allowed deviation between Meteora pool price and external market price (e.g. 0.05 = 5%).
+// Pools with large deviation often have misaligned active bin, leading to bad IL/OOR right after opening.
+export const MAX_POOL_PRICE_DEVIATION = envNumber('MAX_POOL_PRICE_DEVIATION', 0.05)
+
 // MAX_POOL_AGE_MINUTES (default 60 via FRESH_SCANNER_MAX_AGE_MINUTES) + MAX_FRESH_DEEP_CHECKS are the main scanner tunables for the ultra-simple fresh-only model.
