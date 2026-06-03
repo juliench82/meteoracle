@@ -108,7 +108,6 @@ function formatMessage(payload: AlertPayload): string {
   switch (payload.type) {
     case 'position_opened': {
       const safeSymbol = escapeMarkdown(payload.symbol)
-      const dexUrl = `https://dexscreener.com/solana/${payload.poolAddress || payload.mint || ''}`
       const entryUsd = payload.entryPriceUsd ?? payload.entryPrice
       const entrySol = payload.entryPriceSol ?? ''
       const entrySolPart = entrySol ? ` | ${entrySol} SOL` : ''
@@ -127,14 +126,21 @@ function formatMessage(payload: AlertPayload): string {
         ? `🕒 Meteora pool age: ${payload.ageMinutes} min`
         : ''
 
+      const meteoraUrl = payload.poolAddress
+        ? `https://app.meteora.ag/dlmm/${payload.poolAddress}`
+        : null
+      const meteoraLine = meteoraUrl
+        ? `📈 [Meteora DLMM](${meteoraUrl})`
+        : ''
+
       return [
-        `🟢 *BUY* ${safeSymbol}`,
+        `🟢 *DLMM* ${safeSymbol}`,
         `💰 Deployed: ${payload.solDeposited} SOL`,
         `💵 Entry Price: ${formatUsdPrice(entryUsd)}${entrySolPart}`,
         rugLine,
         holdersLine,
         ageLine,
-        `📈 [Dexscreener](${dexUrl})`,
+        meteoraLine,
       ].filter(Boolean).join('\n')
     }
 
