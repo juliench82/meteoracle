@@ -4,10 +4,11 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 
 import { retryStrandedSells } from '@/lib/swap'
 import { getBotState } from '@/lib/botState'
+import axios from 'axios'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
 import { closePosition } from '@/bot/executor/close'
 import { getConnection, getWallet } from '@/lib/solana'
-import { getDLMM, getDecimalAdjustedPrice } from '@/bot/executor/utils'
+import { getDLMM, getDecimalAdjustedPrice, getClaimableFeesUsd } from '@/bot/executor/utils'
 import { getCurrentPoolFeeTvl24h } from '@/bot/scanner/pool-fetcher'
 import { PublicKey } from '@solana/web3.js'
 import {
@@ -161,6 +162,36 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           const ok = await closePosition(pos.id, reason).catch(() => false)
           if (ok) stats.closed++
           continue
+        }
+
+        // For dry sim rows, compute a rough net PnL from entry price vs current market price
+        // so that close alerts (e.g. on max_duration) can include Net PnL even without on-chain data.
+        if (isDrySim && pos.entry_price_usd && pos.entry_price_usd > 0) {
+          try {
+            const mintForPrice = pos.mint || (pos.metadata && pos.metadata.mint)
+            if (mintForPrice) {
+              const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintForPrice}`, { timeout: 5000 })
+              const pair = res.data?.pairs?.[0]
+              const currentPrice = pair?.priceUsd ? parseFloat(pair.priceUsd) : null
+              if (currentPrice) {
+                let roughPnl = ((currentPrice - pos.entry_price_usd) / pos.entry_price_usd) * 100
+                const claimable = getClaimableFeesUsd(pos) ?? 0
+                if (claimable > 0 && pos.sol_deposited > 0) {
+                  // rough: assume SOL ~150 USD for fee contribution; fees are usually tiny in dry sims
+                  roughPnl += (claimable / (pos.sol_deposited * 150)) * 100
+                }
+                pos.last_net_pnl_pct = Math.round(roughPnl * 100) / 100
+                const all = getOpenLpPositions()
+                const idx = all.findIndex((p: any) => p.id === pos.id)
+                if (idx !== -1) {
+                  all[idx].last_net_pnl_pct = pos.last_net_pnl_pct
+                  saveOpenLpPositions(all)
+                }
+              }
+            }
+          } catch (e) {
+            // non-fatal for dry sim
+          }
         }
 
         // ── 2. Out-of-range duration (OOR) ────────────────────────────────────────
