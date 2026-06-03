@@ -4,7 +4,7 @@
  * Ultra-minimal fresh-only filter for the age-based scanner.
  *
  * Responsibilities:
- * - Age gate: only pools with age <= MAX_POOL_AGE_MINUTES
+ * - Age gate: only pools with age <= MAX_POOL_AGE_MINUTES (default 60m)
  * - Cap the number of candidates we process
  * - Highest-liquidity pool selection when multiple tiers exist for one token
  *
@@ -36,7 +36,7 @@ export type FreshCandidate = {
  * Returns only pools that pass the age gate, capped for processing.
  */
 export function filterFreshPools(pools: MeteoraPool[], config: FreshFilterConfig = {}) {
-  const maxAge = config.maxPoolAgeMinutes ?? 30;
+  const maxAge = config.maxPoolAgeMinutes ?? 60;
   const maxCandidates = config.maxCandidates ?? 12;
 
   const fresh: MeteoraPool[] = [];

@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
-const METEORA_DLMM = 'https://dlmm-api.meteora.ag'
+// dlmm-api.meteora.ag /pools (and /pair/all) deprecated/returning 404; datapi is the active public DLMM pool list endpoint.
 
 // Simple in-process cache — pools change slowly.
 // Cache TTL tuned for the fresh-only scanner (age ≤ MAX_POOL_AGE_MINUTES).
@@ -291,12 +291,11 @@ export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: Poo
     .sort((a, b) => (getPoolCreatedAt(b) ?? 0) - (getPoolCreatedAt(a) ?? 0))
   if (pools.length > 0) return pools
 
-  // No pools from this endpoint's /pools (either empty or fetch failed inside). 
-  // /pair/all deprecated, so just return empty for this endpoint (outer logic will try next endpoint).
+  // No pools from this endpoint's /pools (either empty or fetch failed inside).
   return []
 }
 
-export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pools: MeteoraPool[]; error?: string }> {
+export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pools: MeteoraPool[]; error?: string; rawCount?: number }> {
   // 1. In-process memory cache — always apply JS pre-filter so callers with
   //    different configs (e.g. telegram-bot vs lp-scanner) see consistent output.
   const cached = getCachedMeteoraPools()
@@ -304,34 +303,33 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
     const pools = applyJsPreFilter(cached, config)
     console.log(
       `[scanner] using in-memory cached Meteora pools (${cached.length} entries, TTL ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min)` +
-      `; ${pools.length} passed JS pre-filter`,
+      `; ${pools.length} passed JS pre-filter (age≤${config.maxPoolAgeMinutes}m + hasQuote)`,
     )
-    return { pools }
+    return { pools, rawCount: cached.length }
   }
 
   // 2. Live fetch from Meteora API (no persistent DB warm cache in simplified model)
-  // Try both endpoints and merge to be resilient to transient flakes on one.
+  // datapi is the supported public endpoint for DLMM pool listing.
   const poolMap = new Map<string, MeteoraPool>()
-  for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
-    try {
-      console.log(`[scanner] trying Meteora endpoint: ${endpoint}`)
-      const endpointPools = await fetchMeteoraPoolsFromEndpoint(endpoint, config)
-      for (const p of endpointPools) {
-        if (!poolMap.has(p.address)) poolMap.set(p.address, p)
-      }
-      if (endpointPools.length > 0) {
-        console.log(`[scanner] ${endpoint} returned ${endpointPools.length} pools`)
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
-      const status = (err as { response?: { status?: number } })?.response?.status
-      console.warn(`[scanner] endpoint ${endpoint} failed: ${status ? `HTTP ${status}: ` : ''}${message}`)
+  const endpoint = METEORA_DATAPI
+  try {
+    console.log(`[scanner] trying Meteora endpoint: ${endpoint}`)
+    const endpointPools = await fetchMeteoraPoolsFromEndpoint(endpoint, config)
+    for (const p of endpointPools) {
+      if (!poolMap.has(p.address)) poolMap.set(p.address, p)
     }
+    if (endpointPools.length > 0) {
+      console.log(`[scanner] ${endpoint} returned ${endpointPools.length} pools`)
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    const status = (err as { response?: { status?: number } })?.response?.status
+    console.warn(`[scanner] endpoint ${endpoint} failed: ${status ? `HTTP ${status}: ` : ''}${message}`)
   }
 
   const allPools = Array.from(poolMap.values())
   if (allPools.length === 0) {
-    return { pools: [], error: 'All Meteora endpoints failed or returned empty' }
+    return { pools: [], error: 'All Meteora endpoints failed or returned empty', rawCount: 0 }
   }
 
   meteoraPoolsCache = { pools: allPools, ts: Date.now() }
@@ -339,10 +337,10 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
 
   const pools = applyJsPreFilter(allPools, config)
   console.log(
-    `[scanner] ${allPools.length} filtered Meteora pools fetched; ${pools.length} passed JS pre-filter ` +
-    `(minTvl=$${config.minTvlUsd})`,
+    `[scanner] ${allPools.length} Meteora pools from API; ${pools.length} passed JS pre-filter ` +
+    `(age≤${config.maxPoolAgeMinutes}m + hasQuote + !blacklist, minTvl=$${config.minTvlUsd})`,
   )
-  return { pools }
+  return { pools, rawCount: allPools.length }
 }
 
 function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): MeteoraPool[] {
@@ -389,13 +387,10 @@ export async function getCurrentPoolFeeTvl24h(poolAddress: string): Promise<numb
     }
     // Use the internal fetcher directly to avoid heavy JS pre-filter
     let pools: MeteoraPool[] = []
-    for (const endpoint of [METEORA_DATAPI, METEORA_DLMM]) {
-      try {
-        pools = await fetchMeteoraPoolsFromEndpoint(endpoint, relaxedConfig)
-        if (pools.length > 0) break
-      } catch {
-        // try next endpoint
-      }
+    try {
+      pools = await fetchMeteoraPoolsFromEndpoint(METEORA_DATAPI, relaxedConfig)
+    } catch {
+      // best-effort; pools will stay []
     }
     const hit = pools.find((p) => p.address === poolAddress)
     if (hit) {

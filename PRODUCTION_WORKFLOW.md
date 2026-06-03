@@ -2,7 +2,7 @@
 
 **Current ultra-simplified model (post-2026-06 cleanup)**
 
-- Entries: age-only filter (MAX_POOL_AGE_MINUTES) + highest-liquidity pool + rich Telegram info alerts. **Zero scoring, zero momentum lanes.**
+- Entries: age-only filter (MAX_POOL_AGE_MINUTES, default 60m) + highest-liquidity pool + rich Telegram info alerts. **Zero scoring, zero momentum lanes.**
 - Exits (LP): 4-rule system (4h Fee/TVL avg < 0.75%, 45min OOR, -30% net PnL after 20min grace, 24h hard cap) with rich per-rule Telegram close messages.
 - All hot-path state is local JSON only. Telegram is the primary observability surface.
 - Moonboy uses its own simple 80/15/20 trailing.

@@ -67,7 +67,10 @@ export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
 export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
 
 // ── Scanner entry filter (ultra-simplified model) ──
-export const MAX_POOL_AGE_MINUTES = envNumber('MAX_POOL_AGE_MINUTES', 30)
+export const MAX_POOL_AGE_MINUTES = envNumber(
+  'MAX_POOL_AGE_MINUTES',
+  envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 60)
+)
 // Cap on how many fresh age-qualified pools we will deep-check / enrich per scanner tick.
 export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 12)
 
@@ -81,4 +84,4 @@ export const LP_NET_LOSS_SL_MIN_AGE_MIN = envNumber('LP_NET_LOSS_SL_MIN_AGE_MIN'
 export const LP_MAX_DURATION_HOURS     = envNumber('LP_MAX_DURATION_HOURS', 24)           // hard safety cap regardless of other signals
 export const LP_FEE_TVL_SAMPLE_WINDOW_H = 4                                               // rolling window for avg calculation (hours)
 
-// MAX_POOL_AGE_MINUTES + MAX_FRESH_DEEP_CHECKS are the main remaining scanner tunables for the ultra-simple fresh-only model.
+// MAX_POOL_AGE_MINUTES (default 60 via FRESH_SCANNER_MAX_AGE_MINUTES) + MAX_FRESH_DEEP_CHECKS are the main scanner tunables for the ultra-simple fresh-only model.

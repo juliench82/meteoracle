@@ -48,10 +48,11 @@ async function tickScanner() {
     log('scanner tick start')
     const stats = await runScanner()
     const blocked = stats.openBlockedReason ? ` openBlocked=${stats.openBlockedReason}` : ''
+    const api = stats.apiPools != null ? ` apiPools=${stats.apiPools}` : ''
     log(
       `scanner tick done — scanned=${stats.scanned} candidates=${stats.candidates} ` +
       `processed=${stats.processed} opened=${stats.opened} ` +
-      `openSkipped=${stats.openSkipped}${blocked}`,
+      `openSkipped=${stats.openSkipped}${blocked}${api}`,
     )
   } catch (err) {
     console.error('[worker] scanner tick error:', err)

@@ -5,12 +5,12 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 /**
  * Ultra-minimal deep-check / decision layer (age-only model).
  *
- * - Hard gate: pool age ≤ MAX_POOL_AGE_MINUTES (30 by default)
- * - Very light pre-filter (only basic TVL floor + must have SOL/USDC/USDT quote)
+ * - Hard gate: pool age ≤ MAX_POOL_AGE_MINUTES (60m default)
+ * - Very light pre-filter (age + must have SOL/USDC/USDT quote; no TVL floor in hot path)
  * - No fee/TVL or volume/TVL requirements in the hot path
  * - No scoring, no momentum lanes
  * - Best pool per token chosen by highest 24h Fee/TVL
- * - Then deep-check enrichment + accept (if fresh) → open + Moonboy
+ * - Then deep-check enrichment + strategy filter + open + Moonboy
  *
  * Rugcheck + holders are fetched only for rich Telegram notifications (informational).
  */
@@ -96,6 +96,7 @@ export type ScannerResult = {
   openBlockedReason?: string
   error?: string
   tickMode?: boolean
+  apiPools?: number           // raw count returned by Meteora API before JS age/quote pre-filter (for observability)
 }
 
 export async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
@@ -343,9 +344,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     maxCandidates: MAX_FRESH_DEEP_CHECKS,
   }
 
-  // Ultra-minimal scanner fetch: **Only the age gate**.
-  // No TVL, liquidity, fee/TVL or volume filters are applied at fetch time.
-  const { pools: fetchedPools, error: fetchError } = await fetchMeteoraPools({
+  // Ultra-minimal scanner fetch: **Only the age gate** (plus quote asset + blacklist in JS pre-filter).
+  // No TVL, fee/TVL or volume filters are applied at fetch time.
+  const { pools: fetchedPools, error: fetchError, rawCount } = await fetchMeteoraPools({
     minTvlUsd: 0,
     limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '1200'),
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
@@ -361,8 +362,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   const { freshPools, candidates } =
     filterFreshPools(fetchedPools, freshConfig)
 
+  const apiCount = rawCount ?? fetchedPools.length
   console.log(
-    `[scanner] fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m): ${freshPools.length} (from ${fetchedPools.length} pools)`
+    `[scanner] fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m): ${freshPools.length} (from ${fetchedPools.length} age-qualified pools; raw API: ${apiCount})`
   )
 
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
@@ -370,7 +372,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   if (freshCandidates.length === 0) {
     console.log('[scanner] done — no fresh candidates after age filter')
-    return finish({ scanned: fetchedPools.length, candidates: 0 })
+    return finish({ scanned: fetchedPools.length, candidates: 0, apiPools: rawCount })
   }
 
   console.log(`[scanner] processing ${freshCandidates.length} fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m)`)
@@ -463,6 +465,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     openSlots: availableOpenSlots,
     openCount,
     openBlockedReason,
+    apiPools: rawCount,
   })
 }
 
