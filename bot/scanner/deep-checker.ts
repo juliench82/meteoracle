@@ -632,7 +632,7 @@ async function processFreshCandidate(
     token,
     launchpadSource,
     bondingCurvePct,
-    poolPriceDeviation: priceDev,
+    poolPriceDeviation: priceDev ?? undefined,
   });
 
   const { strategy, decision, rejectionReason } = evaluateCandidate(metrics, symbol);
@@ -794,7 +794,7 @@ function buildTokenMetrics(params: {
   token: any;
   launchpadSource?: 'pumpfun' | 'moonshot' | 'meteora' | 'dbc'; // DBC 0.2.0+ may bring transfer-hook tokens
   bondingCurvePct?: number;
-  poolPriceDeviation?: number;
+  poolPriceDeviation?: number | null;
 }): TokenMetrics {
   const {
     tokenAddress,
@@ -838,6 +838,6 @@ function buildTokenMetrics(params: {
     bondingCurvePct,
     launchpadSource,
     binStep: bestPool.pool_config?.bin_step,
-    poolPriceDeviation,
+    poolPriceDeviation: poolPriceDeviation ?? undefined,
   };
 }
