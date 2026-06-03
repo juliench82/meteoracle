@@ -22,9 +22,11 @@ export type OpenLpLimitState = {
 export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitState> {
   try {
     const local = getOpenLpPositions()
+    const openOnes = local.filter((p: any) => OPEN_LP_STATUSES.includes(p.status || 'open'))
+    const count = openOnes.length
     return {
-      effectiveOpenCount: local.length,
-      liveOpenCount: local.length,
+      effectiveOpenCount: count,
+      liveOpenCount: count,
       cachedOpenCount: 0,
       countSource: 'local-state',
       liveFetchOk: true,
