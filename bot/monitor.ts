@@ -30,7 +30,10 @@ import {
  * 4. Hard safety: position age >= LP_MAX_DURATION_HOURS (24h)
  *
  * All decisions + rich metrics are surfaced via Telegram close alerts.
- * No Supabase hot path. Dry-run fully supported.
+ * No Supabase hot path.
+ *
+ * Dry-run simulation rows (from BOT_DRY_RUN) are supported for full open+close lifecycle testing:
+ * pool-level (Fee/TVL) and time-based (duration) rules are evaluated; on-chain rules (OOR, exact netPnL) are skipped.
  */
 
 let tickCount = 0
@@ -81,19 +84,33 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
     for (const pos of positions) {
       try {
-        if (!pos.pool_address || !pos.position_pubkey) continue
+        if (!pos.pool_address) continue
 
-        const DLMM = await getDLMM()
-        const dlmmPool = await DLMM.create(connection, new PublicKey(pos.pool_address))
-        const activeBin = await dlmmPool.getActiveBin()
+        const isDrySim = pos.dry_run === true || !pos.position_pubkey
 
-        // On-chain position for bin range + amounts/fees
-        const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
-        const onChainPos = userPositions.find((p: any) => p.publicKey.toBase58() === pos.position_pubkey)
-        if (!onChainPos?.positionData) continue
+        let activeBin = null
+        let onChainPos = null
+        let isOOR = false
+        let dlmmPool = null
 
-        const { lowerBinId, upperBinId } = onChainPos.positionData
-        const isOOR = activeBin.binId < lowerBinId || activeBin.binId > upperBinId
+        if (!isDrySim) {
+          const DLMM = await getDLMM()
+          dlmmPool = await DLMM.create(connection, new PublicKey(pos.pool_address))
+          activeBin = await dlmmPool.getActiveBin()
+
+          // On-chain position for bin range + amounts/fees
+          const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey)
+          onChainPos = userPositions.find((p: any) => p.publicKey.toBase58() === pos.position_pubkey)
+          if (!onChainPos?.positionData) continue
+
+          const { lowerBinId, upperBinId } = onChainPos.positionData
+          isOOR = activeBin.binId < lowerBinId || activeBin.binId > upperBinId
+        } else {
+          console.log(`[monitor] ${pos.symbol} DRY SIM row — skipping on-chain OOR/netPnl (no real position on-chain)`)
+          isOOR = false
+        }
+
+        const openedAt = pos.opened_at || pos.created_at
 
         // Use global config for the new minimal rules (authoritative for 48h dry-run)
         const oorMinutesThreshold = LP_OOR_EXIT_MINUTES
@@ -147,51 +164,56 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         }
 
         // ── 2. Out-of-range duration (OOR) ────────────────────────────────────────
-        let oorSince = pos.oor_since ? new Date(pos.oor_since).getTime() : null
-        if (isOOR) {
-          if (!oorSince) {
-            oorSince = now
-            pos.oor_since = new Date(oorSince).toISOString()
+        // Only for real on-chain positions
+        if (!isDrySim) {
+          let oorSince = pos.oor_since ? new Date(pos.oor_since).getTime() : null
+          if (isOOR) {
+            if (!oorSince) {
+              oorSince = now
+              pos.oor_since = new Date(oorSince).toISOString()
+              const all = getOpenLpPositions()
+              const idx = all.findIndex((p: any) => p.id === pos.id)
+              if (idx !== -1) { all[idx].oor_since = pos.oor_since; saveOpenLpPositions(all) }
+            }
+
+            const oorMin = (now - oorSince) / 1000 / 60
+            if (oorMin >= oorMinutesThreshold) {
+              const reason = `oor_${Math.round(oorMin)}min`
+              console.log(`[monitor] OOR EXIT → ${pos.symbol} (out ${Math.round(oorMin)}m / ${oorMinutesThreshold}m)`)
+              const ok = await closePosition(pos.id, reason).catch(() => false)
+              if (ok) stats.closed++
+              continue
+            }
+          } else if (oorSince) {
+            // Back in range — clear the timer
+            delete pos.oor_since
             const all = getOpenLpPositions()
             const idx = all.findIndex((p: any) => p.id === pos.id)
-            if (idx !== -1) { all[idx].oor_since = pos.oor_since; saveOpenLpPositions(all) }
+            if (idx !== -1) { delete all[idx].oor_since; saveOpenLpPositions(all) }
           }
-
-          const oorMin = (now - oorSince) / 1000 / 60
-          if (oorMin >= oorMinutesThreshold) {
-            const reason = `oor_${Math.round(oorMin)}min`
-            console.log(`[monitor] OOR EXIT → ${pos.symbol} (out ${Math.round(oorMin)}m / ${oorMinutesThreshold}m)`)
-            const ok = await closePosition(pos.id, reason).catch(() => false)
-            if (ok) stats.closed++
-            continue
-          }
-        } else if (oorSince) {
-          // Back in range — clear the timer
-          delete pos.oor_since
-          const all = getOpenLpPositions()
-          const idx = all.findIndex((p: any) => p.id === pos.id)
-          if (idx !== -1) { delete all[idx].oor_since; saveOpenLpPositions(all) }
         }
 
         // ── 3. Net PnL stop-loss (price move + fees, after grace) ─────────────────
-        const openedAt = pos.opened_at || pos.created_at
-        if (openedAt) {
-          const ageMin = (now - new Date(openedAt).getTime()) / 1000 / 60
-          if (ageMin >= netLossGraceMin) {
-            const netPnl = computeNetPnlApprox(pos, onChainPos, activeBin, dlmmPool)
-            if (netPnl != null) {
-              pos.last_net_pnl_pct = Math.round(netPnl * 100) / 100
-              // Persist for alert richness
-              const all = getOpenLpPositions()
-              const idx = all.findIndex((p: any) => p.id === pos.id)
-              if (idx !== -1) { all[idx].last_net_pnl_pct = pos.last_net_pnl_pct; saveOpenLpPositions(all) }
+        // Only for real on-chain positions
+        if (!isDrySim) {
+          if (openedAt) {
+            const ageMin = (now - new Date(openedAt).getTime()) / 1000 / 60
+            if (ageMin >= netLossGraceMin) {
+              const netPnl = computeNetPnlApprox(pos, onChainPos, activeBin, dlmmPool)
+              if (netPnl != null) {
+                pos.last_net_pnl_pct = Math.round(netPnl * 100) / 100
+                // Persist for alert richness
+                const all = getOpenLpPositions()
+                const idx = all.findIndex((p: any) => p.id === pos.id)
+                if (idx !== -1) { all[idx].last_net_pnl_pct = pos.last_net_pnl_pct; saveOpenLpPositions(all) }
 
-              if (netPnl <= netLossThreshold) {
-                const reason = `net_pnl_sl_${netPnl.toFixed(1)}pct`
-                console.log(`[monitor] NET PNL SL EXIT → ${pos.symbol} (net ${netPnl.toFixed(1)}% <= ${netLossThreshold}% after ${Math.round(ageMin)}m grace)`)
-                const ok = await closePosition(pos.id, reason).catch(() => false)
-                if (ok) stats.closed++
-                continue
+                if (netPnl <= netLossThreshold) {
+                  const reason = `net_pnl_sl_${netPnl.toFixed(1)}pct`
+                  console.log(`[monitor] NET PNL SL EXIT → ${pos.symbol} (net ${netPnl.toFixed(1)}% <= ${netLossThreshold}% after ${Math.round(ageMin)}m grace)`)
+                  const ok = await closePosition(pos.id, reason).catch(() => false)
+                  if (ok) stats.closed++
+                  continue
+                }
               }
             }
           }
@@ -210,6 +232,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         }
 
         // Tick heartbeat for open positions (useful in dry-run logs)
+        // For dry sim rows, netPnl will be n/a and OOR=false (on-chain skipped)
         if (feeTvl4hAvg != null || pos.last_net_pnl_pct != null) {
           console.log(
             `[monitor] ${pos.symbol} tick — 4hFeeTvlAvg=${feeTvl4hAvg?.toFixed(2) ?? 'n/a'}% ` +
