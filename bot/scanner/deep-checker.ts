@@ -10,7 +10,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
  * - No fee/TVL or volume/TVL requirements in the hot path
  * - No scoring, no momentum lanes
  * - Best pool per token chosen by highest 24h Fee/TVL
- * - Then deep-check enrichment + strategy filter + open + Moonboy
+ * - Then deep-check enrichment + strategy filter + open
  *
  * Rugcheck + holders are fetched only for rich Telegram notifications (informational).
  */
@@ -29,8 +29,6 @@ import {
   isMoonshotToken,
 } from '@/lib/pumpfun'
 import type { TokenMetrics } from '@/lib/types'
-import { openMoonboyPosition } from '../moonboy-executor'
-import { moonboyStrategy } from '@/strategies/moonboy'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
@@ -175,51 +173,7 @@ async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   return new Set()
 }
 
-/**
- * Attempt a Moonboy companion spot-buy ($10) right after a successful LP open.
- * This is the single authoritative trigger point for Moonboy.
- *
- * In the minimal model the scanner already only considers fresh tokens (≤ MAX_POOL_AGE_MINUTES),
- * so we do not re-apply a separate age gate here.
- */
-async function triggerMoonboyOnCandidate(
-  metrics: TokenMetrics, 
-  solPriceUsd: number
-): Promise<void> {
-  const isDryRun = process.env.BOT_DRY_RUN === 'true'
-  const label = `[moonboy][${metrics.symbol}]`
 
-  console.log(`${label} evaluating Moonboy on fresh candidate (age=${metrics.ageHours.toFixed(1)}h)`);
-
-  if (!moonboyStrategy.enabled) {
-    console.log(`${label} skipped — Moonboy strategy disabled`);
-    return
-  }
-
-  // Note: The main scanner already enforces age ≤ MAX_POOL_AGE_MINUTES.
-  // We keep this secondary check only as a safety net for standalone Moonboy paths.
-  const maxAge = moonboyStrategy.filters.maxAgeHours
-  if (metrics.ageHours > maxAge) {
-    console.log(`${label} skipped — age ${metrics.ageHours.toFixed(1)}h > ${maxAge}h gate (Moonboy max age)`);
-    return
-  }
-
-  console.log(`${label} triggering companion spot-buy on fresh candidate (age=${metrics.ageHours.toFixed(1)}h)`)
-
-  try {
-    const moonboyId = await openMoonboyPosition(metrics, solPriceUsd)
-    if (moonboyId) {
-      console.log(`${label} companion spot-buy succeeded (id=${moonboyId})`)
-    } else {
-      console.log(`${label} companion spot-buy did not open (see moonboy logs above)`)
-    }
-  } catch (err) {
-    console.warn(
-      `${label} openMoonboyPosition threw (non-fatal):`,
-      err instanceof Error ? err.message : String(err),
-    )
-  }
-}
 
 /** Resolve SOL price in USD using DexScreener (free tier friendly, reliable for SOL).
  * Falls back to env var or 150.
@@ -459,8 +413,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     `openSlots=${availableOpenSlots}, dailyLossHit=${dailyLossLimitHit ?? false}`
   )
 
-  // Moonboy summary (now triggered on candidates, not just LP opens)
-  // (logged via the per-candidate Moonboy logs above + this aggregate if we tracked more)
+
 
   return finish({
     scanned: fetchedPools.length,
@@ -717,10 +670,6 @@ async function attemptOpenAndNotify(params: {
       return { wasCandidate: true, wasOpened: false, wasSkipped: true };
     }
   }
-
-  // Moonboy is triggered on every fresh candidate the scanner picks up
-  // (independent of whether an LP position is actually opened).
-  void triggerMoonboyOnCandidate(metrics, liveSolPriceUsd);
 
   const positionId = await openPosition(metrics, strategy);
   if (positionId) {

@@ -53,26 +53,6 @@ type AlertPayload =
     }
   | { type: 'candidate_found'; symbol: string; strategy: string; score: number; mcUsd: number; volume24h: number; bondingCurvePct?: number }
   | { type: 'pnl_unavailable_warning'; symbol: string; strategy: string; positionId: string; reason: string; ageHours: number }
-  | {
-      type: 'moonboy_opened'
-      symbol: string
-      mint: string
-      buyUsd: number
-      solSpent: number
-      entryPriceUsd: number
-      takeProfitPct: number
-      stopLossPct: number
-      ageMinutes?: number
-    }
-  | {
-      type: 'moonboy_closed'
-      symbol: string
-      mint: string
-      pnlPct: number
-      reason: string
-      ageHours: number
-      swapSig: string
-    }
   | { type: 'warning'; message: string }
   | { type: 'error'; message: string }
 
@@ -206,40 +186,6 @@ function formatMessage(payload: AlertPayload): string {
         `Age: ${payload.ageHours}h`,
         `Stop-loss/take-profit protection is degraded.`,
       ].join('\n')
-
-    case 'moonboy_opened': {
-      const safeSymbol = escapeMarkdown(payload.symbol)
-      const dexUrl = `https://dexscreener.com/solana/${payload.mint}`
-      const pnlSign = payload.takeProfitPct >= 0 ? '+' : ''
-      const ageLine = payload.ageMinutes != null
-        ? `🕒 Meteora pool age: ${payload.ageMinutes} min`
-        : ''
-
-      return [
-        `🌙 *MOONBOY BUY* ${safeSymbol}`,
-        `💵 Buy Size: $${payload.buyUsd} (~${payload.solSpent.toFixed(4)} SOL)`,
-        `📊 Entry: ${formatUsdPrice(payload.entryPriceUsd)}`,
-        `🎯 TP: ${pnlSign}${payload.takeProfitPct}% | SL: ${payload.stopLossPct}%`,
-        ageLine,
-        `📈 [Dexscreener](${dexUrl})`,
-      ].filter(Boolean).join('\n')
-    }
-
-    case 'moonboy_closed': {
-      const safeSymbol = escapeMarkdown(payload.symbol)
-      const safeReason = escapeMarkdown(payload.reason)
-      const pnlSign = payload.pnlPct >= 0 ? '+' : ''
-      const pnlEmoji = payload.pnlPct >= 0 ? '🟢' : '🔴'
-      const dexUrl = `https://dexscreener.com/solana/${payload.mint}`
-      return [
-        `${pnlEmoji} *MOONBOY SELL* ${safeSymbol}`,
-        `PnL: *${pnlSign}${payload.pnlPct.toFixed(2)}%*`,
-        `Reason: ${safeReason}`,
-        `Held: ${payload.ageHours}h`,
-        `Sig: \`${payload.swapSig.slice(0, 12)}…\``,
-        `📈 [Dexscreener](${dexUrl})`,
-      ].join('\n')
-    }
 
     case 'warning':
       return `⚠️ *Warning*\n${escapeMarkdown(payload.message)}`

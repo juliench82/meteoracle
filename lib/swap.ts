@@ -183,7 +183,7 @@ export async function swapTokenToSol(
 }
 
 /**
- * Retries stranded sell_failed positions across moonboy_positions and lp_positions.
+ * Retries stranded sell_failed positions across lp_positions.
  * Called at the top of every monitor tick. Swaps whatever token balance remains
  * in the wallet directly to SOL — no LP close attempted.
  * Promotes to status=closed on success, leaves as sell_failed if swap still fails.
@@ -194,78 +194,4 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   return { retried: 0, recovered: 0 }
 }
 
-/**
- * Buys `usdAmount` worth of `tokenMint` using SOL via Jupiter.
- * Returns { sig, solSpent, tokenAmountOut } or throws.
- */
-export async function buyTokenWithSol(
-  tokenMint: string,
-  solPriceUsd: number,
-  usdAmount: number,
-  label: string,
-): Promise<{ sig: string; solSpent: number; tokenAmountOut: bigint }> {
-  if (process.env.BOT_DRY_RUN === 'true') {
-    console.log(`${label} [swap] DRY RUN — skipping Jupiter buy`)
-    return { sig: 'DRY_RUN', solSpent: 0, tokenAmountOut: 0n }
-  }
 
-  if (tokenMint === NATIVE_MINT) throw new Error('buyTokenWithSol: cannot buy native SOL')
-  if (solPriceUsd <= 0) throw new Error('buyTokenWithSol: solPriceUsd must be > 0')
-  if (solPriceUsd < 10) throw new Error(`buyTokenWithSol: solPriceUsd suspiciously low (${solPriceUsd}) — aborting`)
-
-  const solAmount = usdAmount / solPriceUsd
-  const lamports = BigInt(Math.floor(solAmount * 1e9))
-  if (lamports === 0n) throw new Error('buyTokenWithSol: lamport amount rounds to zero')
-
-  const connection = getConnection()
-  const wallet = getWallet()
-
-  console.log(`${label} [swap] buying ~$${usdAmount} (${solAmount.toFixed(5)} SOL) of ${tokenMint.slice(0, 8)}…`)
-
-  const ladder = slippageLadder()
-  let lastError: unknown
-
-  for (const slippage of ladder) {
-    try {
-      console.log(`${label} [swap] trying buy with slippage ${slippage}bps…`)
-
-      const quoteUrl =
-        `${JUPITER_QUOTE_API}/quote?inputMint=${NATIVE_MINT}&outputMint=${tokenMint}` +
-        `&amount=${lamports.toString()}&slippageBps=${slippage}&onlyDirectRoutes=false`
-
-      const quoteRes = await fetchWithRetry(quoteUrl, {})
-      if (!quoteRes.ok) throw new Error(`Jupiter buy quote failed: ${quoteRes.status} ${await quoteRes.text()}`)
-      const quote = await quoteRes.json()
-
-      const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          quoteResponse: quote,
-          userPublicKey: wallet.publicKey.toBase58(),
-          wrapAndUnwrapSol: true,
-          dynamicComputeUnitLimit: true,
-          prioritizationFeeLamports: 'auto',
-        }),
-      })
-      if (!swapRes.ok) throw new Error(`Jupiter buy swap tx failed: ${swapRes.status} ${await swapRes.text()}`)
-      const { swapTransaction } = await swapRes.json()
-
-      const txBuf = Buffer.from(swapTransaction, 'base64')
-      const tx = VersionedTransaction.deserialize(txBuf)
-      tx.sign([wallet])
-
-      const sig = await sendAndConfirmVersioned(tx, `${label}[buy]`)
-      const tokenAmountOut = BigInt(quote.outAmount ?? '0')
-      console.log(`${label} [swap] buy confirmed ✔ with ${slippage}bps | sig: ${sig} | outAmount: ${tokenAmountOut.toString()}`)
-      return { sig, solSpent: Number(lamports) / 1e9, tokenAmountOut }
-
-    } catch (err) {
-      lastError = err
-      const msg = err instanceof Error ? err.message : String(err)
-      console.warn(`${label} [swap] buy failed at ${slippage}bps: ${msg}`)
-    }
-  }
-
-  throw lastError || new Error('Moonboy buy failed after all slippage levels')
-}

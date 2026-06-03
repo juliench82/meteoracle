@@ -15,7 +15,7 @@ import { getBotState, setBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { getOpenLpPositions, getOpenMoonboys } from '@/lib/local-state'
+import { getOpenLpPositions } from '@/lib/local-state'
 import { getTelegramAllowedUsers, isTelegramCommandAllowed } from '@/lib/telegram-auth'
 
 const execAsync = promisify(exec)
@@ -69,7 +69,7 @@ async function handleUpdate(update: any) {
       '*Meteoracle Commands*',
       '',
       '/status — current state + positions count',
-      '/positions — detailed list of open LP + Moonboy (with live exit signals: netPnL, Fee/TVL, OOR, trailing state, ages)',
+      '/positions — detailed list of open LP positions (with live exit signals: netPnL, Fee/TVL, OOR, age)',
       '/tick — force one scanner + monitor cycle',
       '/start — enable the bot (soft, recommended)',
       '/stop — disable the bot',
@@ -99,14 +99,12 @@ async function handleUpdate(update: any) {
   if (cmd === '/status') {
     const state = await getBotState()
     const lp = getOpenLpPositions()
-    const mb = getOpenMoonboys()
 
     let msg = `*Bot Status*\n`
     msg += `Enabled: ${state.enabled}\n`
     msg += `Dry-run: ${state.dry_run}\n`
     msg += `Paused: ${state.paused}\n\n`
     msg += `Open LP: ${lp.length}\n`
-    msg += `Open Moonboy: ${mb.length}\n`
 
     await sendMessage(msg, chatId)
     return
@@ -114,47 +112,27 @@ async function handleUpdate(update: any) {
 
   if (cmd === '/positions') {
     const lp = getOpenLpPositions()
-    const mb = getOpenMoonboys()
     const now = Date.now()
 
     let msg = '*Open Positions*\n\n'
 
-    if (lp.length === 0 && mb.length === 0) {
+    if (lp.length === 0) {
       msg += 'No open positions.'
     } else {
-      if (lp.length > 0) {
-        msg += `*LP Positions (${lp.length})*\n`
-        lp.forEach((p: any) => {
-          const ageH = p.opened_at ? ((now - new Date(p.opened_at).getTime()) / 3600000).toFixed(1) : '?'
-          const net = p.last_net_pnl_pct != null ? `${p.last_net_pnl_pct.toFixed(1)}%` : 'n/a'
-          const ft = p.last_fee_tvl_4h_avg != null ? `${p.last_fee_tvl_4h_avg.toFixed(2)}%` : 'n/a'
-          let oor = 'no'
-          if (p.oor_since) {
-            const mins = Math.round((now - new Date(p.oor_since).getTime()) / 60000)
-            oor = `${mins}m`
-          }
-          const dry = p.dry_run ? ' (dry)' : ''
-          msg += `• ${p.symbol}${dry} — ${p.sol_deposited ?? '?'} SOL\n`
-          msg += `  NetPnL: ${net} | 4hFee/TVL: ${ft} | OOR: ${oor} | Age: ${ageH}h\n`
-        })
-      }
-      if (mb.length > 0) {
-        msg += `\n*Moonboy Positions (${mb.length})*\n`
-        mb.forEach((p: any) => {
-          const pnl = p.pnl_pct != null ? `${p.pnl_pct.toFixed(1)}%` : 'n/a'
-          const entry = p.entry_price_usd != null ? `$${p.entry_price_usd.toFixed(6)}` : '?'
-          const curr = p.current_price_usd != null ? `$${p.current_price_usd.toFixed(6)}` : '?'
-          const ageH = p.opened_at ? ((now - new Date(p.opened_at).getTime()) / 3600000).toFixed(1) : '?'
-          const dry = p.dry_run ? ' (dry)' : ''
-          const meta = p.metadata || {}
-          let trail = ''
-          if (meta.highest_price_since_80pct != null) {
-            trail = ` | Peak@80%: $${Number(meta.highest_price_since_80pct).toFixed(6)}`
-          }
-          msg += `• ${p.symbol}${dry}\n`
-          msg += `  PnL: ${pnl} | Entry: ${entry} → Now: ${curr}${trail} | Age: ${ageH}h\n`
-        })
-      }
+      msg += `*LP Positions (${lp.length})*\n`
+      lp.forEach((p: any) => {
+        const ageH = p.opened_at ? ((now - new Date(p.opened_at).getTime()) / 3600000).toFixed(1) : '?'
+        const net = p.last_net_pnl_pct != null ? `${p.last_net_pnl_pct.toFixed(1)}%` : 'n/a'
+        const ft = p.last_fee_tvl_4h_avg != null ? `${p.last_fee_tvl_4h_avg.toFixed(2)}%` : 'n/a'
+        let oor = 'no'
+        if (p.oor_since) {
+          const mins = Math.round((now - new Date(p.oor_since).getTime()) / 60000)
+          oor = `${mins}m`
+        }
+        const dry = p.dry_run ? ' (dry)' : ''
+        msg += `• ${p.symbol}${dry} — ${p.sol_deposited ?? '?'} SOL\n`
+        msg += `  NetPnL: ${net} | 4hFee/TVL: ${ft} | OOR: ${oor} | Age: ${ageH}h\n`
+      })
     }
 
     await sendMessage(msg, chatId)

@@ -2,7 +2,7 @@
  * lib/strategy-config.ts
  *
  * Minimal centralized env configuration for the current architecture
- * (evil-panda LP + moonboy spot buys only).
+ * (evil-panda LP only).
  */
 
 export function envNumber(name: string, fallback: number): number {
@@ -56,7 +56,6 @@ export const MAX_POOL_AGE_MINUTES_FOR_LP = envNumber('FRESH_SCANNER_MAX_AGE_MINU
 export const SCANNER_ENABLED = envBool('SCANNER_ENABLED', true)
 export const LP_SCANNER_ENABLED = envBool('LP_SCANNER_ENABLED', true) && SCANNER_ENABLED
 export const EVIL_PANDA_ENABLED = envBool('EVIL_PANDA_ENABLED', true)
-export const MOONBOY_ENABLED = envBool('MOONBOY_ENABLED', true)
 export const HELIUS_ENABLED = envBool('HELIUS_ENABLED', false)
 export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
 

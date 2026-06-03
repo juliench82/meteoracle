@@ -1,18 +1,14 @@
 import type { Strategy, TokenMetrics } from '@/lib/types'
 import { evilPandaStrategy } from './evil-panda'
-import { moonboyStrategy } from './moonboy'
 
 /**
  * Minimal strategy registry for the current architecture.
  *
- * Only two things exist:
- * - evil-panda: LP on very fresh shitcoins
- * - moonboy: companion spot buy (max 3 concurrent, exit at 2x)
+ * Only evil-panda: LP on very fresh Meteora DLMM tokens.
  */
 
 export const STRATEGIES: Strategy[] = [
   evilPandaStrategy,
-  moonboyStrategy,
 ]
 
 export type StrategyId = Strategy['id']

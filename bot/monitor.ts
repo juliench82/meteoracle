@@ -2,7 +2,6 @@ import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
-import { checkMoonboyPositions } from './moonboy-executor'
 import { retryStrandedSells } from '@/lib/swap'
 import { getBotState } from '@/lib/botState'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
@@ -21,7 +20,7 @@ import {
 } from '@/lib/strategy-config'
 
 /**
- * Ultra-minimal LP + Moonboy monitor (local-state + on-chain only).
+ * Ultra-minimal LP monitor (local-state + on-chain only).
  *
  * LP exit rules (48h dry-run starting point — see strategy-config + .env):
  * 1. Fee/TVL yield collapse: rolling 4h avg of pool 24h Fee/TVL < LP_FEE_TVL_EXIT_THRESHOLD (0.75%)
@@ -64,7 +63,6 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
   tickCount++ // incremented for potential future use / debugging
 
-  await checkMoonboyPositions().catch(err => console.error('[monitor] moonboy failed:', err))
   await retryStrandedSells().catch(err => console.error('[monitor] stranded sells failed:', err))
 
   if (!LP_MONITOR_ENABLED) {
