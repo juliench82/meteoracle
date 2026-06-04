@@ -6,7 +6,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
  * Ultra-minimal deep-check / decision layer (age-only model).
  *
  * - Hard gate: pool age ≤ MAX_POOL_AGE_MINUTES (60m default)
- * - Very light pre-filter (age + must have SOL/USDC/USDT quote; no TVL floor in hot path)
+ * - Very light pre-filter (age + must be SOL-paired for one-sided SOL LP; no TVL floor in hot path)
  * - No fee/TVL or volume/TVL requirements in the hot path
  * - No scoring, no momentum lanes
  * - Best pool per token chosen by highest 24h Fee/TVL
@@ -51,7 +51,6 @@ import {
   MAX_POOL_PRICE_DEVIATION,
 } from '@/lib/strategy-config'
 import {
-  WSOL,
   fetchMeteoraPools,
   getFeeTvlPct,
   getPoolAgeMinutes,
@@ -60,6 +59,7 @@ import {
   getQuoteTokenMint,
   getTradableToken,
   getVolumeTvlRatio,
+  SOL_MINT,
 } from './pool-fetcher'
 import {
   filterFreshPools,
@@ -96,7 +96,7 @@ export type ScannerResult = {
   openBlockedReason?: string
   error?: string
   tickMode?: boolean
-  apiPools?: number           // raw count returned by Meteora API before JS age/quote pre-filter (for observability)
+  apiPools?: number           // raw count returned by Meteora API before JS age/SOL-paired pre-filter (for observability)
 }
 
 export async function withTimeout<T>(promise: PromiseLike<T>, ms: number, label: string): Promise<T | null> {
@@ -306,7 +306,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     maxCandidates: MAX_FRESH_DEEP_CHECKS,
   }
 
-  // Ultra-minimal scanner fetch: **Only the age gate** (plus quote asset + blacklist in JS pre-filter).
+  // Ultra-minimal scanner fetch: **Only the age gate** (plus SOL-paired + blacklist in JS pre-filter).
   // No TVL, fee/TVL or volume filters are applied at fetch time.
   const { pools: fetchedPools, error: fetchError, rawCount } = await fetchMeteoraPools({
     minTvlUsd: 0,
@@ -328,6 +328,15 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   console.log(
     `[scanner] fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m): ${freshPools.length} (from ${fetchedPools.length} age-qualified pools; raw API: ${apiCount})`
   )
+
+  // Explicit list for observability: makes "why isn't PAWS (or any specific fresh SOL pool) showing" obvious from logs.
+  // If a pool you expect is missing here, it was either not returned by datapi (page/age), >60m old, not SOL-paired, or blacklisted at API.
+  if (fetchedPools.length > 0) {
+    const names = fetchedPools.map((p: any) => p.name).join(', ')
+    console.log(`[scanner] age-qualified SOL-paired pools: ${names}`)
+  } else {
+    console.log(`[scanner] age-qualified SOL-paired pools: (none)`)
+  }
 
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
   const freshCandidates = selectFreshCandidates(candidates, recentlyClosedOorMints, freshConfig)
@@ -524,6 +533,17 @@ async function processFreshCandidate(
   const label = `[scanner][${symbol}]`;
 
   console.log(`${label} processing fresh candidate (age=${ageHours.toFixed(1)}h)`);
+
+  // Early gate for evil-panda: must be SOL-paired (we only do one-sided SOL LP via Zap/direct).
+  // This is belt-and-suspenders with the JS pre-filter; ensures clear per-candidate skip reason
+  // and prevents non-SOL from reaching price-dev, Jupiter precheck, or ACCEPT (then late reject in executor).
+  const p = representativePool;
+  const isSolPaired = p.token_x?.address === SOL_MINT || p.token_y?.address === SOL_MINT;
+  if (!isSolPaired) {
+    console.log(`${label} skip: no SOL side (evil-panda strategy is SOL-paired one-sided only; got ${p.token_x?.symbol || p.token_x?.address?.slice(0,4)}/${p.token_y?.symbol || p.token_y?.address?.slice(0,4)})`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
   const launchpadSource: 'pumpfun' | 'moonshot' | 'meteora' | 'dbc' = isPumpFunToken(tokenAddress) ? 'pumpfun' : isMoonshotToken(tokenAddress) ? 'moonshot' : 'meteora';
   const liveOpenPosition = findLiveOpenPosition(limitState, tokenAddress, representativePool.address);
 

@@ -18,6 +18,7 @@ export function getCachedMeteoraPools(): MeteoraPool[] | null {
 }
 
 export const WSOL = 'So11111111111111111111111111111111111111112'
+export const SOL_MINT = WSOL
 export const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 export const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
 export const QUOTE_ASSETS = new Set([WSOL, USDC, USDT])
@@ -245,13 +246,14 @@ async function fetchMeteoraPoolsPage(
   baseUrl: string,
   sortBy: 'pool_created_at' | 'volume_1h' | 'volume_5m',
   config: PoolFetchConfig,
+  page = 1,
 ): Promise<MeteoraPool[]> {
   const filters = ['is_blacklisted=false']
   if (config.minTvlUsd > 0) {
     filters.unshift(`tvl>=${config.minTvlUsd}`)
   }
   const params: Record<string, string | number> = {
-    page: 1,
+    page,
     page_size: Math.min(config.limit, 100), // API seems sensitive to large sizes sometimes
     sort_by: `${sortBy}:desc`,
     filter_by: filters.join(' && '),
@@ -276,16 +278,45 @@ async function fetchMeteoraPoolsPage(
 
 export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchConfig): Promise<MeteoraPool[]> {
   const poolMap = new Map<string, MeteoraPool>()
-  let newestPools: MeteoraPool[] = []
-  try {
-    newestPools = await fetchMeteoraPoolsPage(baseUrl, 'pool_created_at', config)
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.warn(`[scanner] ${baseUrl}/pools newest-first fetch failed: ${message}`)
-  }
-  for (const pool of newestPools) poolMap.set(pool.address, pool)
+  const MAX_PAGES = 20 // safety cap; 100/page *20 = 2000 pools max
+  let page = 1
+  let pagesFetched = 0
+  let reachedAgeLimit = false
 
-  // In the ultra-minimal model we only care about recent pools by age (≤ MAX_POOL_AGE_MINUTES).
+  while (page <= MAX_PAGES) {
+    let pagePools: MeteoraPool[] = []
+    try {
+      pagePools = await fetchMeteoraPoolsPage(baseUrl, 'pool_created_at', config, page)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[scanner] ${baseUrl}/pools page ${page} fetch failed: ${message}`)
+      break
+    }
+    if (pagePools.length === 0) break
+
+    pagesFetched = page
+    for (const pool of pagePools) {
+      if (!poolMap.has(pool.address)) poolMap.set(pool.address, pool)
+    }
+
+    // If this page contains pools older than our max age, no need to fetch further pages (newer pages first).
+    const pageAges = pagePools
+      .map(p => getPoolAgeMinutes(p))
+      .filter(a => a < 1_000_000)
+    const oldestAgeInPage = pageAges.length > 0 ? Math.max(...pageAges) : 0
+    if (oldestAgeInPage > config.maxPoolAgeMinutes) {
+      reachedAgeLimit = true
+      break
+    }
+
+    page++
+  }
+
+  if (pagesFetched > 1) {
+    console.log(`[scanner] paginated ${pagesFetched} page(s) from ${baseUrl} (reachedAgeLimit=${reachedAgeLimit})`)
+  }
+
+  // In the ultra-minimal model we only care about recent SOL-paired pools by age (≤ MAX_POOL_AGE_MINUTES).
   // Extra volume-sorted fetches have been removed.
   const pools = Array.from(poolMap.values())
     .sort((a, b) => (getPoolCreatedAt(b) ?? 0) - (getPoolCreatedAt(a) ?? 0))
@@ -298,12 +329,13 @@ export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: Poo
 export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pools: MeteoraPool[]; error?: string; rawCount?: number }> {
   // 1. In-process memory cache — always apply JS pre-filter so callers with
   //    different configs (e.g. telegram-bot vs lp-scanner) see consistent output.
+  //    Pre-filter now strictly requires SOL side (for evil-panda one-sided SOL strategy).
   const cached = getCachedMeteoraPools()
   if (cached) {
     const pools = applyJsPreFilter(cached, config)
     console.log(
       `[scanner] using in-memory cached Meteora pools (${cached.length} entries, TTL ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min)` +
-      `; ${pools.length} passed JS pre-filter (age≤${config.maxPoolAgeMinutes}m + hasQuote)`,
+      `; ${pools.length} passed JS pre-filter (age≤${config.maxPoolAgeMinutes}m + SOL-paired + !blacklist)`,
     )
     return { pools, rawCount: cached.length }
   }
@@ -338,7 +370,7 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
   const pools = applyJsPreFilter(allPools, config)
   console.log(
     `[scanner] ${allPools.length} Meteora pools from API; ${pools.length} passed JS pre-filter ` +
-    `(age≤${config.maxPoolAgeMinutes}m + hasQuote + !blacklist, minTvl=$${config.minTvlUsd})`,
+    `(age≤${config.maxPoolAgeMinutes}m + SOL-paired + !blacklist, minTvl=$${config.minTvlUsd})`,
   )
   return { pools, rawCount: allPools.length }
 }
@@ -353,8 +385,10 @@ function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): Met
     if (config.minLiquidityUsd > 0 && getPoolTvl(pool) < config.minLiquidityUsd) return false
     if (config.maxLiquidityUsd > 0 && getPoolTvl(pool) > config.maxLiquidityUsd) return false
 
-    const hasQuote = QUOTE_ASSETS.has(pool.token_x.address) || QUOTE_ASSETS.has(pool.token_y.address)
-    if (!hasQuote) return false
+    // Evil-panda is SOL-paired only (one-sided SOL zap-in / direct). Reject USDC/USDT-paired or other.
+    // This prevents non-SOL pairs from reaching deep-check, ACCEPT, then late "pool has no SOL side" reject in executor.
+    const hasSolSide = pool.token_x.address === SOL_MINT || pool.token_y.address === SOL_MINT
+    if (!hasSolSide) return false
     return true
   })
 }
