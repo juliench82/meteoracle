@@ -35,6 +35,7 @@ import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import { logInfo } from '@/lib/log'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
+import { hasJupiterRouteSolToToken } from '@/lib/swap'
 import {
   SCAN_INTERVAL_MS,
   SCANNER_TICK_TIMEOUT_MS,
@@ -577,6 +578,22 @@ async function processFreshCandidate(
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
+  // Jupiter buyability pre-flight (critical for Token-2022 live opens).
+  // The manual initialize+add path requires acquiring the output token via Jupiter first.
+  // Ultra-fresh Token-2022 graduates frequently return "No routes found" until Jupiter
+  // indexes the new DLMM pool / on-chain liquidity. We skip early (before ACCEPT) so we
+  // don't burn an open slot + produce loud errors. Scanner will re-evaluate on next tick
+  // while the pool is still "fresh" (<=60m).
+  const canBuyToken = await withTimeout(
+    hasJupiterRouteSolToToken(tokenAddress, '50000000', 1000),
+    8000,
+    `jupiter-route ${symbol}`
+  );
+  if (canBuyToken !== true) {
+    console.log(`${label} skip: no Jupiter route for SOL → ${symbol} (NO_ROUTES_FOUND or quote error at test size; common on brand-new Token-2022 graduates — will retry next scan if still fresh)`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
   const liveBestPoolPosition = findLiveOpenPosition(limitState, tokenAddress, bestPool.address);
   if (liveBestPoolPosition) {
     console.log(`${label} skip: live Meteora position already exists for best pool (${liveBestPoolPosition.position_pubkey})`);
@@ -725,6 +742,7 @@ async function attemptOpenAndNotify(params: {
   } else {
     openSkippedCountRef.value++;
     console.warn(`[scanner] ${symbol} — openPosition returned null (executor did not open despite ACCEPT)`);
+    await sendAlert({ type: 'warning', message: `Open failed for ${symbol} (executor returned null after ACCEPT — likely Jupiter buy or on-chain tx error; see worker logs)` });
     return { wasCandidate: true, wasOpened: false, wasSkipped: true };
   }
 }

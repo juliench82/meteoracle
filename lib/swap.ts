@@ -8,6 +8,42 @@ const SWAP_TIMEOUT_MS = 20_000
 const SWAP_MAX_RETRIES = 3
 const SWAP_RETRY_DELAY_MS = 3_000
 
+/**
+ * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
+ * Returns true only if a quote succeeds with positive outAmount (no error).
+ * Used in scanner deep-check to avoid ACCEPTING fresh candidates that will immediately
+ * fail the Jupiter buy step during live Token-2022 position open (very common for
+ * brand-new pump.fun/Dynamic Bonding Curve graduates until the pool is indexed by
+ * the aggregator or has visible swap routes).
+ *
+ * Uses the same /swap/v1/quote endpoint + params as the live buy path in executor/open.ts
+ * so the check is predictive of whether the actual swap ladder will find a route.
+ */
+export async function hasJupiterRouteSolToToken(
+  outputMint: string,
+  amountLamports = '50000000', // ~0.05 SOL test amount (larger than dust to avoid min-size false-negatives)
+  slippageBps = 1000
+): Promise<boolean> {
+  try {
+    const params = new URLSearchParams({
+      inputMint: NATIVE_MINT,
+      outputMint,
+      amount: amountLamports,
+      slippageBps: slippageBps.toString(),
+      onlyDirectRoutes: 'false',
+    });
+    const url = `https://api.jup.ag/swap/v1/quote?${params.toString()}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(7000) });
+    if (!res.ok) return false;
+    const quote = await res.json();
+    if (quote?.error || quote?.errorCode) return false;
+    const out = quote?.outAmount ?? quote?.out_amount;
+    return !!(out && BigInt(out) > 0n);
+  } catch {
+    return false;
+  }
+}
+
 // Slippage ladder for swapTokenToSol: tries each tier in order until one lands.
 // Env SWAP_SLIPPAGE_BPS overrides the starting tier (not the full ladder).
 const SLIPPAGE_LADDER_BPS = [100, 300, 500, 1000, 2000, 5000]

@@ -2,8 +2,13 @@
  * bot/executor/open.ts
  *
  * Position opening for Meteora DLMM.
- * Primary path: Zap SDK (with retries). One manual fallback (Jupiter + raw DLMM) for Token-2022 (incl. DBC 0.2.0+ transfer-hook graduates).
+ * Primary path: Meteora Zap SDK (with retries, using single-sided for SOL-only when applicable).
+ * Direct SDK fallback (one-sided SOL + initializePositionAndAddLiquidityByStrategy)
+ * is used only when Zap fails. This is the official method from Meteora DLMM SDK docs.
  * Early real-binStep validation + proportional shrinking protects against InvalidPositionWidth.
+ *
+ * Note: We no longer force the manual path for all Token-2022. If the Meteora Zap UI can zap-in a pool,
+ * the bot's Zap path should be able to as well (cleaner atomic flow, no separate pre-swap in bot code).
  */
 
 import {
@@ -11,8 +16,6 @@ import {
   ComputeBudgetProgram,
   TransactionInstruction,
   Connection,
-  VersionedTransaction,
-  SYSVAR_RENT_PUBKEY,
 } from '@solana/web3.js'
 import {
   getAssociatedTokenAddressSync,
@@ -27,6 +30,7 @@ import { logInfo, logError, logWarn } from '@/lib/log'
 import { getOpenLpPositions } from '@/lib/local-state'
 import type { StrategyType } from '@meteora-ag/dlmm'
 import type { ZapInDlmmResponse } from '@meteora-ag/zap-sdk'
+import { DlmmSingleSided } from '@meteora-ag/zap-sdk'
 
 
 import {
@@ -40,7 +44,6 @@ import {
   getDecimalAdjustedPrice,
   NATIVE_MINT_STR,
   METEORA_RENT_RESERVE_SOL,
-  ADD_LIQUIDITY_FALLBACK_CU,
   DLMM_ZAP_SWAP_SLIPPAGE_BPS,
   DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE,
   DLMM_ZAP_MAX_ACCOUNTS,
@@ -206,35 +209,16 @@ export async function openPosition(
     // END: Early Bin Range Validation
     // =============================================================================
 
-    // === TOKEN-2022 / pump.fun GRADUATE PATH (primary for these tokens) ===
-    // Historical note (from git history):
-    // The direct Jupiter + raw DLMM SDK path (with split init + addLiquidity + retries)
-    // was the reliable way to consistently open positions on pump.fun graduates.
-    // We route Token-2022 tokens to the direct path as the primary route.
+    // Token-2022 / pump.fun / DBC graduates are no longer forced into the manual path.
+    // We let the Zap path run for them too. Many (like TACO-SOL) can be zapped successfully
+    // via the Meteora app, so the bot should use the same clean Zap flow (atomic swap + LP).
+    // The direct-SDK fallback (pre-swap + initializePositionAndAddLiquidityByStrategy) is available
+    // if the Zap path cannot handle a particular Token-2022 pool's hooks.
     if (isToken2022) {
-      console.log(`${label} Token-2022 / pump.fun / DBC 0.2.0 graduate — routing to direct Jupiter + DLMM SDK path (primary for these tokens)`);
-
-      return await openPositionToken2022(
-        metrics,
-        strategy,
-        dlmmPool,
-        poolPubkey,
-        outputMint,
-        outputTokenProgram,
-        solAmount,
-        minBinId,
-        maxBinId,
-        solIsTokenX,
-        label,
-        await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-        // local-state only
-        DRY_RUN,
-        new Keypair()
-      );
+      console.log(`${label} Token-2022 / pump.fun / DBC 0.2.0 graduate — attempting Zap path first (direct SDK fallback only if Zap fails)`);
     }
-    // === END TOKEN-2022 PRIMARY PATH ===
 
-    // Only reach here for normal (legacy Token) pairs — safe to create ATAs
+    // ATA pre-creation for the token side(s) before attempting Zap (uses getTokenProgramId per mint so Token-2022 sides get the correct program).
     const ataIxs: TransactionInstruction[] = []
     for (const [lbl, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
@@ -281,8 +265,9 @@ export async function openPosition(
 
     const positionKeypair = new Keypair()
 
-    // === ZAP-FIRST ARCHITECTURE (with one manual fallback) ===
-    // Primary path: Meteora Zap SDK — extracted for readability.
+    // === ZAP-FIRST ARCHITECTURE (with one direct SDK fallback) ===
+    // Primary path: Meteora Zap SDK (single-sided SOL when applicable) — for clean atomic SOL-only zaps.
+    console.log(`${label} starting Zap path (singleSided=${solIsTokenX ? 'X' : 'Y'})`);
     const { openSig, lastZapErr } = await tryZapInWithRetries({
       label,
       dlmmPool,
@@ -301,11 +286,14 @@ export async function openPosition(
     });
 
     // Reached after Zap attempts (either success or both failed).
-    // This block is now primarily a safety net for legacy (non-Token-2022) tokens.
+    // Safety net when Zap fails. Fallback uses pure one-sided SOL (no pre-swap) +
+    // the official direct DLMM SDK method (initializePositionAndAddLiquidityByStrategy) from the docs.
     if (!openSig && lastZapErr) {
-      console.warn(`${label} Zap path exhausted after 2 attempts — trying ONE manual fallback (Jupiter + DLMM SDK)`)
+      console.warn(`${label} Zap path exhausted after 2 attempts — lastZapErr=${lastZapErr?.message || lastZapErr}; trying direct SDK fallback (one-sided SOL)`)
       try {
-        return await openPositionToken2022(
+        // Fallback using the official DLMM SDK method recommended in Meteora docs (after Zap fails).
+        // Pure one-sided SOL for SOL economics, no pre-swap.
+        return await openPositionDirectSdkFallback(
           metrics,
           strategy,
           dlmmPool,
@@ -390,6 +378,8 @@ async function tryZapInWithRetries(params: {
 
   const attemptLabelBase = label;
   const favorXInActiveId = solIsTokenX;
+  const singleSided = solIsTokenX ? DlmmSingleSided.X : DlmmSingleSided.Y;
+  console.log(`${attemptLabelBase} singleSided decision: ${singleSided} (SOL is ${solIsTokenX ? 'X' : 'Y'} side)`);
 
   const sendZapTx = async (
     tx: Transaction | undefined,
@@ -415,8 +405,14 @@ async function tryZapInWithRetries(params: {
 
       const activeBin = await dlmmPool.getActiveBin();
       const currentActiveBinId = activeBin.binId;
-      const currentMinDeltaId = minBinId - currentActiveBinId;
-      const currentMaxDeltaId = maxBinId - currentActiveBinId;
+      let currentMinDeltaId = minBinId - currentActiveBinId;
+      let currentMaxDeltaId = maxBinId - currentActiveBinId;
+      const isSingleSidedX = singleSided === DlmmSingleSided.X;
+      if (singleSided !== undefined) {
+        // For single-sided SOL deposit, restrict range to only the SOL side of active bin
+        currentMinDeltaId = isSingleSidedX ? 0 : currentMinDeltaId;
+        currentMaxDeltaId = isSingleSidedX ? currentMaxDeltaId : 0;
+      }
 
       const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk');
       const directSwapEstimate = await estimateDlmmDirectSwap({
@@ -428,11 +424,13 @@ async function tryZapInWithRetries(params: {
         minDeltaId: currentMinDeltaId,
         maxDeltaId: currentMaxDeltaId,
         strategy: strategyType,
+        singleSided,
       });
 
       console.log(
         `${attemptLabel} DLMM zap-in estimate: input=${amountIn.toString()} lamports ` +
-        `solSide=${solIsTokenX ? 'X' : 'Y'} swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
+        `solSide=${solIsTokenX ? 'X' : 'Y'} singleSided=${singleSided} ` +
+        `swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
         `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
       );
 
@@ -451,6 +449,7 @@ async function tryZapInWithRetries(params: {
         swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
         maxTransferAmountExtendPercentage: DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
         directSwapEstimate: directSwapEstimate.result,
+        singleSided,
       });
 
       const zapResponse: ZapInDlmmResponse = await zap.buildZapInDlmmTransaction({
@@ -629,17 +628,13 @@ async function validateOpenEligibility(
 }
 
 /**
- * Primary open path for Token-2022 / pump.fun graduates (and safety fallback for legacy tokens).
+ * Fallback open path using official direct DLMM SDK (after Zap primary fails).
+ * Pure one-sided SOL (no pre-swap) + dlmmPool.initializePositionAndAddLiquidityByStrategy
+ * (the method recommended in Meteora's latest DLMM SDK docs). Supports Token-2022 via the SDK.
  *
- * Low-level split path (proven on wide ranges):
- *   1. Jupiter SOL → token swap
- *   2. initializePosition2 + increasePositionLength2 (dynamic sizing based on actual range width)
- *   3. addLiquidityByStrategy2 with explicit 1.4M CU limit + proper bin arrays + transfer hooks
- *
- * This replaced the old combined initializePositionAndAddLiquidityByStrategy call
- * which was hitting InvalidRealloc / compute budget errors on wide evil-panda ranges.
+ * Reached only when the Zap path (preferred, atomic, no bot-level pre-swap) fails.
  */
-async function openPositionToken2022(
+async function openPositionDirectSdkFallback(
   metrics: TokenMetrics,
   strategy: Strategy,
   dlmmPool: any,
@@ -655,7 +650,7 @@ async function openPositionToken2022(
   DRY_RUN: boolean,
   positionKeypair: Keypair
 ): Promise<string | null> {
-  const label = `${attemptLabel}[token2022]`
+  const label = `${attemptLabel}[direct-fallback]`
 
   console.log(`${label} [DRY-RUN GUARD] DRY_RUN param received: ${DRY_RUN}`)
 
@@ -670,321 +665,77 @@ async function openPositionToken2022(
   try {
     const amountIn = new BN(Math.floor(solAmount * 1e9))
 
-    console.log(`${label} entering Token-2022 low-level split path (initializePosition2 + addLiquidityByStrategy2)`)
-
-    // 1. Swap SOL → token using Jupiter (reliable for Token-2022)
-    console.log(`${label} swapping ${solAmount} SOL → ${metrics.symbol} via Jupiter...`)
-    // =============================================================================
-    // SECTION: Jupiter Swap Fallback (for Token-2022)
-    // =============================================================================
-    // Jupiter swap for fresh Token-2022 tokens.
-    // The helper now uses your SWAP_SLIPPAGE_BPS + a ladder + retries for live reliability.
-    const tokenAmountOut = await swapSolToTokenViaJupiter(
-      connection,
-      wallet,
-      outputMint,
-      amountIn
-    )
-    console.log(`${label} received ${tokenAmountOut.toString()} of ${metrics.symbol}`)
-
-    if (tokenAmountOut.isZero()) {
-      throw new Error(`${label} Jupiter swap returned zero tokens`)
-    }
+    console.log(`${label} entering direct one-sided SOL fallback (no pre-swap, pure SOL economics)`)
 
     if (DRY_RUN) {
-      console.log(`${label} [SAFETY] DRY_RUN true before low-level position creation — aborting`)
+      console.log(`${label} [SAFETY] DRY_RUN true before direct position creation — aborting`)
       return null
     }
 
     const activeBin = await dlmmPool.getActiveBin()
-    const activeBinId = activeBin.binId
 
-    const isTokenXSol = dlmmPool.tokenX.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
-    const isTokenYSol = dlmmPool.tokenY.publicKey.toBase58() === 'So11111111111111111111111111111111111111112'
+    const isTokenXSol = dlmmPool.tokenX.publicKey.toBase58() === NATIVE_MINT_STR
+    const isTokenYSol = dlmmPool.tokenY.publicKey.toBase58() === NATIVE_MINT_STR
 
-    const totalX = isTokenXSol ? new BN(0) : tokenAmountOut
-    const totalY = isTokenYSol ? new BN(0) : tokenAmountOut
+    // One-sided SOL: put full amount on the SOL side, 0 on the other
+    const totalX = isTokenXSol ? amountIn : new BN(0)
+    const totalY = isTokenYSol ? amountIn : new BN(0)
 
-    // === DYNAMIC POSITION CREATION (matches test script logic) ===
-    const DEFAULT_BIN_PER_POSITION = 70
-    const MAX_RESIZE_LENGTH = 91
-    const desiredWidth = maxBinId - minBinId + 1
-    const initialWidth = Math.min(DEFAULT_BIN_PER_POSITION, desiredWidth)
+    const StrategyTypeEnum = await getStrategyType()
+    const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
 
     console.log(
-      `${label} creating position with low-level split (range: ${minBinId} → ${maxBinId}, ${desiredWidth} bins)`
+      `${label} using OFFICIAL direct DLMM SDK initializePositionAndAddLiquidityByStrategy ` +
+      `(one-sided on SOL, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
+    console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
-    // initializePosition2
-    const initIx = await dlmmPool.program.methods
-      .initializePosition2(minBinId, initialWidth)
-      .accountsPartial({
-        payer: wallet.publicKey,
-        position: positionKeypair.publicKey,
-        lbPair: poolPubkey,
-        owner: wallet.publicKey,
-      })
-      .instruction()
-
-    // increasePositionLength2 loop (dynamic, respects actual maxBinId)
-    const extendIxs: any[] = []
-    let currentEndBinId = minBinId + initialWidth - 1
-    while (currentEndBinId < maxBinId) {
-      currentEndBinId = Math.min(currentEndBinId + MAX_RESIZE_LENGTH, maxBinId)
-      const extendIx = await dlmmPool.program.methods
-        .increasePositionLength2(currentEndBinId)
-        .accountsPartial({
-          lbPair: poolPubkey,
-          position: positionKeypair.publicKey,
-          funder: wallet.publicKey,
-          owner: wallet.publicKey,
-        })
-        .instruction()
-      extendIxs.push(extendIx)
-    }
-
-    const createTx = new Transaction().add(initIx, ...extendIxs)
-    const preparedCreateTx = applyPriorityFee(createTx, priorityFee, ADD_LIQUIDITY_FALLBACK_CU)
-    const createSig = await sendLegacyTx(preparedCreateTx, [wallet, positionKeypair], `${label} position-create`)
-    console.log(`${label} ✓ Position created + extended. Sig: ${createSig}`)
-    if (extendIxs.length > 0) {
-      console.log(`${label}   (Used ${extendIxs.length} increasePositionLength2 instruction(s))`)
-    }
-
-    // === ATA for output token (Token-2022) ===
-    const outputAta = getAssociatedTokenAddressSync(
-      outputMint,
-      wallet.publicKey,
-      false,
-      outputTokenProgram,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    )
-
-    if (!(await connection.getAccountInfo(outputAta))) {
-      console.log(`${label} creating ATA for Token-2022 token (${outputMint.toBase58().slice(0, 8)}…)`)
-      const ataIx = createAssociatedTokenAccountIdempotentInstruction(
-        wallet.publicKey,
-        outputAta,
-        wallet.publicKey,
-        outputMint,
-        outputTokenProgram,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      )
-
-      const ataTx = new Transaction().add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }),
-        ataIx
-      )
-
-      const ataSig = await sendLegacyTx(ataTx, [wallet], `${label} ata`)
-      console.log(`${label} ✓ Token-2022 ATA created. Sig: ${ataSig}`)
-    }
-
-    // === Resolve bitmap extension if needed ===
-    let binArrayBitmapExtension: PublicKey | null = null
-    try {
-      const BIN_ARRAY_BITMAP_EXTENSION_SEED = Buffer.from('bitmap')
-      const [pda] = PublicKey.findProgramAddressSync(
-        [BIN_ARRAY_BITMAP_EXTENSION_SEED, poolPubkey.toBuffer()],
-        dlmmPool.program.programId
-      )
-      const info = await connection.getAccountInfo(pda)
-      const existsAndOwned = !!info && info.owner.toBase58() === dlmmPool.program.programId.toBase58()
-
-      if (existsAndOwned) {
-        binArrayBitmapExtension = pda
-        console.log(`${label} Bitmap extension: ${pda.toBase58()} (exists ✓)`)
-      } else {
-        console.log(`${label} Initializing binArrayBitmapExtension (locks rent)`)
-        const initIx = await dlmmPool.program.methods
-          .initializeBinArrayBitmapExtension()
-          .accountsPartial({
-            binArrayBitmapExtension: pda,
-            lbPair: poolPubkey,
-            funder: wallet.publicKey,
-            rent: SYSVAR_RENT_PUBKEY,
-          })
-          .instruction()
-
-        const initTx = new Transaction().add(initIx)
-        const preparedInitTx = applyPriorityFee(initTx, priorityFee, ADD_LIQUIDITY_FALLBACK_CU)
-        const bitmapSig = await sendLegacyTx(preparedInitTx, [wallet], `${label} bitmap-ext`)
-        console.log(`${label} ✓ binArrayBitmapExtension initialized. Sig: ${bitmapSig}`)
-        binArrayBitmapExtension = pda
+    // Step 3: Add ATA pre-creation before the direct call if the SDK doesn't handle it
+    const ataIxs: TransactionInstruction[] = []
+    for (const [lbl, mint, program] of [
+      ['X', dlmmPool.tokenX.publicKey, isTokenXSol ? TOKEN_PROGRAM_ID : outputTokenProgram],
+      ['Y', dlmmPool.tokenY.publicKey, isTokenYSol ? TOKEN_PROGRAM_ID : outputTokenProgram],
+    ] as const) {
+      if (mint.equals(NATIVE_MINT)) {
+        console.log(`${label} token ${lbl} is native SOL — skipping ATA`)
+        continue
       }
-    } catch (bitmapErr: any) {
-      console.warn(`${label} bitmap extension resolution skipped or failed (non-fatal):`, bitmapErr?.message || bitmapErr)
-    }
-
-    if (DRY_RUN) {
-      console.log(`${label} [SAFETY] DRY_RUN true before liquidity addition — aborting`)
-      return null
-    }
-
-    // === Low-level addLiquidityByStrategy2 ===
-    console.log(`${label} Adding liquidity via low-level addLiquidityByStrategy2...`)
-
-    // Lazy import low-level helpers (same pattern as test script)
-    const { toStrategyParameters, getBinArrayAccountMetasCoverage, getBinArrayIndexesCoverage } = await import('@meteora-ag/dlmm')
-    const strategyType = strategyTypeForDistribution(await getStrategyType(), strategy.position.distributionType)
-
-    // Resolve transfer hook remaining accounts for Token-2022
-    let hookSlices: any = { slices: [] }
-    let hookRemainingAccounts: any[] = []
-    try {
-      const hookData = await dlmmPool.getPotentialToken2022IxDataAndAccounts(0 /* Liquidity */)
-      if (hookData) {
-        if (hookData.slices) hookSlices = { slices: hookData.slices }
-        if (hookData.accounts && hookData.accounts.length > 0) {
-          hookRemainingAccounts = hookData.accounts
-          console.log(`${label} Adding ${hookRemainingAccounts.length} transfer hook remaining account(s)`)
-        }
+      const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, program, ASSOCIATED_TOKEN_PROGRAM_ID)
+      if (!(await connection.getAccountInfo(ata))) {
+        console.log(`${label} creating ATA for token ${lbl} (${mint.toBase58().slice(0, 8)}…)`)
+        ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
+          wallet.publicKey, ata, wallet.publicKey, mint, program, ASSOCIATED_TOKEN_PROGRAM_ID
+        ))
       }
-    } catch {
-      console.log(`${label} No transfer hook accounts required (or resolution skipped)`)
     }
-
-    const userTokenX = getAssociatedTokenAddressSync(
-      dlmmPool.tokenX.publicKey,
-      wallet.publicKey,
-      false,
-      isTokenXSol ? TOKEN_PROGRAM_ID : outputTokenProgram
-    )
-    const userTokenY = getAssociatedTokenAddressSync(
-      dlmmPool.tokenY.publicKey,
-      wallet.publicKey,
-      false,
-      isTokenYSol ? TOKEN_PROGRAM_ID : outputTokenProgram
-    )
-
-    // Ensure ATAs exist (create in separate tx if needed)
-    const preInstructions: any[] = []
-    const userTokenXInfo = await connection.getAccountInfo(userTokenX)
-    if (!userTokenXInfo) {
-      preInstructions.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey, userTokenX, wallet.publicKey,
-          dlmmPool.tokenX.publicKey, isTokenXSol ? TOKEN_PROGRAM_ID : outputTokenProgram
-        )
-      )
-    }
-    const userTokenYInfo = await connection.getAccountInfo(userTokenY)
-    if (!userTokenYInfo) {
-      preInstructions.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey, userTokenY, wallet.publicKey,
-          dlmmPool.tokenY.publicKey, isTokenYSol ? TOKEN_PROGRAM_ID : outputTokenProgram
-        )
-      )
-    }
-
-    if (preInstructions.length > 0) {
+    if (ataIxs.length > 0) {
       const ataTx = new Transaction().add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }),
-        ...preInstructions
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }), ...ataIxs
       )
-      const ataSig = await sendLegacyTx(ataTx, [wallet], `${label} liquidity-ata`)
-      console.log(`${label} ✓ Liquidity ATAs created. Sig: ${ataSig}`)
+      const ataSig = await sendLegacyTx(ataTx, [wallet], label)
+      console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
     }
 
-    const currentActiveId = activeBinId
-    const distanceToMin = Math.abs(currentActiveId - minBinId)
-    const distanceToMax = Math.abs(currentActiveId - maxBinId)
-    const maxDistanceFromActive = Math.max(distanceToMin, distanceToMax)
-    const SAFETY_BUFFER_BINS = 25
-    const maxActiveBinSlippage = maxDistanceFromActive + SAFETY_BUFFER_BINS
-
-    const strategyParameters = toStrategyParameters({
-      minBinId,
-      maxBinId,
-      strategyType,
-      singleSidedX: false,
+    const createPositionTxOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+      positionPubKey: positionKeypair.publicKey,
+      user: wallet.publicKey,
+      totalXAmount: totalX,
+      totalYAmount: totalY,
+      strategy: {
+        minBinId,
+        maxBinId,
+        strategyType,
+      },
     })
 
-    const liquidityParams = {
-      amountX: totalX,
-      amountY: totalY,
-      activeId: currentActiveId,
-      maxActiveBinSlippage,
-      strategyParameters,
+    const txsToSend = Array.isArray(createPositionTxOrTxs) ? createPositionTxOrTxs : [createPositionTxOrTxs]
+    let liqSig = ''
+    for (const tx of txsToSend) {
+      const preparedTx = applyPriorityFee(tx, priorityFee)
+      const sig = await sendLegacyTx(preparedTx, [wallet, positionKeypair], `${label} direct-sdk`)
+      console.log(`${label} ✓ direct SDK position created & confirmed. Sig: ${sig}`)
+      liqSig = sig
     }
-
-    const binArrayIndexes = getBinArrayIndexesCoverage(new BN(minBinId), new BN(maxBinId))
-    const binArrayAccountMetas = getBinArrayAccountMetasCoverage(
-      new BN(minBinId),
-      new BN(maxBinId),
-      poolPubkey,
-      dlmmPool.program.programId
-    )
-
-    const accounts: any = {
-      position: positionKeypair.publicKey,
-      lbPair: poolPubkey,
-      sender: wallet.publicKey,
-      user: wallet.publicKey,
-      userTokenX,
-      userTokenY,
-      tokenXProgram: isTokenXSol ? TOKEN_PROGRAM_ID : outputTokenProgram,
-      tokenYProgram: isTokenYSol ? TOKEN_PROGRAM_ID : outputTokenProgram,
-    }
-    if (binArrayBitmapExtension) {
-      accounts.binArrayBitmapExtension = binArrayBitmapExtension
-    }
-
-    const allRemaining = [...binArrayAccountMetas, ...hookRemainingAccounts]
-    console.log(`${label} Bin arrays required: ${binArrayAccountMetas.length}, total remainingAccounts: ${allRemaining.length}`)
-
-    // === Initialize any missing bin arrays for the range (critical for fresh/wide ranges on Token-2022) ===
-    // We must use the parallel indexes list because AccountMeta from getBinArrayAccountMetasCoverage does not carry binArrayIndex.
-    // The indexes are required for the initializeBinArray instruction.
-    const binArrayCoverage = binArrayIndexes.map((binArrayIndex, i) => ({
-      binArrayIndex,
-      pubkey: binArrayAccountMetas[i]?.pubkey,
-    }))
-
-    for (const { binArrayIndex, pubkey } of binArrayCoverage) {
-      if (!pubkey) continue
-      try {
-        const info = await connection.getAccountInfo(pubkey)
-        const isOwnedByProgram = info && info.owner.toBase58() === dlmmPool.program.programId.toBase58()
-
-        if (!isOwnedByProgram) {
-          console.log(`${label} Initializing missing bin array for index ${binArrayIndex?.toString() ?? 'unknown'}`)
-          const initIx = await dlmmPool.program.methods
-            .initializeBinArray(binArrayIndex)
-            .accountsPartial({
-              lbPair: poolPubkey,
-              binArray: pubkey,
-              funder: wallet.publicKey,
-              rent: SYSVAR_RENT_PUBKEY,
-            })
-            .instruction()
-
-          const initTx = new Transaction().add(initIx)
-          const preparedInitTx = applyPriorityFee(initTx, priorityFee, ADD_LIQUIDITY_FALLBACK_CU)
-          const initSig = await sendLegacyTx(preparedInitTx, [wallet], `${label} init-bin-array`)
-          console.log(`${label} ✓ Bin array initialized. Sig: ${initSig}`)
-        }
-      } catch (binErr: any) {
-        console.warn(`${label} Failed to initialize bin array ${pubkey?.toBase58?.()}:`, binErr?.message || binErr)
-      }
-    }
-
-    const addLiqIx = await dlmmPool.program.methods
-      .addLiquidityByStrategy2(liquidityParams, hookSlices)
-      .accountsPartial(accounts)
-      .remainingAccounts(allRemaining)
-      .instruction()
-
-    // Liquidity transaction with 1.4M CU limit (critical for wide Token-2022 ranges)
-    const liqTx = new Transaction()
-      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: ADD_LIQUIDITY_FALLBACK_CU }))
-      .add(addLiqIx)
-
-    const preparedLiqTx = applyPriorityFee(liqTx, priorityFee, ADD_LIQUIDITY_FALLBACK_CU)
-    const liqSig = await sendLegacyTx(preparedLiqTx, [wallet], `${label} add-liquidity`)
-    console.log(`${label} ✓ addLiquidityByStrategy2 sent with 1.4M CU. Sig: ${liqSig}`)
-    console.log(`${label}   remainingAccounts passed: ${allRemaining.length}`)
 
     // Fetch position data for persistence (best effort)
     let tokenAmountDeposited = 0
@@ -995,7 +746,7 @@ async function openPositionToken2022(
       )
       if (userPos?.positionData) {
         const pd = userPos.positionData
-        const rawAmount = solIsTokenX ? pd.totalYAmount : pd.totalXAmount
+        const rawAmount = isTokenXSol ? pd.totalYAmount : pd.totalXAmount
         tokenAmountDeposited = typeof rawAmount === 'object'
           ? (rawAmount as BN).toNumber() / 1e6
           : Number(rawAmount) / 1e6
@@ -1020,7 +771,7 @@ async function openPositionToken2022(
 
     await sendOpenAlert(metrics, strategy, positionId, solAmount, getDecimalAdjustedPrice(dlmmPool, activeBin))
 
-    console.log(`${label} position opened successfully via low-level Token-2022 split path ✔`)
+    console.log(`${label} position opened successfully via direct SDK fallback path ✔`)
     return positionId
 
   } catch (err) {
@@ -1029,7 +780,7 @@ async function openPositionToken2022(
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
     }
-    logError('open_position_token2022_failed', {
+    logError('open_position_direct_fallback_failed', {
       symbol: metrics.symbol,
       strategy: strategy.id,
       error: message,
@@ -1039,121 +790,4 @@ async function openPositionToken2022(
   }
 }
 
-/**
- * Jupiter v1 swap helper: SOL → output token.
- * Used exclusively for the manual Token-2022 low-level opening path.
- *
- * Features for live trading:
- * - Respects SWAP_SLIPPAGE_BPS from .env
- * - Uses a slippage ladder on simulation failures (common on fresh pump.fun tokens)
- * - Hard capped at 2000 bps for safety (configurable via MAX_SLIPPAGE_BPS inside the function)
- * - Basic retry with backoff
- */
-async function swapSolToTokenViaJupiter(
-  connection: Connection,
-  wallet: Keypair,
-  outputMint: PublicKey,
-  amountIn: BN,
-  slippageBps?: number
-): Promise<BN> {
-  const SWAP_MAX_RETRIES = 3;
-  const SWAP_RETRY_DELAY_MS = 2500;
-  const MAX_SLIPPAGE_BPS = 2000; // Hard cap for live trading safety
-
-  // Build slippage ladder starting from user's setting (or safe default)
-  let baseSlippage = slippageBps ?? parseInt(process.env.SWAP_SLIPPAGE_BPS ?? '200');
-
-  if (baseSlippage > MAX_SLIPPAGE_BPS) {
-    console.warn(`[executor] SWAP_SLIPPAGE_BPS=${baseSlippage} exceeds hard cap of ${MAX_SLIPPAGE_BPS}. Capping to ${MAX_SLIPPAGE_BPS}.`);
-    baseSlippage = MAX_SLIPPAGE_BPS;
-  }
-
-  const SLIPPAGE_LADDER = [100, 300, 500, 1000, 2000, 5000];
-  const startIdx = SLIPPAGE_LADDER.findIndex(b => b >= baseSlippage);
-  let ladder = startIdx === -1 ? [baseSlippage] : SLIPPAGE_LADDER.slice(startIdx);
-
-  // Hard cap the ladder at 2000bps for live trading
-  ladder = ladder.filter(bps => bps <= MAX_SLIPPAGE_BPS);
-
-  if (ladder.length === 0) {
-    ladder = [MAX_SLIPPAGE_BPS];
-  }
-
-  let lastError: Error | null = null;
-
-  for (let attempt = 1; attempt <= SWAP_MAX_RETRIES; attempt++) {
-    for (const currentSlippage of ladder) {
-      try {
-        const isAtHardCap = currentSlippage === MAX_SLIPPAGE_BPS;
-        console.log(`[executor] Jupiter SOL→token quote (slippage ${currentSlippage}bps, attempt ${attempt}/${SWAP_MAX_RETRIES})${isAtHardCap ? ' [HARD CAP]' : ''}`);
-
-        const quoteParams = new URLSearchParams({
-          inputMint: 'So11111111111111111111111111111111111111112',
-          outputMint: outputMint.toBase58(),
-          amount: amountIn.toString(),
-          slippageBps: currentSlippage.toString(),
-          onlyDirectRoutes: 'false',
-        });
-
-        const quoteUrl = `https://api.jup.ag/swap/v1/quote?${quoteParams.toString()}`;
-        const quoteRes = await fetch(quoteUrl);
-
-        if (!quoteRes.ok) {
-          const text = await quoteRes.text();
-          throw new Error(`Jupiter quote failed: ${text}`);
-        }
-
-        const quote = await quoteRes.json();
-        if (quote.error) throw new Error(`Jupiter quote error: ${quote.error}`);
-
-        const swapRes = await fetch('https://api.jup.ag/swap/v1/swap', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            quoteResponse: quote,
-            userPublicKey: wallet.publicKey.toBase58(),
-            wrapAndUnwrapSol: true,
-            dynamicComputeUnitLimit: true,
-          }),
-        });
-
-        if (!swapRes.ok) {
-          const text = await swapRes.text();
-          throw new Error(`Jupiter swap failed: ${text}`);
-        }
-
-        const swap = await swapRes.json();
-        if (swap.error) throw new Error(`Jupiter swap error: ${swap.error}`);
-
-        const tx = VersionedTransaction.deserialize(Buffer.from(swap.swapTransaction, 'base64'));
-        tx.sign([wallet]);
-
-        const signature = await connection.sendRawTransaction(tx.serialize());
-        await connection.confirmTransaction(signature, 'confirmed');
-
-        console.log(`[executor] Jupiter swap succeeded with ${currentSlippage}bps`);
-        return new BN(quote.outAmount);
-
-      } catch (err: any) {
-        lastError = err;
-        const msg = err?.message || String(err);
-        const isSlippageError = msg.includes('0x1771') || msg.toLowerCase().includes('slippage');
-
-        console.warn(`[executor] Jupiter swap attempt failed (slippage ${currentSlippage}bps): ${msg}`);
-
-        // Only continue to next slippage level on simulation/slippage errors
-        if (!isSlippageError && attempt < SWAP_MAX_RETRIES) {
-          await new Promise(r => setTimeout(r, SWAP_RETRY_DELAY_MS));
-          break; // retry same slippage after delay
-        }
-      }
-    }
-
-    if (attempt < SWAP_MAX_RETRIES) {
-      console.log(`[executor] Retrying Jupiter swap after delay...`);
-      await new Promise(r => setTimeout(r, SWAP_RETRY_DELAY_MS));
-    }
-  }
-
-  throw lastError || new Error('Jupiter swap failed after all retries and slippage levels');
-}
+// (swapSolToTokenViaJupiter removed - no longer needed after switching fallback to pure SOL one-sided)
