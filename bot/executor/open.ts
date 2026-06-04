@@ -2,9 +2,9 @@
  * bot/executor/open.ts
  *
  * Position opening for Meteora DLMM.
- * Primary path: Meteora Zap SDK (with retries, using single-sided for SOL-only when applicable).
- * Direct SDK fallback (one-sided SOL + initializePositionAndAddLiquidityByStrategy)
- * is used only when Zap fails. This is the official method from Meteora DLMM SDK docs.
+ * Primary path: Meteora Zap SDK (with retries + singleSided flag for pure SOL deposit, full range).
+ * Direct SDK fallback (one-sided SOL amounts + full range via initializePositionAndAddLiquidityByStrategy)
+ * is used only when Zap fails. Matches UI behavior for % range + single-sided.
  * Early real-binStep validation + proportional shrinking protects against InvalidPositionWidth.
  *
  * Note: We no longer force the manual path for all Token-2022. If the Meteora Zap UI can zap-in a pool,
@@ -266,7 +266,7 @@ export async function openPosition(
     const positionKeypair = new Keypair()
 
     // === ZAP-FIRST ARCHITECTURE (with one direct SDK fallback) ===
-    // Primary path: Meteora Zap SDK (single-sided SOL when applicable) — for clean atomic SOL-only zaps.
+    // Primary path: Meteora Zap SDK + singleSided flag — clean atomic SOL-only zaps with full % range (matches Meteora UI).
     console.log(`${label} starting Zap path (singleSided=${solIsTokenX ? 'X' : 'Y'})`);
     const { openSig, lastZapErr } = await tryZapInWithRetries({
       label,
@@ -286,8 +286,8 @@ export async function openPosition(
     });
 
     // Reached after Zap attempts (either success or both failed).
-    // Safety net when Zap fails. Fallback uses pure one-sided SOL (no pre-swap) +
-    // the official direct DLMM SDK method (initializePositionAndAddLiquidityByStrategy) from the docs.
+    // Safety net when Zap fails. Fallback uses one-sided SOL amounts (no pre-swap) +
+    // full range via the official direct DLMM SDK initializePositionAndAddLiquidityByStrategy.
     if (!openSig && lastZapErr) {
       console.warn(`${label} Zap path exhausted after 2 attempts — lastZapErr=${lastZapErr?.message || lastZapErr}; trying direct SDK fallback (one-sided SOL)`)
       try {
@@ -379,7 +379,7 @@ async function tryZapInWithRetries(params: {
   const attemptLabelBase = label;
   const favorXInActiveId = solIsTokenX;
   const singleSided = solIsTokenX ? DlmmSingleSided.X : DlmmSingleSided.Y;
-  console.log(`${attemptLabelBase} singleSided decision: ${singleSided} (SOL is ${solIsTokenX ? 'X' : 'Y'} side)`);
+  console.log(`${attemptLabelBase} singleSided=${singleSided} (SOL side=${solIsTokenX ? 'X' : 'Y'}), using FULL range deltas for position (UI-style)`);
 
   const sendZapTx = async (
     tx: Transaction | undefined,
@@ -405,14 +405,12 @@ async function tryZapInWithRetries(params: {
 
       const activeBin = await dlmmPool.getActiveBin();
       const currentActiveBinId = activeBin.binId;
-      let currentMinDeltaId = minBinId - currentActiveBinId;
-      let currentMaxDeltaId = maxBinId - currentActiveBinId;
-      const isSingleSidedX = singleSided === DlmmSingleSided.X;
-      if (singleSided !== undefined) {
-        // For single-sided SOL deposit, restrict range to only the SOL side of active bin
-        currentMinDeltaId = isSingleSidedX ? 0 : currentMinDeltaId;
-        currentMaxDeltaId = isSingleSidedX ? currentMaxDeltaId : 0;
-      }
+      const currentMinDeltaId = minBinId - currentActiveBinId;
+      const currentMaxDeltaId = maxBinId - currentActiveBinId;
+      // Note: we pass the full min/max deltas (the evil-panda -50%/+100% range)
+      // even for singleSided. The singleSided flag tells the Zap/estimate to do
+      // pure one-sided deposit (swapAmount=0). This matches what the Meteora UI
+      // does when you set full % range + single-sided deposit.
 
       const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk');
       const directSwapEstimate = await estimateDlmmDirectSwap({
@@ -430,6 +428,7 @@ async function tryZapInWithRetries(params: {
       console.log(
         `${attemptLabel} DLMM zap-in estimate: input=${amountIn.toString()} lamports ` +
         `solSide=${solIsTokenX ? 'X' : 'Y'} singleSided=${singleSided} ` +
+        `rangeDeltas: min=${currentMinDeltaId} max=${currentMaxDeltaId} (full evil-panda range) ` +
         `swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
         `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
       );
