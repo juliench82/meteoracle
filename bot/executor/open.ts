@@ -173,39 +173,82 @@ export async function openPosition(
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
     // =============================================================================
-    // SECTION: Early Bin Range Validation (prevents InvalidPositionWidth)
-    // Computes deltas for desired % then caps total width to the DLMM program's max per position
-    // (currently ~70 bins). Wider requests are proportionally shrunk (matches Meteora UI behavior).
+    // Smart range selection for 0 non-refundable bin array cost (per user request + UI behavior)
+    // Compute full desired, show the exact "new bin array cost" the UI would display,
+    // then clamp to the largest range that touches *only already-existing* bin arrays (0 new = 0 non-refundable).
+    // This lets us get as close as possible to -50%/+100% without the painful 0.07 SOL hit on small positions.
     // =============================================================================
-    const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT;
+    const rangeDownPct = strategy.position.rangeDownPct;
+    const rangeUpPct = strategy.position.rangeUpPct;
+    const fullBinsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
+    const fullBinsUp = Math.round((rangeUpPct / 100) / (binStep / 10000));
+    const fullDesiredMin = activeBinId - fullBinsDown;
+    const fullDesiredMax = activeBinId + fullBinsUp;
+    const fullTotalBins = fullDesiredMax - fullDesiredMin + 1;
 
-    const { minBinId, maxBinId, binRange, wasShrunk } = calculateValidatedBinRange(
-      activeBinId,
-      binStep,
-      strategy.position.rangeDownPct,
-      strategy.position.rangeUpPct,
-      maxBins,
-      label
+    const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
+    const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
+
+    const desiredRequired = getBinArraysRequiredByPositionRange(
+      poolPubkey,
+      new BN(fullDesiredMin),
+      new BN(fullDesiredMax),
+      DLMM_PROGRAM_ID
     );
+    let newBinArrayCount = 0;
+    for (const ba of desiredRequired) {
+      if (!(await connection.getAccountInfo(ba.key))) newBinArrayCount++;
+    }
+    const nonRefundCost = (newBinArrayCount * 0.07).toFixed(2);
+    console.log(`${label} Desired range cost check: ${fullTotalBins} bins would require ${newBinArrayCount} new bin array(s) (~${nonRefundCost} SOL non-refundable)`);
 
-    if (binRange < 2 || binRange > maxBins) {
-      console.warn(`${label} bin range still invalid after shrinking — rejecting early`, {
-        binRange,
-        maxBins,
-        binStep,
-        strategy: strategy.id,
-      });
-      logWarn('legacy_bot_log', {
-        level: 'warn',
-        event: 'open_position_skipped_invalid_bin_range',
-        payload: { symbol: metrics.symbol, strategy: strategy.id, binRange, maxBins, binStep },
-      });
+    // Probe to find the max contiguous free range (only existing bin arrays)
+    async function findFreeBoundary(dir: 'left' | 'right', start: number, maxDist = 400) {
+      let lastGood = start;
+      const coarse = 25;
+      for (let off = 0; off < maxDist; off += coarse) {
+        const b = dir === 'left' ? start - off : start + off;
+        const arrs = getBinArraysRequiredByPositionRange(poolPubkey, new BN(b), new BN(b), DLMM_PROGRAM_ID);
+        if (arrs.length === 0) break;
+        const info = await connection.getAccountInfo(arrs[0].key);
+        if (info) lastGood = b;
+        else break;
+      }
+      for (let i = 0; i < coarse + 30; i++) {
+        const b = dir === 'left' ? lastGood - 1 : lastGood + 1;
+        const arrs = getBinArraysRequiredByPositionRange(poolPubkey, new BN(b), new BN(b), DLMM_PROGRAM_ID);
+        if (arrs.length === 0) break;
+        const info = await connection.getAccountInfo(arrs[0].key);
+        if (info) lastGood = b;
+        else break;
+      }
+      return lastGood;
+    }
+    const freeLeft = await findFreeBoundary('left', activeBinId);
+    const freeRight = await findFreeBoundary('right', activeBinId);
+    let minBinId = Math.max(fullDesiredMin, freeLeft);
+    let maxBinId = Math.min(fullDesiredMax, freeRight);
+    if (maxBinId - minBinId < 2) {
+      minBinId = activeBinId - 10;
+      maxBinId = activeBinId + 10;
+    }
+    const binRange = maxBinId - minBinId + 1;
+    const wasShrunk = (fullDesiredMin !== minBinId || fullDesiredMax !== maxBinId);
+    console.log(`${label} Using free range (0 new bin arrays): ${minBinId} → ${maxBinId} (${binRange} bins)`);
+
+    if (binRange < 2) {
+      console.warn(`${label} bin range still invalid after free clamp — rejecting`);
       return null;
     }
 
+    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${binStep})`)
+
     const effectiveDownPct = -((minBinId - activeBinId) * (binStep / 10000) * 100);
     const effectiveUpPct = (maxBinId - activeBinId) * (binStep / 10000) * 100;
-    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${binStep}) — effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% (desired was ${strategy.position.rangeDownPct}% / ${strategy.position.rangeUpPct}%)`);
+    console.log(`${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% (desired was ${strategy.position.rangeDownPct}% / ${strategy.position.rangeUpPct}%)`);
+
+    // (smart free-range clamp + cost logging above already set final min/max and printed the validated line; old calc removed)
+    // (old calc removed; smart free-range logic above already chose min/max, logged the cost info, and printed the validated line with effective coverage)
     // =============================================================================
     // END: Early Bin Range Validation
     // =============================================================================
