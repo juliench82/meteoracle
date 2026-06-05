@@ -21,7 +21,7 @@ export function envBool(name: string, fallback = false): boolean {
 
 // ── Evil Panda (main LP strategy) ───────────────────────────────
 export const EVIL_PANDA_MIN_HOLDER_COUNT = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 50)
-export const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)
+export const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)  // legacy name; tied to old 60m fresh gate (not used in current scanner)
 export const EVIL_PANDA_MAX_AGE_HOURS = envNumber('EVIL_PANDA_MAX_AGE_HOURS', 48)
 export const EVIL_PANDA_MIN_RUGCHECK_SCORE = envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 40)
 
@@ -50,7 +50,7 @@ export const SCANNER_TICK_TIMEOUT_MS = Math.max(
   envNumber('LP_SCANNER_TICK_TIMEOUT_MS', envNumber('SCANNER_TICK_TIMEOUT_MS', 570_000))
 )
 
-export const MAX_POOL_AGE_MINUTES_FOR_LP = envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 60)
+export const MAX_POOL_AGE_MINUTES_FOR_LP = envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 15)
 
 // ── Feature flags ───────────────────────────────────────────────
 export const SCANNER_ENABLED = envBool('SCANNER_ENABLED', true)
@@ -68,7 +68,7 @@ export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
 // ── Scanner entry filter (ultra-simplified model) ──
 export const MAX_POOL_AGE_MINUTES = envNumber(
   'MAX_POOL_AGE_MINUTES',
-  envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 60)
+  envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 15)
 )
 // Cap on how many fresh age-qualified pools we will deep-check / enrich per scanner tick.
 export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 12)
@@ -87,4 +87,4 @@ export const LP_FEE_TVL_SAMPLE_WINDOW_H = 4                                     
 // Pools with large deviation often have misaligned active bin, leading to bad IL/OOR right after opening.
 export const MAX_POOL_PRICE_DEVIATION = envNumber('MAX_POOL_PRICE_DEVIATION', 0.05)
 
-// MAX_POOL_AGE_MINUTES (default 60 via FRESH_SCANNER_MAX_AGE_MINUTES) + MAX_FRESH_DEEP_CHECKS are the main scanner tunables for the ultra-simple fresh-only model.
+// MAX_POOL_AGE_MINUTES (default 15 via FRESH_SCANNER_MAX_AGE_MINUTES) + MAX_FRESH_DEEP_CHECKS are the main scanner tunables for the ultra-simple fresh-only model.

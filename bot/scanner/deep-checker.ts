@@ -5,7 +5,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 /**
  * Ultra-minimal deep-check / decision layer (age-only model).
  *
- * - Hard gate: pool age ≤ MAX_POOL_AGE_MINUTES (60m default)
+ * - Hard gate: pool age ≤ MAX_POOL_AGE_MINUTES (15m default for very fresh only)
  * - Very light pre-filter (age + must be SOL-paired for one-sided SOL LP; no TVL floor in hot path)
  * - No fee/TVL or volume/TVL requirements in the hot path
  * - No scoring, no momentum lanes
@@ -330,7 +330,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   )
 
   // Explicit list for observability: makes "why isn't PAWS (or any specific fresh SOL pool) showing" obvious from logs.
-  // If a pool you expect is missing here, it was either not returned by datapi (page/age), >60m old, not SOL-paired, or blacklisted at API.
+  // If a pool you expect is missing here, it was either not returned by datapi (page/age), >15m old, not SOL-paired, or blacklisted at API.
   if (fetchedPools.length > 0) {
     const names = fetchedPools.map((p: any) => p.name).join(', ')
     console.log(`[scanner] age-qualified SOL-paired pools: ${names}`)
@@ -603,7 +603,7 @@ async function processFreshCandidate(
   // Ultra-fresh Token-2022 graduates frequently return "No routes found" until Jupiter
   // indexes the new DLMM pool / on-chain liquidity. We skip early (before ACCEPT) so we
   // don't burn an open slot + produce loud errors. Scanner will re-evaluate on next tick
-  // while the pool is still "fresh" (<=60m).
+  // while the pool is still "fresh" (<=15m).
   const canBuyToken = await withTimeout(
     hasJupiterRouteSolToToken(tokenAddress, '50000000', 1000),
     8000,

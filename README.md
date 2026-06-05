@@ -8,7 +8,7 @@ It is deliberately scoped to **pure DLMM LP operations** on Meteora — no compa
 
 ## Key Features
 
-- **Evil Panda Strategy**: Opens concentrated LP positions on fresh Meteora DLMM tokens (age ≤ 60m by default).
+- **Evil Panda Strategy**: Opens concentrated LP positions on very fresh Meteora DLMM tokens (age ≤ 15m by default — "very fresh or nothing").
 - **4-Rule Exit Engine** (monitor every ~60s):
   1. Fee/TVL yield collapse (4h rolling avg of 24h Fee/TVL < threshold)
   2. Prolonged out-of-range (OOR)
@@ -80,7 +80,8 @@ Key environment variables (see `.env.local.example` for full list and comments):
 | `LP_SCANNER_ENABLED`           | true    | Enable fresh pool scanning |
 | `LP_MONITOR_ENABLED`           | true    | Enable position monitoring & exits |
 | `EVIL_PANDA_ENABLED`           | true    | Enable the core LP strategy |
-| `MAX_POOL_AGE_MINUTES`         | 60      | Max age for fresh candidates (via FRESH_SCANNER_MAX_AGE_MINUTES) |
+| `MAX_POOL_AGE_MINUTES`         | 15      | Max age for fresh candidates (via FRESH_SCANNER_MAX_AGE_MINUTES) — very fresh only |
+
 | `MAX_CONCURRENT_MARKET_LP_POSITIONS` | 5 | Max concurrent LP positions |
 | `LP_FEE_TVL_EXIT_THRESHOLD`    | 0.75    | 4h avg Fee/TVL % below this → exit |
 | `LP_NET_LOSS_SL_PCT`           | -30     | Net PnL stop-loss threshold |

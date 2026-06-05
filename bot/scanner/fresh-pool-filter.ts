@@ -4,7 +4,7 @@
  * Ultra-minimal fresh-only filter for the age-based scanner.
  *
  * Responsibilities:
- * - Age gate: only pools with age <= MAX_POOL_AGE_MINUTES (default 60m)
+ * - Age gate: only pools with age <= MAX_POOL_AGE_MINUTES (default 15m for very fresh only)
  * - Cap the number of candidates we process
  * - Highest-liquidity pool selection when multiple tiers exist for one token
  *

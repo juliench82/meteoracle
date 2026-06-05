@@ -692,6 +692,50 @@ async function openPositionDirectSdkFallback(
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
+    // Pre-initialize any missing bin arrays for the range.
+    // This avoids "InvalidRealloc" / "Account data size realloc limited to 10240 in inner instructions"
+    // when the range is wide (151+ bins on binStep=100). The DLMM program hits CPI realloc limits
+    // if bin arrays are created/realloced inside the initializePositionAndAddLiquidityByStrategy ix.
+    // Manual UI succeeds because it prepares the accounts (bin arrays + position) with full size upfront.
+    // We do the same here for direct primary to support full evil-panda ranges.
+    try {
+      const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
+      const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
+      const requiredBinArrays = getBinArraysRequiredByPositionRange(
+        poolPubkey,
+        new BN(minBinId),
+        new BN(maxBinId),
+        DLMM_PROGRAM_ID
+      );
+
+      for (const ba of requiredBinArrays) {
+        const baInfo = await connection.getAccountInfo(ba.key);
+        if (!baInfo) {
+          const binArrayIndex = (ba as any).binArrayIndex ?? (ba as any).index;
+          if (binArrayIndex === undefined) {
+            console.warn(`${label} could not determine binArrayIndex for ${ba.key.toBase58().slice(0,8)}, skipping pre-init for this array`);
+            continue;
+          }
+          console.log(`${label} initializing missing bin array index=${binArrayIndex} (${ba.key.toBase58().slice(0,8)})`);
+          const initBinArrayTx = await dlmmPool.initializeBinArray({
+            binArrayIndex,
+            payer: wallet.publicKey,
+          });
+          if (initBinArrayTx) {
+            // Add high CU limit before priority fee
+            initBinArrayTx.instructions.unshift(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 })
+            );
+            const prepared = applyPriorityFee(initBinArrayTx, priorityFee);
+            const sig = await sendLegacyTx(prepared, [wallet], `${label} init-bin-array-${binArrayIndex}`);
+            console.log(`${label} bin array ${binArrayIndex} created ✔ sig: ${sig}`);
+          }
+        }
+      }
+    } catch (binArrayErr) {
+      console.warn(`${label} bin array pre-init warning (continuing):`, binArrayErr);
+    }
+
     // ATA pre-creation before the direct call (primary path) if the SDK doesn't handle it
     const ataIxs: TransactionInstruction[] = []
     for (const [lbl, mint, program] of [
