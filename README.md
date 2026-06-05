@@ -13,7 +13,7 @@ It is deliberately scoped to **pure DLMM LP operations** on Meteora — no compa
   1. Fee/TVL yield collapse (4h rolling avg of 24h Fee/TVL < threshold)
   2. Prolonged out-of-range (OOR)
   3. Net PnL stop-loss (price move + fees, after grace period)
-  4. Hard max duration safety cap
+  4. Hard max duration safety cap (1h for fresh volatile memes)
 - **Local State Only**: All positions and state live in `state/` JSON files. No Supabase required for runtime.
 - **Full Telegram Control**: Start/stop, dry/live mode, force tick, view positions with live metrics, manual close, etc.
 - **Rich Alerts**: Detailed open/close notifications including rugcheck, holders, net PnL, Fee/TVL, OOR time, and more.

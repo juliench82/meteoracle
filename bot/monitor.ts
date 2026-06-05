@@ -28,7 +28,7 @@ import {
  * 2. Prolonged out-of-range: OOR for >= LP_OOR_EXIT_MINUTES (45min)
  * 3. Net PnL stop-loss: realized price move + fees (claimed + unclaimed) <= LP_NET_LOSS_SL_PCT (-30%)
  *    after at least LP_NET_LOSS_SL_MIN_AGE_MIN (20min) grace period
- * 4. Hard safety: position age >= LP_MAX_DURATION_HOURS (24h)
+ * 4. Hard safety: position age >= LP_MAX_DURATION_HOURS (1h for fresh volatile memes — out after 60m max, other rules can fire earlier)
  *
  * All decisions + rich metrics are surfaced via Telegram close alerts.
  * No Supabase hot path.
@@ -250,12 +250,12 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           }
         }
 
-        // ── 4. Hard max duration safety cap ───────────────────────────────────────
+        // ── 4. Hard max duration safety cap (1h for fresh memes) ───────────────────
         if (openedAt) {
           const hoursOpen = (now - new Date(openedAt).getTime()) / 1000 / 3600
           if (hoursOpen >= maxDurationH) {
             const reason = `max_duration_${hoursOpen.toFixed(1)}h`
-            console.log(`[monitor] MAX DURATION EXIT → ${pos.symbol} (${hoursOpen.toFixed(1)}h / ${maxDurationH}h)`)
+            console.log(`[monitor] MAX DURATION EXIT → ${pos.symbol} (${hoursOpen.toFixed(1)}h / ${maxDurationH}h) — 1h fresh meme safety`)
             const ok = await closePosition(pos.id, reason).catch(() => false)
             if (ok) stats.closed++
             continue

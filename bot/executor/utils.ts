@@ -39,9 +39,9 @@ export const DLMM_ZAP_MAX_ACCOUNTS = 48;
 export const DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE = 2;
 
 export const MAX_BINS_BY_STRATEGY: Record<string, number> = {
-  'evil-panda':    150,
+  'evil-panda':    256,  // high enough to support full desired ranges (e.g. 149+ bins on binStep=100); multi-position logic for even wider to be added later
 };
-export const MAX_BINS_DEFAULT = 150;
+export const MAX_BINS_DEFAULT = 256;
 
 export const MARKET_LP_SOL_PER_POSITION = parseFloat(
   process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
@@ -169,7 +169,12 @@ export function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: strin
 
 /**
  * Calculates the actual bin range needed for a strategy's % range on a specific pool's binStep.
- * Applies proportional shrinking if the range would exceed the strategy's max bins.
+ * No artificial low cap (removed per request); high max to support full desired ranges like -50%/+100%
+ * (149+ bins confirmed working on binStep=100 via direct manual open, one position).
+ * Multi-position logic for extremely wide ranges to be added later.
+ *
+ * binRange returned = total bins spanned (max - min + 1).
+ * Shrinking only if exceeding the (high) strategy max.
  */
 export function calculateValidatedBinRange(
   activeBinId: number,
@@ -181,25 +186,28 @@ export function calculateValidatedBinRange(
 ): { minBinId: number; maxBinId: number; binRange: number; wasShrunk: boolean } {
   let binsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
   let binsUp = Math.round((rangeUpPct / 100) / (binStep / 10000));
-  let binRange = binsDown + binsUp;
+  let totalBins = binsDown + binsUp + 1;
   let wasShrunk = false;
 
-  if (binRange > maxBins) {
-    const shrinkRatio = maxBins / binRange;
+  if (totalBins > maxBins) {
+    const maxDeltas = maxBins - 1;
+    const origDeltas = binsDown + binsUp || 1;
+    const shrinkRatio = maxDeltas / origDeltas;
+    const origTotalForLog = totalBins;
     binsDown = Math.floor(binsDown * shrinkRatio);
-    binsUp = maxBins - binsDown;
-    binRange = binsDown + binsUp;
+    binsUp = maxDeltas - binsDown;
+    totalBins = binsDown + binsUp + 1;
     wasShrunk = true;
 
     console.log(
-      `${label} bin range auto-shrunk to respect strategy limit (${binRange} bins instead of ~${Math.round(binRange / shrinkRatio)})`
+      `${label} bin range auto-shrunk to respect strategy limit (${totalBins} bins instead of ~${origTotalForLog})`
     );
   }
 
   const minBinId = activeBinId - binsDown;
   const maxBinId = activeBinId + binsUp;
 
-  return { minBinId, maxBinId, binRange, wasShrunk };
+  return { minBinId, maxBinId, binRange: totalBins, wasShrunk };
 }
 
 export async function getPositionWithRetry(

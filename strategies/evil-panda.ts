@@ -13,7 +13,7 @@ export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
   version: 'v1.1',
   name: 'Evil Panda',
-  description: 'New SOL-paired meme tokens. Wide range (-50% / +100%), short duration, fast exit. Positions are capped at 150 bins max for stability.',
+  description: 'New SOL-paired meme tokens. Wide range (-50% / +100%), Bid-Ask distribution (recommended for capturing volatility swings on fresh memes), short duration (1h hard max), fast exit. Full desired range attempted via direct one-sided SOL (protocol supports 149+ bins on binStep=100).',
   enabled: true,
   filters: {
     minMcUsd: 0,
@@ -32,7 +32,7 @@ export const evilPandaStrategy: Strategy = {
     binStep: envNumber('EVIL_PANDA_BIN_STEP', 100),
     rangeDownPct: envNumber('EVIL_PANDA_RANGE_DOWN_PCT', -50),
     rangeUpPct: envNumber('EVIL_PANDA_RANGE_UP_PCT', 100),
-    distributionType: 'spot',
+    distributionType: 'bid-ask',
     solBias: envNumber('EVIL_PANDA_SOL_BIAS', 1),
   },
   exits: {
@@ -41,7 +41,7 @@ export const evilPandaStrategy: Strategy = {
     stopLossPct: 0,
     takeProfitPct: 0,
     outOfRangeMinutes: envNumber('EVIL_PANDA_OOR_MINUTES', 30),
-    maxDurationHours: envNumber('EVIL_PANDA_MAX_DURATION_HOURS', 12),
+    maxDurationHours: envNumber('EVIL_PANDA_MAX_DURATION_HOURS', 1),
     claimFeesBeforeClose: true,
     minFeesToClaim: envNumber('EVIL_PANDA_MIN_FEES_TO_CLAIM', 0.001),
   },

@@ -1,14 +1,11 @@
 /**
  * bot/executor/open.ts
  *
- * Position opening for Meteora DLMM.
- * Primary path: Meteora Zap SDK (with retries + singleSided flag for pure SOL deposit, full range).
- * Direct SDK fallback (one-sided SOL amounts + full range via initializePositionAndAddLiquidityByStrategy)
- * is used only when Zap fails. Matches UI behavior for % range + single-sided.
- * Early real-binStep validation + proportional shrinking protects against InvalidPositionWidth.
- *
- * Note: We no longer force the manual path for all Token-2022. If the Meteora Zap UI can zap-in a pool,
- * the bot's Zap path should be able to as well (cleaner atomic flow, no separate pre-swap in bot code).
+ * Position opening for Meteora DLMM (evil-panda: Bid-Ask, one-sided SOL).
+ * Primary: direct one-sided SOL via official DLMM SDK initializePositionAndAddLiquidityByStrategy
+ *   (full desired range support, e.g. 149 bins on binStep=100, pure SOL no pre-swap to token).
+ * Fallback: Zap SDK (atomic, singleSided) only if direct fails.
+ * Early binStep validation (high cap, full range attempted; multi-position logic later).
  */
 
 import {
@@ -177,6 +174,8 @@ export async function openPosition(
 
     // =============================================================================
     // SECTION: Early Bin Range Validation (prevents InvalidPositionWidth)
+    // Full desired range from strategy (no artificial low cap); high MAX_BINS to support
+    // e.g. 149+ bins on binStep=100 (confirmed via direct). Multi-position later if needed.
     // =============================================================================
     const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT;
 
@@ -204,7 +203,9 @@ export async function openPosition(
       return null;
     }
 
-    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins, step=${binStep})`)
+    const effectiveDownPct = -((minBinId - activeBinId) * (binStep / 10000) * 100);
+    const effectiveUpPct = (maxBinId - activeBinId) * (binStep / 10000) * 100;
+    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${binStep}) — effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% (desired was ${strategy.position.rangeDownPct}% / ${strategy.position.rangeUpPct}%)`);
     // =============================================================================
     // END: Early Bin Range Validation
     // =============================================================================
@@ -218,7 +219,8 @@ export async function openPosition(
       console.log(`${label} Token-2022 / pump.fun / DBC 0.2.0 graduate — attempting Zap path first (direct SDK fallback only if Zap fails)`);
     }
 
-    // ATA pre-creation for the token side(s) before attempting Zap (uses getTokenProgramId per mint so Token-2022 sides get the correct program).
+    // ATA pre-creation for the token side(s) (uses getTokenProgramId per mint so Token-2022 sides get the correct program).
+    // Done before path selection (direct primary or Zap fallback); direct path also ensures inside as belt-and-suspenders.
     const ataIxs: TransactionInstruction[] = []
     for (const [lbl, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
@@ -265,9 +267,36 @@ export async function openPosition(
 
     const positionKeypair = new Keypair()
 
-    // === ZAP-FIRST ARCHITECTURE (with one direct SDK fallback) ===
-    // Primary path: Meteora Zap SDK + singleSided flag — clean atomic SOL-only zaps with full % range (matches Meteora UI).
-    console.log(`${label} starting Zap path (singleSided=${solIsTokenX ? 'X' : 'Y'})`);
+    // === DIRECT ONE-SIDED SOL PRIMARY (full range support) + Zap fallback ===
+    // Direct primary: uses official DLMM SDK initializePositionAndAddLiquidityByStrategy with one-sided
+    // totals (pure SOL economics, no pre-swap to the token side). Supports full desired ranges
+    // (e.g. -50%/+100% = 149+ bins on binStep=100, confirmed manually with one position).
+    // Zap (Ape In equivalent) as fallback only.
+    console.log(`${label} attempting direct one-sided SOL as PRIMARY path (full evil-panda range, Bid-Ask shape)`);
+    const directResult = await openPositionDirectSdkFallback(
+      metrics,
+      strategy,
+      dlmmPool,
+      poolPubkey,
+      outputMint,
+      outputTokenProgram,
+      solAmount,
+      minBinId,
+      maxBinId,
+      solIsTokenX,
+      label,
+      priorityFee,
+      DRY_RUN,
+      positionKeypair
+    );
+    if (directResult) {
+      console.log(`${label} position opened successfully via direct SDK primary path ✔`);
+      return directResult;
+    }
+    console.warn(`${label} direct primary did not succeed — falling back to Zap path`);
+
+    // Zap fallback (atomic single-sided via Zap program, only if direct primary unsuitable)
+    console.log(`${label} starting Zap fallback path (singleSided=${solIsTokenX ? 'X' : 'Y'})`);
     const { openSig, lastZapErr } = await tryZapInWithRetries({
       label,
       dlmmPool,
@@ -285,55 +314,30 @@ export async function openPosition(
       DRY_RUN,
     });
 
-    // Reached after Zap attempts (either success or both failed).
-    // Safety net when Zap fails. Fallback uses one-sided SOL amounts (no pre-swap) +
-    // full range via the official direct DLMM SDK initializePositionAndAddLiquidityByStrategy.
     if (!openSig && lastZapErr) {
-      console.warn(`${label} Zap path exhausted after 2 attempts — lastZapErr=${lastZapErr?.message || lastZapErr}; trying direct SDK fallback (one-sided SOL)`)
-      try {
-        // Fallback using the official DLMM SDK method recommended in Meteora docs (after Zap fails).
-        // Pure one-sided SOL for SOL economics, no pre-swap.
-        return await openPositionDirectSdkFallback(
-          metrics,
-          strategy,
-          dlmmPool,
-          poolPubkey,
-          outputMint,
-          outputTokenProgram,
-          solAmount,
-          minBinId,
-          maxBinId,
-          solIsTokenX,
-          label,
-          await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()]),
-          // local-state only
-          DRY_RUN,
-          new Keypair()
-        )
-      } catch (manualErr) {
-        console.error(`${label} manual fallback also failed — giving up on ${metrics.symbol}`)
-        throw manualErr
-      }
+      console.error(`${label} both direct primary and Zap fallback failed — giving up on ${metrics.symbol}`);
+      // no further fallback; return null below via finalize or explicit
     }
 
     if (openSig) {
-      console.log(`${label} position opened successfully via Zap path`)
+      console.log(`${label} position opened successfully via Zap fallback path`)
+      const result = await finalizeOpenPosition({
+        label,
+        metrics,
+        strategy,
+        openSig,
+        entryPriceSol,
+        solAmount,
+        positionKeypair,
+        dlmmPool,
+        DRY_RUN,
+        wallet,
+      });
+      return result;
+    } else {
+      console.warn(`${label} both direct primary and Zap fallback failed to produce an openSig`);
+      return null;
     }
-
-    const result = await finalizeOpenPosition({
-      label,
-      metrics,
-      strategy,
-      openSig,
-      entryPriceSol,
-      solAmount,
-      positionKeypair,
-      dlmmPool,
-      DRY_RUN,
-      wallet,
-    });
-
-    return result;
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -379,7 +383,7 @@ async function tryZapInWithRetries(params: {
   const attemptLabelBase = label;
   const favorXInActiveId = solIsTokenX;
   const singleSided = solIsTokenX ? DlmmSingleSided.X : DlmmSingleSided.Y;
-  console.log(`${attemptLabelBase} singleSided=${singleSided} (SOL side=${solIsTokenX ? 'X' : 'Y'}), using FULL range deltas for position (UI-style)`);
+  console.log(`${attemptLabelBase} singleSided=${singleSided} (SOL side=${solIsTokenX ? 'X' : 'Y'}), using FULL range deltas for position (UI-style, Zap fallback)`);
 
   const sendZapTx = async (
     tx: Transaction | undefined,
@@ -408,9 +412,8 @@ async function tryZapInWithRetries(params: {
       const currentMinDeltaId = minBinId - currentActiveBinId;
       const currentMaxDeltaId = maxBinId - currentActiveBinId;
       // Note: we pass the full min/max deltas (the evil-panda -50%/+100% range)
-      // even for singleSided. The singleSided flag tells the Zap/estimate to do
-      // pure one-sided deposit (swapAmount=0). This matches what the Meteora UI
-      // does when you set full % range + single-sided deposit.
+      // even for singleSided (in fallback). The singleSided flag tells the Zap/estimate to do
+      // pure one-sided deposit (swapAmount=0).
 
       const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk');
       const directSwapEstimate = await estimateDlmmDirectSwap({
@@ -428,7 +431,7 @@ async function tryZapInWithRetries(params: {
       console.log(
         `${attemptLabel} DLMM zap-in estimate: input=${amountIn.toString()} lamports ` +
         `solSide=${solIsTokenX ? 'X' : 'Y'} singleSided=${singleSided} ` +
-        `rangeDeltas: min=${currentMinDeltaId} max=${currentMaxDeltaId} (full evil-panda range) ` +
+        `rangeDeltas: min=${currentMinDeltaId} max=${currentMaxDeltaId} (evil-panda range, Zap fallback) ` +
         `swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
         `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
       );
@@ -627,11 +630,11 @@ async function validateOpenEligibility(
 }
 
 /**
- * Fallback open path using official direct DLMM SDK (after Zap primary fails).
+ * Direct one-sided SOL primary path (Zap is fallback).
  * Pure one-sided SOL (no pre-swap) + dlmmPool.initializePositionAndAddLiquidityByStrategy
  * (the method recommended in Meteora's latest DLMM SDK docs). Supports Token-2022 via the SDK.
  *
- * Reached only when the Zap path (preferred, atomic, no bot-level pre-swap) fails.
+ * Primary for evil-panda to support full desired ranges (e.g. 149+ bins on binStep=100).
  */
 async function openPositionDirectSdkFallback(
   metrics: TokenMetrics,
@@ -649,7 +652,7 @@ async function openPositionDirectSdkFallback(
   DRY_RUN: boolean,
   positionKeypair: Keypair
 ): Promise<string | null> {
-  const label = `${attemptLabel}[direct-fallback]`
+  const label = `${attemptLabel}[direct-primary]`
 
   console.log(`${label} [DRY-RUN GUARD] DRY_RUN param received: ${DRY_RUN}`)
 
@@ -664,7 +667,7 @@ async function openPositionDirectSdkFallback(
   try {
     const amountIn = new BN(Math.floor(solAmount * 1e9))
 
-    console.log(`${label} entering direct one-sided SOL fallback (no pre-swap, pure SOL economics)`)
+    console.log(`${label} entering direct one-sided SOL primary path (no pre-swap, pure SOL economics, full range)`)
 
     if (DRY_RUN) {
       console.log(`${label} [SAFETY] DRY_RUN true before direct position creation — aborting`)
@@ -685,11 +688,11 @@ async function openPositionDirectSdkFallback(
 
     console.log(
       `${label} using OFFICIAL direct DLMM SDK initializePositionAndAddLiquidityByStrategy ` +
-      `(one-sided on SOL, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
+      `(one-sided on SOL primary, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
-    // Step 3: Add ATA pre-creation before the direct call if the SDK doesn't handle it
+    // ATA pre-creation before the direct call (primary path) if the SDK doesn't handle it
     const ataIxs: TransactionInstruction[] = []
     for (const [lbl, mint, program] of [
       ['X', dlmmPool.tokenX.publicKey, isTokenXSol ? TOKEN_PROGRAM_ID : outputTokenProgram],
@@ -770,7 +773,7 @@ async function openPositionDirectSdkFallback(
 
     await sendOpenAlert(metrics, strategy, positionId, solAmount, getDecimalAdjustedPrice(dlmmPool, activeBin))
 
-    console.log(`${label} position opened successfully via direct SDK fallback path ✔`)
+    console.log(`${label} position opened successfully via direct SDK primary path ✔`)
     return positionId
 
   } catch (err) {
@@ -779,7 +782,7 @@ async function openPositionDirectSdkFallback(
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
     }
-    logError('open_position_direct_fallback_failed', {
+    logError('open_position_direct_primary_failed', {
       symbol: metrics.symbol,
       strategy: strategy.id,
       error: message,
