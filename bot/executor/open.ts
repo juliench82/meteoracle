@@ -174,8 +174,8 @@ export async function openPosition(
 
     // =============================================================================
     // SECTION: Early Bin Range Validation (prevents InvalidPositionWidth)
-    // Full desired range from strategy (no artificial low cap); high MAX_BINS to support
-    // e.g. 149+ bins on binStep=100 (confirmed via direct). Multi-position later if needed.
+    // Computes deltas for desired % then caps total width to the DLMM program's max per position
+    // (currently ~70 bins). Wider requests are proportionally shrunk (matches Meteora UI behavior).
     // =============================================================================
     const maxBins = MAX_BINS_BY_STRATEGY[strategy.id] ?? MAX_BINS_DEFAULT;
 
@@ -692,12 +692,9 @@ async function openPositionDirectSdkFallback(
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
-    // Pre-initialize any missing bin arrays for the range.
-    // This avoids "InvalidRealloc" / "Account data size realloc limited to 10240 in inner instructions"
-    // when the range is wide (151+ bins on binStep=100). The DLMM program hits CPI realloc limits
-    // if bin arrays are created/realloced inside the initializePositionAndAddLiquidityByStrategy ix.
-    // Manual UI succeeds because it prepares the accounts (bin arrays + position) with full size upfront.
-    // We do the same here for direct primary to support full evil-panda ranges.
+    // Pre-initialize any missing bin arrays for the (capped) range.
+    // Prevents realloc/CPI limits inside the position init for ranges that span new bin arrays
+    // (common on fresh price levels). The DLMM program can't realloc >10k in inner instructions.
     try {
       const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
       const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');

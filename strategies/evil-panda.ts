@@ -13,7 +13,7 @@ export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
   version: 'v1.1',
   name: 'Evil Panda',
-  description: 'New SOL-paired meme tokens. Wide range (-50% / +100%), Bid-Ask distribution (recommended for capturing volatility swings on fresh memes), short duration (1h hard max), fast exit. Full desired range attempted via direct one-sided SOL (protocol supports 149+ bins on binStep=100).',
+  description: 'New SOL-paired meme tokens. Wide desired range (-50% / +100% asymmetric), Bid-Ask distribution (for volatility swings), short duration (1h hard max), fast exit. Actual bin width per position is clamped to DLMM max (~70 bins) with proportional shrink (UI does the same).',
   enabled: true,
   filters: {
     minMcUsd: 0,

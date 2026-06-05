@@ -88,3 +88,4 @@ export const LP_FEE_TVL_SAMPLE_WINDOW_H = 4                                     
 export const MAX_POOL_PRICE_DEVIATION = envNumber('MAX_POOL_PRICE_DEVIATION', 0.05)
 
 // MAX_POOL_AGE_MINUTES (default 15 via FRESH_SCANNER_MAX_AGE_MINUTES) + MAX_FRESH_DEEP_CHECKS are the main scanner tunables for the ultra-simple fresh-only model.
+// Per-position bin width is capped in calculateValidatedBinRange to the DLMM on-chain max (~70).

@@ -39,9 +39,14 @@ export const DLMM_ZAP_MAX_ACCOUNTS = 48;
 export const DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE = 2;
 
 export const MAX_BINS_BY_STRATEGY: Record<string, number> = {
-  'evil-panda':    256,  // high enough to support full desired ranges (e.g. 149+ bins on binStep=100); multi-position logic for even wider to be added later
+  'evil-panda':    70,  // real on-chain max per position (DLMM rejects wider with InvalidPositionWidth 0x1798). UI auto-clamps desired % to this.
 };
-export const MAX_BINS_DEFAULT = 256;
+export const MAX_BINS_DEFAULT = 70;
+
+/** Hard limit on the number of bins (maxBinId - minBinId + 1) a single DLMM position can cover.
+ * Wider ranges require multiple positions (to be added later).
+ */
+export const MAX_BINS_PER_POSITION = 70;
 
 export const MARKET_LP_SOL_PER_POSITION = parseFloat(
   process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
@@ -169,12 +174,12 @@ export function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: strin
 
 /**
  * Calculates the actual bin range needed for a strategy's % range on a specific pool's binStep.
- * No artificial low cap (removed per request); high max to support full desired ranges like -50%/+100%
- * (149+ bins confirmed working on binStep=100 via direct manual open, one position).
- * Multi-position logic for extremely wide ranges to be added later.
+ * Respects the hard DLMM on-chain limit per position (MAX_BINS_PER_POSITION ~70; wider = InvalidPositionWidth).
+ * The desired % is scaled proportionally if it would exceed the max width (this is what the Meteora UI does
+ * when you request -50%/+100% on fine binStep pools — "Total Bins:149" shown but actual position is clamped).
+ * Multi-position logic for full asymmetric coverage on fine grids to be added later.
  *
  * binRange returned = total bins spanned (max - min + 1).
- * Shrinking only if exceeding the (high) strategy max.
  */
 export function calculateValidatedBinRange(
   activeBinId: number,
@@ -189,8 +194,10 @@ export function calculateValidatedBinRange(
   let totalBins = binsDown + binsUp + 1;
   let wasShrunk = false;
 
-  if (totalBins > maxBins) {
-    const maxDeltas = maxBins - 1;
+  // Cap to both the strategy max AND the hard on-chain per-position limit.
+  const effectiveMaxBins = Math.min(maxBins, MAX_BINS_PER_POSITION);
+  if (totalBins > effectiveMaxBins) {
+    const maxDeltas = effectiveMaxBins - 1;
     const origDeltas = binsDown + binsUp || 1;
     const shrinkRatio = maxDeltas / origDeltas;
     const origTotalForLog = totalBins;
@@ -200,7 +207,7 @@ export function calculateValidatedBinRange(
     wasShrunk = true;
 
     console.log(
-      `${label} bin range auto-shrunk to respect strategy limit (${totalBins} bins instead of ~${origTotalForLog})`
+      `${label} bin range auto-shrunk to respect on-chain position width limit (${totalBins} bins instead of ~${origTotalForLog})`
     );
   }
 
