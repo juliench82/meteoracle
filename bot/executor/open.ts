@@ -247,12 +247,6 @@ export async function openPosition(
     const effectiveUpPct = (maxBinId - activeBinId) * (binStep / 10000) * 100;
     console.log(`${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% (desired was ${strategy.position.rangeDownPct}% / ${strategy.position.rangeUpPct}%)`);
 
-    // (smart free-range clamp + cost logging above already set final min/max and printed the validated line; old calc removed)
-    // (old calc removed; smart free-range logic above already chose min/max, logged the cost info, and printed the validated line with effective coverage)
-    // =============================================================================
-    // END: Early Bin Range Validation
-    // =============================================================================
-
     // Token-2022 / pump.fun / DBC graduates are no longer forced into the manual path.
     // We let the Zap path run for them too. Many (like TACO-SOL) can be zapped successfully
     // via the Meteora app, so the bot should use the same clean Zap flow (atomic swap + LP).
@@ -735,9 +729,10 @@ async function openPositionDirectSdkFallback(
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
-    // Pre-initialize any missing bin arrays for the (capped) range.
-    // Prevents realloc/CPI limits inside the position init for ranges that span new bin arrays
-    // (common on fresh price levels). The DLMM program can't realloc >10k in inner instructions.
+    // Pre-initialize any missing bin arrays for the final range.
+    // The smart clamp above already chose a range whose required bin arrays are all existing (0 new = 0 non-refundable cost).
+    // This pre-init is now a safeguard only (in case of concurrent activity or future policy changes that allow paying for 1 new array).
+    // The DLMM program can't realloc >10k in inner instructions.
     try {
       const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
       const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
