@@ -90,6 +90,12 @@ export type PoolFetchConfig = {
   maxPoolAgeMinutes: number
   minLiquidityUsd: number
   maxLiquidityUsd: number
+  // When true (activity scanner path), include fee_tvl_ratio_24h>=0.005 in server filter_by
+  // per the revised top-performer spec. Relaxed/monitor paths set false to reach decayed pools.
+  strictFeeTvlRatioFilter?: boolean
+  // Explicit sort for the list call. Activity path uses 'fee_tvl_ratio_1h:desc' (spec).
+  // Relaxed paths can use 'pool_created_at' or omit for default.
+  sortBy?: string
 }
 
 type UnknownRecord = Record<string, unknown>
@@ -303,22 +309,32 @@ async function fetchMeteoraPoolsPage(
 ): Promise<MeteoraPool[]> {
   const filters: string[] = ['is_blacklisted=false']
 
-  // Use documented real fields for server-side filtering (Claude revised filters)
+  // Use documented real fields for server-side filtering (aligned to revised spec)
   const minTvl = config.minTvlUsd > 0 ? config.minTvlUsd : MIN_TVL_USD
   filters.push(`tvl>=${minTvl}`)
 
   // fee_24h >= 5 (real activity floor, cheap server-side filter)
   filters.push(`fee_24h>=${MIN_FEE_24H}`)
 
+  // fee_tvl_ratio_24h >= 0.005 (0.5%) — pushed server-side for activity path per spec
+  // (fee_tvl_ratio_* is an allowed filter_by field). Relaxed paths (monitor) omit this
+  // so we can still observe yield on older/decayed positions.
+  if (config.strictFeeTvlRatioFilter) {
+    filters.push(`fee_tvl_ratio_24h>=${MIN_FEE_TVL_RATIO_24H}`)
+  }
+
   const params: Record<string, string | number> = {
     page,
     page_size: Math.min(config.limit, 100),
-    // Prefer recency on 1h fee/tvl ratio (Claude recommendation)
+    // sortBy is provided by caller (yield sort for activity, recency for relaxed/pagination)
     sort_by: sortBy || 'fee_tvl_ratio_1h:desc',
     filter_by: filters.join(' && '),
   }
 
   // Simple retry for transient 4xx/5xx on Meteora public API
+  if (page === 1) {
+    console.log(`[scanner] /pools request — sort_by=${params.sort_by} filter_by=${params.filter_by} page_size=${params.page_size}`)
+  }
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await axios.get<unknown>(`${baseUrl}/pools`, {
@@ -337,7 +353,19 @@ async function fetchMeteoraPoolsPage(
 
 export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: PoolFetchConfig): Promise<MeteoraPool[]> {
   const poolMap = new Map<string, MeteoraPool>()
-  const MAX_PAGES = 20 // safety cap; 100/page *20 = 2000 pools max
+
+  // Determine sort for this fetch. Activity path passes 'fee_tvl_ratio_1h:desc' (per spec).
+  // Relaxed/monitoring paths typically pass recency or omit.
+  const effectiveSort = config.sortBy || (config.strictFeeTvlRatioFilter ? 'fee_tvl_ratio_1h:desc' : 'pool_created_at')
+
+  // Pagination budget:
+  // - For yield-sorted activity lists we use a small bounded number of pages (targeted per spec "limit=20" spirit,
+  //   with modest headroom). High recent yielders bubble to the top; we don't need the full 72h history.
+  // - For recency/relaxed paths we keep the previous age-aware stop + higher safety cap.
+  const isYieldSort = /fee_tvl_ratio|volume|fee_1h|fee_24h/.test(effectiveSort)
+  const MAX_PAGES = isYieldSort ? 4 : 20 // 4 pages @ ~50 = ~200 top yielders is plenty for secondary derives
+  const useAgeStop = !isYieldSort
+
   let page = 1
   let pagesFetched = 0
   let reachedAgeLimit = false
@@ -345,7 +373,7 @@ export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: Poo
   while (page <= MAX_PAGES) {
     let pagePools: MeteoraPool[] = []
     try {
-      pagePools = await fetchMeteoraPoolsPage(baseUrl, 'pool_created_at', config, page)
+      pagePools = await fetchMeteoraPoolsPage(baseUrl, effectiveSort, config, page)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.warn(`[scanner] ${baseUrl}/pools page ${page} fetch failed: ${message}`)
@@ -358,27 +386,36 @@ export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: Poo
       if (!poolMap.has(pool.address)) poolMap.set(pool.address, pool)
     }
 
-    // If this page contains pools older than our max age, no need to fetch further pages (newer pages first).
-    const pageAges = pagePools
-      .map(p => getPoolAgeMinutes(p))
-      .filter(a => a < 1_000_000)
-    const oldestAgeInPage = pageAges.length > 0 ? Math.max(...pageAges) : 0
-    if (oldestAgeInPage > config.maxPoolAgeMinutes) {
-      reachedAgeLimit = true
-      break
+    if (useAgeStop) {
+      // Recency-sorted path: stop when we have gone past the desired window (oldest in this page).
+      const pageAges = pagePools
+        .map(p => getPoolAgeMinutes(p))
+        .filter(a => a < 1_000_000)
+      const oldestAgeInPage = pageAges.length > 0 ? Math.max(...pageAges) : 0
+      if (oldestAgeInPage > config.maxPoolAgeMinutes) {
+        reachedAgeLimit = true
+        break
+      }
+    } else {
+      // Yield-sorted path (spec): we intentionally fetch only the top of the sorted list.
+      // No age stop here — the client-side MIN_POOL_AGE_HOURS gate in applyJsPreFilter will drop <2h.
     }
 
     page++
   }
 
   if (pagesFetched > 1) {
-    console.log(`[scanner] paginated ${pagesFetched} page(s) from ${baseUrl} (reachedAgeLimit=${reachedAgeLimit})`)
+    console.log(`[scanner] paginated ${pagesFetched} page(s) from ${baseUrl} (sort=${effectiveSort}, reachedAgeLimit=${reachedAgeLimit})`)
   }
 
-  // For the activity model we use a broad scan window (ACTIVITY_MAX...) + minimum age gate (>2h) + real API fields + derived proxies.
-  // Previous "very fresh <=15m" upper cap and all non-real active_tvl logic removed.
   const pools = Array.from(poolMap.values())
-    .sort((a, b) => (getPoolCreatedAt(b) ?? 0) - (getPoolCreatedAt(a) ?? 0))
+
+  // Only re-sort by recency for the old-style relaxed/recency paths.
+  // For yield-sorted activity we trust the server sort + later client 1h re-sort in prepareCandidates.
+  if (!isYieldSort) {
+    pools.sort((a, b) => (getPoolCreatedAt(b) ?? 0) - (getPoolCreatedAt(a) ?? 0))
+  }
+
   if (pools.length > 0) return pools
 
   // No pools from this endpoint's /pools (either empty or fetch failed inside).
@@ -530,6 +567,8 @@ export async function getCurrentPoolFeeTvl24h(poolAddress: string): Promise<numb
   }
 
   // 2. Cold fallback: fetch a broad recent set (no strict pre-filter) and lookup
+  // Use relaxed mode: omit fee_tvl_ratio_24h server filter and prefer recency sort so we can
+  // observe current yield even for positions whose pools have decayed below the activity thresholds.
   try {
     const relaxedConfig: PoolFetchConfig = {
       minTvlUsd: 0,
@@ -538,6 +577,8 @@ export async function getCurrentPoolFeeTvl24h(poolAddress: string): Promise<numb
       maxPoolAgeMinutes: 60 * 24 * 30, // allow old pools for monitoring existing positions
       minLiquidityUsd: 0,
       maxLiquidityUsd: Number.MAX_SAFE_INTEGER,
+      strictFeeTvlRatioFilter: false,
+      sortBy: 'pool_created_at',
     }
     // Use the internal fetcher directly to avoid heavy JS pre-filter
     let pools: MeteoraPool[] = []

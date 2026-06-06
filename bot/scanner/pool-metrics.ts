@@ -1,10 +1,13 @@
 /**
  * pool-metrics.ts
  *
- * Pool metric getters and derived proxies.
- * Extracted from pool-fetcher during post-redesign cleanup.
+ * Pool metric getters and derived proxies (per revised top-performer activity spec).
  *
- * Current model uses only real fields from the /pools API + derivations.
+ * - impliedActiveTVL = volume_1h / fee_pct   (proxy for real earning liquidity from swap flow)
+ * - isFeeAccelerating = fee_1h > (fee_2h / 2)
+ * - getUniqueLpCount (expensive, only on final survivors) via getProgramAccounts on DLMM program
+ *
+ * Current model uses only real fields from the /pools list API + derivations.
  * Legacy getters for non-returned fields (active_tvl etc.) are kept for compatibility.
  */
 

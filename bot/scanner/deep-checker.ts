@@ -3,16 +3,26 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
 /**
- * Deep-check / decision layer — fully aligned to latest Claude recommendations
- * (only real fields from dlmm.datapi.meteora.ag/pools + derivations).
+ * Deep-check / decision layer — aligned to the revised bot filters spec (real fields only).
  *
- * Server-side list: filter_by=tvl>=500 && fee_24h>=5 , sort_by=fee_tvl_ratio_1h:desc
- * Derived on results: implied_active (volume_1h/fee_pct), fee_1h > fee_2h/2, age>2h, fee_tvl_24h>=0.5%
- * Expensive only on final survivors: lp_count (via positions)
- * Then deep gates + enter the top survivor.
+ * Server-side list (per spec):
+ *   GET /pools?sort_by=fee_tvl_ratio_1h:desc
+ *        &filter_by=tvl>=500 && fee_24h>=5 && fee_tvl_ratio_24h>=0.005 && is_blacklisted=false
+ *        &limit/page_size ~50 (small number of pages for bounded results)
  *
- * All previous "very fresh 15m", "active_tvl hard bounds", "7 hard filters with non-existent fields"
- * logic has been removed.
+ * Client secondary derives (on the small result set):
+ *   impliedActiveTVL = volume_1h / fee_pct   → 330..750000
+ *   feeAccelerating = fee_1h > (fee_2h / 2)
+ *   age > 2h (pool_created_at)
+ *   (plus SOL-paired for this strategy)
+ *
+ * Expensive only on final ~top-5 survivors: lp_count (via getProgramAccounts / positions)
+ * Then full deep gates (price deviation, Jupiter preflight, rug/holders, strategy filter, dedup, slots, etc.)
+ * Enter the first viable ("#1 remaining").
+ *
+ * Kept improvements beyond the minimal spec: rich per-pool rejection logging, early SOL gate,
+ * price vs market check, Jupiter route preflight for new Token-2022, full deep quality gates,
+ * 0-new-bin-array range optimization on open, etc.
  */
 
 import axios from 'axios'
@@ -326,11 +336,11 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     })
   }
 
-  // === New flow (Claude revised, using only real documented API fields) ===
-  // 1. Cheap targeted list call: server-side filter_by (tvl + fee_24h) + sort_by fee_tvl_ratio_1h:desc
-  // 2. JS derived proxies on the small result (implied active from volume/flow, fee acceleration)
-  // 3. For final survivors only: lp count via positions (expensive)
-  // 4. Take top 5, deep check, enter #1
+  // === Aligned flow (per revised spec: real fields + server sort/filter where supported) ===
+  // 1. Cheap targeted list call: server filter_by (tvl + fee_24h + fee_tvl_ratio_24h) + sort_by=fee_tvl_ratio_1h:desc (bounded pages)
+  // 2. Client secondary derives on the (small) result: impliedActiveTVL (volume_1h/fee_pct), fee_1h > fee_2h/2, age>2h
+  // 3. LP count (expensive) only on final ~top-5 survivors
+  // 4. Deep quality gates + enter the first viable top performer ("#1 remaining")
 
   const activityConfig = {
     maxPoolAgeMinutes: ACTIVITY_MAX_POOL_AGE_MINUTES,
@@ -338,13 +348,16 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   }
 
   // Targeted fetch using real API capabilities (much smaller result set)
+  // Aligned to revised spec: server sort_by=fee_tvl_ratio_1h:desc + filter_by including fee_tvl_ratio_24h>=0.005
   const { pools: fetchedPools, error: fetchError, rawCount } = await fetchMeteoraPools({
     minTvlUsd: MIN_TVL_USD,
-    limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '50'), // small because server does heavy lifting
+    limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '50'),
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
     maxPoolAgeMinutes: ACTIVITY_MAX_POOL_AGE_MINUTES,
     minLiquidityUsd: 0,
     maxLiquidityUsd: Number.MAX_SAFE_INTEGER,
+    strictFeeTvlRatioFilter: true,
+    sortBy: 'fee_tvl_ratio_1h:desc',
   })
   if (fetchError) {
     console.error('[scanner] fetch failed:', fetchError)

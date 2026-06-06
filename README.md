@@ -8,12 +8,13 @@ It is deliberately scoped to **pure DLMM LP operations** on Meteora — no compa
 
 ## Key Features
 
-- **Evil Panda Top-Performer Strategy** (fully aligned to latest Claude recommendations — ONLY real fields from dlmm.datapi.meteora.ag/pools):
-  Server-side: tvl >= 500 && fee_24h >= 5 , sort_by=fee_tvl_ratio_1h:desc
-  Derived: volume_1h / fee_pct (implied active), fee_1h > fee_2h/2 (accel), age > 2h, fee_tvl_24h >= 0.5%
-  lp_count only on final survivors (positions query)
-  Take top 5, deep-check, open #1.
-  All previous "very fresh 15m", non-existent active_tvl, and old hard-filter logic completely removed.
+- **Evil Panda Top-Performer Strategy** (aligned to the revised bot filters spec — ONLY real fields from dlmm.datapi.meteora.ag/pools):
+  Server-side list: `sort_by=fee_tvl_ratio_1h:desc&filter_by=tvl>=500 && fee_24h>=5 && fee_tvl_ratio_24h>=0.005 && is_blacklisted=false` (bounded pages)
+  Client derives on small result: `volume_1h / fee_pct` (implied active 330-750k), `fee_1h > (fee_2h / 2)` (accel), age > 2h, fee_tvl_24h >= 0.5%
+  lp_count (via positions) only on final ~top-5 survivors
+  Take top performers, deep-check (price dev, Jupiter preflight, rug/holders + strategy filters, dedup, etc.), open the first viable.
+  Kept improvements: early SOL-paired gate (one-sided strategy), rich per-pool rejection logs, 0-new-bin cost optimization on open, etc.
+  Previous "very fresh 15m" / non-existent active_tvl models removed.
 - **4-Rule Exit Engine** (monitor every ~60s):
   1. Fee/TVL yield collapse (4h rolling avg of 24h Fee/TVL < threshold)
   2. Prolonged out-of-range (OOR)
@@ -106,12 +107,12 @@ Runtime state and logs live under `state/`.
 ```
 worker.ts
 ├── tickScanner()   → runScanner() (deep-checker.ts)
-│                     └── fetchMeteoraPools → fresh filter → evil-panda evaluation → open
+│                     └── fetchMeteoraPools (spec sort+filter) → client derives → top survivors + lp_count → evil-panda deep eval → open
 └── tickMonitor()   → monitorPositions() (monitor.ts)
                       └── 4-rule LP exits + stranded sell recovery + rich alerts
 ```
 
-- **Scanner**: Uses targeted list from datapi with server-side real-field filters + sort_by fee_tvl_ratio_1h, applies derived proxies (implied active, accel, age>2h), enriches lp_count on survivors only, then deep checks and opens the top one. Completely redesigned from previous fresh/active_tvl models.
+- **Scanner**: Uses targeted list from datapi with server-side filters (tvl + fee_24h + fee_tvl_ratio_24h) + sort_by=fee_tvl_ratio_1h:desc (per spec), bounded results, client secondary derives (implied, accel, age>2h, SOL), lp_count only on final survivors, then deep quality gates and opens the first viable top performer. Completely redesigned from previous fresh/active_tvl models.
 - **Monitor**: On-chain DLMM queries + persisted samples for Fee/TVL and net PnL. Triggers exits with detailed Telegram close alerts. Enriched with the same activity signals when available.
 - **State**: `state/open-lp-positions.json` is the source of truth.
 - **Control**: `bot/telegram-bot.ts` (long-polling) provides the full operator interface.
@@ -145,7 +146,7 @@ The production entrypoint is `dist/worker.js` (see `ecosystem.config.cjs` for PM
 - Always start with `BOT_DRY_RUN=true`.
 - The bot is intentionally minimal. It does one thing well: find currently strong 24h fee-yielding DLMM pools using the live-data activity criteria, provide one-sided SOL liquidity, and exit according to clear, observable rules.
 - All hot paths use local state + targeted on-chain reads. Supabase is legacy-only.
-- The scanner uses only fields that actually exist in the /pools list API (plus cheap derivations from volume/fee windows). lp_count is the only expensive step and is done only on final candidates. Rich logs show exactly which real filter or derivation rejected a pool.
+- The scanner uses only fields that actually exist in the /pools list API (plus cheap derivations from volume/fee windows per the revised spec). The list call uses the spec's sort_by + filter_by (including fee_tvl_ratio_24h). lp_count is the only expensive step and is done only on final candidates. Rich logs show exactly which real filter or derivation rejected a pool.
 
 For questions or issues, use the Telegram interface or inspect `state/` + logs.
 

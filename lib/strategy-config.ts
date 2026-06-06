@@ -61,8 +61,9 @@ export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
 
 // ── Misc (still referenced by current ultra-simple scanner) ──────
 export const DEEP_CHECK_DELAY_MS = envNumber('DEEP_CHECK_DELAY_MS', 800)
-// Legacy TVL floor (kept for backward compat). Primary gates are now the real-API activity filters
-// (tvl + fee_24h server-side, plus derived implied_active, fee acceleration, age > 2h).
+// Legacy TVL floor (kept for backward compat / strategy filter). Primary gates are now the
+// real-API activity filters (tvl + fee_24h + fee_tvl_ratio_24h server-side via filter_by,
+// plus client derives: implied, accel, age>2h).
 export const FRESH_MIN_TVL_USD = envNumber('FRESH_MIN_TVL_USD', 5000)
 export const MIN_LIQUIDITY_USD_FOR_FRESH = FRESH_MIN_TVL_USD  // kept for backward compat in strategy filters / docs
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
@@ -77,16 +78,20 @@ export const MAX_POOL_AGE_MINUTES = envNumber(
 export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 12)
 
 // ── Current activity model (real documented fields from /pools + derivations) ──
+// Server-pushed via filter_by on the list call (per revised spec):
+//   tvl >= MIN_TVL_USD && fee_24h >= MIN_FEE_24H && fee_tvl_ratio_24h >= MIN_FEE_TVL_RATIO_24H
 export const MIN_TVL_USD = envNumber('MIN_TVL_USD', 500)
 export const MIN_FEE_24H = envNumber('MIN_FEE_24H', 5)
 export const MIN_FEE_TVL_RATIO_24H = envNumber('MIN_FEE_TVL_RATIO_24H', 0.005) // 0.5%
+
+// Client-side (in applyJsPreFilter) after the server list + sort_by=fee_tvl_ratio_1h:desc
 export const MIN_POOL_AGE_HOURS = envNumber('MIN_POOL_AGE_HOURS', 2)
 
-// Derived "implied active TVL" from real flow (volume_1h / fee rate)
-export const MIN_IMPLIED_ACTIVE_TVL = envNumber('MIN_IMPLIED_ACTIVE_TVL', 330)
+// Derived proxies (client, on the small result set from the yield-sorted list)
+export const MIN_IMPLIED_ACTIVE_TVL = envNumber('MIN_IMPLIED_ACTIVE_TVL', 330) // volume_1h / fee_pct
 export const MAX_IMPLIED_ACTIVE_TVL = envNumber('MAX_IMPLIED_ACTIVE_TVL', 750000)
 
-// LP count (derived via positions - only on final survivors)
+// LP count (expensive, via getProgramAccounts on survivors only)
 export const MIN_LP_COUNT = envNumber('MIN_LP_COUNT', 3)
 
 

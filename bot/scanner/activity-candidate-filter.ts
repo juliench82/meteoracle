@@ -1,13 +1,12 @@
 /**
  * activity-candidate-filter.ts
  *
- * Helper functions for activity-qualified pool filtering and selection.
+ * Helper functions for activity-qualified pool filtering and selection (post server list).
  *
- * The main hard filters + derived proxies (real API fields only) live in pool-fetcher.ts.
- * This module handles:
- * - Capping the number of candidates
- * - Recency/quality sorting (by fee_tvl_1h)
- * - Taking the top N for deeper checks + lp_count enrichment
+ * Per spec the heavy lifting (sort_by=fee_tvl_ratio_1h:desc + core filter_by) is done by the
+ * datapi /pools list call. The fetcher applies the client secondary derives (implied, accel, age, SOL).
+ * This module handles capping, OOR dedup, best-of-token selection, and preparing the final ~top-5
+ * for LP enrichment + deep checks.
  */
 
 import type { MeteoraPool } from './pool-fetcher';
