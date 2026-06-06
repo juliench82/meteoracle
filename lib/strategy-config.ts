@@ -68,27 +68,15 @@ export const MIN_LIQUIDITY_USD_FOR_FRESH = FRESH_MIN_TVL_USD  // kept for backwa
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
 export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
 
-// ── Scanner entry filter (ultra-simplified model) ──
+// ── Legacy (from previous "very fresh" model) ──
 export const MAX_POOL_AGE_MINUTES = envNumber(
   'MAX_POOL_AGE_MINUTES',
   envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 72 * 60)
 ) // legacy name; the activity scanner primarily uses ACTIVITY_MAX_POOL_AGE_MINUTES + MIN_POOL_AGE_HOURS (>=2h)
-// Cap on how many fresh age-qualified pools we will deep-check / enrich per scanner tick.
+// Cap on how many candidates we will deep-check per scanner tick.
 export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 12)
 
-// ── Revised bot filters using ONLY documented fields from dlmm.datapi.meteora.ag/pools ──
-// See Claude's analysis + official docs for rationale.
-// Server-side filter_by + sort_by (cheap):
-//   tvl >= 500 && fee_24h >= 5
-//   sort_by=fee_tvl_ratio_1h:desc
-// Then derived proxies on small result set:
-//   impliedActiveTVL = volume_1h / (base_fee_pct/100)   → 330-750k range
-//   feeAccelerating = fee_1h > (fee_2h / 2)
-//   age > 2h (from pool_created_at)
-//   fee_tvl_ratio_24h >= 0.005 (0.5%)
-// For final survivors only: derive lp_count via positions (Helius or RPC)
-// SORT by fee_tvl_ratio_1h (recency) or 24h quality
-// TAKE top ~5 then pick #1 that passes deep checks (price dev, Jupiter, etc.)
+// ── Current activity model (real documented fields from /pools + derivations) ──
 export const MIN_TVL_USD = envNumber('MIN_TVL_USD', 500)
 export const MIN_FEE_24H = envNumber('MIN_FEE_24H', 5)
 export const MIN_FEE_TVL_RATIO_24H = envNumber('MIN_FEE_TVL_RATIO_24H', 0.005) // 0.5%
@@ -98,8 +86,10 @@ export const MIN_POOL_AGE_HOURS = envNumber('MIN_POOL_AGE_HOURS', 2)
 export const MIN_IMPLIED_ACTIVE_TVL = envNumber('MIN_IMPLIED_ACTIVE_TVL', 330)
 export const MAX_IMPLIED_ACTIVE_TVL = envNumber('MAX_IMPLIED_ACTIVE_TVL', 750000)
 
-// LP count (derived via GetPoolPositionPnL equivalent - only on final survivors)
+// LP count (derived via positions - only on final survivors)
 export const MIN_LP_COUNT = envNumber('MIN_LP_COUNT', 3)
+
+
 
 // Broad window for the activity model (previous 15m "very fresh" upper cap removed)
 // so that pools >=2h old with real sustained yield can be discovered. Use a high default (or env).

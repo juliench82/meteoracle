@@ -1,5 +1,5 @@
 /**
- * fresh-pool-filter.ts (legacy name)
+ * activity-candidate-filter.ts
  *
  * Helper functions for activity-qualified pool filtering and selection.
  *
@@ -17,20 +17,18 @@ import {
   getPoolVolume,
   getFeeTvlPct,
   getTradableToken,
-  getFeesActiveTvl24hPct,
-  getActiveTvlUsd,
-  getTotalLps,
-  getFeesChange24h,
-  getTvlChange24h,
 } from './pool-fetcher';
+import {
+  getFeesActiveTvl24hPct,
+} from './pool-metrics';
 
-// Config for candidate selection (type names kept for minimal code churn; behavior is current activity model)
-export type FreshFilterConfig = {
+// Config for candidate selection
+export type ActivityFilterConfig = {
   maxPoolAgeMinutes?: number;
   maxCandidates?: number;
 };
 
-export type FreshCandidate = {
+export type ActivityCandidate = {
   pool: MeteoraPool;
   ageHours: number;
 };
@@ -39,7 +37,7 @@ export type FreshCandidate = {
  * Returns the pools that reached this point (they already passed the real documented
  * API filters + derived proxies in pool-fetcher).
  */
-export function filterActivityPools(pools: MeteoraPool[], config: FreshFilterConfig = {}) {
+export function filterActivityPools(pools: MeteoraPool[], config: ActivityFilterConfig = {}) {
   const maxCandidates = config.maxCandidates ?? 12;
   return {
     activityPools: pools,
@@ -48,21 +46,14 @@ export function filterActivityPools(pools: MeteoraPool[], config: FreshFilterCon
 }
 
 /**
- * Legacy name kept for call sites. Delegates to the activity version.
- */
-export function filterFreshPools(pools: MeteoraPool[], config: FreshFilterConfig = {}) {
-  return filterActivityPools(pools, config);
-}
-
-/**
  * Apply OOR dedup and cap the list of activity-qualified candidates.
  */
-export function selectFreshCandidates(
+export function selectTopCandidates(
   activityPools: MeteoraPool[],
   recentlyClosedOorMints: Set<string>,
-  config: FreshFilterConfig = {}
-): FreshCandidate[] {
-  const out: FreshCandidate[] = [];
+  config: ActivityFilterConfig = {}
+): ActivityCandidate[] {
+  const out: ActivityCandidate[] = [];
   const maxTotal = config.maxCandidates ?? 12;
 
   for (const p of activityPools) {
@@ -97,7 +88,7 @@ export function selectTopByActiveYield(
   return sorted.slice(0, maxN);
 }
 
-export function candidateTokenAddress(c: FreshCandidate | MeteoraPool | any): string {
+export function candidateTokenAddress(c: ActivityCandidate | MeteoraPool | any): string {
   if (!c) return '';
   const pool = c.pool ?? c;
   const t = getTradableToken(pool);

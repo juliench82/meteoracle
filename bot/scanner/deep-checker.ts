@@ -78,12 +78,11 @@ import {
   SOL_MINT,
 } from './pool-fetcher'
 import {
-  filterFreshPools,
   filterActivityPools,
-  selectFreshCandidates,
+  selectTopCandidates,
   selectBestPool,
   selectTopByActiveYield,
-} from './fresh-pool-filter'
+} from './activity-candidate-filter'
 
 const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
 
@@ -355,41 +354,10 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   const apiCount = rawCount ?? fetchedPools.length
   console.log(`[scanner] fetched ${fetchedPools.length} pools from targeted API call (raw: ${apiCount})`)
 
-  // The updated applyJsPreFilter (called inside fetchMeteoraPools) already applied:
-  // server filters + age>2h + implied active (volume/flow) + fee acceleration + SOL
-  const { activityPools: qualified } = filterActivityPools(fetchedPools, activityConfig)
-
-  console.log(`[scanner] ${qualified.length} pools passed real documented fields + derived proxies (implied_active, fee_accel, age>2h, fee_tvl_24h>=0.5%)`)
-
-  if (qualified.length > 0) {
-    const names = qualified.slice(0, 8).map((p: any) => p.name).join(', ')
-    console.log(`[scanner] top qualified by fee_tvl_1h: ${names}${qualified.length > 8 ? ' ...' : ''}`)
-  }
-
-  const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
-  let activityCandidates = selectFreshCandidates(qualified, recentlyClosedOorMints, activityConfig)
-
-  // Sort by recency (fee_tvl_1h) as recommended
-  activityCandidates.sort((a, b) => getFeeTvlPct(b.pool, '1h') - getFeeTvlPct(a.pool, '1h'))
-
-  // Take top 5 per spec
-  activityCandidates = activityCandidates.slice(0, 5)
+  const activityCandidates = await selectEnrichAndPrepareCandidates(fetchedPools, activityConfig, rawCount)
 
   if (activityCandidates.length === 0) {
-    console.log('[scanner] done — no candidates after real-field filters + proxies')
     return finish({ scanned: fetchedPools.length, candidates: 0, apiPools: rawCount })
-  }
-
-  // Enrich only the final survivors with lp_count (the expensive step)
-  console.log(`[scanner] enriching lp_count for ${activityCandidates.length} final survivors (Helius or RPC)`)
-  for (const cand of activityCandidates) {
-    const lpCount = await getUniqueLpCount(cand.pool.address)
-    if (lpCount > 0) {
-      (cand.pool as any)._enriched_lp_count = lpCount
-      if (lpCount < MIN_LP_COUNT) {
-        console.log(`[scanner][enrich] ${cand.pool.name} lp_count=${lpCount} < ${MIN_LP_COUNT} — will be soft-filtered in deep checks`)
-      }
-    }
   }
 
   console.log(`[scanner] processing ${activityCandidates.length} enriched top candidates (lp_count + deep gates)`)
@@ -435,7 +403,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
   const tickContext: ScannerTickContext = {
-    freshPools: activityPools, // passed through for selectBestPool / helpers (legacy field name)
+    freshPools: activityCandidates, // passed through for selectBestPool / helpers (legacy field name)
     limitState,
     openBlockedReason,
     availableOpenSlots,
@@ -448,8 +416,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     dailyLossLimitHit: { value: dailyLossLimitHit },
   };
 
-  for (const cand of freshCandidates) {
-    await processFreshCandidate(cand, tickContext);
+  for (const cand of activityCandidates) {
+    await processActivityCandidate(cand, tickContext);
   }
 
   // Sync counters back from context
@@ -525,15 +493,14 @@ async function getPoolVsMarketPriceDeviation(pool: any, mint: string): Promise<n
   }
 }
 
-type FreshCandidateProcessResult = {
+type ActivityCandidateProcessResult = {
   wasCandidate: boolean;
   wasOpened: boolean;
   wasSkipped: boolean;
 };
 
-// Legacy type name kept for minimal changes. Contents are activity-qualified now.
 interface ScannerTickContext {
-  freshPools: any[];
+  freshPools: any[];  // legacy field name for helpers
   limitState: any;
   openBlockedReason: string | undefined;
   availableOpenSlots: number;
@@ -549,12 +516,63 @@ interface ScannerTickContext {
 }
 
 /**
+ * Fetches with real API filters, applies derived proxies, selects top 5 by 1h yield,
+ * enriches with lp_count on survivors (expensive step only here).
+ */
+async function selectEnrichAndPrepareCandidates(
+  fetchedPools: any[],
+  activityConfig: any,
+  rawCount: number | undefined
+): Promise<any[]> {
+  // The updated applyJsPreFilter (called inside fetchMeteoraPools) already applied:
+  // server filters + age>2h + implied active (volume/flow) + fee acceleration + SOL
+  const { activityPools: qualified } = filterActivityPools(fetchedPools, activityConfig)
+
+  console.log(`[scanner] ${qualified.length} pools passed real documented fields + derived proxies (implied_active, fee_accel, age>2h, fee_tvl_24h>=0.5%)`)
+
+  if (qualified.length > 0) {
+    const names = qualified.slice(0, 8).map((p: any) => p.name).join(', ')
+    console.log(`[scanner] top qualified by fee_tvl_1h: ${names}${qualified.length > 8 ? ' ...' : ''}`)
+  }
+
+  const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
+  let activityCandidates = selectTopCandidates(qualified, recentlyClosedOorMints, activityConfig)
+
+  // Sort by recency (fee_tvl_1h) as recommended
+  activityCandidates.sort((a, b) => getFeeTvlPct(b.pool, '1h') - getFeeTvlPct(a.pool, '1h'))
+
+  // Take top 5 per spec
+  activityCandidates = activityCandidates.slice(0, 5)
+
+  if (activityCandidates.length === 0) {
+    console.log('[scanner] done — no candidates after real-field filters + proxies')
+    return []
+  }
+
+  // Enrich only the final survivors with lp_count (the expensive step)
+  console.log(`[scanner] enriching lp_count for ${activityCandidates.length} final survivors (Helius or RPC)`)
+  for (const cand of activityCandidates) {
+    const lpCount = await getUniqueLpCount(cand.pool.address)
+    if (lpCount > 0) {
+      (cand.pool as any)._enriched_lp_count = lpCount
+      if (lpCount < MIN_LP_COUNT) {
+        console.log(`[scanner][enrich] ${cand.pool.name} lp_count=${lpCount} < ${MIN_LP_COUNT} — will be soft-filtered in deep checks`)
+      }
+    } else {
+      console.warn(`[scanner][enrich] ${cand.pool.name} lp_count=0 (Helius/RPC failed or no positions — LP gate is soft-pass for this pool)`)
+    }
+  }
+
+  return activityCandidates
+}
+
+/**
  * Processes one of the top activity-qualified candidates.
  */
-async function processFreshCandidate(
+async function processActivityCandidate(
   cand: { pool: any; ageHours: number },
   ctx: ScannerTickContext
-): Promise<FreshCandidateProcessResult> {
+): Promise<ActivityCandidateProcessResult> {
   const {
     freshPools,
     limitState,
@@ -756,7 +774,7 @@ async function attemptOpenAndNotify(params: {
   openBlockedReason: string | undefined;
   availableOpenSlots: number;
   candidateCountRef: { value: number };
-}): Promise<FreshCandidateProcessResult> {
+}): Promise<ActivityCandidateProcessResult> {
   const {
     metrics,
     strategy,

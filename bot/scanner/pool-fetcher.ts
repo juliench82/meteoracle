@@ -10,6 +10,8 @@ import {
   MIN_LP_COUNT,
 } from '@/lib/strategy-config'
 
+import * as poolMetrics from './pool-metrics';
+
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 // dlmm-api.meteora.ag /pools (and /pair/all) deprecated/returning 404; datapi is the active public DLMM pool list endpoint.
 
@@ -258,168 +260,26 @@ export function getVolumeTvlRatio(pool: MeteoraPool, window: '1h' | '5m'): numbe
 }
 
 export function getRecentVolumeGrowth(pool: MeteoraPool): number {
-  const vol5mAnnualizedTo1h = getPoolVolume(pool, '5m') * 12
-  const vol1h = getPoolVolume(pool, '1h')
-  if (vol1h <= 0) return vol5mAnnualizedTo1h > 0 ? 3 : 0
-  return vol5mAnnualizedTo1h / vol1h
+  return poolMetrics.getRecentVolumeGrowth(pool);
 }
 
-// (scoreMeteoraMomentum fully removed — no longer used)
-
-// ─── Legacy getters for fields the current /pools API does not return ───
-// These were used in previous iterations that assumed active_tvl / lp_count fields existed.
-// Current logic (per latest Claude docs-based recommendations) uses only real fields:
-// - getImpliedActiveTvl (volume_1h / fee_pct)
-// - isFeeAccelerating (fee_1h > fee_2h / 2)
-// - getPoolAgeMinutes (from pool_created_at)
-// - getFeeTvlPct (from fee_tvl_ratio)
-// - getUniqueLpCount (expensive, only on final survivors via positions)
-
-export function getActiveTvlUsd(pool: MeteoraPool): number {
-  const explicit = asNumber(
-    pool.active_tvl_usd ?? pool.active_tvl ?? (pool as any).activeTvlUsd ?? (pool as any).activeTvl,
-    Number.NaN
-  )
-  if (Number.isFinite(explicit) && explicit > 0) return explicit
-  return getPoolTvl(pool)
-}
-
-export function getTotalLps(pool: MeteoraPool): number {
-  const explicit = asNumber(
-    pool.total_lps ?? pool.lp_count ?? (pool as any).lps ?? (pool as any).lpCount,
-    Number.NaN
-  )
-  if (Number.isFinite(explicit) && explicit > 0) return explicit
-  return 0
-}
-
-export function getFeesActiveTvl24hPct(pool: MeteoraPool): number {
-  const explicit = asNumber(
-    pool.fees_active_tvl_24h ?? (pool as any).feesActiveTvl24h ?? (pool as any).feeActiveTvl24h,
-    Number.NaN
-  )
-  if (Number.isFinite(explicit) && explicit > 0) return explicit
-  return getFeeTvlPct(pool, '24h')
-}
-
-export function getTvlChange24h(pool: MeteoraPool): number {
-  const explicit = asNumber(
-    pool.tvl_change_24h ?? (pool as any).tvlChange24h,
-    Number.NaN
-  )
-  if (Number.isFinite(explicit)) return explicit
-  return 0
-}
-
-export function getFeesChange24h(pool: MeteoraPool): number {
-  const explicit = asNumber(
-    pool.fees_change_24h ?? (pool as any).feesChange24h ?? (pool as any).feeChange24h,
-    Number.NaN
-  )
-  if (Number.isFinite(explicit)) return explicit
-  const f = pool.fees || {}
-  const f24 = asNumber(f['24h'] ?? f['24H'], 0)
-  const f12 = asNumber(f['12h'] ?? f['12H'], 0)
-  if (f24 > 0 && f12 >= 0) {
-    return f24 - f12
-  }
-  return 0
-}
-
-// ─── Real API field proxies (per official docs + Claude revised filters) ───
-
-/**
- * Implied active TVL from actual trading flow.
- * volume_1h / (base_fee_pct / 100)
- * This is one of the best available proxies for "real earning liquidity"
- * because it comes from swaps, not parked capital. Ghost pools die here.
- */
-export function getImpliedActiveTvl(pool: MeteoraPool): number {
-  const vol1h = getPoolVolume(pool, '1h')
-  const poolConfig = pool.pool_config || {}
-  const feePct = asNumber(poolConfig.base_fee_pct ?? (pool as any).base_fee_percentage, 0)
-  if (feePct <= 0 || vol1h <= 0) return 0
-  return vol1h / (feePct / 100)
-}
-
-/**
- * Is fees accelerating right now?
- * fee_1h > fee_2h / 2
- * Strong signal that activity is increasing (not a dead historical spike).
- */
-export function isFeeAccelerating(pool: MeteoraPool): boolean {
-  const fees = pool.fees || {}
-  const fee1h = asNumber(fees['1h'] ?? fees['1H'], 0)
-  const fee2h = asNumber(fees['2h'] ?? fees['2H'], 0)
-  if (fee1h <= 0) return false
-  return fee1h > (fee2h / 2)
-}
-
-/**
- * Best-effort unique LP count for a pool.
- * Only call this on the final few survivors (expensive).
- *
- * Strategy:
- * - If Helius is configured, use it for efficient program account scan.
- * - Fallback: return 0 (meaning "unknown" → soft pass the LP gate).
- *
- * This approximates the "GetPoolPositionPnL" / total_lps concept from the UI.
- */
-export async function getUniqueLpCount(poolAddress: string): Promise<number> {
-  try {
-    // Lazy import to avoid circular issues
-    const { getHeliusRpcEndpoint } = await import('@/lib/solana')
-    const heliusUrl = getHeliusRpcEndpoint()
-
-    if (heliusUrl) {
-      // Use Helius for getProgramAccounts with memcmp on the position account layout.
-      // DLMM position accounts contain the lb_pair (pool) address at a known offset.
-      // For simplicity and reliability we use a broad but filtered query.
-      // In practice this is only called on 3-5 pools per tick.
-      const response = await fetch(heliusUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'getProgramAccounts',
-          params: [
-            'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo', // DLMM program (common)
-            {
-              encoding: 'base64',
-              filters: [
-                { dataSize: 1024 }, // rough position account size
-                {
-                  memcmp: {
-                    offset: 8, // typical offset for lb_pair in position accounts
-                    bytes: poolAddress,
-                  },
-                },
-              ],
-            },
-          ],
-        }),
-      })
-
-      if (response.ok) {
-        const json: any = await response.json()
-        const accounts = json?.result || []
-        // Count unique owners (first 32 bytes after discriminator often owner or use data)
-        const owners = new Set<string>()
-        for (const acc of accounts) {
-          // Simple heuristic: many position layouts put owner early
-          if (acc?.pubkey) owners.add(acc.pubkey) // fallback, better to parse
-        }
-        if (owners.size > 0) return owners.size
-      }
-    }
-  } catch (e) {
-    // Non-fatal
-  }
-
-  // No reliable count available → return 0 (caller should treat as soft pass)
-  return 0
-}
+// Re-export metrics (current + legacy) from dedicated module for cleaner separation after redesign.
+export {
+  getPoolTvl,
+  getPoolVolume,
+  getFeeTvlRatio,
+  getFeeTvlPct,
+  getVolumeTvlRatio,
+  getRecentVolumeGrowth,
+  getActiveTvlUsd,
+  getTotalLps,
+  getFeesActiveTvl24hPct,
+  getTvlChange24h,
+  getFeesChange24h,
+  getImpliedActiveTvl,
+  isFeeAccelerating,
+  getUniqueLpCount,
+} from './pool-metrics';
 
 // (scoreMeteoraMomentum fully removed — no longer used)
 
@@ -617,6 +477,12 @@ function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): Met
 
     // Derived: implied active from volume / fee rate (Claude's key proxy for real earning liquidity)
     const implied = getImpliedActiveTvl(pool)
+    const vol1h = getPoolVolume(pool, '1h')
+    if (implied === 0 && vol1h > 0) {
+      // fee_pct missing from API but we have volume → proxy unusable, reject for safety (ghost risk)
+      console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=0 (missing fee_pct despite volume_1h=${vol1h.toFixed(2)})`)
+      return false
+    }
     if (implied > 0 && implied < MIN_IMPLIED_ACTIVE_TVL) {
       console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=$${implied.toFixed(0)} < $${MIN_IMPLIED_ACTIVE_TVL} (volume/flow proxy)`)
       return false

@@ -24,7 +24,7 @@ It is deliberately scoped to **pure DLMM LP operations** on Meteora — no compa
 - **Rich Alerts**: Detailed open/close notifications including rugcheck, holders, net PnL, Fee/TVL, OOR time, and more.
 - **Dry-Run Support**: Safe simulation mode that still exercises the full decision + monitoring logic.
 - **Optional Helius Integration**: For holder counts, rugcheck, and Pump.fun bonding curve progress on graduated tokens.
-- **Clean & Maintainable**: Ultra-minimal architecture. Only the Evil Panda top-performer path remains.
+- **Clean & Maintainable**: Ultra-minimal architecture after complete redesign. Previous "very fresh 15m" and non-real active_tvl models have been fully removed. Only the Evil Panda top-performer path remains.
 
 No dashboard. No multi-strategy system. No on-chain position syncing or rebalancing.
 
