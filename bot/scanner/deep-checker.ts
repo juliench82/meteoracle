@@ -634,10 +634,6 @@ async function processActivityCandidate(
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
-  if (CANDIDATE_DEDUP_HOURS > 0) {
-    // Per-mint dedup is handled via local state below; no Supabase path.
-  }
-
   if (liveOpenPosition) {
     console.log(`${label} skip: live Meteora position already exists (${liveOpenPosition.position_pubkey})`);
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
@@ -868,7 +864,8 @@ function evaluateCandidate(
 }
 
 function findConflictingLocalPosition(tokenAddress: string) {
-  const recentClosedCutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+  const dedupMs = Math.max(0, CANDIDATE_DEDUP_HOURS) * 60 * 60 * 1000;
+  const recentClosedCutoff = new Date(Date.now() - dedupMs).toISOString();
   const allPositions = getOpenLpPositions();
 
   return allPositions.find((p: any) => {

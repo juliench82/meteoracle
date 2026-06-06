@@ -469,9 +469,13 @@ function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): Met
     // Derived: implied active from volume / fee rate (Claude's key proxy for real earning liquidity)
     const implied = getImpliedActiveTvl(pool)
     const vol1h = getPoolVolume(pool, '1h')
-    if (implied === 0 && vol1h > 0) {
-      // fee_pct missing from API but we have volume → proxy unusable, reject for safety (ghost risk)
-      console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=0 (missing fee_pct despite volume_1h=${vol1h.toFixed(2)})`)
+    if (implied === 0) {
+      // No usable implied active TVL (either no volume_1h or missing fee_pct in pool_config).
+      // Dead/ghost pool for current activity; reject even if server had some fee_24h.
+      const detail = vol1h > 0
+        ? `(missing fee_pct despite volume_1h=${vol1h.toFixed(2)})`
+        : `(no recent volume_1h or missing fee_pct)`
+      console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=0 ${detail}`)
       return false
     }
     if (implied > 0 && implied < MIN_IMPLIED_ACTIVE_TVL) {
