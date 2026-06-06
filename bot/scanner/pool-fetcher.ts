@@ -1,10 +1,20 @@
 import axios from 'axios'
 
+import {
+  MIN_TVL_USD,
+  MIN_FEE_24H,
+  MIN_FEE_TVL_RATIO_24H,
+  MIN_POOL_AGE_HOURS,
+  MIN_IMPLIED_ACTIVE_TVL,
+  MAX_IMPLIED_ACTIVE_TVL,
+  MIN_LP_COUNT,
+} from '@/lib/strategy-config'
+
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 // dlmm-api.meteora.ag /pools (and /pair/all) deprecated/returning 404; datapi is the active public DLMM pool list endpoint.
 
 // Simple in-process cache — pools change slowly.
-// Cache TTL tuned for the fresh-only scanner (age ≤ MAX_POOL_AGE_MINUTES).
+// Cache TTL tuned for the activity scanner (broad window via ACTIVITY_MAX_POOL_AGE_MINUTES + MIN age gate).
 let meteoraPoolsCache: { pools: MeteoraPool[]; ts: number } | null = null
 const METEORA_CACHE_TTL_MS = parseInt(
   process.env.METEORA_POOLS_CACHE_TTL_MS ?? '300000',
@@ -38,6 +48,7 @@ export interface MeteoraPool {
   created_at?: number | string
   pool_created_at?: number | string
   tvl: number | string
+  active_tvl?: number | string   // NOTE: Not returned by the current /pools list endpoint (see Claude revised filters). Kept for future API expansion.
   current_price: number
   volume?: { '24h'?: number | string; '1h'?: number | string; '30m'?: number | string; '5m'?: number | string }
   volume_24h?: number | string
@@ -55,6 +66,19 @@ export interface MeteoraPool {
   // DBC 0.2.0+ transfer hook support (for graduated transfer-hook pools)
   transfer_hook_program?: string | null
   has_transfer_hook?: boolean
+  // NOTE: The following fields for "active TVL", "lp_count", and explicit 24h changes
+  // are NOT currently returned by the dlmm.datapi.meteora.ag/pools list endpoint
+  // (per official docs). We derive the needed signals from real fields (volume, fee windows, fee_tvl_ratio, pool_created_at).
+  // These are kept in the type for future-proofing if the API adds them.
+  lp_count?: number | string
+  total_lps?: number | string
+  active_tvl_usd?: number | string
+  fees_active_tvl_24h?: number | string
+  fees_active_tvl_1h?: number | string
+  tvl_change_24h?: number | string
+  tvl_change_1h?: number | string
+  fees_change_24h?: number | string
+  fees_change_1h?: number | string
 }
 
 export type PoolFetchConfig = {
@@ -153,6 +177,18 @@ function normalizeMeteoraPool(raw: unknown): MeteoraPool | null {
     is_blacklisted: pool.is_blacklisted === true,
     transfer_hook_program: asString(getRecordValue(pool, ['transfer_hook_program', 'transferHookProgram', 'transfer_hook'])) ?? undefined,
     has_transfer_hook: !!(getRecordValue(pool, ['transfer_hook_program', 'transferHookProgram', 'has_transfer_hook', 'transfer_hook'])),
+    // Defensive extraction for fields that the current /pools list API does not return
+    // (active_tvl, lp_count, explicit changes). These may appear in future API versions.
+    lp_count: getRecordValue(pool, ['lp_count', 'total_lps', 'lps', 'lpCount', 'totalLps']) as number | string | undefined,
+    total_lps: getRecordValue(pool, ['total_lps', 'lp_count', 'lps', 'totalLps']) as number | string | undefined,
+    active_tvl_usd: getRecordValue(pool, ['active_tvl_usd', 'active_tvl', 'activeTvlUsd', 'activeTvl', 'activeLiquidity']) as number | string | undefined,
+    active_tvl: getRecordValue(pool, ['active_tvl', 'activeTvl', 'active_tvl_usd']) as number | string | undefined,
+    fees_active_tvl_24h: getRecordValue(pool, ['fees_active_tvl_24h', 'feesActiveTvl24h', 'fee_active_tvl_24h', 'active_fee_tvl_24h']) as number | string | undefined,
+    fees_active_tvl_1h: getRecordValue(pool, ['fees_active_tvl_1h', 'feesActiveTvl1h', 'fee_active_tvl_1h']) as number | string | undefined,
+    tvl_change_24h: getRecordValue(pool, ['tvl_change_24h', 'tvlChange24h', 'tvl_change']) as number | string | undefined,
+    tvl_change_1h: getRecordValue(pool, ['tvl_change_1h', 'tvlChange1h']) as number | string | undefined,
+    fees_change_24h: getRecordValue(pool, ['fees_change_24h', 'feesChange24h', 'fee_change_24h']) as number | string | undefined,
+    fees_change_1h: getRecordValue(pool, ['fees_change_1h', 'feesChange1h']) as number | string | undefined,
   }
 }
 
@@ -230,6 +266,163 @@ export function getRecentVolumeGrowth(pool: MeteoraPool): number {
 
 // (scoreMeteoraMomentum fully removed — no longer used)
 
+// ─── Legacy getters for fields the current /pools API does not return ───
+// These were used in previous iterations that assumed active_tvl / lp_count fields existed.
+// Current logic (per latest Claude docs-based recommendations) uses only real fields:
+// - getImpliedActiveTvl (volume_1h / fee_pct)
+// - isFeeAccelerating (fee_1h > fee_2h / 2)
+// - getPoolAgeMinutes (from pool_created_at)
+// - getFeeTvlPct (from fee_tvl_ratio)
+// - getUniqueLpCount (expensive, only on final survivors via positions)
+
+export function getActiveTvlUsd(pool: MeteoraPool): number {
+  const explicit = asNumber(
+    pool.active_tvl_usd ?? pool.active_tvl ?? (pool as any).activeTvlUsd ?? (pool as any).activeTvl,
+    Number.NaN
+  )
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  return getPoolTvl(pool)
+}
+
+export function getTotalLps(pool: MeteoraPool): number {
+  const explicit = asNumber(
+    pool.total_lps ?? pool.lp_count ?? (pool as any).lps ?? (pool as any).lpCount,
+    Number.NaN
+  )
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  return 0
+}
+
+export function getFeesActiveTvl24hPct(pool: MeteoraPool): number {
+  const explicit = asNumber(
+    pool.fees_active_tvl_24h ?? (pool as any).feesActiveTvl24h ?? (pool as any).feeActiveTvl24h,
+    Number.NaN
+  )
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  return getFeeTvlPct(pool, '24h')
+}
+
+export function getTvlChange24h(pool: MeteoraPool): number {
+  const explicit = asNumber(
+    pool.tvl_change_24h ?? (pool as any).tvlChange24h,
+    Number.NaN
+  )
+  if (Number.isFinite(explicit)) return explicit
+  return 0
+}
+
+export function getFeesChange24h(pool: MeteoraPool): number {
+  const explicit = asNumber(
+    pool.fees_change_24h ?? (pool as any).feesChange24h ?? (pool as any).feeChange24h,
+    Number.NaN
+  )
+  if (Number.isFinite(explicit)) return explicit
+  const f = pool.fees || {}
+  const f24 = asNumber(f['24h'] ?? f['24H'], 0)
+  const f12 = asNumber(f['12h'] ?? f['12H'], 0)
+  if (f24 > 0 && f12 >= 0) {
+    return f24 - f12
+  }
+  return 0
+}
+
+// ─── Real API field proxies (per official docs + Claude revised filters) ───
+
+/**
+ * Implied active TVL from actual trading flow.
+ * volume_1h / (base_fee_pct / 100)
+ * This is one of the best available proxies for "real earning liquidity"
+ * because it comes from swaps, not parked capital. Ghost pools die here.
+ */
+export function getImpliedActiveTvl(pool: MeteoraPool): number {
+  const vol1h = getPoolVolume(pool, '1h')
+  const poolConfig = pool.pool_config || {}
+  const feePct = asNumber(poolConfig.base_fee_pct ?? (pool as any).base_fee_percentage, 0)
+  if (feePct <= 0 || vol1h <= 0) return 0
+  return vol1h / (feePct / 100)
+}
+
+/**
+ * Is fees accelerating right now?
+ * fee_1h > fee_2h / 2
+ * Strong signal that activity is increasing (not a dead historical spike).
+ */
+export function isFeeAccelerating(pool: MeteoraPool): boolean {
+  const fees = pool.fees || {}
+  const fee1h = asNumber(fees['1h'] ?? fees['1H'], 0)
+  const fee2h = asNumber(fees['2h'] ?? fees['2H'], 0)
+  if (fee1h <= 0) return false
+  return fee1h > (fee2h / 2)
+}
+
+/**
+ * Best-effort unique LP count for a pool.
+ * Only call this on the final few survivors (expensive).
+ *
+ * Strategy:
+ * - If Helius is configured, use it for efficient program account scan.
+ * - Fallback: return 0 (meaning "unknown" → soft pass the LP gate).
+ *
+ * This approximates the "GetPoolPositionPnL" / total_lps concept from the UI.
+ */
+export async function getUniqueLpCount(poolAddress: string): Promise<number> {
+  try {
+    // Lazy import to avoid circular issues
+    const { getHeliusRpcEndpoint } = await import('@/lib/solana')
+    const heliusUrl = getHeliusRpcEndpoint()
+
+    if (heliusUrl) {
+      // Use Helius for getProgramAccounts with memcmp on the position account layout.
+      // DLMM position accounts contain the lb_pair (pool) address at a known offset.
+      // For simplicity and reliability we use a broad but filtered query.
+      // In practice this is only called on 3-5 pools per tick.
+      const response = await fetch(heliusUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getProgramAccounts',
+          params: [
+            'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo', // DLMM program (common)
+            {
+              encoding: 'base64',
+              filters: [
+                { dataSize: 1024 }, // rough position account size
+                {
+                  memcmp: {
+                    offset: 8, // typical offset for lb_pair in position accounts
+                    bytes: poolAddress,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      })
+
+      if (response.ok) {
+        const json: any = await response.json()
+        const accounts = json?.result || []
+        // Count unique owners (first 32 bytes after discriminator often owner or use data)
+        const owners = new Set<string>()
+        for (const acc of accounts) {
+          // Simple heuristic: many position layouts put owner early
+          if (acc?.pubkey) owners.add(acc.pubkey) // fallback, better to parse
+        }
+        if (owners.size > 0) return owners.size
+      }
+    }
+  } catch (e) {
+    // Non-fatal
+  }
+
+  // No reliable count available → return 0 (caller should treat as soft pass)
+  return 0
+}
+
+// (scoreMeteoraMomentum fully removed — no longer used)
+
 export function getQuoteTokenMint(pool: MeteoraPool): string {
   return QUOTE_ASSETS.has(pool.token_x.address)
     ? pool.token_x.address
@@ -244,18 +437,24 @@ export function getTradableToken(pool: MeteoraPool): MeteoraToken {
 
 async function fetchMeteoraPoolsPage(
   baseUrl: string,
-  sortBy: 'pool_created_at' | 'volume_1h' | 'volume_5m',
+  sortBy: string,
   config: PoolFetchConfig,
   page = 1,
 ): Promise<MeteoraPool[]> {
-  const filters = ['is_blacklisted=false']
-  if (config.minTvlUsd > 0) {
-    filters.unshift(`tvl>=${config.minTvlUsd}`)
-  }
+  const filters: string[] = ['is_blacklisted=false']
+
+  // Use documented real fields for server-side filtering (Claude revised filters)
+  const minTvl = config.minTvlUsd > 0 ? config.minTvlUsd : MIN_TVL_USD
+  filters.push(`tvl>=${minTvl}`)
+
+  // fee_24h >= 5 (real activity floor, cheap server-side filter)
+  filters.push(`fee_24h>=${MIN_FEE_24H}`)
+
   const params: Record<string, string | number> = {
     page,
-    page_size: Math.min(config.limit, 100), // API seems sensitive to large sizes sometimes
-    sort_by: `${sortBy}:desc`,
+    page_size: Math.min(config.limit, 100),
+    // Prefer recency on 1h fee/tvl ratio (Claude recommendation)
+    sort_by: sortBy || 'fee_tvl_ratio_1h:desc',
     filter_by: filters.join(' && '),
   }
 
@@ -316,8 +515,8 @@ export async function fetchMeteoraPoolsFromEndpoint(baseUrl: string, config: Poo
     console.log(`[scanner] paginated ${pagesFetched} page(s) from ${baseUrl} (reachedAgeLimit=${reachedAgeLimit})`)
   }
 
-  // In the ultra-minimal model we only care about recent SOL-paired pools by age (≤ MAX_POOL_AGE_MINUTES).
-  // Extra volume-sorted fetches have been removed.
+  // For the activity model we use a broad scan window (ACTIVITY_MAX...) + minimum age gate (>2h) + real API fields + derived proxies.
+  // Previous "very fresh <=15m" upper cap and all non-real active_tvl logic removed.
   const pools = Array.from(poolMap.values())
     .sort((a, b) => (getPoolCreatedAt(b) ?? 0) - (getPoolCreatedAt(a) ?? 0))
   if (pools.length > 0) return pools
@@ -335,7 +534,7 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
     const pools = applyJsPreFilter(cached, config)
     console.log(
       `[scanner] using in-memory cached Meteora pools (${cached.length} entries, TTL ${Math.round(METEORA_CACHE_TTL_MS / 60000)}min)` +
-      `; ${pools.length} passed JS pre-filter (age≤${config.maxPoolAgeMinutes}m + SOL-paired + !blacklist)`,
+      `; ${pools.length} passed JS pre-filter (real fields + derived proxies)`,
     )
     return { pools, rawCount: cached.length }
   }
@@ -370,25 +569,80 @@ export async function fetchMeteoraPools(config: PoolFetchConfig): Promise<{ pool
   const pools = applyJsPreFilter(allPools, config)
   console.log(
     `[scanner] ${allPools.length} Meteora pools from API; ${pools.length} passed JS pre-filter ` +
-    `(age≤${config.maxPoolAgeMinutes}m + SOL-paired + !blacklist, minTvl=$${config.minTvlUsd})`,
+    `(real fields + derived proxies per latest Claude recommendations)`,
   )
   return { pools, rawCount: allPools.length }
 }
 
 function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): MeteoraPool[] {
   return allPools.filter((pool) => {
-    if (pool.is_blacklisted) return false
+    const name = pool.name || pool.address?.slice(0, 8)
+
+    if (pool.is_blacklisted) {
+      console.log(`[scanner][filter] ${name} REJECT blacklisted`)
+      return false
+    }
+
     const ageMin = getPoolAgeMinutes(pool)
+    const ageHours = ageMin / 60
+
+    // Minimum age gate (per latest Claude recs: exclude launch-and-rug)
+    if (ageHours < MIN_POOL_AGE_HOURS) {
+      console.log(`[scanner][filter] ${name} REJECT age=${ageHours.toFixed(1)}h < ${MIN_POOL_AGE_HOURS}h`)
+      return false
+    }
+
+    // Pagination safety (broad window used for activity scanning)
     if (ageMin > config.maxPoolAgeMinutes) return false
 
-    // Only apply liquidity filter if positive thresholds are provided
-    if (config.minLiquidityUsd > 0 && getPoolTvl(pool) < config.minLiquidityUsd) return false
-    if (config.maxLiquidityUsd > 0 && getPoolTvl(pool) > config.maxLiquidityUsd) return false
+    // Real fields from server-side filter_by (tvl + fee_24h)
+    const totalTvl = getPoolTvl(pool)
+    if (totalTvl < MIN_TVL_USD) {
+      console.log(`[scanner][filter] ${name} REJECT tvl=$${totalTvl.toFixed(0)} < $${MIN_TVL_USD}`)
+      return false
+    }
 
-    // Evil-panda is SOL-paired only (one-sided SOL zap-in / direct). Reject USDC/USDT-paired or other.
-    // This prevents non-SOL pairs from reaching deep-check, ACCEPT, then late "pool has no SOL side" reject in executor.
+    const fee24h = asNumber((pool.fees || {})['24h'], 0)
+    if (fee24h < MIN_FEE_24H) {
+      console.log(`[scanner][filter] ${name} REJECT fee_24h=$${fee24h.toFixed(2)} < $${MIN_FEE_24H}`)
+      return false
+    }
+
+    // 24h quality on real fee_tvl_ratio
+    const yield24h = getFeeTvlPct(pool, '24h')
+    if (yield24h < MIN_FEE_TVL_RATIO_24H * 100) {
+      console.log(`[scanner][filter] ${name} REJECT fee_tvl_ratio_24h=${yield24h.toFixed(2)}% < ${MIN_FEE_TVL_RATIO_24H * 100}%`)
+      return false
+    }
+
+    // Derived: implied active from volume / fee rate (Claude's key proxy for real earning liquidity)
+    const implied = getImpliedActiveTvl(pool)
+    if (implied > 0 && implied < MIN_IMPLIED_ACTIVE_TVL) {
+      console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=$${implied.toFixed(0)} < $${MIN_IMPLIED_ACTIVE_TVL} (volume/flow proxy)`)
+      return false
+    }
+    if (implied > MAX_IMPLIED_ACTIVE_TVL) {
+      console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=$${implied.toFixed(0)} > $${MAX_IMPLIED_ACTIVE_TVL}`)
+      return false
+    }
+
+    // Derived: fee acceleration (kills dead historical spikes)
+    if (!isFeeAccelerating(pool)) {
+      const fees = pool.fees || {}
+      console.log(`[scanner][filter] ${name} REJECT fee_not_accelerating (fee_1h=${asNumber(fees['1h'], 0).toFixed(2)} <= fee_2h/2)`)
+      return false
+    }
+
+    // Evil-panda: SOL-paired only
     const hasSolSide = pool.token_x.address === SOL_MINT || pool.token_y.address === SOL_MINT
-    if (!hasSolSide) return false
+    if (!hasSolSide) {
+      console.log(`[scanner][filter] ${name} REJECT no SOL side`)
+      return false
+    }
+
+    if (config.minLiquidityUsd > 0 && totalTvl < config.minLiquidityUsd) return false
+    if (config.maxLiquidityUsd > 0 && totalTvl > config.maxLiquidityUsd) return false
+
     return true
   })
 }

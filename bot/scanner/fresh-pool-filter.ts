@@ -1,14 +1,13 @@
 /**
- * fresh-pool-filter.ts
+ * fresh-pool-filter.ts (legacy name)
  *
- * Ultra-minimal fresh-only filter for the age-based scanner.
+ * Helper functions for activity-qualified pool filtering and selection.
  *
- * Responsibilities:
- * - Age gate: only pools with age <= MAX_POOL_AGE_MINUTES (default 15m for very fresh only)
- * - Cap the number of candidates we process
- * - Highest-liquidity pool selection when multiple tiers exist for one token
- *
- * This is the entire "brain" for the ultra-simple model. No lanes. No momentum. No scoring.
+ * The main hard filters + derived proxies (real API fields only) live in pool-fetcher.ts.
+ * This module handles:
+ * - Capping the number of candidates
+ * - Recency/quality sorting (by fee_tvl_1h)
+ * - Taking the top N for deeper checks + lp_count enrichment
  */
 
 import type { MeteoraPool } from './pool-fetcher';
@@ -18,12 +17,17 @@ import {
   getPoolVolume,
   getFeeTvlPct,
   getTradableToken,
+  getFeesActiveTvl24hPct,
+  getActiveTvlUsd,
+  getTotalLps,
+  getFeesChange24h,
+  getTvlChange24h,
 } from './pool-fetcher';
 
-// Minimal config for the fresh-only age-based path
+// Config for candidate selection (type names kept for minimal code churn; behavior is current activity model)
 export type FreshFilterConfig = {
   maxPoolAgeMinutes?: number;
-  maxCandidates?: number;   // how many fresh pools we will deep-check per tick
+  maxCandidates?: number;
 };
 
 export type FreshCandidate = {
@@ -32,40 +36,36 @@ export type FreshCandidate = {
 };
 
 /**
- * Ultra-simple fresh filter.
- * Returns only pools that pass the age gate, capped for processing.
+ * Returns the pools that reached this point (they already passed the real documented
+ * API filters + derived proxies in pool-fetcher).
  */
-export function filterFreshPools(pools: MeteoraPool[], config: FreshFilterConfig = {}) {
-  const maxAge = config.maxPoolAgeMinutes ?? 60;
+export function filterActivityPools(pools: MeteoraPool[], config: FreshFilterConfig = {}) {
   const maxCandidates = config.maxCandidates ?? 12;
-
-  const fresh: MeteoraPool[] = [];
-
-  for (const p of pools) {
-    const ageMin = getPoolAgeMinutes(p);
-    if (ageMin <= maxAge) {
-      fresh.push(p);
-    }
-  }
-
   return {
-    freshPools: fresh,
-    candidates: fresh.slice(0, maxCandidates),
+    activityPools: pools,
+    candidates: pools.slice(0, maxCandidates),
   };
 }
 
 /**
- * Take fresh pools, apply OOR dedup, and return capped list of candidates to deep-check.
+ * Legacy name kept for call sites. Delegates to the activity version.
+ */
+export function filterFreshPools(pools: MeteoraPool[], config: FreshFilterConfig = {}) {
+  return filterActivityPools(pools, config);
+}
+
+/**
+ * Apply OOR dedup and cap the list of activity-qualified candidates.
  */
 export function selectFreshCandidates(
-  fresh: MeteoraPool[],
+  activityPools: MeteoraPool[],
   recentlyClosedOorMints: Set<string>,
   config: FreshFilterConfig = {}
 ): FreshCandidate[] {
   const out: FreshCandidate[] = [];
   const maxTotal = config.maxCandidates ?? 12;
 
-  for (const p of fresh) {
+  for (const p of activityPools) {
     if (out.length >= maxTotal) break;
 
     const trad = getTradableToken(p);
@@ -81,6 +81,22 @@ export function selectFreshCandidates(
   return out;
 }
 
+/**
+ * Sort the qualified pools by the recommended recency signal (fee_tvl_ratio_1h) DESC
+ * and take the top N (we then do lp_count enrichment + deep checks on them).
+ */
+export function selectTopByActiveYield(
+  pools: MeteoraPool[],
+  maxN = 5
+): MeteoraPool[] {
+  const sorted = [...pools].sort((a, b) => {
+    const ya = getFeesActiveTvl24hPct(a);
+    const yb = getFeesActiveTvl24hPct(b);
+    return yb - ya; // DESC
+  });
+  return sorted.slice(0, maxN);
+}
+
 export function candidateTokenAddress(c: FreshCandidate | MeteoraPool | any): string {
   if (!c) return '';
   const pool = c.pool ?? c;
@@ -89,12 +105,10 @@ export function candidateTokenAddress(c: FreshCandidate | MeteoraPool | any): st
 }
 
 /**
- * Best pool selection for the ultra-minimal model.
+ * Best pool selection (used inside the top-N activity list).
  *
- * When multiple Meteora pools/tiers exist for the same token,
- * prefer the one with the **highest 24h Fee / TVL**.
- *
- * This is the primary quality filter for pool tier selection.
+ * When multiple Meteora pools/tiers exist for the same token inside the
+ * fees/active-24h sorted top performers, prefer the one with the highest 24h Fee/TVL.
  */
 export function selectBestPool(
   pools: MeteoraPool[] | any,

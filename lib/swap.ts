@@ -11,7 +11,7 @@ const SWAP_RETRY_DELAY_MS = 3_000
 /**
  * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
  * Returns true only if a quote succeeds with positive outAmount (no error).
- * Used in scanner deep-check to avoid ACCEPTING fresh candidates that will immediately
+ * Used in scanner deep-check to avoid issues with very new pools (now less relevant after activity-model change)
  * fail the Jupiter buy step during live Token-2022 position open (very common for
  * brand-new pump.fun/Dynamic Bonding Curve graduates until the pool is indexed by
  * the aggregator or has visible swap routes).

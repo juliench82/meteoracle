@@ -1,7 +1,7 @@
 {
   "name": "meteoracle",
   "version": "0.2.0",
-  "description": "Minimal Meteora DLMM LP bot — evil-panda on very fresh tokens with 4-rule exits.",
+  "description": "Minimal Meteora DLMM LP bot — fully redesigned to latest Claude recs (real /pools fields + derivations only) with 4-rule exits.",
   "private": true,
   "scripts": {
     "build": "tsc --project tsconfig.worker.json && tsc-alias -p tsconfig.worker.json",

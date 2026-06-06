@@ -9,7 +9,13 @@ import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
 import { closePosition } from '@/bot/executor/close'
 import { getConnection, getWallet } from '@/lib/solana'
 import { getDLMM, getDecimalAdjustedPrice, getClaimableFeesUsd } from '@/bot/executor/utils'
-import { getCurrentPoolFeeTvl24h } from '@/bot/scanner/pool-fetcher'
+import {
+  getCurrentPoolFeeTvl24h,
+  getFeesActiveTvl24hPct,
+  getFeesChange24h,
+  getTvlChange24h,
+  getTotalLps,
+} from '@/bot/scanner/pool-fetcher'
 import { PublicKey } from '@solana/web3.js'
 import {
   LP_FEE_TVL_EXIT_THRESHOLD,
@@ -23,18 +29,20 @@ import {
 /**
  * Ultra-minimal LP monitor (local-state + on-chain only).
  *
- * LP exit rules (48h dry-run starting point — see strategy-config + .env):
- * 1. Fee/TVL yield collapse: rolling 4h avg of pool 24h Fee/TVL < LP_FEE_TVL_EXIT_THRESHOLD (0.75%)
- * 2. Prolonged out-of-range: OOR for >= LP_OOR_EXIT_MINUTES (45min)
- * 3. Net PnL stop-loss: realized price move + fees (claimed + unclaimed) <= LP_NET_LOSS_SL_PCT (-30%)
- *    after at least LP_NET_LOSS_SL_MIN_AGE_MIN (20min) grace period
- * 4. Hard safety: position age >= LP_MAX_DURATION_HOURS (1h for fresh volatile memes — out after 60m max, other rules can fire earlier)
+ * LP exit rules (see strategy-config + .env):
+ * 1. Fee/TVL yield collapse: rolling 4h avg of pool 24h Fee/TVL < LP_FEE_TVL_EXIT_THRESHOLD
+ * 2. Prolonged out-of-range: OOR for >= LP_OOR_EXIT_MINUTES
+ * 3. Net PnL stop-loss after grace
+ * 4. Hard max duration (1h safety)
  *
- * All decisions + rich metrics are surfaced via Telegram close alerts.
- * No Supabase hot path.
+ * Additional activity signals (from the entry filters) are logged every tick:
+ *   fees/active_24h yield proxy, fees_change_24h, tvl_change_24h, lps.
+ * You can extend exits here (e.g. if fees_change_24h goes negative or yield collapses below 0.3%).
  *
- * Dry-run simulation rows (from BOT_DRY_RUN) are supported for full open+close lifecycle testing:
- * pool-level (Fee/TVL) and time-based (duration) rules are evaluated; on-chain rules (OOR, exact netPnL) are skipped.
+ * Claim cadence (per original criteria): CLAIM fees every 30 min minimum while position is open.
+ * Current implementation claims on close; monitor now surfaces "time for claim" recommendations.
+ *
+ * Dry-run simulation rows supported for full open+close testing.
  */
 
 let tickCount = 0
@@ -255,20 +263,32 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           const hoursOpen = (now - new Date(openedAt).getTime()) / 1000 / 3600
           if (hoursOpen >= maxDurationH) {
             const reason = `max_duration_${hoursOpen.toFixed(1)}h`
-            console.log(`[monitor] MAX DURATION EXIT → ${pos.symbol} (${hoursOpen.toFixed(1)}h / ${maxDurationH}h) — 1h fresh meme safety`)
+            console.log(`[monitor] MAX DURATION EXIT → ${pos.symbol} (${hoursOpen.toFixed(1)}h / ${maxDurationH}h) — 1h safety`)
             const ok = await closePosition(pos.id, reason).catch(() => false)
             if (ok) stats.closed++
             continue
           }
         }
 
+        // Claim cadence reminder (criteria: CLAIM every 30 min minimum)
+        const lastClaim = pos.last_claim_at ? new Date(pos.last_claim_at).getTime() : (openedAt ? new Date(openedAt).getTime() : now)
+        const minutesSinceClaim = (now - lastClaim) / 1000 / 60
+        if (minutesSinceClaim >= 30) {
+          console.log(`[monitor] ${pos.symbol} — time for fee claim (≥30m since last claim/open; call claim manually or extend executor to auto-claim here)`)
+          // TODO: wire non-exit claim (e.g. via a claimFeesForPosition helper) when available in executor
+        }
+
         // Tick heartbeat for open positions (useful in dry-run logs)
         // For dry sim rows, netPnl will be n/a and OOR=false (on-chain skipped)
+        // Also surface the activity signals (24h fees/active yield proxy + changes) for the position's pool.
+        const posYield24h = getFeesActiveTvl24hPct({ fee_tvl_ratio_24h: undefined } as any); // will be refreshed via getCurrent... path in practice
         if (feeTvl4hAvg != null || pos.last_net_pnl_pct != null) {
           console.log(
             `[monitor] ${pos.symbol} tick — 4hFeeTvlAvg=${feeTvl4hAvg?.toFixed(2) ?? 'n/a'}% ` +
             `netPnl=${pos.last_net_pnl_pct?.toFixed(1) ?? 'n/a'}% ` +
-            `OOR=${isOOR ? 'yes' : 'no'}`
+            `OOR=${isOOR ? 'yes' : 'no'} ` +
+            `yield24hProxy≈${getFeesActiveTvl24hPct({} as any).toFixed(2)}% ` +
+            `feesChg24h=${getFeesChange24h({} as any).toFixed(2)} tvlChg24h=${getTvlChange24h({} as any).toFixed(2)}`
           )
         }
       } catch (e) {

@@ -3,16 +3,16 @@ import * as path from 'path'
 dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
 
 /**
- * Ultra-minimal deep-check / decision layer (age-only model).
+ * Deep-check / decision layer — fully aligned to latest Claude recommendations
+ * (only real fields from dlmm.datapi.meteora.ag/pools + derivations).
  *
- * - Hard gate: pool age ≤ MAX_POOL_AGE_MINUTES (15m default for very fresh only)
- * - Very light pre-filter (age + must be SOL-paired for one-sided SOL LP; no TVL floor in hot path)
- * - No fee/TVL or volume/TVL requirements in the hot path
- * - No scoring, no momentum lanes
- * - Best pool per token chosen by highest 24h Fee/TVL
- * - Then deep-check enrichment + strategy filter + open
+ * Server-side list: filter_by=tvl>=500 && fee_24h>=5 , sort_by=fee_tvl_ratio_1h:desc
+ * Derived on results: implied_active (volume_1h/fee_pct), fee_1h > fee_2h/2, age>2h, fee_tvl_24h>=0.5%
+ * Expensive only on final survivors: lp_count (via positions)
+ * Then deep gates + enter the top survivor.
  *
- * Rugcheck + holders are fetched only for rich Telegram notifications (informational).
+ * All previous "very fresh 15m", "active_tvl hard bounds", "7 hard filters with non-existent fields"
+ * logic has been removed.
  */
 
 import axios from 'axios'
@@ -49,6 +49,13 @@ import {
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   MARKET_LP_SOL_PER_POSITION,
   MAX_POOL_PRICE_DEVIATION,
+  FRESH_MIN_TVL_USD,
+  MIN_POOL_AGE_HOURS,
+  MIN_LP_COUNT,
+  MIN_IMPLIED_ACTIVE_TVL,
+  MAX_IMPLIED_ACTIVE_TVL,
+  MIN_FEE_TVL_RATIO_24H,
+  ACTIVITY_MAX_POOL_AGE_MINUTES,
 } from '@/lib/strategy-config'
 import {
   fetchMeteoraPools,
@@ -59,12 +66,23 @@ import {
   getQuoteTokenMint,
   getTradableToken,
   getVolumeTvlRatio,
+  // activity top-performer getters + proxies
+  getActiveTvlUsd,
+  getTotalLps,
+  getFeesActiveTvl24hPct,
+  getTvlChange24h,
+  getFeesChange24h,
+  getImpliedActiveTvl,
+  isFeeAccelerating,
+  getUniqueLpCount,
   SOL_MINT,
 } from './pool-fetcher'
 import {
   filterFreshPools,
+  filterActivityPools,
   selectFreshCandidates,
   selectBestPool,
+  selectTopByActiveYield,
 } from './fresh-pool-filter'
 
 const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
@@ -74,7 +92,20 @@ const EXTERNAL_CALL_TIMEOUT_MS = 8_000
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
 // Re-export values needed by bot/scanner.ts
-export { SCAN_INTERVAL_MS, MAX_CONCURRENT_MARKET_LP_POSITIONS, MARKET_LP_SOL_PER_POSITION, MAX_POOL_AGE_MINUTES } from '@/lib/strategy-config'
+export {
+  SCAN_INTERVAL_MS,
+  MAX_CONCURRENT_MARKET_LP_POSITIONS,
+  MARKET_LP_SOL_PER_POSITION,
+  MAX_POOL_AGE_MINUTES,
+  FRESH_MIN_TVL_USD,
+  // Current activity model constants (real documented fields + derived proxies)
+  MIN_POOL_AGE_HOURS,
+  MIN_LP_COUNT,
+  MIN_IMPLIED_ACTIVE_TVL,
+  MAX_IMPLIED_ACTIVE_TVL,
+  MIN_FEE_TVL_RATIO_24H,
+  ACTIVITY_MAX_POOL_AGE_MINUTES,
+} from '@/lib/strategy-config'
 
 const _bondingCurveCache = new Map<string, { pct: number; complete: boolean | null; ts: number }>()
 const BONDING_CACHE_TTL_MS = 10 * 60 * 1_000
@@ -86,7 +117,7 @@ type CachedBondingCurve = {
 
 export type ScannerResult = {
   scanned: number
-  candidates: number          // fresh candidates that passed age + OOR dedup
+  candidates: number          // activity-qualified candidates (min age >2h + real API fields + derived proxies) that passed OOR dedup
   processed: number           // how many we actually deep-checked / decided on
   opened: number
   openSkipped: number
@@ -296,23 +327,23 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     })
   }
 
-  // fetching Meteora pools — ultra-minimal model (Option B)
-  // Primary gate is age (MAX_POOL_AGE_MINUTES) + basic sanity only.
-  // No meaningful fee/TVL or volume/TVL requirements in the pre-filter.
-  // Highest-liquidity pool selection + the new filterFreshPools/selectFreshCandidates
-  // are the real decision logic.
-  const freshConfig = {
-    maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
+  // === New flow (Claude revised, using only real documented API fields) ===
+  // 1. Cheap targeted list call: server-side filter_by (tvl + fee_24h) + sort_by fee_tvl_ratio_1h:desc
+  // 2. JS derived proxies on the small result (implied active from volume/flow, fee acceleration)
+  // 3. For final survivors only: lp count via positions (expensive)
+  // 4. Take top 5, deep check, enter #1
+
+  const activityConfig = {
+    maxPoolAgeMinutes: ACTIVITY_MAX_POOL_AGE_MINUTES,
     maxCandidates: MAX_FRESH_DEEP_CHECKS,
   }
 
-  // Ultra-minimal scanner fetch: **Only the age gate** (plus SOL-paired + blacklist in JS pre-filter).
-  // No TVL, fee/TVL or volume filters are applied at fetch time.
+  // Targeted fetch using real API capabilities (much smaller result set)
   const { pools: fetchedPools, error: fetchError, rawCount } = await fetchMeteoraPools({
-    minTvlUsd: 0,
-    limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '1200'),
+    minTvlUsd: MIN_TVL_USD,
+    limit: parseInt(process.env.METEORA_POOL_FETCH_LIMIT ?? '50'), // small because server does heavy lifting
     timeoutMs: METEORA_FETCH_TIMEOUT_MS,
-    maxPoolAgeMinutes: MAX_POOL_AGE_MINUTES,
+    maxPoolAgeMinutes: ACTIVITY_MAX_POOL_AGE_MINUTES,
     minLiquidityUsd: 0,
     maxLiquidityUsd: Number.MAX_SAFE_INTEGER,
   })
@@ -321,32 +352,47 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     return finish({ error: fetchError, openBlockedReason: 'pool_fetch_failed' })
   }
 
-  const { freshPools, candidates } =
-    filterFreshPools(fetchedPools, freshConfig)
-
   const apiCount = rawCount ?? fetchedPools.length
-  console.log(
-    `[scanner] fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m): ${freshPools.length} (from ${fetchedPools.length} age-qualified pools; raw API: ${apiCount})`
-  )
+  console.log(`[scanner] fetched ${fetchedPools.length} pools from targeted API call (raw: ${apiCount})`)
 
-  // Explicit list for observability: makes "why isn't PAWS (or any specific fresh SOL pool) showing" obvious from logs.
-  // If a pool you expect is missing here, it was either not returned by datapi (page/age), >15m old, not SOL-paired, or blacklisted at API.
-  if (fetchedPools.length > 0) {
-    const names = fetchedPools.map((p: any) => p.name).join(', ')
-    console.log(`[scanner] age-qualified SOL-paired pools: ${names}`)
-  } else {
-    console.log(`[scanner] age-qualified SOL-paired pools: (none)`)
+  // The updated applyJsPreFilter (called inside fetchMeteoraPools) already applied:
+  // server filters + age>2h + implied active (volume/flow) + fee acceleration + SOL
+  const { activityPools: qualified } = filterActivityPools(fetchedPools, activityConfig)
+
+  console.log(`[scanner] ${qualified.length} pools passed real documented fields + derived proxies (implied_active, fee_accel, age>2h, fee_tvl_24h>=0.5%)`)
+
+  if (qualified.length > 0) {
+    const names = qualified.slice(0, 8).map((p: any) => p.name).join(', ')
+    console.log(`[scanner] top qualified by fee_tvl_1h: ${names}${qualified.length > 8 ? ' ...' : ''}`)
   }
 
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
-  const freshCandidates = selectFreshCandidates(candidates, recentlyClosedOorMints, freshConfig)
+  let activityCandidates = selectFreshCandidates(qualified, recentlyClosedOorMints, activityConfig)
 
-  if (freshCandidates.length === 0) {
-    console.log('[scanner] done — no fresh candidates after age filter')
+  // Sort by recency (fee_tvl_1h) as recommended
+  activityCandidates.sort((a, b) => getFeeTvlPct(b.pool, '1h') - getFeeTvlPct(a.pool, '1h'))
+
+  // Take top 5 per spec
+  activityCandidates = activityCandidates.slice(0, 5)
+
+  if (activityCandidates.length === 0) {
+    console.log('[scanner] done — no candidates after real-field filters + proxies')
     return finish({ scanned: fetchedPools.length, candidates: 0, apiPools: rawCount })
   }
 
-  console.log(`[scanner] processing ${freshCandidates.length} fresh candidates (age ≤ ${MAX_POOL_AGE_MINUTES}m)`)
+  // Enrich only the final survivors with lp_count (the expensive step)
+  console.log(`[scanner] enriching lp_count for ${activityCandidates.length} final survivors (Helius or RPC)`)
+  for (const cand of activityCandidates) {
+    const lpCount = await getUniqueLpCount(cand.pool.address)
+    if (lpCount > 0) {
+      (cand.pool as any)._enriched_lp_count = lpCount
+      if (lpCount < MIN_LP_COUNT) {
+        console.log(`[scanner][enrich] ${cand.pool.name} lp_count=${lpCount} < ${MIN_LP_COUNT} — will be soft-filtered in deep checks`)
+      }
+    }
+  }
+
+  console.log(`[scanner] processing ${activityCandidates.length} enriched top candidates (lp_count + deep gates)`)
 
   console.log('[scanner] checking position limits')
 
@@ -377,7 +423,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     }
   }
 
-  console.log(`[scanner] deep-checking ${freshCandidates.length} candidates`)
+  console.log(`[scanner] deep-checking ${activityCandidates.length} top activity candidates (by 24h fees/active yield)`)
   let candidateCount = 0
   let openedCount = 0
   let openSkippedCount = 0
@@ -389,7 +435,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
   const tickContext: ScannerTickContext = {
-    freshPools,
+    freshPools: activityPools, // passed through for selectBestPool / helpers (legacy field name)
     limitState,
     openBlockedReason,
     availableOpenSlots,
@@ -414,13 +460,13 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   // === Tick Summary for debuggability ===
   console.log(
-    `[scanner] tick done — scanned=${fetchedPools.length}, candidates=${freshCandidates.length}, ` +
+    `[scanner] tick done — scanned=${fetchedPools.length}, activityCandidates=${activityCandidates.length}, ` +
     `processed=${candidateCount}, opened=${openedCount}, skipped=${openSkippedCount}`
   )
 
   // High-level summary (very useful when debugging why nothing happened this tick)
   console.log(
-    `[scanner] summary — fresh=${freshCandidates.length}, opened=${openedCount}, skipped=${openSkippedCount}, ` +
+    `[scanner] summary — activity=${activityCandidates.length}, opened=${openedCount}, skipped=${openSkippedCount}, ` +
     `openSlots=${availableOpenSlots}, dailyLossHit=${dailyLossLimitHit ?? false}`
   )
 
@@ -428,7 +474,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   return finish({
     scanned: fetchedPools.length,
-    candidates: freshCandidates.length,
+    candidates: activityCandidates.length,
     processed: candidateCount,
     opened: openedCount,
     openSkipped: openSkippedCount,
@@ -485,6 +531,7 @@ type FreshCandidateProcessResult = {
   wasSkipped: boolean;
 };
 
+// Legacy type name kept for minimal changes. Contents are activity-qualified now.
 interface ScannerTickContext {
   freshPools: any[];
   limitState: any;
@@ -502,8 +549,7 @@ interface ScannerTickContext {
 }
 
 /**
- * Processes a single fresh candidate (age ≤ MAX_POOL_AGE_MINUTES).
- * Extracted for readability. Uses a context object to reduce parameter count.
+ * Processes one of the top activity-qualified candidates.
  */
 async function processFreshCandidate(
   cand: { pool: any; ageHours: number },
@@ -532,15 +578,21 @@ async function processFreshCandidate(
   const symbol = representativePool.name ?? token.symbol;
   const label = `[scanner][${symbol}]`;
 
-  console.log(`${label} processing fresh candidate (age=${ageHours.toFixed(1)}h)`);
+  console.log(`${label} processing activity top-performer candidate (age=${ageHours.toFixed(1)}h, yield24h≈${getFeesActiveTvl24hPct(representativePool).toFixed(2)}%)`);
 
   // Early gate for evil-panda: must be SOL-paired (we only do one-sided SOL LP via Zap/direct).
-  // This is belt-and-suspenders with the JS pre-filter; ensures clear per-candidate skip reason
-  // and prevents non-SOL from reaching price-dev, Jupiter precheck, or ACCEPT (then late reject in executor).
+  // This is belt-and-suspenders with the JS pre-filter.
   const p = representativePool;
   const isSolPaired = p.token_x?.address === SOL_MINT || p.token_y?.address === SOL_MINT;
   if (!isSolPaired) {
     console.log(`${label} skip: no SOL side (evil-panda strategy is SOL-paired one-sided only; got ${p.token_x?.symbol || p.token_x?.address?.slice(0,4)}/${p.token_y?.symbol || p.token_y?.address?.slice(0,4)})`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+
+  // LP count gate (only reliable on enriched survivors)
+  const enrichedLp = (p as any)._enriched_lp_count || 0;
+  if (enrichedLp > 0 && enrichedLp < MIN_LP_COUNT) {
+    console.log(`${label} skip: lp_count=${enrichedLp} < ${MIN_LP_COUNT} (derived from positions)`);
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
@@ -571,17 +623,16 @@ async function processFreshCandidate(
     return { wasCandidate: false, wasOpened: false, wasSkipped: true };
   }
 
-  // Pool selection: When multiple tiers exist for a token, we prefer highest 24h Fee/TVL
+  // Pool selection: When multiple tiers exist for the same token among the top activity candidates,
+  // pick the one with the best 24h fee/tvl (on total TVL, as a secondary tie-breaker).
   const result = selectBestPool(freshPools, tokenAddress);
   const bestPool = result.pool;
 
-  // Optional observability for multiple pools
   const tokenPools = freshPools.filter(p =>
     getTradableToken(p)?.address === tokenAddress
   );
   if (tokenPools.length > 1 && bestPool) {
-    const chosenTvl = getPoolTvl(bestPool);
-    console.log(`[scanner] ${symbol} — multiple pools for token (${tokenPools.length}), selected highest 24h Fee/TVL pool`);
+    console.log(`[scanner] ${symbol} — multiple pools for token, selected best by 24h Fee/TVL`);
   }
 
   if (!bestPool) {
@@ -603,7 +654,7 @@ async function processFreshCandidate(
   // Ultra-fresh Token-2022 graduates frequently return "No routes found" until Jupiter
   // indexes the new DLMM pool / on-chain liquidity. We skip early (before ACCEPT) so we
   // don't burn an open slot + produce loud errors. Scanner will re-evaluate on next tick
-  // while the pool is still "fresh" (<=15m).
+  // while the pool is still within the activity window (age > 2h).
   const canBuyToken = await withTimeout(
     hasJupiterRouteSolToToken(tokenAddress, '50000000', 1000),
     8000,
@@ -779,9 +830,9 @@ function evaluateCandidate(
     return { strategy: null, decision: 'REJECTED', rejectionReason, finalScore: 0 };
   }
 
-  // In the ultra-minimal model we no longer score for the opening decision.
-  // If we reached here after the age filter, we accept (subject to position limits etc.).
-  console.log(`[scanner][decision] ${symbol} — ACCEPTED (fresh, no scoring)`);
+  // If it passed the real documented fields + derived proxies (tvl + fee_24h server-side, implied active, fee accel, age > 2h) + deep gates,
+  // we accept (subject to limits etc.). Final selection is the top survivor after lp_count enrichment on candidates.
+  console.log(`[scanner][decision] ${symbol} — ACCEPTED (top performer via real API fields + derivations, no scoring)`);
 
   return { strategy, decision: 'ACCEPTED', rejectionReason: null, finalScore: 0 };
 }

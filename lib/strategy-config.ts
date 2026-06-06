@@ -50,7 +50,7 @@ export const SCANNER_TICK_TIMEOUT_MS = Math.max(
   envNumber('LP_SCANNER_TICK_TIMEOUT_MS', envNumber('SCANNER_TICK_TIMEOUT_MS', 570_000))
 )
 
-export const MAX_POOL_AGE_MINUTES_FOR_LP = envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 15)
+export const MAX_POOL_AGE_MINUTES_FOR_LP = envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 72 * 60) // legacy name, now broad for activity model
 
 // ── Feature flags ───────────────────────────────────────────────
 export const SCANNER_ENABLED = envBool('SCANNER_ENABLED', true)
@@ -61,17 +61,52 @@ export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
 
 // ── Misc (still referenced by current ultra-simple scanner) ──────
 export const DEEP_CHECK_DELAY_MS = envNumber('DEEP_CHECK_DELAY_MS', 800)
-export const MIN_LIQUIDITY_USD_FOR_FRESH = envNumber('MIN_LIQUIDITY_USD_FOR_FRESH', 8000)
+// Legacy TVL floor (kept for backward compat). Primary gates are now the real-API activity filters
+// (tvl + fee_24h server-side, plus derived implied_active, fee acceleration, age > 2h).
+export const FRESH_MIN_TVL_USD = envNumber('FRESH_MIN_TVL_USD', 5000)
+export const MIN_LIQUIDITY_USD_FOR_FRESH = FRESH_MIN_TVL_USD  // kept for backward compat in strategy filters / docs
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
 export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
 
 // ── Scanner entry filter (ultra-simplified model) ──
 export const MAX_POOL_AGE_MINUTES = envNumber(
   'MAX_POOL_AGE_MINUTES',
-  envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 15)
-)
+  envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 72 * 60)
+) // legacy name; the activity scanner primarily uses ACTIVITY_MAX_POOL_AGE_MINUTES + MIN_POOL_AGE_HOURS (>=2h)
 // Cap on how many fresh age-qualified pools we will deep-check / enrich per scanner tick.
 export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 12)
+
+// ── Revised bot filters using ONLY documented fields from dlmm.datapi.meteora.ag/pools ──
+// See Claude's analysis + official docs for rationale.
+// Server-side filter_by + sort_by (cheap):
+//   tvl >= 500 && fee_24h >= 5
+//   sort_by=fee_tvl_ratio_1h:desc
+// Then derived proxies on small result set:
+//   impliedActiveTVL = volume_1h / (base_fee_pct/100)   → 330-750k range
+//   feeAccelerating = fee_1h > (fee_2h / 2)
+//   age > 2h (from pool_created_at)
+//   fee_tvl_ratio_24h >= 0.005 (0.5%)
+// For final survivors only: derive lp_count via positions (Helius or RPC)
+// SORT by fee_tvl_ratio_1h (recency) or 24h quality
+// TAKE top ~5 then pick #1 that passes deep checks (price dev, Jupiter, etc.)
+export const MIN_TVL_USD = envNumber('MIN_TVL_USD', 500)
+export const MIN_FEE_24H = envNumber('MIN_FEE_24H', 5)
+export const MIN_FEE_TVL_RATIO_24H = envNumber('MIN_FEE_TVL_RATIO_24H', 0.005) // 0.5%
+export const MIN_POOL_AGE_HOURS = envNumber('MIN_POOL_AGE_HOURS', 2)
+
+// Derived "implied active TVL" from real flow (volume_1h / fee rate)
+export const MIN_IMPLIED_ACTIVE_TVL = envNumber('MIN_IMPLIED_ACTIVE_TVL', 330)
+export const MAX_IMPLIED_ACTIVE_TVL = envNumber('MAX_IMPLIED_ACTIVE_TVL', 750000)
+
+// LP count (derived via GetPoolPositionPnL equivalent - only on final survivors)
+export const MIN_LP_COUNT = envNumber('MIN_LP_COUNT', 3)
+
+// Broad window for the activity model (previous 15m "very fresh" upper cap removed)
+// so that pools >=2h old with real sustained yield can be discovered. Use a high default (or env).
+export const ACTIVITY_MAX_POOL_AGE_MINUTES = envNumber(
+  'ACTIVITY_MAX_POOL_AGE_MINUTES',
+  envNumber('MAX_POOL_AGE_MINUTES', 72 * 60) // 72 hours default for activity scan
+)
 
 // ── LP Position Exit Rules (ultra-minimal model) ──
 // 48h dry-run starting point (2026-06). Tune after observing real Fee/TVL decay curves + net PnL behavior.
@@ -87,5 +122,7 @@ export const LP_FEE_TVL_SAMPLE_WINDOW_H = 4                                     
 // Pools with large deviation often have misaligned active bin, leading to bad IL/OOR right after opening.
 export const MAX_POOL_PRICE_DEVIATION = envNumber('MAX_POOL_PRICE_DEVIATION', 0.05)
 
-// MAX_POOL_AGE_MINUTES (default 15 via FRESH_SCANNER_MAX_AGE_MINUTES) + MAX_FRESH_DEEP_CHECKS are the main scanner tunables for the ultra-simple fresh-only model.
-// Per-position bin width is capped in calculateValidatedBinRange to the DLMM on-chain max (~70).
+// MAX_POOL_AGE_MINUTES and FRESH_MIN_TVL_USD are legacy names.
+// Current age rule: only MIN_POOL_AGE_HOURS (min 2h, no upper "very fresh" cap).
+// Primary logic uses real /pools fields + derivations (see README).
+// Per-position bin width capped in calculateValidatedBinRange.

@@ -202,39 +202,45 @@ export async function openPosition(
     const nonRefundCost = (newBinArrayCount * 0.07).toFixed(2);
     console.log(`${label} Desired range cost check: ${fullTotalBins} bins would require ${newBinArrayCount} new bin array(s) (~${nonRefundCost} SOL non-refundable)`);
 
-    // Probe to find the max contiguous free range (only existing bin arrays)
+    // Find the actual free bins left and right (max without new array)
+    // Walk bin-by-bin from active for accuracy (small number, only on opens)
     async function findFreeBoundary(dir: 'left' | 'right', start: number, maxDist = 400) {
-      let lastGood = start;
-      const coarse = 25;
-      for (let off = 0; off < maxDist; off += coarse) {
-        const b = dir === 'left' ? start - off : start + off;
+      let current = start;
+      for (let i = 1; i <= maxDist; i++) {
+        const b = dir === 'left' ? start - i : start + i;
         const arrs = getBinArraysRequiredByPositionRange(poolPubkey, new BN(b), new BN(b), DLMM_PROGRAM_ID);
         if (arrs.length === 0) break;
         const info = await connection.getAccountInfo(arrs[0].key);
-        if (info) lastGood = b;
-        else break;
+        if (info) {
+          current = b;
+        } else {
+          break;
+        }
       }
-      for (let i = 0; i < coarse + 30; i++) {
-        const b = dir === 'left' ? lastGood - 1 : lastGood + 1;
-        const arrs = getBinArraysRequiredByPositionRange(poolPubkey, new BN(b), new BN(b), DLMM_PROGRAM_ID);
-        if (arrs.length === 0) break;
-        const info = await connection.getAccountInfo(arrs[0].key);
-        if (info) lastGood = b;
-        else break;
-      }
-      return lastGood;
+      return current;
     }
     const freeLeft = await findFreeBoundary('left', activeBinId);
     const freeRight = await findFreeBoundary('right', activeBinId);
-    let minBinId = Math.max(fullDesiredMin, freeLeft);
-    let maxBinId = Math.min(fullDesiredMax, freeRight);
-    if (maxBinId - minBinId < 2) {
-      minBinId = activeBinId - 10;
-      maxBinId = activeBinId + 10;
-    }
+
+    const freeDownBins = activeBinId - freeLeft;
+    const freeUpBins = freeRight - activeBinId;
+
+    // Scale the desired ratio to fit the free bins (preserve -50:+100 ratio as much as possible)
+    const desiredDownBins = fullBinsDown;
+    const desiredUpBins = fullBinsUp;
+    const scale = Math.min(
+      freeDownBins / desiredDownBins,
+      freeUpBins / desiredUpBins
+    );
+    const actualDown = Math.floor(desiredDownBins * scale);
+    const actualUp = Math.floor(desiredUpBins * scale);
+
+    let minBinId = activeBinId - actualDown;
+    let maxBinId = activeBinId + actualUp;
     const binRange = maxBinId - minBinId + 1;
-    const wasShrunk = (fullDesiredMin !== minBinId || fullDesiredMax !== maxBinId);
-    console.log(`${label} Using free range (0 new bin arrays): ${minBinId} → ${maxBinId} (${binRange} bins)`);
+    const wasShrunk = scale < 1;
+
+    console.log(`${label} Using scaled free range (0 new bin arrays, ratio preserved): ${minBinId} → ${maxBinId} (${binRange} bins), scale=${scale.toFixed(2)}`);
 
     if (binRange < 2) {
       console.warn(`${label} bin range still invalid after free clamp — rejecting`);
@@ -728,48 +734,6 @@ async function openPositionDirectSdkFallback(
       `(one-sided on SOL primary, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
-
-    // Pre-initialize any missing bin arrays for the final range.
-    // The smart clamp above already chose a range whose required bin arrays are all existing (0 new = 0 non-refundable cost).
-    // This pre-init is now a safeguard only (in case of concurrent activity or future policy changes that allow paying for 1 new array).
-    // The DLMM program can't realloc >10k in inner instructions.
-    try {
-      const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
-      const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
-      const requiredBinArrays = getBinArraysRequiredByPositionRange(
-        poolPubkey,
-        new BN(minBinId),
-        new BN(maxBinId),
-        DLMM_PROGRAM_ID
-      );
-
-      for (const ba of requiredBinArrays) {
-        const baInfo = await connection.getAccountInfo(ba.key);
-        if (!baInfo) {
-          const binArrayIndex = (ba as any).binArrayIndex ?? (ba as any).index;
-          if (binArrayIndex === undefined) {
-            console.warn(`${label} could not determine binArrayIndex for ${ba.key.toBase58().slice(0,8)}, skipping pre-init for this array`);
-            continue;
-          }
-          console.log(`${label} initializing missing bin array index=${binArrayIndex} (${ba.key.toBase58().slice(0,8)})`);
-          const initBinArrayTx = await dlmmPool.initializeBinArray({
-            binArrayIndex,
-            payer: wallet.publicKey,
-          });
-          if (initBinArrayTx) {
-            // Add high CU limit before priority fee
-            initBinArrayTx.instructions.unshift(
-              ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 })
-            );
-            const prepared = applyPriorityFee(initBinArrayTx, priorityFee);
-            const sig = await sendLegacyTx(prepared, [wallet], `${label} init-bin-array-${binArrayIndex}`);
-            console.log(`${label} bin array ${binArrayIndex} created ✔ sig: ${sig}`);
-          }
-        }
-      }
-    } catch (binArrayErr) {
-      console.warn(`${label} bin array pre-init warning (continuing):`, binArrayErr);
-    }
 
     // ATA pre-creation before the direct call (primary path) if the SDK doesn't handle it
     const ataIxs: TransactionInstruction[] = []

@@ -11,15 +11,15 @@ import {
 
 export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
-  version: 'v1.1',
+  version: 'v1.3',
   name: 'Evil Panda',
-  description: 'New SOL-paired meme tokens. Wide desired range (-50% / +100% asymmetric), Bid-Ask distribution (for volatility swings), short duration (1h hard max), fast exit. Actual bin width per position is clamped to DLMM max (~70 bins) with proportional shrink (UI does the same).',
+  description: 'Top-performer SOL-paired DLMM using only real fields from /pools (tvl>=500, fee_24h>=5, fee_tvl_ratio_24h>=0.5%, age>2h). Sort fee_tvl_ratio_1h:desc. Derived proxies: volume_1h/fee_pct for implied active, fee_1h > fee_2h/2 for acceleration. lp_count on final survivors only. Bid-Ask, 1h hard max.',
   enabled: true,
   filters: {
     minMcUsd: 0,
     maxMcUsd: Number.MAX_SAFE_INTEGER,
     minVolume24h: 0,
-    minLiquidityUsd: envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 5_000),
+    minLiquidityUsd: envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 5000),  // Legacy; primary gates now use real /pools fields + derivations in scanner
     maxTopHolderPct: envNumber('EVIL_PANDA_MAX_TOP_HOLDER_PCT', 30),
     minHolderCount: EVIL_PANDA_MIN_HOLDER_COUNT,
     maxAgeHours: EVIL_PANDA_MAX_AGE_HOURS,
