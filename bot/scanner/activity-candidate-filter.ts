@@ -72,8 +72,9 @@ export function selectTopCandidates(
 }
 
 /**
- * Sort the qualified pools by the recommended recency signal (fee_tvl_ratio_1h) DESC
- * and take the top N (we then do lp_count enrichment + deep checks on them).
+ * @deprecated Unused in the main path (main selection uses inline 1h fee_tvl sort after prefilter).
+ * Sorts by 24h active yield (getFeesActiveTvl24hPct) which does not match the spec's "fee_tvl_ratio_1h:desc" recency preference.
+ * Kept only for possible future alternative use; do not rely on it for current "top performer" selection.
  */
 export function selectTopByActiveYield(
   pools: MeteoraPool[],
@@ -111,8 +112,9 @@ export function selectBestPool(
   const candidates = list.filter(p => getTradableToken(p)?.address === tokenAddress);
 
   if (candidates.length === 0) {
-    // Fallback to first in the broader list (should be rare)
-    return { pool: list[0] };
+    // No pools in the provided list match this token at all. Return null so caller can skip cleanly.
+    // (Previously fell back to list[0], which could be for an unrelated token.)
+    return { pool: null };
   }
 
   if (candidates.length === 1) {

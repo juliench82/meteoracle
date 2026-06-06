@@ -91,7 +91,6 @@ import {
   filterActivityPools,
   selectTopCandidates,
   selectBestPool,
-  selectTopByActiveYield,
 } from './activity-candidate-filter'
 
 const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'

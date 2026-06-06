@@ -10,7 +10,6 @@ import {
   MIN_LP_COUNT,
 } from '@/lib/strategy-config'
 
-import * as poolMetrics from './pool-metrics';
 
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 // dlmm-api.meteora.ag /pools (and /pair/all) deprecated/returning 404; datapi is the active public DLMM pool list endpoint.
@@ -222,51 +221,6 @@ export function getPoolAgeMinutes(pool: MeteoraPool): number {
   const createdAt = getPoolCreatedAt(pool)
   if (!createdAt) return 999_999
   return Math.max(0, (Date.now() / 1000 - createdAt) / 60)
-}
-
-export function getPoolVolume(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
-  const flatKey = `volume_${window}` as keyof MeteoraPool
-  const direct = asNumber(pool.volume?.[window] ?? pool[flatKey], Number.NaN)
-  if (Number.isFinite(direct)) return direct
-
-  // Meteora currently returns 30m buckets on /pools but may omit 5m.
-  // Use the 30m average as a conservative recent activity signal (kept for compatibility during transition).
-  if (window === '5m') {
-    const thirtyMinuteVolume = asNumber(pool.volume?.['30m'], Number.NaN)
-    if (Number.isFinite(thirtyMinuteVolume)) return thirtyMinuteVolume / 6
-  }
-
-  return 0
-}
-
-export function getPoolTvl(pool: MeteoraPool): number {
-  return asNumber(pool.tvl, 0)
-}
-
-export function getFeeTvlRatio(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
-  const flatKey = `fee_tvl_ratio_${window}` as keyof MeteoraPool
-  const direct = asNumber(pool.fee_tvl_ratio?.[window] ?? pool[flatKey], Number.NaN)
-  if (Number.isFinite(direct)) return direct
-
-  if (window === '5m') {
-    const thirtyMinuteRatio = asNumber(pool.fee_tvl_ratio?.['30m'], Number.NaN)
-    if (Number.isFinite(thirtyMinuteRatio)) return thirtyMinuteRatio / 6
-  }
-
-  return 0
-}
-
-export function getFeeTvlPct(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
-  return getFeeTvlRatio(pool, window) * 100
-}
-
-export function getVolumeTvlRatio(pool: MeteoraPool, window: '1h' | '5m'): number {
-  const tvl = getPoolTvl(pool)
-  return tvl > 0 ? getPoolVolume(pool, window) / tvl : 0
-}
-
-export function getRecentVolumeGrowth(pool: MeteoraPool): number {
-  return poolMetrics.getRecentVolumeGrowth(pool);
 }
 
 // Re-export metrics (current + legacy) from dedicated module for cleaner separation after redesign.
