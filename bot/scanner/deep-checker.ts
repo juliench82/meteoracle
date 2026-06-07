@@ -572,17 +572,18 @@ async function selectEnrichAndPrepareCandidates(
   }
 
   // Enrich only the final survivors with lp_count (the expensive step)
-  console.log(`[scanner] enriching lp_count for ${activityCandidates.length} final survivors (Helius or RPC)`)
+  console.log(`[scanner] enriching lp_count for ${activityCandidates.length} final survivors (Helius getProgramAccounts)`)
   for (const cand of activityCandidates) {
     const lpCount = await getUniqueLpCount(cand.pool.address)
     if (lpCount > 0) {
       (cand.pool as any)._enriched_lp_count = lpCount
       if (lpCount < MIN_LP_COUNT) {
         console.log(`[scanner][enrich] ${cand.pool.name} lp_count=${lpCount} < ${MIN_LP_COUNT} — will be soft-filtered in deep checks`)
+      } else {
+        console.log(`[scanner][enrich] ${cand.pool.name} lp_count=${lpCount} (meets MIN_LP_COUNT)`)
       }
-    } else {
-      console.warn(`[scanner][enrich] ${cand.pool.name} lp_count=0 (Helius/RPC failed or no positions — LP gate is soft-pass for this pool)`)
     }
+    // When 0 we rely on the detailed logs from inside getUniqueLpCount (no key / query returned 0 accounts / error)
   }
 
   return activityCandidates

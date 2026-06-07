@@ -13,6 +13,7 @@
 
 import type { MeteoraPool } from './pool-fetcher';
 import { MIN_FEE_24H } from '@/lib/strategy-config';
+import { getHeliusRpcEndpoint } from '@/lib/solana';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -155,56 +156,70 @@ export function isFeeAccelerating(pool: MeteoraPool): boolean {
 }
 
 /**
- * Best-effort unique LP count for a pool.
- * Only call this on the final few survivors (expensive).
+ * Best-effort unique LP (position account) count for a pool.
+ * Only called on the final ~top-5 survivors (expensive getProgramAccounts).
  *
- * Strategy:
- * - If Helius is configured, use it for efficient program account scan.
- * - Fallback: return 0 (meaning "unknown" → soft pass the LP gate).
+ * Uses Helius when configured (preferred for speed + scale).
+ * Returns 0 on any failure / no key / no matches (LP gate is soft-pass when unknown).
  */
 export async function getUniqueLpCount(poolAddress: string): Promise<number> {
+  const heliusUrl = getHeliusRpcEndpoint();
+
+  if (!heliusUrl) {
+    // No key or not configured — soft pass (consistent with previous behavior)
+    return 0;
+  }
+
   try {
-    const { getHeliusRpcEndpoint } = await import('@/lib/solana');
-    const heliusUrl = getHeliusRpcEndpoint();
+    console.log(`[scanner][enrich] querying Helius getProgramAccounts for lp count on ${poolAddress}`);
 
-    if (heliusUrl) {
-      const response = await fetch(heliusUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'getProgramAccounts',
-          params: [
-            'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo',
-            {
-              encoding: 'base64',
-              filters: [
-                { dataSize: 1024 },
-                {
-                  memcmp: {
-                    offset: 8,
-                    bytes: poolAddress,
-                  },
+    const response = await fetch(heliusUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getProgramAccounts',
+        params: [
+          'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo', // Meteora DLMM program
+          {
+            encoding: 'base64',
+            filters: [
+              // NOTE: dataSize:1024 was too strict for many current DLMM position layouts.
+              // We rely primarily on the memcmp for the pool pubkey at offset 8 (after 8-byte discriminator).
+              // { dataSize: 1024 },
+              {
+                memcmp: {
+                  offset: 8,
+                  bytes: poolAddress,
                 },
-              ],
-            },
-          ],
-        }),
-      });
+              },
+            ],
+          },
+        ],
+      }),
+    });
 
-      if (response.ok) {
-        const json: any = await response.json();
-        const accounts = json?.result || [];
-        const owners = new Set<string>();
-        for (const acc of accounts) {
-          if (acc?.pubkey) owners.add(acc.pubkey);
-        }
-        if (owners.size > 0) return owners.size;
-      }
+    const json: any = await response.json();
+
+    if (!response.ok || json?.error) {
+      const errInfo = json?.error ? JSON.stringify(json.error) : `status ${response.status}`;
+      console.warn(`[scanner] getUniqueLpCount Helius error for ${poolAddress}: ${errInfo}`);
+      return 0;
     }
+
+    const accounts = json?.result || [];
+    const uniquePositions = new Set<string>();
+    for (const acc of accounts) {
+      if (acc?.pubkey) uniquePositions.add(acc.pubkey);
+    }
+
+    const count = uniquePositions.size;
+    console.log(`[scanner][enrich] ${poolAddress} → ${count} position account(s) from Helius (raw accounts returned: ${accounts.length})`);
+
+    return count;
   } catch (e) {
     console.warn(`[scanner] getUniqueLpCount Helius/RPC error for ${poolAddress}:`, e instanceof Error ? e.message : e);
+    return 0;
   }
-  return 0;
 }
