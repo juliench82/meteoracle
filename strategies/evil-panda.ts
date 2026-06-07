@@ -5,6 +5,7 @@ import {
   EVIL_PANDA_MAX_AGE_HOURS,
   EVIL_PANDA_MIN_RUGCHECK_SCORE,
   EVIL_PANDA_MIN_HOLDER_COUNT,
+  EVIL_PANDA_MIN_LIQUIDITY_USD,
 } from '@/lib/strategy-config'
 
 // (Old scoring weights fully removed — no scoring in entry path)
@@ -19,7 +20,7 @@ export const evilPandaStrategy: Strategy = {
     minMcUsd: 0,
     maxMcUsd: Number.MAX_SAFE_INTEGER,
     minVolume24h: 0,
-    minLiquidityUsd: envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 500),  // Aligned to spec floor (MIN_TVL_USD=500). Legacy name kept for the final strategy filter gate.
+    minLiquidityUsd: EVIL_PANDA_MIN_LIQUIDITY_USD,
     maxTopHolderPct: envNumber('EVIL_PANDA_MAX_TOP_HOLDER_PCT', 30),
     minHolderCount: EVIL_PANDA_MIN_HOLDER_COUNT,
     maxAgeHours: EVIL_PANDA_MAX_AGE_HOURS,

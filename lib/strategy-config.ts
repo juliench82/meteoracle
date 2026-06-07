@@ -24,6 +24,7 @@ export const EVIL_PANDA_MIN_HOLDER_COUNT = envNumber('EVIL_PANDA_MIN_HOLDER_COUN
 export const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)  // legacy name; tied to old 60m fresh gate (not used in current scanner)
 export const EVIL_PANDA_MAX_AGE_HOURS = envNumber('EVIL_PANDA_MAX_AGE_HOURS', 48)
 export const EVIL_PANDA_MIN_RUGCHECK_SCORE = envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 40)
+export const EVIL_PANDA_MIN_LIQUIDITY_USD = envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 500)  // must match server-side MIN_TVL_USD floor to avoid wasting deep-check quota on pools the scanner already accepted
 
 // ── Position sizing ─────────────────────────────────────────────
 export const MARKET_LP_SOL_PER_POSITION = envNumber(
@@ -61,9 +62,9 @@ export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
 
 // ── Misc (still referenced by current ultra-simple scanner) ──────
 export const DEEP_CHECK_DELAY_MS = envNumber('DEEP_CHECK_DELAY_MS', 800)
-// Legacy TVL floor (kept for backward compat / strategy filter). Primary gates are now the
-// real-API activity filters (tvl + fee_24h + fee_tvl_ratio_24h server-side via filter_by,
-// plus client derives: implied, accel, age>2h).
+// Legacy TVL floor (kept only for backward compat / old monitor paths / docs).
+// Active server floor is MIN_TVL_USD (500). Active strategy filter floor is EVIL_PANDA_MIN_LIQUIDITY_USD (500).
+// Do not raise FRESH_MIN_TVL_USD; it is not used in the current Evil Panda entry path.
 export const FRESH_MIN_TVL_USD = envNumber('FRESH_MIN_TVL_USD', 5000)
 export const MIN_LIQUIDITY_USD_FOR_FRESH = FRESH_MIN_TVL_USD  // kept for backward compat in strategy filters / docs
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
