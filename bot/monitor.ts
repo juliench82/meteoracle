@@ -131,8 +131,9 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
         // ── 1. Rolling 4h Fee/TVL sampling + yield collapse check ─────────────────
         let feeTvl4hAvg: number | null = null
+        let currentFeeTvl: number | null = null
         try {
-          const currentFeeTvl = await getCurrentPoolFeeTvl24h(pos.pool_address)
+          currentFeeTvl = await getCurrentPoolFeeTvl24h(pos.pool_address)
           if (currentFeeTvl != null && Number.isFinite(currentFeeTvl)) {
             const samples: Array<{ ts: number; fee_tvl_24h: number }> = Array.isArray(pos.fee_tvl_samples) ? pos.fee_tvl_samples : []
             samples.push({ ts: now, fee_tvl_24h: currentFeeTvl })
@@ -282,14 +283,33 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         // Tick heartbeat for open positions (useful in dry-run logs)
         // For dry sim rows, netPnl will be n/a and OOR=false (on-chain skipped)
         // Also surface the activity signals (24h fees/active yield proxy + changes) for the position's pool.
-        const posYield24h = getFeesActiveTvl24hPct({ fee_tvl_ratio_24h: undefined } as any); // will be refreshed via getCurrent... path in practice
         if (feeTvl4hAvg != null || pos.last_net_pnl_pct != null) {
+          // Use the just-fetched current 24h Fee/TVL (or the rolling 4h avg) for the yield proxy.
+          // Previously the log was calling the getters with dummy {} objects, causing 0.00.
+          const yield24hProxy = currentFeeTvl ?? feeTvl4hAvg ?? 0;
+
+          // Compute a simple recent change from the fee_tvl samples we just maintained
+          // (as proxy for feesChg24h / tvlChg24h, since we don't have separate fees/tvl deltas here).
+          // Real getFeesChange24h / getTvlChange24h expect full pool objects with explicit change fields or fees map.
+          let feesChg24h = 0;
+          let tvlChg24h = 0;
+          const prunedSamples: Array<{ ts: number; fee_tvl_24h: number }> = pos.fee_tvl_samples || [];
+          if (prunedSamples.length >= 2) {
+            const last = prunedSamples[prunedSamples.length - 1].fee_tvl_24h;
+            const prev = prunedSamples[prunedSamples.length - 2].fee_tvl_24h;
+            if (prev > 0) {
+              const pct = ((last - prev) / prev) * 100;
+              feesChg24h = Math.round(pct * 100) / 100;
+              tvlChg24h = feesChg24h; // combined signal proxy
+            }
+          }
+
           console.log(
             `[monitor] ${pos.symbol} tick — 4hFeeTvlAvg=${feeTvl4hAvg?.toFixed(2) ?? 'n/a'}% ` +
             `netPnl=${pos.last_net_pnl_pct?.toFixed(1) ?? 'n/a'}% ` +
             `OOR=${isOOR ? 'yes' : 'no'} ` +
-            `yield24hProxy≈${getFeesActiveTvl24hPct({} as any).toFixed(2)}% ` +
-            `feesChg24h=${getFeesChange24h({} as any).toFixed(2)} tvlChg24h=${getTvlChange24h({} as any).toFixed(2)}`
+            `yield24hProxy≈${yield24hProxy.toFixed(2)}% ` +
+            `feesChg24h≈${feesChg24h.toFixed(2)} tvlChg24h≈${tvlChg24h.toFixed(2)}`
           )
         }
       } catch (e) {

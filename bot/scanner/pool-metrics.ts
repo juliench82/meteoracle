@@ -117,8 +117,10 @@ export function getFeesChange24h(pool: MeteoraPool): number {
   const f = pool.fees || {};
   const f24 = asNumber(f['24h'] ?? f['24H'], 0);
   const f12 = asNumber(f['12h'] ?? f['12H'], 0);
-  if (f24 > 0 && f12 >= 0) {
-    return f24 - f12;
+  if (f24 > 0 && f12 > 0) {
+    // Return percentage change (not absolute delta) so it is consistent with
+    // expected "chg" semantics in logs and any future rules.
+    return ((f24 - f12) / f12) * 100;
   }
   return 0;
 }
