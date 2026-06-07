@@ -296,8 +296,16 @@ async function fetchMeteoraPoolsPage(
   const filters: string[] = ['is_blacklisted=false']
 
   // Use documented real fields for server-side filtering (aligned to revised spec)
-  const minTvl = config.minTvlUsd > 0 ? config.minTvlUsd : MIN_TVL_USD
-  filters.push(`tvl>=${minTvl}`)
+  // For relaxed/monitoring paths (minTvlUsd=0 and !strict), allow very low/no TVL floor
+  // so we can still sample yield on decayed positions the activity scanner would ignore.
+  const minTvl = config.minTvlUsd > 0
+    ? config.minTvlUsd
+    : (config.strictFeeTvlRatioFilter ? MIN_TVL_USD : 0)
+  if (minTvl > 0) {
+    filters.push(`tvl>=${minTvl}`)
+  } else {
+    // no tvl floor for broad monitoring fallbacks
+  }
 
   // fee_24h >= 5 (real activity floor, cheap server-side filter)
   filters.push(`fee_24h>=${MIN_FEE_24H}`)
@@ -329,8 +337,13 @@ async function fetchMeteoraPoolsPage(
       })
       return normalizeMeteoraPoolsResponse(res.data)
     } catch (err) {
-      if (attempt === 1) throw err
-      console.warn(`[scanner] ${baseUrl}/pools attempt ${attempt + 1} failed, retrying...`)
+      const status = (err as any)?.response?.status
+      const isClientError = status && status >= 400 && status < 500
+
+      if (attempt === 1 || isClientError) {
+        throw err
+      }
+      console.warn(`[scanner] ${baseUrl}/pools attempt ${attempt + 1} failed (status=${status}), retrying...`)
       await new Promise(r => setTimeout(r, 300))
     }
   }
@@ -556,9 +569,11 @@ export async function getCurrentPoolFeeTvl24h(poolAddress: string): Promise<numb
     }
   }
 
-  // 2. Cold fallback: fetch a broad recent set (no strict pre-filter) and lookup
-  // Use relaxed mode: omit fee_tvl_ratio_24h server filter and prefer recency sort so we can
-  // observe current yield even for positions whose pools have decayed below the activity thresholds.
+  // 2. Cold fallback: fetch a broad recent set (no strict pre-filter) and lookup.
+  // IMPORTANT: relaxedConfig explicitly sets strictFeeTvlRatioFilter=false so the
+  // fee_tvl_ratio_24h>=0.005 filter is NEVER sent for monitoring paths (only for
+  // the main activity yield-sorted scan). This lets us observe yield on older/decayed
+  // positions that the scanner would have filtered.
   try {
     const relaxedConfig: PoolFetchConfig = {
       minTvlUsd: 0,
@@ -574,8 +589,15 @@ export async function getCurrentPoolFeeTvl24h(poolAddress: string): Promise<numb
     let pools: MeteoraPool[] = []
     try {
       pools = await fetchMeteoraPoolsFromEndpoint(METEORA_DATAPI, relaxedConfig)
-    } catch {
-      // best-effort; pools will stay []
+    } catch (e) {
+      // best-effort only; 4xx (e.g. datapi rejecting broad recency sort + filters)
+      // is common for monitoring fallbacks and is swallowed silently.
+      const status = (e as any)?.response?.status
+      if (status && status >= 400 && status < 500) {
+        // expected for some relaxed queries — no need to spam
+      } else {
+        console.warn(`[pool-fetcher] getCurrentPoolFeeTvl24h relaxed fetch error for ${poolAddress}:`, e instanceof Error ? e.message : e)
+      }
     }
     const hit = pools.find((p) => p.address === poolAddress)
     if (hit) {

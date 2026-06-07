@@ -165,6 +165,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         }
 
         if (feeTvl4hAvg != null && feeTvl4hAvg < feeTvlThreshold && (pos.fee_tvl_samples?.length ?? 0) >= 3) {
+          // Exit decision uses the *rolling 4h window average* of 24h Fee/TVL samples (not a single-tick value).
           const reason = `fee_tvl_yield_low_4havg_${feeTvl4hAvg.toFixed(2)}pct`
           console.log(`[monitor] FEE/TVL EXIT → ${pos.symbol} (4h avg ${feeTvl4hAvg.toFixed(2)}% < ${feeTvlThreshold}%, samples=${pos.fee_tvl_samples?.length ?? 0})`)
           const ok = await closePosition(pos.id, reason).catch(() => false)
