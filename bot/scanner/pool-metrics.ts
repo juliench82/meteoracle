@@ -25,7 +25,7 @@ export function getPoolTvl(pool: MeteoraPool): number {
   return asNumber(pool.tvl, 0);
 }
 
-export function getPoolVolume(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
+export function getPoolVolume(pool: MeteoraPool, window: string): number {
   const flatKey = `volume_${window}` as keyof MeteoraPool;
   const direct = asNumber(pool.volume?.[window] ?? pool[flatKey], Number.NaN);
   if (Number.isFinite(direct)) return direct;
@@ -38,7 +38,7 @@ export function getPoolVolume(pool: MeteoraPool, window: '24h' | '1h' | '5m'): n
   return 0;
 }
 
-export function getFeeTvlRatio(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
+export function getFeeTvlRatio(pool: MeteoraPool, window: string): number {
   const flatKey = `fee_tvl_ratio_${window}` as keyof MeteoraPool;
   const direct = asNumber(pool.fee_tvl_ratio?.[window] ?? pool[flatKey], Number.NaN);
   if (Number.isFinite(direct)) return direct;
@@ -51,11 +51,11 @@ export function getFeeTvlRatio(pool: MeteoraPool, window: '24h' | '1h' | '5m'): 
   return 0;
 }
 
-export function getFeeTvlPct(pool: MeteoraPool, window: '24h' | '1h' | '5m'): number {
+export function getFeeTvlPct(pool: MeteoraPool, window: string): number {
   return getFeeTvlRatio(pool, window) * 100;
 }
 
-export function getVolumeTvlRatio(pool: MeteoraPool, window: '1h' | '5m'): number {
+export function getVolumeTvlRatio(pool: MeteoraPool, window: string): number {
   const tvl = getPoolTvl(pool);
   return tvl > 0 ? getPoolVolume(pool, window) / tvl : 0;
 }

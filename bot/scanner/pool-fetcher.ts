@@ -10,6 +10,14 @@ import {
   MIN_LP_COUNT,
 } from '@/lib/strategy-config'
 
+import {
+  getPoolTvl,
+  getFeeTvlPct,
+  getImpliedActiveTvl,
+  getPoolVolume,
+  isFeeAccelerating,
+} from './pool-metrics'
+
 
 const METEORA_DATAPI = 'https://dlmm.datapi.meteora.ag'
 // dlmm-api.meteora.ag /pools (and /pair/all) deprecated/returning 404; datapi is the active public DLMM pool list endpoint.
@@ -51,12 +59,30 @@ export interface MeteoraPool {
   tvl: number | string
   active_tvl?: number | string   // NOTE: Not returned by the current /pools list endpoint (see Claude revised filters). Kept for future API expansion.
   current_price: number
-  volume?: { '24h'?: number | string; '1h'?: number | string; '30m'?: number | string; '5m'?: number | string }
+  volume?: {
+    '24h'?: number | string
+    '1h'?: number | string
+    '30m'?: number | string
+    '5m'?: number | string
+    [k: string]: number | string | undefined
+  }
   volume_24h?: number | string
   volume_1h?: number | string
   volume_5m?: number | string
-  fees?: { '24h'?: number | string; '1h'?: number | string; '30m'?: number | string; '5m'?: number | string }
-  fee_tvl_ratio?: { '24h'?: number | string; '1h'?: number | string; '30m'?: number | string; '5m'?: number | string }
+  fees?: {
+    '24h'?: number | string
+    '1h'?: number | string
+    '30m'?: number | string
+    '5m'?: number | string
+    [k: string]: number | string | undefined
+  }
+  fee_tvl_ratio?: {
+    '24h'?: number | string
+    '1h'?: number | string
+    '30m'?: number | string
+    '5m'?: number | string
+    [k: string]: number | string | undefined
+  }
   fee_tvl_ratio_24h?: number | string
   fee_tvl_ratio_1h?: number | string
   fee_tvl_ratio_5m?: number | string
