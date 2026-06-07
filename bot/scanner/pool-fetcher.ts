@@ -269,14 +269,20 @@ export {
 
 // (scoreMeteoraMomentum fully removed — no longer used)
 
-export function getQuoteTokenMint(pool: MeteoraPool): string {
-  return QUOTE_ASSETS.has(pool.token_x.address)
-    ? pool.token_x.address
-    : pool.token_y.address
+export function getQuoteTokenMint(pool: any): string {
+  const p = pool?.pool ?? pool;
+  if (!p || !p.token_x?.address || !p.token_y?.address) return '';
+  return QUOTE_ASSETS.has(p.token_x.address)
+    ? p.token_x.address
+    : p.token_y.address;
 }
 
-export function getTradableToken(pool: MeteoraPool): MeteoraToken {
-  return QUOTE_ASSETS.has(pool.token_x.address) ? pool.token_y : pool.token_x
+export function getTradableToken(pool: any): MeteoraToken | null {
+  // Tolerate both raw MeteoraPool and ActivityCandidate wrappers {pool, ageHours}
+  // (the latter is passed via the legacy "freshPools" in scanner context).
+  const p = pool?.pool ?? pool;
+  if (!p || !p.token_x?.address || !p.token_y) return null;
+  return QUOTE_ASSETS.has(p.token_x.address) ? p.token_y : p.token_x;
 }
 
 // ─── Meteora API fetchers ─────────────────────────────────────────────────────

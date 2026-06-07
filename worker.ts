@@ -73,7 +73,8 @@ async function main() {
   log(`Scanner     : every ${SCANNER_INTERVAL_MS / 60_000} min`)
   try {
     const bs = await getBotState()
-    log(`botState    : enabled=${bs.enabled} dry_run=${bs.dry_run} paused=${bs.paused ?? false}`)
+    const effectiveDry = DRY_RUN || (bs.dry_run ?? false)
+    log(`botState    : enabled=${bs.enabled} dry_run=${bs.dry_run} (effective=${effectiveDry}) paused=${bs.paused ?? false}`)
   } catch {
     log(`botState    : (unreadable, will default disabled)`)
   }

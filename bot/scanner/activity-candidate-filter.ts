@@ -45,7 +45,9 @@ export function filterActivityPools(pools: MeteoraPool[], config: ActivityFilter
 }
 
 /**
- * Apply OOR dedup and cap the list of activity-qualified candidates.
+ * Apply OOR dedup + same-token dedup (multiple DLMM tiers per mint are common)
+ * and cap the list of activity-qualified candidates.
+ * The returned list contains at most one entry per tradable mint.
  */
 export function selectTopCandidates(
   activityPools: MeteoraPool[],
@@ -54,18 +56,26 @@ export function selectTopCandidates(
 ): ActivityCandidate[] {
   const out: ActivityCandidate[] = [];
   const maxTotal = config.maxCandidates ?? 12;
+  const seenMints = new Set<string>();
 
   for (const p of activityPools) {
     if (out.length >= maxTotal) break;
 
     const trad = getTradableToken(p);
     const mint = trad?.address;
+
+    // Skip recently OOR-closed tokens (when the set is populated)
     if (mint && recentlyClosedOorMints.has(mint)) continue;
+
+    // Dedup by tradable mint: Meteora DLMM frequently surfaces multiple active pools/tiers
+    // for the same token. We only need (and want to lp-enrich) one per token per tick.
+    if (mint && seenMints.has(mint)) continue;
 
     out.push({
       pool: p,
       ageHours: getPoolAgeMinutes(p) / 60,
     });
+    if (mint) seenMints.add(mint);
   }
 
   return out;
@@ -105,11 +115,18 @@ export function selectBestPool(
   pools: MeteoraPool[] | any,
   tokenAddress: string
 ): { pool: MeteoraPool | null } {
-  const list: MeteoraPool[] = Array.isArray(pools) ? pools : [];
+  const list: any[] = Array.isArray(pools) ? pools : [];
   if (list.length === 0) return { pool: null };
 
+  // Normalize items that may be ActivityCandidate wrappers { pool, ageHours }
+  // (legacy "freshPools" in the scanner tick context is the wrapped list).
+  // Always return a raw MeteoraPool.
+  const normalized = list
+    .map((item: any) => item?.pool ?? item)
+    .filter((p: any): p is MeteoraPool => !!p && p.token_x && p.token_y);
+
   // All pools that match this exact tradable token
-  const candidates = list.filter(p => getTradableToken(p)?.address === tokenAddress);
+  const candidates = normalized.filter(p => getTradableToken(p)?.address === tokenAddress);
 
   if (candidates.length === 0) {
     // No pools in the provided list match this token at all. Return null so caller can skip cleanly.

@@ -416,7 +416,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
   const tickContext: ScannerTickContext = {
-    freshPools: activityCandidates, // passed through for selectBestPool / helpers (legacy field name)
+    freshPools: activityCandidates, // wrapped ActivityCandidate[] for legacy selectBestPool helpers (we normalize inside)
     limitState,
     openBlockedReason,
     availableOpenSlots,
@@ -544,8 +544,17 @@ async function selectEnrichAndPrepareCandidates(
   console.log(`[scanner] ${qualified.length} pools passed real documented fields + derived proxies (implied_active, fee_accel, age>2h, fee_tvl_24h>=0.5%)`)
 
   if (qualified.length > 0) {
-    const names = qualified.slice(0, 8).map((p: any) => p.name).join(', ')
-    console.log(`[scanner] top qualified by fee_tvl_1h: ${names}${qualified.length > 8 ? ' ...' : ''}`)
+    // Show a deduped-by-mint view in the log (multiple tiers per token can pass filters)
+    const seenForLog = new Set<string>()
+    const displayNames: string[] = []
+    for (const p of qualified) {
+      const mint = getTradableToken(p)?.address
+      if (mint && seenForLog.has(mint)) continue
+      if (mint) seenForLog.add(mint)
+      displayNames.push(p.name)
+      if (displayNames.length >= 8) break
+    }
+    console.log(`[scanner] top qualified by fee_tvl_1h: ${displayNames.join(', ')}${qualified.length > displayNames.length ? ' ...' : ''}`)
   }
 
   const recentlyClosedOorMints = await fetchRecentlyClosedOorMints()
@@ -605,9 +614,14 @@ async function processActivityCandidate(
   await new Promise(r => setTimeout(r, DEEP_CHECK_DELAY_MS));
 
   const token = getTradableToken(representativePool);
-  const tokenAddress = token.address;
-  const symbol = representativePool.name ?? token.symbol;
+  const symbol = representativePool?.name ?? token?.symbol ?? 'unknown';
   const label = `[scanner][${symbol}]`;
+
+  if (!token) {
+    console.log(`${label} skip: malformed pool (no tradable token side)`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
+  const tokenAddress = token.address;
 
   console.log(`${label} processing activity top-performer candidate (age=${ageHours.toFixed(1)}h, yield24h≈${getFeesActiveTvl24hPct(representativePool).toFixed(2)}%)`);
 
@@ -655,9 +669,11 @@ async function processActivityCandidate(
   const result = selectBestPool(freshPools, tokenAddress);
   const bestPool = result.pool;
 
-  const tokenPools = freshPools.filter(p =>
-    getTradableToken(p)?.address === tokenAddress
-  );
+  // Normalize because freshPools may contain ActivityCandidate wrappers.
+  const tokenPools = (Array.isArray(freshPools) ? freshPools : [])
+    .map((item: any) => item?.pool ?? item)
+    .filter((p: any) => getTradableToken(p)?.address === tokenAddress);
+
   if (tokenPools.length > 1 && bestPool) {
     console.log(`[scanner] ${symbol} — multiple pools for token, selected best by 24h Fee/TVL`);
   }
