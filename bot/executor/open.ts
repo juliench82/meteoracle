@@ -259,15 +259,29 @@ export async function openPosition(
 
     const totalSolLamports = BigInt(Math.floor(solAmount * 1e9))
     const binsTotal = fullBinsDown + fullBinsUp + 1  // +1 for the active bin
-    const solToSwapLamports = totalSolLamports * BigInt(fullBinsDown) / BigInt(binsTotal)
+
+    // Base allocation for the token leg is bin-proportional for value-matching the Bid-Ask range.
+    // solBias (from strategy, default 1) allows tilting the split:
+    //   - solBias = 1 : use exact bin proportion (current default behavior)
+    //   - solBias > 1 : more SOL-heavy (swap less for token leg)
+    //   - solBias < 1 : more token-heavy (swap more for token leg)
+    // This makes the previously-unused solBias field actually control the economics.
+    let swapFraction = fullBinsDown / binsTotal
+    const solBias = Math.max(0.1, strategy.position.solBias ?? 1)
+    swapFraction = swapFraction / solBias
+    swapFraction = Math.max(0, Math.min(1, swapFraction))
+
+    let solToSwapLamports = BigInt(Math.floor(Number(totalSolLamports) * swapFraction))
+    if (solToSwapLamports < 0n) solToSwapLamports = 0n
     const remainingSolLamports = totalSolLamports - solToSwapLamports
 
-    console.log(`${label} one-sided split for Bid-Ask: swap ${solToSwapLamports} lamports SOL for token side, keep ${remainingSolLamports} as SOL side`)
+    console.log(`${label} one-sided split for Bid-Ask: swap ${solToSwapLamports} lamports SOL for token side (fraction=${swapFraction.toFixed(4)}, solBias=${solBias}), keep ${remainingSolLamports} as SOL side`)
 
-    // Guard against dust/zero token leg from integer split (common with small SOL amounts or certain bin counts)
-    const MIN_SWAP_LAMPORTS = 10_000n; // ~0.00001 SOL worth of token — anything less is not worth a swap+open
-    if (solToSwapLamports < MIN_SWAP_LAMPORTS) {
-      console.warn(`${label} token swap leg would be dust or zero (${solToSwapLamports} lamports) — skipping pool to avoid stranded dust or SDK failure`);
+    // Guard against dust token leg (tiny positive amounts that would fail or be useless).
+    // If solBias made it exactly 0 we allow pure-SOL leg (proceed without pre-swap).
+    const MIN_SWAP_LAMPORTS = 10_000n;
+    if (solToSwapLamports > 0n && solToSwapLamports < MIN_SWAP_LAMPORTS) {
+      console.warn(`${label} token swap leg would be dust (${solToSwapLamports} lamports) — skipping pool to avoid stranded dust or SDK failure`);
       return null;
     }
 
@@ -285,49 +299,54 @@ export async function openPosition(
       console.warn(`${label} balance re-check before swap failed (proceeding with caution):`, balChkErr);
     }
 
-    // Pre-quote at the first ladder slippage (500bps) for validation.
-    // We will try to use this exact quote for the swap tx to minimize staleness between
-    // quote and execution (a common cause of 0x177e "route not executable" on new Token-2022 DLMMs).
-    let quote: any = null
-    try {
-      const params = new URLSearchParams({
-        inputMint: NATIVE_MINT_STR,
-        outputMint: outputMint.toBase58(),
-        amount: solToSwapLamports.toString(),
-        slippageBps: '500',
-        onlyDirectRoutes: 'false',
-        restrictIntermediateTokens: 'true',
-      })
-      const quoteUrl = `${JUPITER_QUOTE_API}/quote?${params.toString()}`
-      const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(7000) })
-      if (!quoteRes.ok) throw new Error(`quote http ${quoteRes.status}`)
-      quote = await quoteRes.json()
-      if (quote?.error || quote?.errorCode) throw new Error(quote.error || quote.errorCode || 'quote error')
-      const expectedOut = BigInt(quote.outAmount ?? quote.out_amount ?? '0')
-      console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token`)
-    } catch (e) {
-      console.warn(`${label} pre-quote SOL→token failed — skipping pool: ${e instanceof Error ? e.message : e}`)
-      return null
-    }
+    let actualTokenLamports = 0n
+    if (solToSwapLamports > 0n) {
+      // Pre-quote at the first ladder slippage (500bps) for validation.
+      // We will try to use this exact quote for the swap tx to minimize staleness between
+      // quote and execution (a common cause of 0x177e "route not executable" on new Token-2022 DLMMs).
+      let quote: any = null
+      try {
+        const params = new URLSearchParams({
+          inputMint: NATIVE_MINT_STR,
+          outputMint: outputMint.toBase58(),
+          amount: solToSwapLamports.toString(),
+          slippageBps: '500',
+          onlyDirectRoutes: 'false',
+          restrictIntermediateTokens: 'true',
+        })
+        const quoteUrl = `${JUPITER_QUOTE_API}/quote?${params.toString()}`
+        const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(7000) })
+        if (!quoteRes.ok) throw new Error(`quote http ${quoteRes.status}`)
+        quote = await quoteRes.json()
+        if (quote?.error || quote?.errorCode) throw new Error(quote.error || quote.errorCode || 'quote error')
+        const expectedOut = BigInt(quote.outAmount ?? quote.out_amount ?? '0')
+        console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token`)
+      } catch (e) {
+        console.warn(`${label} pre-quote SOL→token failed — skipping pool: ${e instanceof Error ? e.message : e}`)
+        return null
+      }
 
-    // Execute the swap: first try the fresh pre-quoted response directly (best chance to avoid 0x177e),
-    // then fall back to the full ladder (re-quotes at 500/1000/2000 bps).
-    let swapRes = await executeSwapFromPreQuote(quote, getWallet(), label)
-    if (!swapRes) {
-      console.warn(`${label} direct use of pre-quote failed (0x177e or other) — falling back to slippage ladder`)
-      swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
+      // Execute the swap: first try the fresh pre-quoted response directly (best chance to avoid 0x177e),
+      // then fall back to the full ladder (re-quotes at 500/1000/2000 bps).
+      let swapRes = await executeSwapFromPreQuote(quote, getWallet(), label)
+      if (!swapRes) {
+        console.warn(`${label} direct use of pre-quote failed (0x177e or other) — falling back to slippage ladder`)
+        swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
+      }
+      if (!swapRes) {
+        console.error(`${label} swap SOL to token failed`)
+        return null
+      }
+      actualTokenLamports = swapRes.tokenAmount
+      console.log(`${label} swap done: received ${actualTokenLamports} token lamports`)
+    } else {
+      console.log(`${label} solBias produced zero token leg — proceeding with pure-SOL allocation for the Bid-Ask range`)
     }
-    if (!swapRes) {
-      console.error(`${label} swap SOL to token failed`)
-      return null
-    }
-    const actualTokenLamports = swapRes.tokenAmount
-    console.log(`${label} swap done: received ${actualTokenLamports} token lamports`)
 
     const positionKeypair = new Keypair()
 
-    // === DIRECT (after explicit pre-swap for the token side) ===
-    console.log(`${label} attempting direct one-sided SOL (full evil-panda range, Bid-Ask shape) after Jupiter swap`);
+    // === DIRECT (using remaining SOL + actual received token from any pre-swap) ===
+    console.log(`${label} attempting direct (Bid-Ask range) with computed legs`);
     const directResult = await openPositionDirect(
       metrics,
       strategy,

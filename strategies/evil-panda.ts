@@ -34,6 +34,8 @@ export const evilPandaStrategy: Strategy = {
     rangeDownPct: envNumber('EVIL_PANDA_RANGE_DOWN_PCT', -50),
     rangeUpPct: envNumber('EVIL_PANDA_RANGE_UP_PCT', 100),
     distributionType: 'bid-ask',
+    // solBias controls the token-leg swap fraction in the Bid-Ask pre-swap (see open.ts).
+    // 1.0 = bin-proportional value match (default). >1 = more SOL heavy, <1 = more token heavy.
     solBias: envNumber('EVIL_PANDA_SOL_BIAS', 1),
   },
   exits: {
