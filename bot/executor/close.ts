@@ -108,8 +108,9 @@ export async function closePosition(
 
     // Resolve transfer hook remaining accounts for Token-2022 (for removeLiquidity)
     let hookRemainingAccounts: any[] = []
-    const tokenXProgram = await getTokenProgramId(dlmmPool.tokenX.publicKey.toBase58()).catch(() => TOKEN_PROGRAM_ID)
-    const tokenYProgram = await getTokenProgramId(dlmmPool.tokenY.publicKey.toBase58()).catch(() => TOKEN_PROGRAM_ID)
+    // Pass PublicKey (not string) for consistency with getTokenProgramId signature and other call sites
+    const tokenXProgram = await getTokenProgramId(dlmmPool.tokenX.publicKey).catch(() => TOKEN_PROGRAM_ID)
+    const tokenYProgram = await getTokenProgramId(dlmmPool.tokenY.publicKey).catch(() => TOKEN_PROGRAM_ID)
     const hasToken2022 = tokenXProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58() || tokenYProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
     if (hasToken2022) {
       try {
@@ -133,6 +134,8 @@ export async function closePosition(
         toBinId: upperBinId,
         bps: new BN(10_000),
         shouldClaimAndClose: true,
+        // Pass transfer hook remaining accounts for Token-2022 (populated above if needed)
+        ...(hookRemainingAccounts.length > 0 ? { remainingAccounts: hookRemainingAccounts } : {}),
       })
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
         const sig = await sendLegacyTx(applyPriorityFee(tx, 100000), [wallet], label)

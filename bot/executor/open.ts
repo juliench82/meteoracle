@@ -397,9 +397,8 @@ async function validateOpenEligibility(
 
   const effectiveOpenCountForCap = limitState.effectiveOpenCount || 0;
 
-  console.log(
-    `${label} market LP cap ok (${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS})`,
-  );
+  // Note: the "cap ok" log is emitted once by the caller in openPosition after eligibility succeeds.
+  // Removed duplicate here to reduce log noise.
 
   const maxTotalDeployed = MAX_MARKET_LP_SOL_DEPLOYED;
   const { totalDeployed, source: exposureSource } = await getTotalDeployedSolForCap(limitState);
@@ -508,11 +507,6 @@ async function openPositionDirect(
   const wallet = getWallet()
 
   try {
-    if (DRY_RUN) {
-      console.log(`${label} [SAFETY] DRY_RUN true before direct position creation — aborting`)
-      return null
-    }
-
     const activeBin = await dlmmPool.getActiveBin()
 
     const isTokenXSol = dlmmPool.tokenX.publicKey.toBase58() === NATIVE_MINT_STR

@@ -17,8 +17,8 @@
  * Score survivors (feeTvl 1h/24h + lpCountNorm) and open highest-scored first.
  * Ranking log now includes raw components (1h, 24h, lpNorm) for observability.
  *
- * Note on legacy: FRESH_MIN_TVL_USD and some MAX_FRESH_* constants are no longer
- * used in the active path (see strategy-config.ts comments).
+ * Note on legacy: FRESH_MIN_TVL_USD (and MAX_FRESH_*) are deprecated/legacy only.
+ * See strategy-config.ts for details — active path uses real API fields + MIN_TVL_USD etc.
  *
  * Kept improvements beyond the minimal spec: rich per-pool rejection logging, early SOL gate,
  * price vs market check, Jupiter route preflight for new Token-2022, full deep quality gates,
