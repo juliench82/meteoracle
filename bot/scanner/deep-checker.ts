@@ -885,7 +885,26 @@ async function attemptOpenAndNotify(params: {
     console.log(`${label} open skipped: ${disabledReason}`);
     return { wasCandidate: true, wasOpened: false, wasSkipped: true };
   }
-  if (openBlockedReason || openedCountRef.value >= availableOpenSlots) {
+
+  // Fresh re-check of current open count / slots right before attempting the open.
+  // This closes the window where limitState was captured before the ranked loop and
+  // previous awaits in the same tick (or external activity) have consumed slots.
+  // Combined with the re-check inside openPosition itself, this prevents double-spend races.
+  let effectiveAvailable = availableOpenSlots;
+  try {
+    const fresh = await getOpenLpLimitState('market').catch(() => null);
+    if (fresh) {
+      const currOpen = fresh.effectiveOpenCount || 0;
+      effectiveAvailable = Math.max(0, MAX_CONCURRENT_MARKET_LP_POSITIONS - currOpen);
+      if (effectiveAvailable <= 0 || currOpen >= MAX_CONCURRENT_MARKET_LP_POSITIONS) {
+        openSkippedCountRef.value++;
+        console.log(`${label} open skipped: no fresh slots (current=${currOpen}/${MAX_CONCURRENT_MARKET_LP_POSITIONS})`);
+        return { wasCandidate: true, wasOpened: false, wasSkipped: true };
+      }
+    }
+  } catch {}
+
+  if (openBlockedReason || openedCountRef.value >= effectiveAvailable) {
     openSkippedCountRef.value++;
     console.log(`${label} open skipped: ${openBlockedReason ?? 'no_slots'}`);
     return { wasCandidate: true, wasOpened: false, wasSkipped: true };

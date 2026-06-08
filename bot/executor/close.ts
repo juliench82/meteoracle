@@ -46,53 +46,6 @@ const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
 
 
-/**
- * Fallback for the token→SOL swap leg after DLMM liquidity removal.
- */
-async function zapOutDlmmFallback(
-  dlmmPool: any,
-  wallet: import('@solana/web3.js').Keypair,
-  lbPairAddress: string,
-  label: string,
-): Promise<boolean> {
-  const connection = getConnection()
-  const tokenX = dlmmPool.tokenX.publicKey as PublicKey
-  const tokenY = dlmmPool.tokenY.publicKey as PublicKey
-
-  const pairHasSol =
-    tokenX.toBase58() === NATIVE_MINT_STR ||
-    tokenY.toBase58() === NATIVE_MINT_STR
-
-  if (!pairHasSol) {
-    console.log(`${label} DLMM zap fallback skipped — pair has no SOL side`)
-    return false
-  }
-
-  const inputMint = tokenX.toBase58() === NATIVE_MINT_STR ? tokenY : tokenX
-  const outputMint = NATIVE_MINT.toBase58()
-  const inputTokenProgram = await getTokenProgramId(inputMint)
-  const outputTokenProgram = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
-
-  const inputAta = getAssociatedTokenAddressSync(
-    inputMint,
-    wallet.publicKey,
-    false,
-    inputTokenProgram,
-  )
-
-  const bal = await connection.getTokenAccountBalance(inputAta).catch(() => null)
-  const amountIn = new BN(bal?.value?.amount ?? '0')
-
-  if (amountIn.isZero()) {
-    console.log(`${label} DLMM zap fallback skipped — no token balance to zap`)
-    return false
-  }
-
-  // Fallback path for Token-2022 tokens
-  console.log(`${label} DLMM zap fallback would be executed here`)
-  return false
-}
-
 export async function closePosition(
   positionId: string,
   reason: string,
@@ -150,22 +103,8 @@ export async function closePosition(
       label
     )
 
-    try {
-      if (userPosition) {
-        const claimTxs = await dlmmPool.claimAllRewards({
-          owner: wallet.publicKey,
-          positions: [userPosition],
-        })
-        for (const tx of Array.isArray(claimTxs) ? claimTxs : [claimTxs]) {
-          const sig = await sendLegacyTx(applyPriorityFee(tx, 100000), [wallet], label)
-          console.log(`${label} fees claimed ✔ sig: ${sig}`)
-        }
-      } else {
-        console.warn(`${label} position not found on-chain — skipping fee claim`)
-      }
-    } catch (err) {
-      console.warn(`${label} fee claim failed (continuing):`, err)
-    }
+    // NOTE: explicit claimAllRewards removed — removeLiquidity with shouldClaimAndClose:true already claims fees + closes in one tx.
+    // Double-claiming wasted fees and could cause on-chain issues.
 
     // Resolve transfer hook remaining accounts for Token-2022 (for removeLiquidity)
     let hookRemainingAccounts: any[] = []
@@ -226,8 +165,8 @@ export async function closePosition(
         await swapTokenToSol(position.mint, label)
       } catch (swapErr) {
         console.error(`${label} post-close swapTokenToSol failed — marking sell_failed for stranded recovery`, swapErr)
-        await zapOutDlmmFallback(dlmmPool, wallet, position.pool_address, label)
-        // LP liquidity has been removed; flag for background stranded sell retry (monitor will pick up)
+        // LP liquidity has been removed; flag for background stranded sell retry (monitor will pick up).
+        // (The previous zapOutDlmmFallback stub has been removed; recovery relies on the sell_failed marker + balance sweep.)
         await markPositionSellFailed(positionId, claimableFeesUsd, `${reason}_sell_failed`)
         await sendCloseAlert(position, claimableFeesUsd, reason)
         return true

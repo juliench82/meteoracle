@@ -350,11 +350,14 @@ function computeNetPnlApprox(
 
     const xPub = dlmmPool.tokenX?.publicKey?.toBase58?.() ?? ''
     const isXSol = xPub === 'So11111111111111111111111111111111111111112'
-    const solSide = isXSol ? totalX : totalY
-    const tokenSide = isXSol ? totalY : totalX
+    const solSideLamports = isXSol ? totalX : totalY
+    const tokenSideLamports = isXSol ? totalY : totalX
 
-    const solValueOfTokens = tokenSide * priceSolPerToken
-    const currentLiqValueSol = (solSide / 1e9) + solValueOfTokens
+    // Convert token lamports to whole units using the token's decimals (critical — priceSolPerToken is per whole token)
+    const tokenDecimals = (isXSol ? dlmmPool.tokenY?.decimals : dlmmPool.tokenX?.decimals) ?? 6;
+    const tokenSideWhole = tokenSideLamports / Math.pow(10, tokenDecimals);
+    const solValueOfTokens = tokenSideWhole * priceSolPerToken;
+    const currentLiqValueSol = (solSideLamports / 1e9) + solValueOfTokens;
 
     const feeX = toNumber(pd.feeX ?? pd.fee_x)
     const feeY = toNumber(pd.feeY ?? pd.fee_y)

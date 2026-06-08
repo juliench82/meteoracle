@@ -73,7 +73,10 @@ import {
   persistPosition,
   sendOpenAlert,
   findExistingActivePosition,
+  persistStrandedTokenAfterFailedOpen,
 } from './persistence'
+
+import { swapTokenToSol } from '@/lib/swap'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
@@ -261,6 +264,27 @@ export async function openPosition(
 
     console.log(`${label} one-sided split for Bid-Ask: swap ${solToSwapLamports} lamports SOL for token side, keep ${remainingSolLamports} as SOL side`)
 
+    // Guard against dust/zero token leg from integer split (common with small SOL amounts or certain bin counts)
+    const MIN_SWAP_LAMPORTS = 10_000n; // ~0.00001 SOL worth of token — anything less is not worth a swap+open
+    if (solToSwapLamports < MIN_SWAP_LAMPORTS) {
+      console.warn(`${label} token swap leg would be dust or zero (${solToSwapLamports} lamports) — skipping pool to avoid stranded dust or SDK failure`);
+      return null;
+    }
+
+    // Lightweight re-check of wallet balance immediately before the irreversible swap (protects against races
+    // with other activity, prior failed txs, or balance changes since the earlier eligibility check).
+    try {
+      const currentBalLamports = await connection.getBalance(wallet.publicKey);
+      const currentBalSol = currentBalLamports / 1e9;
+      const requiredNow = solAmount + 0.05; // small buffer for fees + the swap itself
+      if (currentBalSol < requiredNow) {
+        console.warn(`${label} balance dropped below required before swap — have ${currentBalSol.toFixed(4)}, need ~${requiredNow.toFixed(3)} — skipping`);
+        return null;
+      }
+    } catch (balChkErr) {
+      console.warn(`${label} balance re-check before swap failed (proceeding with caution):`, balChkErr);
+    }
+
     // Pre-quote for validation (do not send yet)
     try {
       const params = new URLSearchParams({
@@ -317,7 +341,25 @@ export async function openPosition(
       return directResult;
     }
 
-    console.warn(`${label} direct primary did not succeed — giving up`);
+    // Rollback path (Claude critical #1): swap succeeded but the DLMM position creation failed.
+    // We must try to return the tokens to SOL, otherwise they are stranded with no OpenLpPosition row
+    // for the normal recovery path to discover.
+    console.error(`${label} position open failed after successful pre-swap — attempting rollback to SOL`);
+    try {
+      const rollbackSig = await swapTokenToSol(outputMint.toBase58(), label);
+      if (rollbackSig) {
+        console.log(`${label} rollback swap back to SOL succeeded ✔ sig: ${rollbackSig}`);
+      } else {
+        console.warn(`${label} rollback returned no sig (dry-run or zero balance?)`);
+      }
+    } catch (rbErr) {
+      console.error(`${label} rollback swapTokenToSol ALSO failed — persisting stranded token marker for monitor recovery`, rbErr);
+      try {
+        await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), actualTokenLamports);
+      } catch (persistErr) {
+        console.error(`${label} failed to persist stranded marker:`, persistErr);
+      }
+    }
     return null;
 
   } catch (err) {
@@ -334,48 +376,6 @@ export async function openPosition(
     })
     return null
   }
-}
-
-async function finalizeOpenPosition(params: {
-  label: string;
-  metrics: TokenMetrics;
-  strategy: Strategy;
-  openSig: string;
-  entryPriceSol: number;
-  solAmount: number;
-  positionKeypair: Keypair;
-  dlmmPool: any;
-  DRY_RUN: boolean;
-  wallet: Keypair;
-}): Promise<string | null> {
-  const { label, metrics, strategy, openSig, entryPriceSol, solAmount, positionKeypair, dlmmPool, DRY_RUN, wallet } = params;
-
-  let tokenAmountDeposited = 0;
-  try {
-    const { userPositions } = await dlmmPool.getPositionsByUserAndLbPair(wallet.publicKey);
-    const userPos = userPositions.find(
-      (p: any) => p.publicKey.toBase58() === positionKeypair.publicKey.toBase58()
-    );
-    if (userPos) {
-      const rawAmount = userPos.positionData.totalXAmount;
-      tokenAmountDeposited = typeof rawAmount === 'object'
-        ? (rawAmount as BN).toNumber() / 1e6
-        : Number(rawAmount) / 1e6;
-      console.log(`${label} token amount deposited: ${tokenAmountDeposited.toFixed(4)}`);
-    }
-  } catch (err) {
-    console.warn(`${label} could not fetch token amount:`, err);
-  }
-
-  console.log(`${label} position opened ✔`);
-  const positionId = await persistPosition(
-    metrics, strategy, openSig,
-    metrics.priceUsd ?? 0, entryPriceSol, solAmount,
-    positionKeypair.publicKey.toBase58(), tokenAmountDeposited, DRY_RUN
-  );
-  await sendOpenAlert(metrics, strategy, positionId, solAmount, entryPriceSol);
-
-  return positionId;
 }
 
 async function validateOpenEligibility(

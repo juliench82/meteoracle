@@ -218,3 +218,53 @@ export async function findExistingActivePosition(mint: string): Promise<{ id: st
     return null
   }
 }
+
+/**
+ * Persist a minimal 'sell_failed' record for tokens acquired via pre-swap for an open
+ * that then failed in the DLMM SDK step. This allows retryStrandedSells (which walks
+ * by mint + status sell_failed/recent-closed and does balance sweep) to recover the tokens.
+ * No position_pubkey is set because the position was never created.
+ */
+export async function persistStrandedTokenAfterFailedOpen(
+  metrics: TokenMetrics,
+  tokenMint: string,
+  tokenAmountLamports: bigint,
+): Promise<void> {
+  try {
+    const positions = getOpenLpPositions();
+    // Avoid creating duplicate stranded rows for the same mint
+    const existing = positions.find((p: any) =>
+      p.mint === metrics.address &&
+      (p.status === 'sell_failed' || OPEN_LP_STATUSES.includes(p.status))
+    );
+    if (existing) return;
+
+    const stranded = {
+      id: (crypto as any).randomUUID ? (crypto as any).randomUUID() : String(Date.now()),
+      mint: metrics.address,                 // the token we actually hold (the one to sell back)
+      symbol: metrics.symbol || metrics.address.slice(0, 6),
+      pool_address: metrics.poolAddress || '',
+      position_pubkey: '',                   // never created
+      strategy_id: 'evil-panda',
+      sol_deposited: 0,
+      status: 'sell_failed',
+      dry_run: false,
+      opened_at: new Date().toISOString(),
+      closed_at: new Date().toISOString(),
+      close_reason: 'open_failed_after_pre_swap',
+      sell_failed_at: new Date().toISOString(),
+      stranded_token_mint: tokenMint,
+      stranded_token_amount: tokenAmountLamports.toString(),
+      metadata: {
+        stranded_from_open_failure: true,
+        original_metrics: { mcUsd: metrics.mcUsd, volume24h: metrics.volume24h },
+      },
+    } as any;
+
+    positions.push(stranded);
+    saveOpenLpPositions(positions);
+    console.log(`[executor] persisted stranded token marker for recovery (mint=${metrics.address}, token=${tokenMint.slice(0,8)})`);
+  } catch (e) {
+    console.warn('[executor] failed to persist stranded token marker:', e);
+  }
+}

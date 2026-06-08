@@ -97,16 +97,21 @@ async function fetchWithRetry(url: string, options: RequestInit, attempt = 1): P
 }
 
 /**
- * Sends a VersionedTransaction and confirms it, with a fallback to
- * getSignatureStatus on confirmTransaction timeout — mirrors executor.ts.
+ * Sends a VersionedTransaction (typically from Jupiter) and confirms it.
+ * Fetches blockhash before send for the confirm call (avoids using a post-send blockhash
+ * which can cause premature timeouts even on landed txs). Falls back to getSignatureStatus.
  */
 async function sendAndConfirmVersioned(
   tx: VersionedTransaction,
   label: string,
 ): Promise<string> {
   const connection = getConnection()
-  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
+  // Fetch a reasonably fresh blockhash *before* send for the confirm call.
+  // (Jupiter-provided swap txs already carry their own recentBlockhash baked in by the service;
+  // we do not override it after signing.)
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
+
+  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
 
   try {
     await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
@@ -230,7 +235,7 @@ export async function swapTokenToSol(
  * Swaps a specific amount of native SOL to `tokenMint` via Jupiter.
  * Uses the same slippage ladder and retry logic as swapTokenToSol.
  * Pre-quote validation should be done by caller.
- * Returns {sig, tokenAmount: outAmount from quote} on success.
+ * Returns {sig, tokenAmount: actual on-chain balance after confirm} on success (not the quote estimate).
  * Throws on final failure.
  */
 async function attemptSwapSolToToken(
@@ -273,15 +278,16 @@ async function attemptSwapSolToToken(
   tx.sign([wallet]);
 
   const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
-  const tokenAmount = BigInt(quote.outAmount ?? quote.out_amount ?? '0');
-  console.log(`${label} [swap] SOL → token confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | outAmount: ${tokenAmount}`);
-  return { sig, tokenAmount };
+  // Read the *actual* received balance from chain after confirm (quote.outAmount is only an estimate and can be off by slippage)
+  const actualReceived = await getWalletTokenBalance(tokenMint);
+  console.log(`${label} [swap] SOL → token confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | actualReceived: ${actualReceived}`);
+  return { sig, tokenAmount: actualReceived };
 }
 
 /**
  * Swaps a specific amount of native SOL to `tokenMint` via Jupiter (for one-sided open).
  * Pre-validate quote exists before calling.
- * Returns the swap sig and actual token amount received.
+ * Returns the swap sig and *actual* on-chain token amount received (post-slippage).
  * Throws on final failure — caller responsible for alerting.
  */
 export async function swapSolToToken(
@@ -301,7 +307,10 @@ export async function swapSolToToken(
 
   console.log(`${label} [swap] swapping ${solLamports.toString()} lamports SOL → ${tokenMint.slice(0, 8)}`);
 
-  const ladder = slippageLadder();
+  // Use a *tighter* ladder for the buy (open) path to avoid over-paying on entry.
+  // Aggressive ladder (up to 20%) is still used for sells via swapTokenToSol.
+  const buyLadder = [100, 300, 500].filter(b => b >= baseSlippageBps()).slice(0, 3);
+  const ladder = buyLadder.length > 0 ? buyLadder : [500];
   let lastError: unknown;
 
   for (const slippage of ladder) {
