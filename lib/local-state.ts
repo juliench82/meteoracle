@@ -9,8 +9,10 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { atomicWriteJson } from './atomic-write'
 
 const STATE_DIR = path.join(process.cwd(), 'state')
+const OPEN_POSITIONS_FILE = path.join(STATE_DIR, 'open-lp-positions.json')
 
 function ensureStateDir() {
   if (!fs.existsSync(STATE_DIR)) {
@@ -35,16 +37,21 @@ export interface OpenLpPosition {
   last_net_pnl_pct?: number
   close_reason?: string
 
+  // Stranded sell recovery (written by retryStrandedSells + close on swap failure)
+  sell_failed_at?: string
+  stranded_recovered_at?: string
+  stranded_recovered_sig?: string
+  last_stranded_check_at?: string
+
   // Free-form bag for strategy params persisted at open time + live metrics
   [key: string]: any
 }
 
 export function getOpenLpPositions(): OpenLpPosition[] {
   ensureStateDir()
-  const file = path.join(STATE_DIR, 'open-lp-positions.json')
-  if (!fs.existsSync(file)) return []
+  if (!fs.existsSync(OPEN_POSITIONS_FILE)) return []
   try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const data = JSON.parse(fs.readFileSync(OPEN_POSITIONS_FILE, 'utf8'))
     return Array.isArray(data) ? data : []
   } catch {
     return []
@@ -52,7 +59,5 @@ export function getOpenLpPositions(): OpenLpPosition[] {
 }
 
 export function saveOpenLpPositions(positions: OpenLpPosition[]) {
-  ensureStateDir()
-  const file = path.join(STATE_DIR, 'open-lp-positions.json')
-  fs.writeFileSync(file, JSON.stringify(positions, null, 2))
+  atomicWriteJson(OPEN_POSITIONS_FILE, positions)
 }

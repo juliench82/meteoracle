@@ -1,7 +1,3 @@
-import * as dotenvLocal from 'dotenv'
-import * as path from 'path'
-dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
-
 /**
  * Deep-check / decision layer — aligned to the revised bot filters spec (real fields only).
  *
@@ -46,6 +42,7 @@ import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import { logInfo } from '@/lib/log'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
 import { hasJupiterRouteSolToToken } from '@/lib/swap'
+import { resolveSolPriceUsd } from '@/lib/sol-price'
 import {
   SCAN_INTERVAL_MS,
   SCANNER_TICK_TIMEOUT_MS,
@@ -106,7 +103,6 @@ export {
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   MARKET_LP_SOL_PER_POSITION,
   MAX_POOL_AGE_MINUTES,
-  FRESH_MIN_TVL_USD,
   // Current activity model constants (real documented fields + derived proxies)
   MIN_POOL_AGE_HOURS,
   MIN_LP_COUNT,
@@ -216,30 +212,6 @@ async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
 }
 
 
-
-/** Resolve SOL price in USD using DexScreener (free tier friendly, reliable for SOL).
- * Falls back to env var or 150.
- */
-async function resolveSolPriceUsd(): Promise<number> {
-  try {
-    const res = await fetch(`${DEXSCREENER}/So11111111111111111111111111111111111111112`, {
-      signal: AbortSignal.timeout(5_000),
-    })
-    if (res.ok) {
-      const json = await res.json() as any
-      const pairs = json?.pairs || []
-      // Prefer stable quote for accurate SOL price
-      const solPair = pairs.find((p: any) =>
-        (p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT') &&
-        p.chainId === 'solana'
-      ) || pairs[0]
-      const price = parseFloat(solPair?.priceUsd || '0')
-      if (price > 0) return price
-    }
-  } catch {}
-  const envSolPrice = parseFloat(process.env.SOL_PRICE_USD ?? '')
-  return Number.isFinite(envSolPrice) && envSolPrice > 0 ? envSolPrice : 150
-}
 
 let scannerRunPromise: Promise<ScannerResult> | null = null
 let scannerRunStartedAt = 0
@@ -851,7 +823,8 @@ async function attemptOpenAndNotify(params: {
 
     console.log(`${label} LP position opened ✔ (id=${positionId})`);
 
-    patchOpenPositionMetadata(positionId, strategy.id, symbol);
+    // Note: strategy_id + symbol are now written directly in persistPosition (persistence.ts).
+    // The previous transitional patchOpenPositionMetadata has been removed.
 
     return { wasCandidate: true, wasOpened: true, wasSkipped: false };
   } else {
@@ -895,23 +868,6 @@ function findConflictingLocalPosition(tokenAddress: string) {
     }
     return false;
   });
-}
-
-/**
- * Patches strategy_id + symbol onto a freshly persisted open LP position in local state.
- * This is a transitional patch because the core persist/open path does not yet receive these fields.
- * Small dedicated helper so the hot path stays readable.
- */
-function patchOpenPositionMetadata(positionId: string, strategyId: string, symbol: string): void {
-  try {
-    const positions = getOpenLpPositions();
-    const idx = positions.findIndex((p: any) => p.id === positionId);
-    if (idx !== -1) {
-      positions[idx].strategy_id = strategyId;
-      positions[idx].symbol = symbol;
-      saveOpenLpPositions(positions);
-    }
-  } catch {}
 }
 
 function buildTokenMetrics(params: {

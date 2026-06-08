@@ -1,7 +1,3 @@
-import * as dotenvLocal from 'dotenv'
-import * as path from 'path'
-dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
-
 import {
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   SCAN_INTERVAL_MS,

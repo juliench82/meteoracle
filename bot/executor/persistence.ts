@@ -113,6 +113,27 @@ export async function markPositionClosed(
   }
 }
 
+export async function markPositionSellFailed(
+  positionId: string,
+  claimableFeesUsd: number | null,
+  reason: string
+): Promise<void> {
+  const positions = getOpenLpPositions()
+  const idx = positions.findIndex((p: any) => p.id === positionId)
+  if (idx !== -1) {
+    positions[idx] = {
+      ...positions[idx],
+      status: 'sell_failed',
+      closed_at: new Date().toISOString(),
+      oor_since_at: null,
+      close_reason: reason,
+      ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
+      sell_failed_at: new Date().toISOString(),
+    }
+    saveOpenLpPositions(positions)
+  }
+}
+
 export async function sendOpenAlert(
   metrics: TokenMetrics,
   strategy: Strategy,

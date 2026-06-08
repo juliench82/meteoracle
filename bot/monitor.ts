@@ -1,12 +1,9 @@
-import * as dotenvLocal from 'dotenv'
-import * as path from 'path'
-dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true })
-
 import { retryStrandedSells } from '@/lib/swap'
 import { getBotState } from '@/lib/botState'
 import axios from 'axios'
-import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
+import { getOpenLpPositions, saveOpenLpPositions, type OpenLpPosition } from '@/lib/local-state'
 import { closePosition } from '@/bot/executor/close'
+import { resolveSolPriceUsd } from '@/lib/sol-price'
 import { getConnection, getWallet } from '@/lib/solana'
 import { getDLMM, getDecimalAdjustedPrice, getClaimableFeesUsd } from '@/bot/executor/utils'
 import {
@@ -51,12 +48,12 @@ const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
 
 // Legacy per-position exit params (still read for backward compat with older opens).
 // For the 4-rule minimal model the global LP_* constants in strategy-config are authoritative.
-function getPositionExitRules(pos: any) {
+function getPositionExitRules(pos: OpenLpPosition) {
   return {
-    outOfRangeMinutes: pos.out_of_range_minutes ?? pos.metadata?.out_of_range_minutes ?? LP_OOR_EXIT_MINUTES,
-    maxDurationHours:  pos.max_duration_hours  ?? pos.metadata?.maxDurationHours  ?? LP_MAX_DURATION_HOURS,
-    claimFeesBeforeClose: pos.claim_fees_before_close ?? pos.metadata?.claimFeesBeforeClose ?? true,
-    minFeesToClaim:       pos.min_fees_to_claim       ?? pos.metadata?.minFeesToClaim       ?? 0.001,
+    outOfRangeMinutes: (pos as any).out_of_range_minutes ?? (pos as any).metadata?.out_of_range_minutes ?? LP_OOR_EXIT_MINUTES,
+    maxDurationHours:  (pos as any).max_duration_hours  ?? (pos as any).metadata?.maxDurationHours  ?? LP_MAX_DURATION_HOURS,
+    claimFeesBeforeClose: (pos as any).claim_fees_before_close ?? (pos as any).metadata?.claimFeesBeforeClose ?? true,
+    minFeesToClaim:       (pos as any).min_fees_to_claim       ?? (pos as any).metadata?.minFeesToClaim       ?? 0.001,
   }
 }
 
@@ -83,13 +80,16 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
   }
 
   // === LP exit rules (4-rule ultra-minimal model) ===
-  const positions = getOpenLpPositions().filter((p: any) => ['open', 'active'].includes(p.status))
+  const positions: OpenLpPosition[] = getOpenLpPositions().filter((p: OpenLpPosition) => ['open', 'active'].includes(p.status))
   stats.checked = positions.length
 
   if (positions.length > 0) {
     const wallet = getWallet()
     const connection = getConnection()
     const now = Date.now()
+
+    // Resolved once per tick only if dry-sim rows with fees are present (avoids fetch for normal runs)
+    let drySimSolPriceUsd: number | null = null
 
     for (const pos of positions) {
       try {
@@ -153,7 +153,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
             // Persist samples (lightweight)
             const all = getOpenLpPositions()
-            const idx = all.findIndex((p: any) => p.id === pos.id)
+            const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
             if (idx !== -1) {
               all[idx].fee_tvl_samples = pos.fee_tvl_samples
               all[idx].last_fee_tvl_4h_avg = pos.last_fee_tvl_4h_avg
@@ -187,12 +187,16 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
                 let roughPnl = ((currentPrice - pos.entry_price_usd) / pos.entry_price_usd) * 100
                 const claimable = getClaimableFeesUsd(pos) ?? 0
                 if (claimable > 0 && pos.sol_deposited > 0) {
-                  // rough: assume SOL ~150 USD for fee contribution; fees are usually tiny in dry sims
-                  roughPnl += (claimable / (pos.sol_deposited * 150)) * 100
+                  // Use live SOL price (via shared resolver) instead of hardcoded 150.
+                  // Fees contribution is usually tiny for dry sims but now accurate when present.
+                  if (drySimSolPriceUsd == null) {
+                    drySimSolPriceUsd = await resolveSolPriceUsd().catch(() => 150)
+                  }
+                  roughPnl += (claimable / (pos.sol_deposited * drySimSolPriceUsd)) * 100
                 }
                 pos.last_net_pnl_pct = Math.round(roughPnl * 100) / 100
                 const all = getOpenLpPositions()
-                const idx = all.findIndex((p: any) => p.id === pos.id)
+                const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
                 if (idx !== -1) {
                   all[idx].last_net_pnl_pct = pos.last_net_pnl_pct
                   saveOpenLpPositions(all)
@@ -213,7 +217,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
               oorSince = now
               pos.oor_since = new Date(oorSince).toISOString()
               const all = getOpenLpPositions()
-              const idx = all.findIndex((p: any) => p.id === pos.id)
+              const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
               if (idx !== -1) { all[idx].oor_since = pos.oor_since; saveOpenLpPositions(all) }
             }
 
@@ -229,7 +233,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
             // Back in range — clear the timer
             delete pos.oor_since
             const all = getOpenLpPositions()
-            const idx = all.findIndex((p: any) => p.id === pos.id)
+            const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
             if (idx !== -1) { delete all[idx].oor_since; saveOpenLpPositions(all) }
           }
         }
@@ -245,7 +249,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
                 pos.last_net_pnl_pct = Math.round(netPnl * 100) / 100
                 // Persist for alert richness
                 const all = getOpenLpPositions()
-                const idx = all.findIndex((p: any) => p.id === pos.id)
+                const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
                 if (idx !== -1) { all[idx].last_net_pnl_pct = pos.last_net_pnl_pct; saveOpenLpPositions(all) }
 
                 if (netPnl <= netLossThreshold) {
@@ -289,18 +293,16 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           const yield24hProxy = currentFeeTvl ?? feeTvl4hAvg ?? 0;
 
           // Compute a simple recent change from the fee_tvl samples we just maintained
-          // (as proxy for feesChg24h / tvlChg24h, since we don't have separate fees/tvl deltas here).
-          // Real getFeesChange24h / getTvlChange24h expect full pool objects with explicit change fields or fees map.
-          let feesChg24h = 0;
-          let tvlChg24h = 0;
+          // (fee_tvl change acts as a combined proxy for fees/tvl movement signals).
+          // We no longer emit two identical values (was: tvlChg24h = feesChg24h).
+          let feeTvlChg24h = 0;
           const prunedSamples: Array<{ ts: number; fee_tvl_24h: number }> = pos.fee_tvl_samples || [];
           if (prunedSamples.length >= 2) {
             const last = prunedSamples[prunedSamples.length - 1].fee_tvl_24h;
             const prev = prunedSamples[prunedSamples.length - 2].fee_tvl_24h;
             if (prev > 0) {
               const pct = ((last - prev) / prev) * 100;
-              feesChg24h = Math.round(pct * 100) / 100;
-              tvlChg24h = feesChg24h; // combined signal proxy
+              feeTvlChg24h = Math.round(pct * 100) / 100;
             }
           }
 
@@ -309,7 +311,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
             `netPnl=${pos.last_net_pnl_pct?.toFixed(1) ?? 'n/a'}% ` +
             `OOR=${isOOR ? 'yes' : 'no'} ` +
             `yield24hProxy≈${yield24hProxy.toFixed(2)}% ` +
-            `feesChg24h≈${feesChg24h.toFixed(2)} tvlChg24h≈${tvlChg24h.toFixed(2)}`
+            `feeTvlChg24h≈${feeTvlChg24h.toFixed(2)}`
           )
         }
       } catch (e) {
@@ -330,7 +332,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
  * Good enough to start collecting data on the -30% rule; can be improved later with better valuation.
  */
 function computeNetPnlApprox(
-  pos: any,
+  pos: OpenLpPosition,
   onChainPos: any,
   activeBin: any,
   dlmmPool: any,

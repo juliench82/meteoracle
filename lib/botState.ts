@@ -7,6 +7,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { atomicWriteJson } from './atomic-write'
 
 const STATE_DIR = path.join(process.cwd(), 'state')
 const STATE_FILE = path.join(STATE_DIR, 'bot-state.json')
@@ -66,8 +67,7 @@ function readState(): BotState {
 }
 
 function writeState(state: BotState) {
-  ensureDir()
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
+  atomicWriteJson(STATE_FILE, state)
 }
 
 export async function getBotState(): Promise<BotState> {

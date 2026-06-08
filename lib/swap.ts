@@ -1,6 +1,7 @@
 import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
+import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
 
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
 const JUPITER_QUOTE_API = process.env.JUPITER_QUOTE_API_URL ?? 'https://public.jupiterapi.com'
@@ -68,6 +69,13 @@ async function getTokenBalance(connection: Connection, mint: string, owner: Publ
   if (!accounts.value.length) return 0n
   const amount = accounts.value[0].account.data.parsed.info.tokenAmount.amount as string
   return BigInt(amount)
+}
+
+/** Public helper for stranded recovery (and any other wallet balance checks). */
+export async function getWalletTokenBalance(mint: string): Promise<bigint> {
+  const connection = getConnection()
+  const wallet = getWallet()
+  return getTokenBalance(connection, mint, wallet.publicKey)
 }
 
 async function fetchWithRetry(url: string, options: RequestInit, attempt = 1): Promise<Response> {
@@ -219,15 +227,82 @@ export async function swapTokenToSol(
 }
 
 /**
- * Retries stranded sell_failed positions across lp_positions.
- * Called at the top of every monitor tick. Swaps whatever token balance remains
- * in the wallet directly to SOL — no LP close attempted.
- * Promotes to status=closed on success, leaves as sell_failed if swap still fails.
+ * Retries stranded sell_failed positions (and any recently closed positions that
+ * still have a token balance in the wallet).
+ *
+ * Called at the top of every monitor tick (via monitor.ts).
+ * Uses only local state + direct wallet balance query + Jupiter swap ladder.
+ * On successful recovery: updates the position record (status -> closed if needed,
+ * records recovered timestamp/sig). Failures are left for the next tick.
  */
 export async function retryStrandedSells(): Promise<{ retried: number; recovered: number }> {
-  // TODO: Re-implement real stranded sell recovery using local-state files.
-  // Currently a safe no-op in the ultra-simplified model.
-  return { retried: 0, recovered: 0 }
+  const positions = getOpenLpPositions()
+  const now = Date.now()
+  const recentMs = 7 * 24 * 3600 * 1000 // last 7 days (defense in depth for solo operator)
+
+  let retried = 0
+  let recovered = 0
+
+  for (const pos of positions) {
+    if (!pos.mint) continue
+
+    const tsStr = (pos as any).closed_at || (pos as any).opened_at
+    if (tsStr) {
+      const ts = new Date(tsStr).getTime()
+      if (now - ts > recentMs) continue
+    }
+    if (pos.status === 'active' || pos.status === 'open') continue
+
+    const isSellFailed = pos.status === 'sell_failed'
+    // Also sweep recently closed as a safety net (in case previous close left residue without setting sell_failed)
+    const isRecentClosed = pos.status === 'closed' && !(pos as any).stranded_recovered_at
+
+    if (!isSellFailed && !isRecentClosed) continue
+
+    try {
+      const bal = await getWalletTokenBalance(pos.mint)
+      if (bal > 0n) {
+        retried++
+        const sym = (pos as any).symbol || pos.mint.slice(0, 6)
+        const label = `[stranded-sell-retry][${sym}]`
+        console.log(`${label} stranded balance=${bal} for ${pos.mint} (status=${pos.status}) — recovering via Jupiter`)
+
+        // swapTokenToSol handles BOT_DRY_RUN, native SOL, and zero-balance internally (returns null in those cases)
+        const sig = await swapTokenToSol(pos.mint, label)
+        if (sig) {
+          recovered++
+          console.log(`${label} recovered ✔ sig=${sig}`)
+        }
+
+        // Persist recovery marker (or at least last check) using direct local-state to avoid pulling in executor
+        const all = getOpenLpPositions()
+        const idx = all.findIndex((p: any) => p.id === pos.id)
+        if (idx !== -1) {
+          const nowIso = new Date().toISOString()
+          if (sig) {
+            all[idx].stranded_recovered_at = nowIso
+            all[idx].stranded_recovered_sig = sig
+            if (all[idx].status === 'sell_failed') {
+              all[idx].status = 'closed'
+            }
+          } else {
+            all[idx].last_stranded_check_at = nowIso
+          }
+          saveOpenLpPositions(all)
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const sym = (pos as any).symbol || pos.mint.slice(0, 6)
+      console.warn(`[swap] stranded retry failed for ${sym}: ${msg}`)
+      // leave marker/status as-is so next monitor tick will retry
+    }
+  }
+
+  if (retried > 0) {
+    console.log(`[swap] stranded sells tick summary: retried=${retried} recovered=${recovered}`)
+  }
+  return { retried, recovered }
 }
 
 

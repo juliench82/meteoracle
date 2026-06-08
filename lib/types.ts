@@ -8,6 +8,7 @@ export type PositionStatus =
   | 'pending_close'
   | 'dry_run'
   | 'orphaned'
+  | 'sell_failed'
 
 export interface Position {
   id: string

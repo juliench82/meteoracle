@@ -22,6 +22,7 @@ import {
 
 import {
   markPositionClosed,
+  markPositionSellFailed,
   sendCloseAlert,
 } from './persistence'
 
@@ -224,7 +225,12 @@ export async function closePosition(
       try {
         await swapTokenToSol(position.mint, label)
       } catch (swapErr) {
+        console.error(`${label} post-close swapTokenToSol failed — marking sell_failed for stranded recovery`, swapErr)
         await zapOutDlmmFallback(dlmmPool, wallet, position.pool_address, label)
+        // LP liquidity has been removed; flag for background stranded sell retry (monitor will pick up)
+        await markPositionSellFailed(positionId, claimableFeesUsd, `${reason}_sell_failed`)
+        await sendCloseAlert(position, claimableFeesUsd, reason)
+        return true
       }
     }
 
