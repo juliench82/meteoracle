@@ -52,7 +52,7 @@ import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '
 import { getBotState } from '@/lib/botState'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
-import { swapSolToToken } from '@/lib/swap'
+import { swapSolToToken, JUPITER_QUOTE_API } from '@/lib/swap'
 import {
   OPEN_LP_STATUSES,
   assertCanOpenLpPosition,
@@ -293,8 +293,9 @@ export async function openPosition(
         amount: solToSwapLamports.toString(),
         slippageBps: '1000',
         onlyDirectRoutes: 'false',
+        restrictIntermediateTokens: 'true',
       })
-      const quoteUrl = `https://api.jup.ag/swap/v1/quote?${params.toString()}`
+      const quoteUrl = `${JUPITER_QUOTE_API}/quote?${params.toString()}`
       const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(7000) })
       if (!quoteRes.ok) throw new Error(`quote http ${quoteRes.status}`)
       const quote = await quoteRes.json()

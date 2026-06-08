@@ -4,7 +4,7 @@ import { evilPandaStrategy } from './evil-panda'
 /**
  * Minimal strategy registry for the current architecture.
  *
- * Only evil-panda: LP on pools using real documented /pools fields + derivations (per latest Claude recs). All previous fresh/15m/active_tvl logic removed.
+ * Only evil-panda: LP on pools using real documented /pools fields + derivations.
  */
 
 export const STRATEGIES: Strategy[] = [

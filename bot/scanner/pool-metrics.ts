@@ -8,7 +8,7 @@
  * - getUniqueLpCount (expensive, only on final survivors) via getProgramAccounts on DLMM program
  *
  * Current model uses only real fields from the /pools list API + derivations.
- * Legacy getters for non-returned fields (active_tvl etc.) are kept for compatibility.
+ * Some getters for fields the current /pools API does not return are kept for compatibility.
  */
 
 import type { MeteoraPool } from './pool-fetcher';
@@ -74,9 +74,8 @@ export function getRecentVolumeGrowth(pool: MeteoraPool): number {
   return vol5mAnnualizedTo1h / vol1h;
 }
 
-// ─── Legacy getters (for fields the current /pools API does not return) ───
-// These were used in previous iterations that assumed active_tvl / lp_count fields existed.
-// Current logic uses only real fields + the derived proxies below.
+// ─── Compatibility getters (for fields the current /pools API does not return) ───
+// Kept so that older code or external consumers don't break. Current active path uses real fields + proxies.
 
 export function getActiveTvlUsd(pool: MeteoraPool): number {
   const explicit = asNumber(

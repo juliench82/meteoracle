@@ -1,8 +1,8 @@
 /**
  * lib/local-logger.ts
  *
- * Simple file-based logger to replace Supabase bot_logs.
- * Keeps logs locally + still sends important alerts via Telegram (through alerter).
+ * Simple file-based logger.
+ * Keeps logs locally in state/bot.log + still sends important alerts via Telegram (through alerter).
  */
 
 import * as fs from 'fs'

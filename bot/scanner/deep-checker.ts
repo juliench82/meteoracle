@@ -17,7 +17,7 @@
  * Score survivors (feeTvl 1h/24h + lpCountNorm) and open highest-scored first.
  * Ranking log now includes raw components (1h, 24h, lpNorm) for observability.
  *
- * Note on legacy: FRESH_MIN_TVL_USD (and MAX_FRESH_*) are deprecated/legacy only.
+ * Note: Some older FRESH_* constants remain exported for compatibility but are not used in the active path.
  * See strategy-config.ts for details — active path uses real API fields + MIN_TVL_USD etc.
  *
  * Kept improvements beyond the minimal spec: rich per-pool rejection logging, early SOL gate,
@@ -26,7 +26,7 @@
  */
 
 import axios from 'axios'
-// Local state only (no Supabase in hot paths)
+// Local state only (JSON files in state/ + targeted on-chain reads)
 import { getBotState } from '@/lib/botState'
 import { getStrategyForToken, explainNoStrategy } from '@/strategies'
 import { openPosition } from '../executor'
@@ -210,11 +210,8 @@ function getDisabledStrategyReason(strategyId: string): string | null {
 }
 
 // OOR recheck is intentionally a no-op stub in the current local-state-only model.
-// The previous Supabase-backed version used this to avoid re-entering pools that recently
-// closed due to OOR. With pure local JSON state we don't have cross-restart OOR history
-// persistence by default, so this always returns empty. If OOR_RECHECK_HOURS is set >0
-// in the future a real implementation (scanning recent closed positions in local state)
-// can be added here. Not critical for the current evil-panda flow.
+// OOR recheck is a no-op with pure local JSON state (no cross-restart history by default).
+// If OOR_RECHECK_HOURS > 0 in future, a real impl can scan recent closed positions in local state.
 async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
   return new Set()
@@ -402,7 +399,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   const deepGateSurvivors: any[] = [];
 
   const tickContext: ScannerTickContext = {
-    freshPools: activityCandidates, // wrapped ActivityCandidate[] for legacy selectBestPool helpers (we normalize inside)
+    freshPools: activityCandidates, // wrapped for selectBestPool helpers (we normalize inside)
     limitState,
     openBlockedReason,
     availableOpenSlots,
@@ -555,7 +552,7 @@ type ActivityCandidateProcessResult = {
 };
 
 interface ScannerTickContext {
-  freshPools: any[];  // legacy field name for helpers
+  freshPools: any[];  // field name for helpers (historical)
   limitState: any;
   openBlockedReason: string | undefined;
   availableOpenSlots: number;
@@ -676,7 +673,7 @@ async function processActivityCandidate(
 
   console.log(`${label} processing activity top-performer candidate (age=${ageHours.toFixed(1)}h, yield24h≈${getFeesActiveTvl24hPct(representativePool).toFixed(2)}%)`);
 
-  // Early gate for evil-panda: must be SOL-paired (we only do one-sided SOL LP via Zap/direct).
+  // Early gate for evil-panda: must be SOL-paired (we only do one-sided SOL LP via direct SDK after pre-swap).
   // This is belt-and-suspenders with the JS pre-filter.
   const p = representativePool;
   const isSolPaired = p.token_x?.address === SOL_MINT || p.token_y?.address === SOL_MINT;

@@ -119,7 +119,7 @@ export function selectBestPool(
   if (list.length === 0) return { pool: null };
 
   // Normalize items that may be ActivityCandidate wrappers { pool, ageHours }
-  // (legacy "freshPools" in the scanner tick context is the wrapped list).
+  // (the wrapped list in scanner tick context).
   // Always return a raw MeteoraPool.
   const normalized = list
     .map((item: any) => item?.pool ?? item)

@@ -37,7 +37,7 @@ export const evilPandaStrategy: Strategy = {
     solBias: envNumber('EVIL_PANDA_SOL_BIAS', 1),
   },
   exits: {
-    // Legacy snapshot fields — still required by ExitRules type.
+    // Snapshot fields required by the ExitRules type.
     // Real LP exits use the LP_* constants in strategy-config.ts.
     stopLossPct: 0,
     takeProfitPct: 0,

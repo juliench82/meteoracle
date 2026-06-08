@@ -63,7 +63,7 @@ export async function persistPosition(
       strategy_version:      strategy.version,
       bin_range_down:        strategy.position.rangeDownPct,
       bin_range_up:          strategy.position.rangeUpPct,
-      // Legacy exit fields removed for ultra-minimal LP model.
+      // Exit fields for the current model.
       // Only duration + OOR fallback values are kept for getPositionExitRules compatibility.
       maxDurationHours:      strategy.exits.maxDurationHours,
       out_of_range_minutes:  strategy.exits.outOfRangeMinutes,

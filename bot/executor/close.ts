@@ -169,7 +169,7 @@ export async function closePosition(
       } catch (swapErr) {
         console.error(`${label} post-close swapTokenToSol failed — marking sell_failed for stranded recovery`, swapErr)
         // LP liquidity has been removed; flag for background stranded sell retry (monitor will pick up).
-        // (The previous zapOutDlmmFallback stub has been removed; recovery relies on the sell_failed marker + balance sweep.)
+        // Recovery relies on the sell_failed marker + balance sweep in retryStrandedSells.
         await markPositionSellFailed(positionId, claimableFeesUsd, `${reason}_sell_failed`)
         await sendCloseAlert(position, claimableFeesUsd, reason)
         return true

@@ -20,7 +20,7 @@ It is deliberately scoped to **pure DLMM LP operations** on Meteora — no compa
   2. Prolonged out-of-range (OOR)
   3. Net PnL stop-loss (price move + fees, after grace period)
   4. Hard max duration safety cap (1h)
-- **Local State Only**: All positions and state live in `state/` JSON files. No Supabase required for runtime.
+- **Local State Only**: All positions and state live in `state/` JSON files (atomic writes). No external database required.
 - **Full Telegram Control**: Start/stop, dry/live mode, force tick, view positions with live metrics, manual close, etc.
 - **Rich Alerts**: Detailed open/close notifications including rugcheck, holders, net PnL, Fee/TVL, OOR time, and more.
 - **Dry-Run Support**: Safe simulation mode that still exercises the full decision + monitoring logic.
@@ -134,7 +134,7 @@ The production entrypoint is `dist/worker.js` (see `ecosystem.config.cjs` for PM
 
 - `worker.ts` — Main entry (scanner + monitor loops)
 - `bot/scanner/` — Pool fetching, fresh filtering, decision logic
-- `bot/executor/` — Position open/close/add-liquidity (DLMM SDK + Jupiter fallbacks)
+- `bot/executor/` — Position open/close/add-liquidity (DLMM SDK + Jupiter for token side)
 - `bot/monitor.ts` — 4-rule exit engine
 - `bot/telegram-bot.ts` — Operator interface
 - `lib/local-state.ts` — JSON persistence for LP positions
@@ -145,7 +145,7 @@ The production entrypoint is `dist/worker.js` (see `ecosystem.config.cjs` for PM
 
 - Always start with `BOT_DRY_RUN=true`.
 - The bot is intentionally minimal. It does one thing well: find currently strong 24h fee-yielding DLMM pools using the live-data activity criteria, provide one-sided SOL liquidity, and exit according to clear, observable rules.
-- All hot paths use local state + targeted on-chain reads. Supabase is legacy-only.
+- All hot paths use local state (JSON) + targeted on-chain reads. No external database.
 - The scanner uses only fields that actually exist in the /pools list API (plus cheap derivations from volume/fee windows per the revised spec). The list call uses the spec's sort_by + filter_by (including fee_tvl_ratio_24h). lp_count is the only expensive step and is done only on final candidates. Rich logs show exactly which real filter or derivation rejected a pool.
 
 For questions or issues, use the Telegram interface or inspect `state/` + logs.

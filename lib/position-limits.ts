@@ -2,7 +2,6 @@
  * lib/position-limits.ts
  *
  * Minimal concurrency control using local state + on-chain where possible.
- * No hard Supabase dependency for the zero-Supabase mode.
  */
 
 import { getOpenLpPositions } from './local-state'

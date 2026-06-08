@@ -76,7 +76,7 @@ export interface TokenMetrics {
   volumeTvl1hRatio?: number
   /** 5m volume annualized to 1h divided by observed 1h volume. >1 means accelerating. */
   volumeGrowth1h?: number
-  /** (legacy) momentumScore — no longer populated or used in ultra-simple model */
+  /** momentumScore — no longer populated or used */
   momentumScore?: number
   /** pump.fun bonding curve fill %, 0–100. undefined = not a pump.fun token or fetch failed. */
   bondingCurvePct?: number

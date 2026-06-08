@@ -156,8 +156,7 @@ export function isRpcRateLimitError(error: unknown): boolean {
 }
 
 export async function refreshRpcProviderCooldown(provider: RpcProvider): Promise<void> {
-  // Supabase persistence removed — using in-memory only for now
-  // (cooldowns are kept in the module-level `cooldowns` map)
+  // In-memory only (cooldowns are kept in the module-level `cooldowns` map)
   cooldowns[provider].warnedReadFailure = false
 }
 
@@ -171,7 +170,7 @@ export async function recordRpcProvider429(provider: RpcProvider, error?: unknow
   if (now - state.lastWriteAtMs < minWriteIntervalMs) return
   state.lastWriteAtMs = now
 
-  // Supabase write removed during refactor — cooldown is tracked in-memory only
+  // Cooldown is tracked in-memory only
   state.warnedWriteFailure = false
   console.warn(`[rpc-rate-limit] ${provider} 429 cooldown until ${new Date(state.untilMs).toISOString()} (in-memory)`)
 }

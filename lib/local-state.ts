@@ -2,9 +2,9 @@
  * lib/local-state.ts
  *
  * Minimal local state for open LP positions.
- * Replaces previous Supabase dependency for runtime state.
  *
- * Data lives in the state/ directory as JSON files.
+ * Data lives in the state/ directory as JSON files (atomic writes for durability).
+ * No external database dependency.
  */
 
 import * as fs from 'fs'

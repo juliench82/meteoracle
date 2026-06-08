@@ -21,7 +21,7 @@ export function envBool(name: string, fallback = false): boolean {
 
 // ── Evil Panda (main LP strategy) ───────────────────────────────
 export const EVIL_PANDA_MIN_HOLDER_COUNT = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT', 50)
-export const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)  // legacy name; tied to old 60m fresh gate (not used in current scanner)
+export const EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M = envNumber('EVIL_PANDA_MIN_HOLDER_COUNT_UNDER_60M', 50)  // not used in current scanner (kept for compatibility)
 export const EVIL_PANDA_MAX_AGE_HOURS = envNumber('EVIL_PANDA_MAX_AGE_HOURS', 48)
 export const EVIL_PANDA_MIN_RUGCHECK_SCORE = envNumber('EVIL_PANDA_MIN_RUGCHECK_SCORE', 40)
 export const EVIL_PANDA_MIN_LIQUIDITY_USD = envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 500)  // must match server-side MIN_TVL_USD floor to avoid wasting deep-check quota on pools the scanner already accepted
@@ -51,8 +51,6 @@ export const SCANNER_TICK_TIMEOUT_MS = Math.max(
   envNumber('LP_SCANNER_TICK_TIMEOUT_MS', envNumber('SCANNER_TICK_TIMEOUT_MS', 570_000))
 )
 
-export const MAX_POOL_AGE_MINUTES_FOR_LP = envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 72 * 60) // legacy name, now broad for activity model
-
 // ── Feature flags ───────────────────────────────────────────────
 export const SCANNER_ENABLED = envBool('SCANNER_ENABLED', true)
 export const LP_SCANNER_ENABLED = envBool('LP_SCANNER_ENABLED', true) && SCANNER_ENABLED
@@ -62,20 +60,9 @@ export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
 
 // ── Misc (still referenced by current ultra-simple scanner) ──────
 export const DEEP_CHECK_DELAY_MS = envNumber('DEEP_CHECK_DELAY_MS', 800)
-// Legacy TVL floor from the previous "very fresh" scanner model.
-// **Do not use in new code.** Kept only for backward compat in old strategy filters, docs, and any direct imports.
-// Not used by the active activity-based scanner (which uses MIN_TVL_USD=500 + server filters).
-// Active server floor: MIN_TVL_USD. Strategy filter: EVIL_PANDA_MIN_LIQUIDITY_USD.
-export const FRESH_MIN_TVL_USD = envNumber('FRESH_MIN_TVL_USD', 5000)
-export const MIN_LIQUIDITY_USD_FOR_FRESH = FRESH_MIN_TVL_USD  // legacy alias only
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)
 export const OOR_RECHECK_HOURS = envNumber('OOR_RECHECK_HOURS', 24)
 
-// ── Legacy (from previous "very fresh" model) ──
-export const MAX_POOL_AGE_MINUTES = envNumber(
-  'MAX_POOL_AGE_MINUTES',
-  envNumber('FRESH_SCANNER_MAX_AGE_MINUTES', 72 * 60)
-) // legacy name; the activity scanner primarily uses ACTIVITY_MAX_POOL_AGE_MINUTES + MIN_POOL_AGE_HOURS (>=2h)
 // Cap on how many candidates we will deep-check per scanner tick.
 export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 12)
 
@@ -96,13 +83,10 @@ export const MAX_IMPLIED_ACTIVE_TVL = envNumber('MAX_IMPLIED_ACTIVE_TVL', 750000
 // LP count (expensive, via getProgramAccounts on survivors only)
 export const MIN_LP_COUNT = envNumber('MIN_LP_COUNT', 3)
 
-
-
-// Broad window for the activity model (previous 15m "very fresh" upper cap removed)
-// so that pools >=2h old with real sustained yield can be discovered. Use a high default (or env).
+// Broad window for the activity model so that pools >=2h old with real sustained yield can be discovered.
 export const ACTIVITY_MAX_POOL_AGE_MINUTES = envNumber(
   'ACTIVITY_MAX_POOL_AGE_MINUTES',
-  envNumber('MAX_POOL_AGE_MINUTES', 72 * 60) // 72 hours default for activity scan
+  72 * 60 // 72 hours default for activity scan
 )
 
 // ── LP Position Exit Rules (ultra-minimal model) ──
@@ -127,7 +111,5 @@ export const LP_SCORE_FEE_TVL_24H_WEIGHT = 0.3
 export const LP_SCORE_LP_COUNT_WEIGHT  = 0.2
 export const LP_SCORE_LP_CAP           = envNumber('LP_SCORE_LP_CAP', 20)
 
-// MAX_POOL_AGE_MINUTES and FRESH_MIN_TVL_USD are legacy names.
-// Current age rule: only MIN_POOL_AGE_HOURS (min 2h, no upper "very fresh" cap).
 // Primary logic uses real /pools fields + derivations (see README).
 // Bin range is the exact desired -50%/+100% (rounded to bin boundaries); gate ensures zero bin-array cost.

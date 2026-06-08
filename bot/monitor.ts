@@ -46,8 +46,8 @@ let tickCount = 0
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1000
 const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
 
-// Legacy per-position exit params (still read for backward compat with older opens).
-// For the 4-rule minimal model the global LP_* constants in strategy-config are authoritative.
+// Per-position exit params (read for backward compat with older opens).
+// The 4-rule model uses the global LP_* constants in strategy-config.
 function getPositionExitRules(pos: OpenLpPosition) {
   return {
     outOfRangeMinutes: (pos as any).out_of_range_minutes ?? (pos as any).metadata?.out_of_range_minutes ?? LP_OOR_EXIT_MINUTES,

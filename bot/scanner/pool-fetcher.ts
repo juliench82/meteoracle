@@ -249,7 +249,7 @@ export function getPoolAgeMinutes(pool: MeteoraPool): number {
   return Math.max(0, (Date.now() / 1000 - createdAt) / 60)
 }
 
-// Re-export metrics (current + legacy) from dedicated module for cleaner separation after redesign.
+// Re-export metrics from dedicated module.
 export {
   getPoolTvl,
   getPoolVolume,
@@ -279,7 +279,7 @@ export function getQuoteTokenMint(pool: any): string {
 
 export function getTradableToken(pool: any): MeteoraToken | null {
   // Tolerate both raw MeteoraPool and ActivityCandidate wrappers {pool, ageHours}
-  // (the latter is passed via the legacy "freshPools" in scanner context).
+  // (passed via the activity list in scanner context).
   const p = pool?.pool ?? pool;
   if (!p || !p.token_x?.address || !p.token_y) return null;
   return QUOTE_ASSETS.has(p.token_x.address) ? p.token_y : p.token_x;

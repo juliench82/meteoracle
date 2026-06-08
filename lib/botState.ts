@@ -2,7 +2,6 @@
  * lib/botState.ts
  *
  * Bot control state (enabled, dry_run, paused, etc.) stored in local JSON.
- * No Supabase dependency.
  */
 
 import * as fs from 'fs'
