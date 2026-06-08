@@ -2,10 +2,16 @@
  * bot/executor/open.ts
  *
  * Position opening for Meteora DLMM (evil-panda: Bid-Ask, one-sided SOL).
- * Primary: direct one-sided SOL via official DLMM SDK initializePositionAndAddLiquidityByStrategy
- *   (full desired range support, e.g. 149 bins on binStep=100, pure SOL no pre-swap to token).
- * Fallback: Zap SDK (atomic, singleSided) only if direct fails.
- * Early binStep validation (high cap, full range attempted; multi-position logic later).
+ * Uses the official DLMM SDK initializePositionAndAddLiquidityByStrategy (one-sided
+ * SOL, full desired -50%/+100% range on binStep=100).
+ *
+ * Hard free-range gate: the pool's existing bin arrays must fully cover the desired
+ * range at zero cost (no new bin arrays = no 0.07 SOL non-refundable hit). If not,
+ * the pool is skipped cleanly. When other LPs/swaps populate the arrays, a future
+ * tick can open it.
+ *
+ * Early binStep validation + on-chain width cap (70 bins max per position for this
+ * strategy). No Zap fallback (structurally impossible for 151+ bin ranges).
  */
 
 import {
