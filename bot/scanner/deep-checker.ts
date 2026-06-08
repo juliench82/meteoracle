@@ -14,7 +14,7 @@
  *
  * Expensive only on final ~top-5 survivors: lp_count (via getProgramAccounts / positions)
  * Then full deep gates (price deviation, Jupiter preflight, rug/holders, strategy filter, dedup, slots, etc.)
- * Enter the first viable ("#1 remaining").
+ * Score survivors (feeTvl 1h/24h + lpCountNorm) and open highest-scored first.
  *
  * Kept improvements beyond the minimal spec: rich per-pool rejection logging, early SOL gate,
  * price vs market check, Jupiter route preflight for new Token-2022, full deep quality gates,
@@ -43,6 +43,7 @@ import { logInfo } from '@/lib/log'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
 import { hasJupiterRouteSolToToken } from '@/lib/swap'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
+import { computePoolScore } from './pool-metrics'
 import {
   SCAN_INTERVAL_MS,
   SCANNER_TICK_TIMEOUT_MS,
@@ -401,6 +402,12 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     dailyLossLimitHit: { value: dailyLossLimitHit },
   };
 
+  // Collect candidates that pass *all* deep gates. After the loop we score them
+  // with the composite formula and sort descending so the single highest-scored
+  // survivor (or top N within slots) gets the open slot(s) instead of the first
+  // one that happened to be processed.
+  const deepGateSurvivors: any[] = [];
+
   for (const cand of activityCandidates) {
     await processActivityCandidate(cand, tickContext);
   }
@@ -409,6 +416,51 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   openedCount = tickContext.openedCount.value;
   openSkippedCount = tickContext.openSkippedCount.value;
   candidateCount = tickContext.candidateCount.value;
+  dailyLossLimitHit = tickContext.dailyLossLimitHit.value;
+
+  // === Score deep-gate survivors and open in descending score order ===
+  // All candidates have now passed (or failed) the full set of deep gates
+  // (SOL-paired, lp_count min, no conflicts, pool-vs-market price dev, Jupiter preflight,
+  // holders/rug, strategy match, etc.). We score only the survivors and re-sort so the
+  // single best composite score always gets the first open slot (and subsequent slots
+  // if available), instead of whichever one happened to appear first in the input order.
+  if (deepGateSurvivors.length > 0) {
+    const scoredSurvivors = deepGateSurvivors
+      .map((s: any) => ({
+        ...s,
+        score: computePoolScore(s.pool, s.lpCount),
+      }))
+      .sort((a: any, b: any) => b.score - a.score);
+
+    console.log(
+      `[scanner] ${scoredSurvivors.length} deep survivors ranked by score (highest first): ` +
+        scoredSurvivors.map((s: any) => `${s.symbol}(${s.score.toFixed(4)})`).join(' > ')
+    );
+
+    // Attempt opens in the new ranked order. The attemptOpenAndNotify logic
+    // handles daily-loss circuit, remaining slots, mint dedup this tick,
+    // the actual openPosition call, counter updates, and alerts.
+    for (const s of scoredSurvivors) {
+      await attemptOpenAndNotify({
+        metrics: s.metrics,
+        strategy: s.strategy,
+        symbol: s.symbol,
+        liveSolPriceUsd: s.liveSolPriceUsd,
+        openedMintsThisTick: s.openedMintsThisTick,
+        openedCountRef: s.openedCountRef,
+        openSkippedCountRef: s.openSkippedCountRef,
+        dailyLossLimitHitRef: s.dailyLossLimitHitRef,
+        openBlockedReason: s.openBlockedReason,
+        availableOpenSlots: s.availableOpenSlots,
+        candidateCountRef: s.candidateCountRef,
+      });
+    }
+  }
+
+  // Re-sync counters (ranked open attempts may have mutated the boxed refs)
+  candidateCount = tickContext.candidateCount.value;
+  openedCount = tickContext.openedCount.value;
+  openSkippedCount = tickContext.openSkippedCount.value;
   dailyLossLimitHit = tickContext.dailyLossLimitHit.value;
 
   // === Tick Summary for debuggability ===
@@ -742,7 +794,11 @@ async function processActivityCandidate(
   const { strategy, decision, rejectionReason } = evaluateCandidate(metrics, symbol);
 
   if (decision === 'ACCEPTED' && strategy) {
-    return await attemptOpenAndNotify({
+    // Collect for post-loop scoring + ranking instead of opening in processing order.
+    // This ensures the highest-scored survivor (after all deep gates) gets slot priority.
+    const poolForScore = bestPool || representativePool;
+    const lpCountForScore = (poolForScore as any)._enriched_lp_count || 0;
+    deepGateSurvivors.push({
       metrics,
       strategy,
       symbol,
@@ -754,7 +810,10 @@ async function processActivityCandidate(
       openBlockedReason,
       availableOpenSlots,
       candidateCountRef,
+      pool: poolForScore,
+      lpCount: lpCountForScore,
     });
+    return { wasCandidate: true, wasOpened: false, wasSkipped: true };
   }
 
   return { wasCandidate: false, wasOpened: false, wasSkipped: true };
