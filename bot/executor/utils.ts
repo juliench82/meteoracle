@@ -25,6 +25,11 @@ import type { Strategy } from '@/lib/types';
 import { OPEN_LP_STATUSES, type OpenLpLimitState } from '@/lib/position-limits';
 import { getOpenLpPositions } from '@/lib/local-state';
 import { STRATEGIES } from '@/strategies';
+import {
+  MARKET_LP_SOL_PER_POSITION,
+  MAX_CONCURRENT_MARKET_LP_POSITIONS,
+  MAX_MARKET_LP_SOL_DEPLOYED,
+} from '@/lib/strategy-config';
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -33,20 +38,8 @@ export const NATIVE_MINT_STR = 'So11111111111111111111111111111111111111112';
 export const METEORA_RENT_RESERVE_SOL = 0.07;
 export const ADD_LIQUIDITY_FALLBACK_CU = 1_400_000;
 
-export const MARKET_LP_SOL_PER_POSITION = parseFloat(
-  process.env.MAX_MARKET_LP_SOL_PER_POSITION ??
-  process.env.MARKET_LP_SOL_PER_POSITION ??
-  process.env.MAX_SOL_PER_POSITION ??
-  '0.1'
-);
-
-export const MAX_CONCURRENT_MARKET_LP_POSITIONS = parseInt(
-  process.env.MAX_CONCURRENT_MARKET_LP_POSITIONS ?? process.env.MAX_CONCURRENT_POSITIONS ?? '5'
-);
-
-export const MAX_MARKET_LP_SOL_DEPLOYED = parseFloat(
-  process.env.MAX_MARKET_LP_SOL_DEPLOYED ?? process.env.MAX_TOTAL_SOL_DEPLOYED ?? '1'
-);
+// Consolidated: imported from strategy-config.ts (single source of env parsing with safe defaults)
+export { MARKET_LP_SOL_PER_POSITION, MAX_CONCURRENT_MARKET_LP_POSITIONS, MAX_MARKET_LP_SOL_DEPLOYED } from '@/lib/strategy-config';
 
 export const WALLET_MIN_SOL_RESERVE = parseFloat(process.env.WALLET_MIN_SOL_RESERVE ?? '0.1');
 

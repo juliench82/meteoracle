@@ -102,7 +102,6 @@ export async function sendLegacyTx(
   tx: Transaction,
   signers: import('@solana/web3.js').Signer[],
   label: string = '[tx]',
-  fallbackUnits = 1_400_000,
 ): Promise<string> {
   const connection = getConnection()
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
@@ -160,5 +159,5 @@ export async function sendWithPriorityFee(
   fallbackUnits = 1_400_000,
 ): Promise<string> {
   const prepared = applyPriorityFee(tx, priorityFee, fallbackUnits)
-  return sendLegacyTx(prepared, signers, label, fallbackUnits)
+  return sendLegacyTx(prepared, signers, label)
 }

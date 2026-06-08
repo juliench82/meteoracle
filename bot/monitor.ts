@@ -80,7 +80,8 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
   }
 
   // === LP exit rules (4-rule ultra-minimal model) ===
-  const positions: OpenLpPosition[] = getOpenLpPositions().filter((p: OpenLpPosition) => ['open', 'active'].includes(p.status))
+  let allPositions: OpenLpPosition[] = getOpenLpPositions()
+  const positions: OpenLpPosition[] = allPositions.filter((p: OpenLpPosition) => ['open', 'active'].includes(p.status))
   stats.checked = positions.length
 
   if (positions.length > 0) {
@@ -90,6 +91,8 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
     // Resolved once per tick only if dry-sim rows with fees are present (avoids fetch for normal runs)
     let drySimSolPriceUsd: number | null = null
+
+    let positionsMutated = false
 
     for (const pos of positions) {
       try {
@@ -151,13 +154,12 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
               pos.fee_tvl_samples = pruned
             }
 
-            // Persist samples (lightweight)
-            const all = getOpenLpPositions()
-            const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
+            // Persist samples using pre-loaded master list (avoids per-pos re-fetch race)
+            const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
             if (idx !== -1) {
-              all[idx].fee_tvl_samples = pos.fee_tvl_samples
-              all[idx].last_fee_tvl_4h_avg = pos.last_fee_tvl_4h_avg
-              saveOpenLpPositions(all)
+              allPositions[idx].fee_tvl_samples = pos.fee_tvl_samples
+              allPositions[idx].last_fee_tvl_4h_avg = pos.last_fee_tvl_4h_avg
+              positionsMutated = true
             }
           }
         } catch (e) {
@@ -190,16 +192,18 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
                   // Use live SOL price (via shared resolver) instead of hardcoded 150.
                   // Fees contribution is usually tiny for dry sims but now accurate when present.
                   if (drySimSolPriceUsd == null) {
-                    drySimSolPriceUsd = await resolveSolPriceUsd().catch(() => 150)
+                    drySimSolPriceUsd = await resolveSolPriceUsd().catch(() => 170) // reasonable current-ish fallback; log if hit
+                    if (drySimSolPriceUsd === 170) {
+                      console.warn(`[monitor] using fallback SOL price 170 for dry-sim PnL of ${pos.symbol}`)
+                    }
                   }
                   roughPnl += (claimable / (pos.sol_deposited * drySimSolPriceUsd)) * 100
                 }
                 pos.last_net_pnl_pct = Math.round(roughPnl * 100) / 100
-                const all = getOpenLpPositions()
-                const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
+                const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
                 if (idx !== -1) {
-                  all[idx].last_net_pnl_pct = pos.last_net_pnl_pct
-                  saveOpenLpPositions(all)
+                  allPositions[idx].last_net_pnl_pct = pos.last_net_pnl_pct
+                  positionsMutated = true
                 }
               }
             }
@@ -216,9 +220,8 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
             if (!oorSince) {
               oorSince = now
               pos.oor_since = new Date(oorSince).toISOString()
-              const all = getOpenLpPositions()
-              const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
-              if (idx !== -1) { all[idx].oor_since = pos.oor_since; saveOpenLpPositions(all) }
+              const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
+              if (idx !== -1) { allPositions[idx].oor_since = pos.oor_since; positionsMutated = true }
             }
 
             const oorMin = (now - oorSince) / 1000 / 60
@@ -232,9 +235,8 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           } else if (oorSince) {
             // Back in range — clear the timer
             delete pos.oor_since
-            const all = getOpenLpPositions()
-            const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
-            if (idx !== -1) { delete all[idx].oor_since; saveOpenLpPositions(all) }
+            const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
+            if (idx !== -1) { delete allPositions[idx].oor_since; positionsMutated = true }
           }
         }
 
@@ -247,10 +249,9 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
               const netPnl = computeNetPnlApprox(pos, onChainPos, activeBin, dlmmPool)
               if (netPnl != null) {
                 pos.last_net_pnl_pct = Math.round(netPnl * 100) / 100
-                // Persist for alert richness
-                const all = getOpenLpPositions()
-                const idx = all.findIndex((p: OpenLpPosition) => p.id === pos.id)
-                if (idx !== -1) { all[idx].last_net_pnl_pct = pos.last_net_pnl_pct; saveOpenLpPositions(all) }
+                // Persist for alert richness (batched)
+                const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
+                if (idx !== -1) { allPositions[idx].last_net_pnl_pct = pos.last_net_pnl_pct; positionsMutated = true }
 
                 if (netPnl <= netLossThreshold) {
                   const reason = `net_pnl_sl_${netPnl.toFixed(1)}pct`
@@ -318,6 +319,11 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         console.warn(`[monitor] LP exit check failed for ${pos.symbol}:`, e instanceof Error ? e.message : e)
       }
     }
+
+    // Single batched save at end of positions processing (prevents per-pos re-fetch/save races under load)
+    if (positionsMutated) {
+      saveOpenLpPositions(allPositions)
+    }
   }
 
   return stats
@@ -361,7 +367,9 @@ function computeNetPnlApprox(
 
     const feeX = toNumber(pd.feeX ?? pd.fee_x)
     const feeY = toNumber(pd.feeY ?? pd.fee_y)
-    const pendingFeeSolApprox = ((feeX + feeY) * priceSolPerToken) / 1e9
+    // feeX is token lamports; feeY is SOL lamports (for SOL-paired).
+    const feeXWhole = feeX / Math.pow(10, tokenDecimals);
+    const pendingFeeSolApprox = (feeXWhole * priceSolPerToken) + (feeY / 1e9);
 
     const netSol = currentLiqValueSol + pendingFeeSolApprox - solDeposited
     return (netSol / solDeposited) * 100

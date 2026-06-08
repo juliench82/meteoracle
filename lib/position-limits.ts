@@ -45,6 +45,9 @@ export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitS
   }
 }
 
-export function assertCanOpenLpPosition(..._args: any[]): void {
-  // Minimal implementation (local-state + on-chain where needed)
-}
+/**
+ * Deprecated / no-op.
+ * Concurrency and exposure caps are enforced in validateOpenEligibility (open.ts)
+ * and slot checks in the scanner (deep-checker.ts).
+ */
+export function assertCanOpenLpPosition(..._args: any[]): void {}

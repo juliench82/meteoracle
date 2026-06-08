@@ -38,14 +38,6 @@ import {
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
-
-
-
-
-
-
-
-
 export async function closePosition(
   positionId: string,
   reason: string,
@@ -102,6 +94,16 @@ export async function closePosition(
       positionPubKey.toBase58(),
       label
     )
+
+    // Refresh claimable from on-chain positionData (fresher than local state snapshot).
+    // The removeLiquidity(shouldClaimAndClose) will claim whatever is current at remove time.
+    if (userPosition?.positionData) {
+      const pd = userPosition.positionData;
+      const feeX = Number(pd.feeX ?? pd.fee_x ?? 0);
+      const feeY = Number(pd.feeY ?? pd.fee_y ?? 0);
+      // Rough USD proxy (token fees ~small; real conversion would use live price).
+      claimableFeesUsd = (feeY / 1e9) + (feeX / 1e6 * 0.001);
+    }
 
     // NOTE: explicit claimAllRewards removed — removeLiquidity with shouldClaimAndClose:true already claims fees + closes in one tx.
     // Double-claiming wasted fees and could cause on-chain issues.

@@ -1,17 +1,31 @@
 /**
  * bot/executor/open.ts
  *
- * Position opening for Meteora DLMM (evil-panda: Bid-Ask, one-sided SOL).
- * Uses the official DLMM SDK initializePositionAndAddLiquidityByStrategy (one-sided
- * SOL, full desired -50%/+100% range on binStep=100).
+ * Position opening for Meteora DLMM (evil-panda: Bid-Ask, explicit pre-swap for
+ * the token leg so we can do true one-sided-SOL economics on a Bid-Ask shape).
  *
- * Hard free-range gate: the pool's existing bin arrays must fully cover the desired
- * range at zero cost (no new bin arrays = no 0.07 SOL non-refundable hit). If not,
- * the pool is skipped cleanly. When other LPs/swaps populate the arrays, a future
- * tick can open it.
+ * Core workflow (per design):
+ *   X SOL budget → calculate TOKEN amount needed for value match → target full
+ *   desired -50% / +100% range → hard gate: must cost zero new bin arrays →
+ *   SWAP for the TOKEN leg (using actual received amount after slippage) →
+ *   openPositionDirect with (remaining SOL + actual TOKEN).
  *
- * No artificial width cap. Uses exact rounded bin range from the desired % (Meteora
- * will use discrete boundaries; effective coverage is logged).
+ * The range is the *closest discrete bins* Meteora will actually give you.
+ * We never enforce literal -50.00% / +100.00%. We use Math.round() on the
+ * percentage-to-bin math and only proceed if the resulting range has all its
+ * bin arrays already on-chain (the free-range / zero-rent gate).
+ *
+ * No artificial width cap (the old 70-bin / Zap limits are gone).
+ * The only limit is economic: if the desired range would require new bin arrays,
+ * we skip cleanly and wait for other LPs to populate them.
+ *
+ * CRITICAL SUCCESS CRITERIA (user directive):
+ *   - No ZAP code path is used for opening. Entire bot purpose depends on reliably
+ *     opening the full desired discrete range (-50% down / +100% up via round() bin math)
+ *     using direct DLMM SDK + pre-swap for value match + zero new bin array gate.
+ *   - If we cannot open such positions the bot has no purpose.
+ *   - Pre-swap leg uses aggressive same-prequoted-quote retries (see lib/swap.ts) before
+ *     any ladder fallback. Pre-quote is done at the exact computed split amount.
  */
 
 import {
@@ -55,7 +69,6 @@ import type { Strategy, TokenMetrics } from '@/lib/types'
 import { swapSolToToken, JUPITER_QUOTE_API, executeSwapFromPreQuote } from '@/lib/swap'
 import {
   OPEN_LP_STATUSES,
-  assertCanOpenLpPosition,
   getOpenLpLimitState,
   type OpenLpLimitState,
 } from '@/lib/position-limits'
@@ -170,10 +183,18 @@ export async function openPosition(
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
     // =============================================================================
-    // Exact -50% / +100% range calculation + bin array existence gate (zero cost only)
-    // No artificial width cap. Use the full desired range only if all required
-    // bin arrays already exist on-chain (0 new arrays = 0 rent cost).
-    // Use runtime rent exemption size for accurate cost reporting.
+    // Desired range calculation (-50% / +100% target) + bin array existence gate
+    //
+    // We do NOT enforce literal -50.00% / +100.00%.
+    // Meteora always snaps to discrete bin boundaries, so you typically get something
+    // like -49.78% / +99.34% (or similar). This is expected and fine.
+    //
+    // We use Math.round() to get the closest achievable number of bins on each side.
+    // The only hard gate is: the bin arrays for that range must already exist
+    // (newBinArrayCount === 0) → zero non-refundable rent cost.
+    //
+    // This is the core of the "free-range" / "no artificial cap" design.
+    // We want the largest possible evil-panda range the current on-chain state allows.
     // =============================================================================
     const rangeDownPct = strategy.position.rangeDownPct;
     const rangeUpPct = strategy.position.rangeUpPct;
@@ -206,6 +227,15 @@ export async function openPosition(
       return null;
     }
 
+    // NOTE on range:
+    // We deliberately do *not* hard-cap the number of bins here.
+    // The whole point of the current design (vs the old artificial 70-bin / Zap limits)
+    // is to allow full desired evil-panda ranges (-50% / +100% on binStep=100 → often 150+ bins)
+    // as long as the required bin arrays already exist on-chain (the gate above).
+    //
+    // Meteora never gives you exactly the requested % because of discrete bin boundaries.
+    // The Math.round() below + the bin-array existence gate is the "subtle" part:
+    // we ask for the closest achievable discrete range and only open if it costs zero rent.
     const minBinId = fullDesiredMin;
     const maxBinId = fullDesiredMax;
     const binRange = fullTotalBins;
@@ -214,7 +244,10 @@ export async function openPosition(
 
     const effectiveDownPct = fullBinsDown * (binStep / 10000) * 100;
     const effectiveUpPct = fullBinsUp * (binStep / 10000) * 100;
-    console.log(`${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% (desired was ${rangeDownPct}% / ${rangeUpPct}%)`);
+    console.log(
+      `${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% ` +
+      `(desired was ${rangeDownPct}% / ${rangeUpPct}%; Meteora snaps to nearest discrete bins)`
+    );
 
     // ATA pre-creation for the token side(s) (uses getTokenProgramId per mint so Token-2022 sides get the correct program).
     // Done before the direct SDK path.
@@ -290,7 +323,7 @@ export async function openPosition(
     try {
       const currentBalLamports = await connection.getBalance(wallet.publicKey);
       const currentBalSol = currentBalLamports / 1e9;
-      const requiredNow = solAmount + 0.05; // small buffer for fees + the swap itself
+      const requiredNow = solAmount + METEORA_RENT_RESERVE_SOL + WALLET_MIN_SOL_RESERVE;
       if (currentBalSol < requiredNow) {
         console.warn(`${label} balance dropped below required before swap — have ${currentBalSol.toFixed(4)}, need ~${requiredNow.toFixed(3)} — skipping`);
         return null;
@@ -301,9 +334,13 @@ export async function openPosition(
 
     let actualTokenLamports = 0n
     if (solToSwapLamports > 0n) {
-      // Pre-quote at the first ladder slippage (500bps) for validation.
-      // We will try to use this exact quote for the swap tx to minimize staleness between
-      // quote and execution (a common cause of 0x177e "route not executable" on new Token-2022 DLMMs).
+      // Pre-quote at the *exact* split amount (solToSwapLamports) with 500bps.
+      // Per design: X SOL budget → calc TOKEN for value match → gate on -50/+100 range (zero rent) →
+      // then SWAP using this pre-quoted response (aggressively retried) → open with landed amounts.
+      // The pre-quoted quoteResponse object is passed to executeSwapFromPreQuote which will
+      // retry the *identical* quote (same route construction) multiple times with small backoff
+      // before the caller falls back to a fresh ladder re-quote. This directly targets the
+      // observed "pre-quote OK … 0x177e on first ladder 500" pattern on new Token-2022 pools.
       let quote: any = null
       try {
         const params = new URLSearchParams({
@@ -326,11 +363,12 @@ export async function openPosition(
         return null
       }
 
-      // Execute the swap: first try the fresh pre-quoted response directly (best chance to avoid 0x177e),
-      // then fall back to the full ladder (re-quotes at 500/1000/2000 bps).
+      // Aggressive pre-quoted execution: executeSwapFromPreQuote now retries the exact same
+      // quoteResponse internally (PREQUOTE_MAX_ATTEMPTS) with tiny backoffs before returning null.
+      // Only then do we fall back to the ladder (fresh re-quotes at 500/1000/2000).
       let swapRes = await executeSwapFromPreQuote(quote, getWallet(), label)
       if (!swapRes) {
-        console.warn(`${label} direct use of pre-quote failed (0x177e or other) — falling back to slippage ladder`)
+        console.warn(`${label} all same-prequote attempts exhausted — falling back to slippage ladder (fresh re-quotes)`)
         swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
       }
       if (!swapRes) {
@@ -424,6 +462,16 @@ async function validateOpenEligibility(
   let limitState: any = await getOpenLpLimitState();
 
   const effectiveOpenCountForCap = limitState.effectiveOpenCount || 0;
+
+  if (effectiveOpenCountForCap >= MAX_CONCURRENT_MARKET_LP_POSITIONS) {
+    console.warn(`${label} concurrent position cap hit (${effectiveOpenCountForCap}/${MAX_CONCURRENT_MARKET_LP_POSITIONS})`);
+    logWarn('open_position_skipped_concurrent_cap', {
+      symbol: metrics.symbol,
+      effectiveOpenCount: effectiveOpenCountForCap,
+      max: MAX_CONCURRENT_MARKET_LP_POSITIONS,
+    });
+    return { ok: false };
+  }
 
   // Note: the "cap ok" log is emitted once by the caller in openPosition after eligibility succeeds.
   // Removed duplicate here to reduce log noise.

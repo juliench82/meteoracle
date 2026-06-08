@@ -39,6 +39,7 @@ export async function persistPosition(
   const safeSymbol = (metrics.symbol && metrics.symbol !== 'LIVE') ? metrics.symbol : metrics.address;
 
   // Write to local state (JSON files in state/)
+  const feeTvlSample = metrics.feeTvl24hPct ? [{ ts: Date.now(), fee_tvl_24h: metrics.feeTvl24hPct }] : [];
   const newPosition = {
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
     mint:            metrics.address,
@@ -58,6 +59,8 @@ export async function persistPosition(
     dry_run:         dryRun,
     opened_at:       new Date().toISOString(),
     tx_open:         sig,
+    // top-level for monitor.ts consumption (fixes metadata vs top-level split)
+    fee_tvl_samples: feeTvlSample,
     metadata: {
       strategy_id:           strategy.id,
       strategy_version:      strategy.version,
@@ -80,8 +83,7 @@ export async function persistPosition(
       dex_price_usd:         metrics.priceUsd,
       entry_sol_price_usd:   entryPriceSol > 0 ? entryPriceUsd / entryPriceSol : null,
       needs_liquidity_retry: needsLiquidityRetry,
-      // New fields for minimal exit rules
-      fee_tvl_samples:       metrics.feeTvl24hPct ? [{ ts: Date.now(), fee_tvl_24h: metrics.feeTvl24hPct }] : [],
+      fee_tvl_samples:       feeTvlSample,
       opened_at:             new Date().toISOString(),
     },
   }

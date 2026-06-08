@@ -13,6 +13,16 @@ const SWAP_RETRY_DELAY_MS = 3_000
 // Higher values help with illiquid new Token-2022 DLMM pools.
 const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000];
 
+// Aggressive same-quote retry config for the pre-quoted path (item 1).
+// We pre-quoted the *exact* split amount in open.ts; we now retry *that same
+// quoteResponse object* a few times with tiny backoff before ever falling back
+// to a fresh ladder re-quote. This targets the exact failure pattern:
+// "pre-quote OK … [swap] Jupiter route not executable (0x177e)".
+// Retrying the identical quoteResponse keeps the route construction stable
+// while the pool/indexer "catches up" on thin Token-2022 DLMMs.
+const PREQUOTE_MAX_ATTEMPTS = 3;          // 1 initial + 2 retries of the exact same pre-quoted response
+const PREQUOTE_RETRY_BACKOFF_BASE_MS = 250; // small, sub-second backoffs (250ms, 500ms, ...)
+
 /**
  * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
  * Returns true only if a quote succeeds with positive outAmount (no error).
@@ -271,11 +281,21 @@ async function attemptSwapSolToToken(
 }
 
 /**
- * Execute a swap using a pre-fetched quote response (from open.ts pre-quote at 500bps).
- * This minimizes the time between quote and /swap, reducing "route not executable" (0x177e)
- * errors on volatile new Token-2022 DLMM pools where the pre-quote succeeded but a later
- * re-quote's tx fails on-chain.
- * Returns {sig, tokenAmount} on success, null on failure (caller can fallback to ladder).
+ * Execute a swap using a pre-fetched quote response (from open.ts pre-quote at the
+ * *exact* split solToSwapLamports amount, 500bps).
+ *
+ * AGGRESSIVE SAME-QUOTE RETRY MODE (per "1. Implement that now"):
+ *   - We submit the *identical* quoteResponse object up to PREQUOTE_MAX_ATTEMPTS times.
+ *   - Small backoff (PREQUOTE_RETRY_BACKOFF_BASE_MS) between attempts.
+ *   - We deliberately retry even on 0x177e "route not executable" because the pre-quote
+ *     was accepted moments ago; re-submitting the exact same /swap payload often succeeds
+ *     as the aggregator/pool state stabilizes (new Token-2022 DLMMs are frequently racy).
+ *   - Only after all same-quote attempts are exhausted do we return null, allowing the
+ *     caller (open.ts) to fall back to the full slippage ladder (fresh re-quotes).
+ *
+ * This is the primary execution path for the Bid-Ask pre-swap leg. Our entire success
+ * depends on being able to reliably land the token leg for the full desired -50%/+100%
+ * range (no ZAP, no artificial bin caps — only the zero new-bin-array rent gate).
  */
 export async function executeSwapFromPreQuote(
   quote: any,
@@ -284,37 +304,48 @@ export async function executeSwapFromPreQuote(
 ): Promise<{ sig: string; tokenAmount: bigint } | null> {
   if (!quote) return null;
 
-  try {
-    const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey: wallet.publicKey.toBase58(),
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: 'auto',
-      }),
-    });
-    if (!swapRes.ok) {
-      const body = await swapRes.text();
-      throw new Error(`Jupiter swap tx failed: ${swapRes.status} ${body}`);
+  for (let attempt = 1; attempt <= PREQUOTE_MAX_ATTEMPTS; attempt++) {
+    try {
+      const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          quoteResponse: quote,
+          userPublicKey: wallet.publicKey.toBase58(),
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: 'auto',
+        }),
+      });
+      if (!swapRes.ok) {
+        const body = await swapRes.text();
+        throw new Error(`Jupiter swap tx failed: ${swapRes.status} ${body}`);
+      }
+      const { swapTransaction } = await swapRes.json();
+
+      const txBuf = Buffer.from(swapTransaction, 'base64');
+      const tx = VersionedTransaction.deserialize(txBuf);
+      tx.sign([wallet]);
+
+      const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
+      const tokenAmount = await getWalletTokenBalance(quote.outputMint || '');
+      console.log(`${label} [swap] SOL → token (pre-quoted, attempt ${attempt}/${PREQUOTE_MAX_ATTEMPTS}) confirmed ✔ sig: ${sig} | actualReceived: ${tokenAmount}`);
+      return { sig, tokenAmount };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isRouteErr = msg.includes('0x177e') || msg.includes('custom program error') || msg.includes('route not executable');
+      console.warn(`${label} [swap] executeSwapFromPreQuote attempt ${attempt}/${PREQUOTE_MAX_ATTEMPTS} failed${isRouteErr ? ' (0x177e / route)' : ''}: ${msg}`);
+
+      if (attempt < PREQUOTE_MAX_ATTEMPTS) {
+        const delay = PREQUOTE_RETRY_BACKOFF_BASE_MS * attempt;
+        console.log(`${label} [swap] retrying same pre-quoted quote in ${delay}ms…`);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
-    const { swapTransaction } = await swapRes.json();
-
-    const txBuf = Buffer.from(swapTransaction, 'base64');
-    const tx = VersionedTransaction.deserialize(txBuf);
-    tx.sign([wallet]);
-
-    const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
-    const tokenAmount = await getWalletTokenBalance(quote.outputMint || '');
-    console.log(`${label} [swap] SOL → token (pre-quoted) confirmed ✔ sig: ${sig} | actualReceived: ${tokenAmount}`);
-    return { sig, tokenAmount };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`${label} [swap] executeSwapFromPreQuote failed: ${msg}`);
-    return null;
   }
+
+  // All same-quote attempts exhausted — caller will decide on ladder fallback or skip.
+  return null;
 }
 
 /**
