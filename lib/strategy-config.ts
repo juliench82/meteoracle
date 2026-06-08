@@ -129,4 +129,4 @@ export const LP_SCORE_LP_CAP           = envNumber('LP_SCORE_LP_CAP', 20)
 // MAX_POOL_AGE_MINUTES and FRESH_MIN_TVL_USD are legacy names.
 // Current age rule: only MIN_POOL_AGE_HOURS (min 2h, no upper "very fresh" cap).
 // Primary logic uses real /pools fields + derivations (see README).
-// Per-position bin width capped in calculateValidatedBinRange.
+// Bin range is the exact desired -50%/+100% (rounded to bin boundaries); gate ensures zero bin-array cost.

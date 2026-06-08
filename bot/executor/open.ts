@@ -43,13 +43,10 @@ import {
   getDecimalAdjustedPrice,
   NATIVE_MINT_STR,
   METEORA_RENT_RESERVE_SOL,
-  MAX_BINS_BY_STRATEGY,
-  MAX_BINS_DEFAULT,
   MARKET_LP_SOL_PER_POSITION,
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   MAX_MARKET_LP_SOL_DEPLOYED,
   WALLET_MIN_SOL_RESERVE,
-  calculateValidatedBinRange,
 } from './utils'
 
 import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '@/lib/solana'
@@ -171,10 +168,10 @@ export async function openPosition(
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
     // =============================================================================
-    // Smart range selection for 0 non-refundable bin array cost (per user request + UI behavior)
-    // Compute full desired, show the exact "new bin array cost" the UI would display,
-    // then clamp to the largest range that touches *only already-existing* bin arrays (0 new = 0 non-refundable).
-    // This lets us get as close as possible to -50%/+100% without the painful 0.07 SOL hit on small positions.
+    // Exact -50% / +100% range calculation + bin array existence gate (zero cost only)
+    // No artificial width cap. Use the full desired range only if all required
+    // bin arrays already exist on-chain (0 new arrays = 0 rent cost).
+    // Use runtime rent exemption size for accurate cost reporting.
     // =============================================================================
     const rangeDownPct = strategy.position.rangeDownPct;
     const rangeUpPct = strategy.position.rangeUpPct;
@@ -187,101 +184,35 @@ export async function openPosition(
     const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
     const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
 
-    const desiredRequired = getBinArraysRequiredByPositionRange(
+    const requiredBinArrays = getBinArraysRequiredByPositionRange(
       poolPubkey,
       new BN(fullDesiredMin),
       new BN(fullDesiredMax),
       DLMM_PROGRAM_ID
     );
     let newBinArrayCount = 0;
-    for (const ba of desiredRequired) {
+    for (const ba of requiredBinArrays) {
       if (!(await connection.getAccountInfo(ba.key))) newBinArrayCount++;
     }
-    const nonRefundCost = (newBinArrayCount * 0.07).toFixed(2);
+
+    const rentPerArray = await connection.getMinimumBalanceForRentExemption(3472) / 1e9;
+    const nonRefundCost = (newBinArrayCount * rentPerArray).toFixed(2);
     console.log(`${label} Desired range cost check: ${fullTotalBins} bins would require ${newBinArrayCount} new bin array(s) (~${nonRefundCost} SOL non-refundable)`);
 
-    // Find the actual free bins left and right (max without new array)
-    // Walk bin-by-bin from active for accuracy (small number, only on opens)
-    async function findFreeBoundary(dir: 'left' | 'right', start: number, maxDist = 400) {
-      let current = start;
-      for (let i = 1; i <= maxDist; i++) {
-        const b = dir === 'left' ? start - i : start + i;
-        const arrs = getBinArraysRequiredByPositionRange(poolPubkey, new BN(b), new BN(b), DLMM_PROGRAM_ID);
-        if (arrs.length === 0) break;
-        const info = await connection.getAccountInfo(arrs[0].key);
-        if (info) {
-          current = b;
-        } else {
-          break;
-        }
-      }
-      return current;
-    }
-    const freeLeft = await findFreeBoundary('left', activeBinId);
-    const freeRight = await findFreeBoundary('right', activeBinId);
-
-    const freeDownBins = activeBinId - freeLeft;
-    const freeUpBins = freeRight - activeBinId;
-
-    // Hard gate: if the pool's existing (free) bin arrays do not fully cover the
-    // desired evil-panda range at zero cost, skip the pool entirely. Never open
-    // a degraded (shrunk) position. When other traders populate the bin arrays,
-    // the next scanner tick can open it cleanly.
-    if (freeDownBins < fullBinsDown || freeUpBins < fullBinsUp) {
-      console.log(`${label} free bin range insufficient for full evil-panda range ` +
-        `(need ${fullBinsDown}↓ ${fullBinsUp}↑, free: ${freeDownBins}↓ ${freeUpBins}↑) — skipping pool`);
+    if (newBinArrayCount > 0) {
+      console.log(`${label} free bin range insufficient for full evil-panda range — skipping pool (would require new bin arrays)`);
       return null;
     }
 
-    // Compute a width-capped version of the *desired* % range first (this reuses
-    // calculateValidatedBinRange so the claim in strategy-config.ts is true, and
-    // we get its "auto-shrunk" log when the original -50/+100 would exceed 70).
-    // Then apply free expansion relative to that valid base. We still cap the
-    // scale so the final range never exceeds the hard on-chain limit, even if
-    // free space would allow a larger position.
-    const strategyMaxBins = MAX_BINS_BY_STRATEGY[strategy.id] || MAX_BINS_DEFAULT;
-    const baseForFree = calculateValidatedBinRange(
-      activeBinId,
-      binStep,
-      rangeDownPct,
-      rangeUpPct,
-      strategyMaxBins,
-      label
-    );
-    const desiredDownBins = activeBinId - baseForFree.minBinId;
-    const desiredUpBins = baseForFree.maxBinId - activeBinId;
+    const minBinId = fullDesiredMin;
+    const maxBinId = fullDesiredMax;
+    const binRange = fullTotalBins;
 
-    const freeScale = Math.min(
-      freeDownBins / desiredDownBins,
-      freeUpBins / desiredUpBins,
-      1.0  // never expand beyond desired range (safety for free-bin scaling)
-    );
-    const maxScaleForWidth = strategyMaxBins / (desiredDownBins + desiredUpBins + 1);
-    const effectiveScale = Math.min(freeScale, maxScaleForWidth);
-    if (effectiveScale < freeScale) {
-      console.log(`${label} free range expansion capped by on-chain position width limit (${strategyMaxBins} bins, scale limited from ${freeScale.toFixed(2)} to ${effectiveScale.toFixed(2)})`);
-    }
+    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${binStep})`);
 
-    const actualDown = Math.floor(desiredDownBins * effectiveScale);
-    const actualUp = Math.floor(desiredUpBins * effectiveScale);
-
-    let minBinId = activeBinId - actualDown;
-    let maxBinId = activeBinId + actualUp;
-    const binRange = maxBinId - minBinId + 1;
-    const wasShrunk = effectiveScale < 1;
-
-    console.log(`${label} Using scaled free range (0 new bin arrays, ratio preserved): ${minBinId} → ${maxBinId} (${binRange} bins), scale=${effectiveScale.toFixed(2)}`);
-
-    if (binRange < 2) {
-      console.warn(`${label} bin range still invalid after free clamp — rejecting`);
-      return null;
-    }
-
-    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${binStep})`)
-
-    const effectiveDownPct = -((minBinId - activeBinId) * (binStep / 10000) * 100);
-    const effectiveUpPct = (maxBinId - activeBinId) * (binStep / 10000) * 100;
-    console.log(`${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% (desired was ${strategy.position.rangeDownPct}% / ${strategy.position.rangeUpPct}%)`);
+    const effectiveDownPct = fullBinsDown * (binStep / 10000) * 100;
+    const effectiveUpPct = fullBinsUp * (binStep / 10000) * 100;
+    console.log(`${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% (desired was ${rangeDownPct}% / ${rangeUpPct}%)`);
 
     // ATA pre-creation for the token side(s) (uses getTokenProgramId per mint so Token-2022 sides get the correct program).
     // Done before the direct SDK path.
@@ -309,7 +240,7 @@ export async function openPosition(
     }
 
     if (!solIsTokenX && !solIsTokenY) {
-      console.warn(`${label} pool has no SOL side — rejecting one-sided SOL zap-in`)
+      console.warn(`${label} pool has no SOL side — rejecting one-sided SOL`)
       logWarn('legacy_bot_log', {
         level: 'warn',
         event: 'open_position_skipped_non_sol_pair',
@@ -324,19 +255,47 @@ export async function openPosition(
     const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
-    const amountIn = new BN(Math.floor(solAmount * 1e9))
-    const minDeltaId = minBinId - activeBinId
-    const maxDeltaId = maxBinId - activeBinId
-    const favorXInActiveId = solIsTokenX
+    const totalSolLamports = BigInt(Math.floor(solAmount * 1e9))
+    const binsTotal = fullBinsDown + fullBinsUp
+    const solToSwapLamports = totalSolLamports * BigInt(fullBinsDown) / BigInt(binsTotal)
+    const remainingSolLamports = totalSolLamports - solToSwapLamports
+
+    console.log(`${label} one-sided split for Bid-Ask: swap ${solToSwapLamports} lamports SOL for token side, keep ${remainingSolLamports} as SOL side`)
+
+    // Pre-quote for validation (do not send yet)
+    try {
+      const params = new URLSearchParams({
+        inputMint: NATIVE_MINT,
+        outputMint: outputMint.toBase58(),
+        amount: solToSwapLamports.toString(),
+        slippageBps: '1000',
+        onlyDirectRoutes: 'false',
+      })
+      const quoteUrl = `https://api.jup.ag/swap/v1/quote?${params.toString()}`
+      const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(7000) })
+      if (!quoteRes.ok) throw new Error(`quote http ${quoteRes.status}`)
+      const quote = await quoteRes.json()
+      if (quote?.error || quote?.errorCode) throw new Error(quote.error || quote.errorCode || 'quote error')
+      const expectedOut = BigInt(quote.outAmount ?? quote.out_amount ?? '0')
+      console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token`)
+    } catch (e) {
+      console.warn(`${label} pre-quote SOL→token failed — skipping pool: ${e instanceof Error ? e.message : e}`)
+      return null
+    }
+
+    // Execute the swap
+    const swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
+    if (!swapRes) {
+      console.error(`${label} swap SOL to token failed`)
+      return null
+    }
+    const actualTokenLamports = swapRes.tokenAmount
+    console.log(`${label} swap done: received ${actualTokenLamports} token lamports`)
 
     const positionKeypair = new Keypair()
 
-    // === DIRECT ONE-SIDED SOL PRIMARY (full evil-panda range support) ===
-    // Uses official DLMM SDK initializePositionAndAddLiquidityByStrategy with one-sided
-    // totals (pure SOL economics, no pre-swap to the token side). The full desired
-    // -50%/+100% range is only attempted when the preceding free-range gate confirmed
-    // that the entire range is covered by existing bin arrays at zero cost.
-    console.log(`${label} attempting direct one-sided SOL (full evil-panda range, Bid-Ask shape)`);
+    // === DIRECT (after explicit pre-swap for the token side) ===
+    console.log(`${label} attempting direct one-sided SOL (full evil-panda range, Bid-Ask shape) after Jupiter swap`);
     const directResult = await openPositionDirectSdkFallback(
       metrics,
       strategy,
@@ -351,18 +310,16 @@ export async function openPosition(
       label,
       priorityFee,
       DRY_RUN,
-      positionKeypair
+      positionKeypair,
+      remainingSolLamports,
+      actualTokenLamports
     );
     if (directResult) {
       console.log(`${label} position opened successfully via direct SDK ✔`);
       return directResult;
     }
 
-    // If we reach here the direct path did not succeed (e.g. on-chain constraints
-    // not visible in our pre-checks). No Zap fallback for evil-panda — the range
-    // is structurally too wide for Zap. Return null so the scanner can try again
-    // on a future tick (or the pool's free bin arrays improve).
-    console.warn(`${label} direct primary did not succeed — giving up (no Zap fallback for this strategy)`);
+    console.warn(`${label} direct primary did not succeed — giving up`);
     return null;
 
   } catch (err) {
@@ -539,7 +496,9 @@ async function openPositionDirectSdkFallback(
   attemptLabel: string,
   priorityFee: number,
   DRY_RUN: boolean,
-  positionKeypair: Keypair
+  positionKeypair: Keypair,
+  remainingSolLamports: bigint = 0n,
+  actualTokenLamports: bigint = 0n
 ): Promise<string | null> {
   const label = `${attemptLabel}[direct-primary]`
 
@@ -554,10 +513,6 @@ async function openPositionDirectSdkFallback(
   const wallet = getWallet()
 
   try {
-    const amountIn = new BN(Math.floor(solAmount * 1e9))
-
-    console.log(`${label} entering direct one-sided SOL primary path (no pre-swap, pure SOL economics, full range)`)
-
     if (DRY_RUN) {
       console.log(`${label} [SAFETY] DRY_RUN true before direct position creation — aborting`)
       return null
@@ -568,16 +523,16 @@ async function openPositionDirectSdkFallback(
     const isTokenXSol = dlmmPool.tokenX.publicKey.toBase58() === NATIVE_MINT_STR
     const isTokenYSol = dlmmPool.tokenY.publicKey.toBase58() === NATIVE_MINT_STR
 
-    // One-sided SOL: put full amount on the SOL side, 0 on the other
-    const totalX = isTokenXSol ? amountIn : new BN(0)
-    const totalY = isTokenYSol ? amountIn : new BN(0)
+    // After explicit Jupiter swap for the token side (Bid-Ask one-sided distribution)
+    const totalX = isTokenXSol ? new BN(remainingSolLamports.toString()) : new BN(actualTokenLamports.toString())
+    const totalY = isTokenYSol ? new BN(remainingSolLamports.toString()) : new BN(actualTokenLamports.toString())
 
     const StrategyTypeEnum = await getStrategyType()
     const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
 
     console.log(
       `${label} using OFFICIAL direct DLMM SDK initializePositionAndAddLiquidityByStrategy ` +
-      `(one-sided on SOL primary, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
+      `(after Jupiter swap for token side, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
@@ -681,4 +636,4 @@ async function openPositionDirectSdkFallback(
   }
 }
 
-// (swapSolToTokenViaJupiter removed - no longer needed after switching fallback to pure SOL one-sided)
+// swapSolToToken is now used for the explicit pre-swap in the one-sided Bid-Ask open flow.

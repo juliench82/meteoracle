@@ -227,6 +227,98 @@ export async function swapTokenToSol(
 }
 
 /**
+ * Swaps a specific amount of native SOL to `tokenMint` via Jupiter.
+ * Uses the same slippage ladder and retry logic as swapTokenToSol.
+ * Pre-quote validation should be done by caller.
+ * Returns {sig, tokenAmount: outAmount from quote} on success.
+ * Throws on final failure.
+ */
+async function attemptSwapSolToToken(
+  tokenMint: string,
+  solLamports: bigint,
+  slippage: number,
+  wallet: ReturnType<typeof getWallet>,
+  label: string,
+): Promise<{ sig: string; outAmount: bigint }> {
+  const quoteUrl =
+    `${JUPITER_QUOTE_API}/quote?inputMint=${NATIVE_MINT}&outputMint=${tokenMint}` +
+    `&amount=${solLamports.toString()}&slippageBps=${slippage}&onlyDirectRoutes=false`;
+
+  const quoteRes = await fetchWithRetry(quoteUrl, {});
+  if (!quoteRes.ok) {
+    const body = await quoteRes.text();
+    throw new Error(`Jupiter quote failed (${slippage}bps): ${quoteRes.status} ${body}`);
+  }
+  const quote = await quoteRes.json();
+
+  const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      quoteResponse: quote,
+      userPublicKey: wallet.publicKey.toBase58(),
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: 'auto',
+    }),
+  });
+  if (!swapRes.ok) {
+    const body = await swapRes.text();
+    throw new Error(`Jupiter swap tx failed (${slippage}bps): ${swapRes.status} ${body}`);
+  }
+  const { swapTransaction } = await swapRes.json();
+
+  const txBuf = Buffer.from(swapTransaction, 'base64');
+  const tx = VersionedTransaction.deserialize(txBuf);
+  tx.sign([wallet]);
+
+  const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
+  const outAmount = BigInt(quote.outAmount ?? quote.out_amount ?? '0');
+  console.log(`${label} [swap] SOL → token confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | outAmount: ${outAmount}`);
+  return { sig, outAmount };
+}
+
+/**
+ * Swaps a specific amount of native SOL to `tokenMint` via Jupiter (for one-sided open).
+ * Pre-validate quote exists before calling.
+ * Returns the swap sig and actual token amount received.
+ * Throws on final failure — caller responsible for alerting.
+ */
+export async function swapSolToToken(
+  tokenMint: string,
+  solLamports: bigint,
+  label: string
+): Promise<{ sig: string; tokenAmount: bigint } | null> {
+  if (process.env.BOT_DRY_RUN === 'true') {
+    console.log(`${label} [swap] DRY RUN — skipping Jupiter swap`)
+    return null;
+  }
+
+  if (solLamports <= 0n) {
+    console.log(`${label} [swap] zero SOL amount — nothing to swap`);
+    return null;
+  }
+
+  console.log(`${label} [swap] swapping ${solLamports.toString()} lamports SOL → ${tokenMint.slice(0, 8)}`);
+
+  const ladder = slippageLadder();
+  let lastError: unknown;
+
+  for (const slippage of ladder) {
+    try {
+      console.log(`${label} [swap] trying slippage ${slippage}bps…`);
+      return await attemptSwapSolToToken(tokenMint, solLamports, slippage, getWallet(), label);
+    } catch (err) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`${label} [swap] failed at ${slippage}bps: ${msg}`);
+    }
+  }
+
+  throw lastError;
+}
+
+/**
  * Retries stranded sell_failed positions (and any recently closed positions that
  * still have a token balance in the wallet).
  *
