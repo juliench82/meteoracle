@@ -325,7 +325,7 @@ export async function openPosition(
       dlmmPool,
       poolPubkey,
       outputMint,
-      solAmount,
+      solAmount,  // budgeted target; effectiveDeployedSol is computed inside from actual post-swap lamports + entry price
       minBinId,
       maxBinId,
       solIsTokenX,
@@ -484,7 +484,7 @@ async function openPositionDirect(
   dlmmPool: any,
   poolPubkey: PublicKey,
   outputMint: PublicKey,
-  solAmount: number,
+  _solAmount: number, // budgeted target passed from caller; we compute + persist effectiveDeployedSol from actual post-swap amounts instead
   minBinId: number,
   maxBinId: number,
   solIsTokenX: boolean,
@@ -572,19 +572,30 @@ async function openPositionDirect(
 
     const openSig = liqSig
 
+    // Compute actual capital deployed using the post-swap received amounts + entry price.
+    // This replaces the budgeted solAmount so that persisted sol_deposited, exposure caps,
+    // and records reflect reality (slippage, actual token received) rather than the pre-swap target.
+    const entryPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin);
+    const tokenDecimals = isTokenXSol
+      ? (dlmmPool.tokenY?.decimals ?? 6)
+      : (dlmmPool.tokenX?.decimals ?? 6);
+    const actualTokenWhole = Number(actualTokenLamports) / Math.pow(10, tokenDecimals);
+    const actualTokenValueSol = actualTokenWhole * entryPriceSol;
+    const effectiveDeployedSol = (Number(remainingSolLamports) / 1e9) + actualTokenValueSol;
+
     const positionId = await persistPosition(
       metrics,
       strategy,
       openSig,
       metrics.priceUsd ?? 0,
-      getDecimalAdjustedPrice(dlmmPool, activeBin),
-      solAmount,
+      entryPriceSol,
+      effectiveDeployedSol,
       positionKeypair.publicKey.toBase58(),
       tokenAmountDeposited,
       DRY_RUN
     )
 
-    await sendOpenAlert(metrics, strategy, positionId, solAmount, getDecimalAdjustedPrice(dlmmPool, activeBin))
+    await sendOpenAlert(metrics, strategy, positionId, effectiveDeployedSol, entryPriceSol)
 
     console.log(`${label} position opened successfully via direct SDK primary path ✔`)
     return positionId

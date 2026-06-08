@@ -232,17 +232,18 @@ export async function persistStrandedTokenAfterFailedOpen(
 ): Promise<void> {
   try {
     const positions = getOpenLpPositions();
-    // Avoid creating duplicate stranded rows for the same mint
+    // Avoid creating duplicate stranded rows for the same recovery mint (the token we actually hold)
+    const recoveryMint = tokenMint || metrics.address;
     const existing = positions.find((p: any) =>
-      p.mint === metrics.address &&
+      ((p as any).stranded_token_mint === recoveryMint || p.mint === recoveryMint) &&
       (p.status === 'sell_failed' || OPEN_LP_STATUSES.includes(p.status))
     );
     if (existing) return;
 
     const stranded = {
       id: (crypto as any).randomUUID ? (crypto as any).randomUUID() : String(Date.now()),
-      mint: metrics.address,                 // the token we actually hold (the one to sell back)
-      symbol: metrics.symbol || metrics.address.slice(0, 6),
+      mint: recoveryMint,                    // explicitly the token we hold and will sell back (for retryStrandedSells)
+      symbol: metrics.symbol || recoveryMint.slice(0, 6),
       pool_address: metrics.poolAddress || '',
       position_pubkey: '',                   // never created
       strategy_id: 'evil-panda',
@@ -253,17 +254,18 @@ export async function persistStrandedTokenAfterFailedOpen(
       closed_at: new Date().toISOString(),
       close_reason: 'open_failed_after_pre_swap',
       sell_failed_at: new Date().toISOString(),
-      stranded_token_mint: tokenMint,
+      stranded_token_mint: recoveryMint,
       stranded_token_amount: tokenAmountLamports.toString(),
       metadata: {
         stranded_from_open_failure: true,
         original_metrics: { mcUsd: metrics.mcUsd, volume24h: metrics.volume24h },
+        pool_token_mint: metrics.address,
       },
     } as any;
 
     positions.push(stranded);
     saveOpenLpPositions(positions);
-    console.log(`[executor] persisted stranded token marker for recovery (mint=${metrics.address}, token=${tokenMint.slice(0,8)})`);
+    console.log(`[executor] persisted stranded token marker for recovery (mint=${recoveryMint}, token=${recoveryMint.slice(0,8)})`);
   } catch (e) {
     console.warn('[executor] failed to persist stranded token marker:', e);
   }

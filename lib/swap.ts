@@ -345,7 +345,10 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   let recovered = 0
 
   for (const pos of positions) {
-    if (!pos.mint) continue
+    // Resolve the mint to recover: prefer stranded_token_mint (for failed-open stranded rows and future-proofing)
+    // otherwise fall back to the main mint field.
+    const recoveryMint: string = (pos as any).stranded_token_mint || pos.mint || '';
+    if (!recoveryMint) continue;
 
     const tsStr = (pos as any).closed_at || (pos as any).opened_at
     if (tsStr) {
@@ -361,15 +364,15 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     if (!isSellFailed && !isRecentClosed) continue
 
     try {
-      const bal = await getWalletTokenBalance(pos.mint)
+      const bal = await getWalletTokenBalance(recoveryMint)
       if (bal > 0n) {
         retried++
-        const sym = (pos as any).symbol || pos.mint.slice(0, 6)
+        const sym = (pos as any).symbol || recoveryMint.slice(0, 6)
         const label = `[stranded-sell-retry][${sym}]`
-        console.log(`${label} stranded balance=${bal} for ${pos.mint} (status=${pos.status}) — recovering via Jupiter`)
+        console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) — recovering via Jupiter`)
 
         // swapTokenToSol handles BOT_DRY_RUN, native SOL, and zero-balance internally (returns null in those cases)
-        const sig = await swapTokenToSol(pos.mint, label)
+        const sig = await swapTokenToSol(recoveryMint, label)
         if (sig) {
           recovered++
           console.log(`${label} recovered ✔ sig=${sig}`)
