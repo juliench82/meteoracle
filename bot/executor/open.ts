@@ -26,14 +26,10 @@ import BN from 'bn.js'
 import { logInfo, logError, logWarn } from '@/lib/log'
 import { getOpenLpPositions } from '@/lib/local-state'
 import type { StrategyType } from '@meteora-ag/dlmm'
-import type { ZapInDlmmResponse } from '@meteora-ag/zap-sdk'
-import { DlmmSingleSided } from '@meteora-ag/zap-sdk'
-
 
 import {
   getDLMM,
   getStrategyType,
-  getZap,
   strategyTypeForDistribution,
   findStrategyForPosition,
   getTotalDeployedSolForCap,
@@ -41,10 +37,6 @@ import {
   getDecimalAdjustedPrice,
   NATIVE_MINT_STR,
   METEORA_RENT_RESERVE_SOL,
-  DLMM_ZAP_SWAP_SLIPPAGE_BPS,
-  DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE,
-  DLMM_ZAP_MAX_ACCOUNTS,
-  DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
   MAX_BINS_BY_STRATEGY,
   MAX_BINS_DEFAULT,
   MARKET_LP_SOL_PER_POSITION,
@@ -339,12 +331,12 @@ export async function openPosition(
 
     const positionKeypair = new Keypair()
 
-    // === DIRECT ONE-SIDED SOL PRIMARY (full range support) + Zap fallback ===
-    // Direct primary: uses official DLMM SDK initializePositionAndAddLiquidityByStrategy with one-sided
-    // totals (pure SOL economics, no pre-swap to the token side). Supports full desired ranges
-    // (e.g. -50%/+100% = 149+ bins on binStep=100, confirmed manually with one position).
-    // Zap (Ape In equivalent) as fallback only.
-    console.log(`${label} attempting direct one-sided SOL as PRIMARY path (full evil-panda range, Bid-Ask shape)`);
+    // === DIRECT ONE-SIDED SOL PRIMARY (full evil-panda range support) ===
+    // Uses official DLMM SDK initializePositionAndAddLiquidityByStrategy with one-sided
+    // totals (pure SOL economics, no pre-swap to the token side). The full desired
+    // -50%/+100% range is only attempted when the preceding free-range gate confirmed
+    // that the entire range is covered by existing bin arrays at zero cost.
+    console.log(`${label} attempting direct one-sided SOL (full evil-panda range, Bid-Ask shape)`);
     const directResult = await openPositionDirectSdkFallback(
       metrics,
       strategy,
@@ -362,54 +354,16 @@ export async function openPosition(
       positionKeypair
     );
     if (directResult) {
-      console.log(`${label} position opened successfully via direct SDK primary path ✔`);
+      console.log(`${label} position opened successfully via direct SDK ✔`);
       return directResult;
     }
-    console.warn(`${label} direct primary did not succeed — falling back to Zap path`);
 
-    // Zap fallback (atomic single-sided via Zap program, only if direct primary unsuitable)
-    console.log(`${label} starting Zap fallback path (singleSided=${solIsTokenX ? 'X' : 'Y'})`);
-    const { openSig, lastZapErr } = await tryZapInWithRetries({
-      label,
-      dlmmPool,
-      poolPubkey,
-      minBinId,
-      maxBinId,
-      solAmount,
-      amountIn: new BN(Math.floor(solAmount * 1e9)),
-      solIsTokenX,
-      strategyType,
-      priorityFee,
-      positionKeypair,
-      wallet,
-      connection,
-      DRY_RUN,
-    });
-
-    if (!openSig && lastZapErr) {
-      console.error(`${label} both direct primary and Zap fallback failed — giving up on ${metrics.symbol}`);
-      // no further fallback; return null below via finalize or explicit
-    }
-
-    if (openSig) {
-      console.log(`${label} position opened successfully via Zap fallback path`)
-      const result = await finalizeOpenPosition({
-        label,
-        metrics,
-        strategy,
-        openSig,
-        entryPriceSol,
-        solAmount,
-        positionKeypair,
-        dlmmPool,
-        DRY_RUN,
-        wallet,
-      });
-      return result;
-    } else {
-      console.warn(`${label} both direct primary and Zap fallback failed to produce an openSig`);
-      return null;
-    }
+    // If we reach here the direct path did not succeed (e.g. on-chain constraints
+    // not visible in our pre-checks). No Zap fallback for evil-panda — the range
+    // is structurally too wide for Zap. Return null so the scanner can try again
+    // on a future tick (or the pool's free bin arrays improve).
+    console.warn(`${label} direct primary did not succeed — giving up (no Zap fallback for this strategy)`);
+    return null;
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -425,143 +379,6 @@ export async function openPosition(
     })
     return null
   }
-}
-
-/**
- * Extracted Zap retry logic for readability.
- * Handles up to 2 attempts with the Meteora Zap SDK, including per-attempt cleanup.
- */
-async function tryZapInWithRetries(params: {
-  label: string;
-  dlmmPool: any;
-  poolPubkey: PublicKey;
-  minBinId: number;
-  maxBinId: number;
-  solAmount: number;
-  amountIn: BN;
-  solIsTokenX: boolean;
-  strategyType: any;
-  priorityFee: number;
-  positionKeypair: Keypair;
-  wallet: Keypair;
-  connection: Connection;
-  DRY_RUN: boolean;
-}): Promise<{ openSig: string; lastZapErr: any }> {
-  const {
-    label, dlmmPool, poolPubkey, minBinId, maxBinId, solAmount, amountIn,
-    solIsTokenX, strategyType, priorityFee, positionKeypair, wallet, connection, DRY_RUN,
-  } = params;
-
-  const attemptLabelBase = label;
-  const favorXInActiveId = solIsTokenX;
-  const singleSided = solIsTokenX ? DlmmSingleSided.X : DlmmSingleSided.Y;
-  console.log(`${attemptLabelBase} singleSided=${singleSided} (SOL side=${solIsTokenX ? 'X' : 'Y'}), using FULL range deltas for position (UI-style, Zap fallback)`);
-
-  const sendZapTx = async (
-    tx: Transaction | undefined,
-    signers: import('@solana/web3.js').Signer[],
-    stage: string,
-    attemptLabel: string,
-  ): Promise<string | null> => {
-    if (!tx || tx.instructions.length === 0) return null;
-    const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), signers, attemptLabel);
-    console.log(`${attemptLabel} zap-in ${stage} confirmed ✔ sig: ${sig}`);
-    return sig;
-  };
-
-  let openSig = '';
-  let lastZapErr: any = null;
-
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const attemptLabel = `${attemptLabelBase} (attempt ${attempt}/2)`;
-    let cleanupSentThisAttempt = false;
-
-    try {
-      console.log(`${attemptLabel} building fresh zap quote...`);
-
-      const activeBin = await dlmmPool.getActiveBin();
-      const currentActiveBinId = activeBin.binId;
-      const currentMinDeltaId = minBinId - currentActiveBinId;
-      const currentMaxDeltaId = maxBinId - currentActiveBinId;
-      // Note: we pass the full min/max deltas (the evil-panda -50%/+100% range)
-      // even for singleSided (in fallback). The singleSided flag tells the Zap/estimate to do
-      // pure one-sided deposit (swapAmount=0).
-
-      const { estimateDlmmDirectSwap } = await import('@meteora-ag/zap-sdk');
-      const directSwapEstimate = await estimateDlmmDirectSwap({
-        amountIn,
-        inputTokenMint: NATIVE_MINT,
-        lbPair: poolPubkey,
-        connection,
-        swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
-        minDeltaId: currentMinDeltaId,
-        maxDeltaId: currentMaxDeltaId,
-        strategy: strategyType,
-        singleSided,
-      });
-
-      console.log(
-        `${attemptLabel} DLMM zap-in estimate: input=${amountIn.toString()} lamports ` +
-        `solSide=${solIsTokenX ? 'X' : 'Y'} singleSided=${singleSided} ` +
-        `rangeDeltas: min=${currentMinDeltaId} max=${currentMaxDeltaId} (evil-panda range, Zap fallback) ` +
-        `swapAmount=${directSwapEstimate.result.swapAmount.toString()} ` +
-        `postX=${directSwapEstimate.result.postSwapX.toString()} postY=${directSwapEstimate.result.postSwapY.toString()}`,
-      );
-
-      const zap = await getZap();
-      const zapParams = await zap.getZapInDlmmDirectParams({
-        user: wallet.publicKey,
-        lbPair: poolPubkey,
-        inputTokenMint: NATIVE_MINT,
-        amountIn,
-        maxActiveBinSlippage: DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE,
-        minDeltaId: currentMinDeltaId,
-        maxDeltaId: currentMaxDeltaId,
-        strategy: strategyType,
-        favorXInActiveId,
-        maxAccounts: DLMM_ZAP_MAX_ACCOUNTS,
-        swapSlippageBps: DLMM_ZAP_SWAP_SLIPPAGE_BPS,
-        maxTransferAmountExtendPercentage: DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE,
-        directSwapEstimate: directSwapEstimate.result,
-        singleSided,
-      });
-
-      const zapResponse: ZapInDlmmResponse = await zap.buildZapInDlmmTransaction({
-        ...zapParams,
-        position: positionKeypair.publicKey,
-      });
-
-      const sendCleanupThisAttemptFn = async (stage: string): Promise<void> => {
-        if (cleanupSentThisAttempt) return;
-        cleanupSentThisAttempt = true;
-        try {
-          await sendZapTx(zapResponse.cleanUpTransaction, [wallet], stage, attemptLabel);
-        } catch (cleanupErr) {
-          console.warn(`${attemptLabel} zap-in cleanup failed after ${stage}:`, cleanupErr);
-        }
-      };
-
-      await sendZapTx(zapResponse.setupTransaction, [wallet], 'setup', attemptLabel);
-      for (let i = 0; i < zapResponse.swapTransactions.length; i++) {
-        await sendZapTx(zapResponse.swapTransactions[i], [wallet], `swap ${i + 1}/${zapResponse.swapTransactions.length}`, attemptLabel);
-      }
-      await sendZapTx(zapResponse.ledgerTransaction, [wallet], 'ledger', attemptLabel);
-      openSig = await sendZapTx(zapResponse.zapInTransaction, [wallet, positionKeypair], 'position', attemptLabel) ?? '';
-      await sendZapTx(zapResponse.cleanUpTransaction, [wallet], 'cleanup', attemptLabel);
-
-      console.log(`${attemptLabel} position opened successfully`);
-      break;
-
-    } catch (zapErr) {
-      lastZapErr = zapErr;
-      console.warn(`${label} attempt ${attempt}/2 failed:`, zapErr);
-
-      if (attempt === 2) break;
-      await new Promise((r) => setTimeout(r, 1200));
-    }
-  }
-
-  return { openSig, lastZapErr };
 }
 
 async function finalizeOpenPosition(params: {
