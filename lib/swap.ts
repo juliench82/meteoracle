@@ -17,6 +17,7 @@ const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000]
 /**
  * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
  * Returns true only if a quote succeeds with positive outAmount (no error).
+ * Uses onlyDirectRoutes=false for maximum route discovery (preflight probe only).
  */
 export async function hasJupiterRouteSolToToken(
   outputMint: string,
@@ -67,7 +68,7 @@ async function fetchWithRetry(url: string, options: RequestInit, attempt = 1): P
   } catch (err) {
     if (attempt < SWAP_MAX_RETRIES) {
       const delay = attempt * SWAP_RETRY_DELAY_MS
-      console.warn(`[swap] fetch failed (attempt ${attempt}/${SWAP_MAX_RETRIES}), retrying in ${delay}ms\u2026`)
+      console.warn(`[swap] fetch failed (attempt ${attempt}/${SWAP_MAX_RETRIES}), retrying in ${delay}ms…`)
       await new Promise(r => setTimeout(r, delay))
       return fetchWithRetry(url, options, attempt + 1)
     }
@@ -92,18 +93,18 @@ async function sendAndConfirmVersioned(
     await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
   } catch (confirmErr: unknown) {
     const errMsg = confirmErr instanceof Error ? confirmErr.message : String(confirmErr)
-    console.warn(`${label} confirmTransaction threw \u2014 checking chain directly for ${sig.slice(0, 8)}\u2026`, errMsg)
+    console.warn(`${label} confirmTransaction threw — checking chain directly for ${sig.slice(0, 8)}…`, errMsg)
 
     await new Promise(r => setTimeout(r, 3_000))
     const statusResp = await connection.getSignatureStatus(sig, { searchTransactionHistory: true })
     const status = statusResp.value
 
     if (status && !status.err && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
-      console.log(`${label} tx confirmed on-chain via status fallback \u2714 (${status.confirmationStatus}) sig: ${sig}`)
+      console.log(`${label} tx confirmed on-chain via status fallback ✔ (${status.confirmationStatus}) sig: ${sig}`)
       return sig
     }
 
-    console.error(`${label} tx not confirmed on-chain after fallback check \u2014 sig: ${sig}`, { status })
+    console.error(`${label} tx not confirmed on-chain after fallback check — sig: ${sig}`, { status })
     throw confirmErr
   }
 
@@ -111,7 +112,9 @@ async function sendAndConfirmVersioned(
 }
 
 /**
- * Attempts a single Jupiter token\u2192SOL swap at the given slippageBps.
+ * Attempts a single Jupiter token→SOL swap at the given slippageBps.
+ * Uses restrictIntermediateTokens=true to avoid multi-hop routes through
+ * random meme coins that amplify price impact on micro-cap tokens.
  */
 async function attemptSwap(
   tokenMint: string,
@@ -122,7 +125,7 @@ async function attemptSwap(
 ): Promise<string> {
   const quoteUrl =
     `${JUPITER_QUOTE_API}/quote?inputMint=${tokenMint}&outputMint=${NATIVE_MINT}` +
-    `&amount=${balance.toString()}&slippageBps=${slippage}&onlyDirectRoutes=false`
+    `&amount=${balance.toString()}&slippageBps=${slippage}&restrictIntermediateTokens=true`
 
   const quoteRes = await fetchWithRetry(quoteUrl, {})
   if (!quoteRes.ok) {
@@ -153,27 +156,27 @@ async function attemptSwap(
   tx.sign([wallet])
 
   const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`)
-  console.log(`${label} [swap] token \u2192 SOL confirmed \u2714 sig: ${sig} | slippage: ${slippage}bps | outAmount: ${quote.outAmount}`)
+  console.log(`${label} [swap] token → SOL confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | outAmount: ${quote.outAmount}`)
   return sig
 }
 
 /**
  * Swaps all balance of `tokenMint` to native SOL via Jupiter.
- * Uses escalating slippage ladder: 500 \u2192 1000 \u2192 2000 bps.
+ * Uses escalating slippage ladder: 500 → 1000 → 2000 bps.
  * Returns the swap signature, or null if nothing to swap.
- * Throws on final failure \u2014 caller is responsible for alerting.
+ * Throws on final failure — caller is responsible for alerting.
  */
 export async function swapTokenToSol(
   tokenMint: string,
   label: string
 ): Promise<string | null> {
   if (process.env.BOT_DRY_RUN === 'true') {
-    console.log(`${label} [swap] DRY RUN \u2014 skipping Jupiter swap`)
+    console.log(`${label} [swap] DRY RUN — skipping Jupiter swap`)
     return null
   }
 
   if (tokenMint === NATIVE_MINT) {
-    console.log(`${label} [swap] token is native SOL \u2014 no swap needed`)
+    console.log(`${label} [swap] token is native SOL — no swap needed`)
     return null
   }
 
@@ -182,16 +185,16 @@ export async function swapTokenToSol(
 
   const balance = await getTokenBalance(connection, tokenMint, wallet.publicKey)
   if (balance === 0n) {
-    console.log(`${label} [swap] zero token balance \u2014 nothing to swap`)
+    console.log(`${label} [swap] zero token balance — nothing to swap`)
     return null
   }
 
-  console.log(`${label} [swap] swapping ${balance.toString()} lamports of ${tokenMint.slice(0, 8)}\u2026 \u2192 SOL`)
+  console.log(`${label} [swap] swapping ${balance.toString()} lamports of ${tokenMint.slice(0, 8)}… → SOL`)
 
   let lastError: unknown
   for (const slippage of SWAP_SLIPPAGE_LADDER) {
     try {
-      console.log(`${label} [swap] trying slippage ${slippage}bps\u2026`)
+      console.log(`${label} [swap] trying slippage ${slippage}bps…`)
       return await attemptSwap(tokenMint, balance, slippage, wallet, label)
     } catch (err) {
       lastError = err
@@ -204,7 +207,9 @@ export async function swapTokenToSol(
 }
 
 /**
- * Attempts a single Jupiter SOL\u2192token swap at the given slippageBps.
+ * Attempts a single Jupiter SOL→token swap at the given slippageBps.
+ * Uses restrictIntermediateTokens=true to avoid multi-hop routes through
+ * random meme coins that amplify price impact on micro-cap tokens.
  */
 async function attemptSwapSolToToken(
   tokenMint: string,
@@ -215,7 +220,7 @@ async function attemptSwapSolToToken(
 ): Promise<{ sig: string; tokenAmount: bigint }> {
   const quoteUrl =
     `${JUPITER_QUOTE_API}/quote?inputMint=${NATIVE_MINT}&outputMint=${tokenMint}` +
-    `&amount=${solLamports.toString()}&slippageBps=${slippage}&onlyDirectRoutes=false`;
+    `&amount=${solLamports.toString()}&slippageBps=${slippage}&restrictIntermediateTokens=true`;
 
   const quoteRes = await fetchWithRetry(quoteUrl, {});
   if (!quoteRes.ok) {
@@ -247,15 +252,15 @@ async function attemptSwapSolToToken(
 
   const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
   const actualReceived = await getWalletTokenBalance(tokenMint);
-  console.log(`${label} [swap] SOL \u2192 token confirmed \u2714 sig: ${sig} | slippage: ${slippage}bps | actualReceived: ${actualReceived}`);
+  console.log(`${label} [swap] SOL → token confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | actualReceived: ${actualReceived}`);
   return { sig, tokenAmount: actualReceived };
 }
 
 /**
  * Swaps a specific amount of native SOL to `tokenMint` via Jupiter (for one-sided open).
- * Uses escalating slippage ladder: 500 \u2192 1000 \u2192 2000 bps.
+ * Uses escalating slippage ladder: 500 → 1000 → 2000 bps.
  * Returns the swap sig and actual on-chain token amount received.
- * Throws on final failure \u2014 caller responsible for alerting.
+ * Throws on final failure — caller responsible for alerting.
  */
 export async function swapSolToToken(
   tokenMint: string,
@@ -263,21 +268,21 @@ export async function swapSolToToken(
   label: string
 ): Promise<{ sig: string; tokenAmount: bigint } | null> {
   if (process.env.BOT_DRY_RUN === 'true') {
-    console.log(`${label} [swap] DRY RUN \u2014 skipping Jupiter swap`)
+    console.log(`${label} [swap] DRY RUN — skipping Jupiter swap`)
     return null;
   }
 
   if (solLamports <= 0n) {
-    console.log(`${label} [swap] zero SOL amount \u2014 nothing to swap`);
+    console.log(`${label} [swap] zero SOL amount — nothing to swap`);
     return null;
   }
 
-  console.log(`${label} [swap] swapping ${solLamports.toString()} lamports SOL \u2192 ${tokenMint.slice(0, 8)}`);
+  console.log(`${label} [swap] swapping ${solLamports.toString()} lamports SOL → ${tokenMint.slice(0, 8)}`);
 
   let lastError: unknown;
   for (const slippage of SWAP_SLIPPAGE_LADDER) {
     try {
-      console.log(`${label} [swap] trying slippage ${slippage}bps\u2026`);
+      console.log(`${label} [swap] trying slippage ${slippage}bps…`);
       return await attemptSwapSolToToken(tokenMint, solLamports, slippage, getWallet(), label);
     } catch (err) {
       lastError = err;
@@ -325,12 +330,12 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         retried++
         const sym = (pos as any).symbol || recoveryMint.slice(0, 6)
         const label = `[stranded-sell-retry][${sym}]`
-        console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) \u2014 recovering via Jupiter`)
+        console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) — recovering via Jupiter`)
 
         const sig = await swapTokenToSol(recoveryMint, label)
         if (sig) {
           recovered++
-          console.log(`${label} recovered \u2714 sig=${sig}`)
+          console.log(`${label} recovered ✔ sig=${sig}`)
         }
 
         const all = getOpenLpPositions()
