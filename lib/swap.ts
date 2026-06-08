@@ -9,19 +9,18 @@ const SWAP_TIMEOUT_MS = 20_000
 const SWAP_MAX_RETRIES = 3
 const SWAP_RETRY_DELAY_MS = 3_000
 
+// Shared slippage ladder for both buy and sell paths.
+// Pump.fun/DBC graduates are illiquid — sub-500bps virtually never fills.
+// 2000bps (20%) is the hard ceiling.
+const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000]
+
 /**
  * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
  * Returns true only if a quote succeeds with positive outAmount (no error).
- * Used in scanner deep-check to avoid issues with very new pools (now less relevant after activity-model change)
- * fail the Jupiter buy step during live Token-2022 position open (very common for
- * brand-new pump.fun/Dynamic Bonding Curve graduates until the pool is indexed by
- * the aggregator or has visible swap routes).\n *
- * Uses the same /swap/v1/quote endpoint + params as the live buy path in executor/open.ts
- * so the check is predictive of whether the actual swap ladder will find a route.
  */
 export async function hasJupiterRouteSolToToken(
   outputMint: string,
-  amountLamports = '50000000', // ~0.05 SOL test amount (larger than dust to avoid min-size false-negatives)
+  amountLamports = '50000000', // ~0.05 SOL test amount
   slippageBps = 1000
 ): Promise<boolean> {
   try {
@@ -42,25 +41,6 @@ export async function hasJupiterRouteSolToToken(
   } catch {
     return false;
   }
-}
-
-// Slippage ladder for swapTokenToSol: tries each tier in order until one lands.
-// Env SWAP_SLIPPAGE_BPS overrides the starting tier (not the full ladder).
-const SLIPPAGE_LADDER_BPS = [100, 300, 500, 1000, 2000, 5000]
-const MAX_SLIPPAGE_BPS = 2000; // Hard roof for slippage (reasonable max per user preference)
-
-function baseSlippageBps(): number {
-  return parseInt(process.env.SWAP_SLIPPAGE_BPS ?? '200')
-}
-
-// Returns the ladder starting from the configured base slippage, capped at MAX_SLIPPAGE_BPS.
-function slippageLadder(): number[] {
-  const base = baseSlippageBps()
-  const idx = SLIPPAGE_LADDER_BPS.findIndex(b => b >= base)
-  let ladder = idx === -1 ? [base] : SLIPPAGE_LADDER_BPS.slice(idx)
-  ladder = ladder.filter(bps => bps <= MAX_SLIPPAGE_BPS)
-  if (ladder.length === 0) ladder = [MAX_SLIPPAGE_BPS]
-  return ladder
 }
 
 async function getTokenBalance(connection: Connection, mint: string, owner: PublicKey): Promise<bigint> {
@@ -87,7 +67,7 @@ async function fetchWithRetry(url: string, options: RequestInit, attempt = 1): P
   } catch (err) {
     if (attempt < SWAP_MAX_RETRIES) {
       const delay = attempt * SWAP_RETRY_DELAY_MS
-      console.warn(`[swap] fetch failed (attempt ${attempt}/${SWAP_MAX_RETRIES}), retrying in ${delay}ms…`)
+      console.warn(`[swap] fetch failed (attempt ${attempt}/${SWAP_MAX_RETRIES}), retrying in ${delay}ms\u2026`)
       await new Promise(r => setTimeout(r, delay))
       return fetchWithRetry(url, options, attempt + 1)
     }
@@ -96,18 +76,14 @@ async function fetchWithRetry(url: string, options: RequestInit, attempt = 1): P
 }
 
 /**
- * Sends a VersionedTransaction (typically from Jupiter) and confirms it.
- * Fetches blockhash before send for the confirm call (avoids using a post-send blockhash
- * which can cause premature timeouts even on landed txs). Falls back to getSignatureStatus.
+ * Sends a VersionedTransaction and confirms it.
+ * Fetches blockhash before send. Falls back to getSignatureStatus on confirm timeout.
  */
 async function sendAndConfirmVersioned(
   tx: VersionedTransaction,
   label: string,
 ): Promise<string> {
   const connection = getConnection()
-  // Fetch a reasonably fresh blockhash *before* send for the confirm call.
-  // (Jupiter-provided swap txs already carry their own recentBlockhash baked in by the service;
-  // we do not override it after signing.)
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
 
   const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
@@ -116,18 +92,18 @@ async function sendAndConfirmVersioned(
     await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed')
   } catch (confirmErr: unknown) {
     const errMsg = confirmErr instanceof Error ? confirmErr.message : String(confirmErr)
-    console.warn(`${label} confirmTransaction threw — checking chain directly for ${sig.slice(0, 8)}…`, errMsg)
+    console.warn(`${label} confirmTransaction threw \u2014 checking chain directly for ${sig.slice(0, 8)}\u2026`, errMsg)
 
     await new Promise(r => setTimeout(r, 3_000))
     const statusResp = await connection.getSignatureStatus(sig, { searchTransactionHistory: true })
     const status = statusResp.value
 
     if (status && !status.err && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
-      console.log(`${label} tx confirmed on-chain via status fallback ✔ (${status.confirmationStatus}) sig: ${sig}`)
+      console.log(`${label} tx confirmed on-chain via status fallback \u2714 (${status.confirmationStatus}) sig: ${sig}`)
       return sig
     }
 
-    console.error(`${label} tx not confirmed on-chain after fallback check — sig: ${sig}`, { status })
+    console.error(`${label} tx not confirmed on-chain after fallback check \u2014 sig: ${sig}`, { status })
     throw confirmErr
   }
 
@@ -135,8 +111,7 @@ async function sendAndConfirmVersioned(
 }
 
 /**
- * Attempts a single Jupiter quote+swap at the given slippageBps.
- * Returns the tx signature on success, throws a typed error on failure.
+ * Attempts a single Jupiter token\u2192SOL swap at the given slippageBps.
  */
 async function attemptSwap(
   tokenMint: string,
@@ -178,27 +153,27 @@ async function attemptSwap(
   tx.sign([wallet])
 
   const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`)
-  console.log(`${label} [swap] token → SOL confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | outAmount: ${quote.outAmount}`)
+  console.log(`${label} [swap] token \u2192 SOL confirmed \u2714 sig: ${sig} | slippage: ${slippage}bps | outAmount: ${quote.outAmount}`)
   return sig
 }
 
 /**
  * Swaps all balance of `tokenMint` to native SOL via Jupiter.
- * Retries with escalating slippage (100 → 300 → 500 → 1000 → 2000 → 5000 bps)
- * before giving up. Returns the swap signature, or null if nothing to swap.
- * Throws on final failure — caller is responsible for alerting.
+ * Uses escalating slippage ladder: 500 \u2192 1000 \u2192 2000 bps.
+ * Returns the swap signature, or null if nothing to swap.
+ * Throws on final failure \u2014 caller is responsible for alerting.
  */
 export async function swapTokenToSol(
   tokenMint: string,
   label: string
 ): Promise<string | null> {
   if (process.env.BOT_DRY_RUN === 'true') {
-    console.log(`${label} [swap] DRY RUN — skipping Jupiter swap`)
+    console.log(`${label} [swap] DRY RUN \u2014 skipping Jupiter swap`)
     return null
   }
 
   if (tokenMint === NATIVE_MINT) {
-    console.log(`${label} [swap] token is native SOL — no swap needed`)
+    console.log(`${label} [swap] token is native SOL \u2014 no swap needed`)
     return null
   }
 
@@ -207,18 +182,16 @@ export async function swapTokenToSol(
 
   const balance = await getTokenBalance(connection, tokenMint, wallet.publicKey)
   if (balance === 0n) {
-    console.log(`${label} [swap] zero token balance — nothing to swap`)
+    console.log(`${label} [swap] zero token balance \u2014 nothing to swap`)
     return null
   }
 
-  console.log(`${label} [swap] swapping ${balance.toString()} lamports of ${tokenMint.slice(0, 8)}… → SOL`)
+  console.log(`${label} [swap] swapping ${balance.toString()} lamports of ${tokenMint.slice(0, 8)}\u2026 \u2192 SOL`)
 
-  const ladder = slippageLadder()
   let lastError: unknown
-
-  for (const slippage of ladder) {
+  for (const slippage of SWAP_SLIPPAGE_LADDER) {
     try {
-      console.log(`${label} [swap] trying slippage ${slippage}bps…`)
+      console.log(`${label} [swap] trying slippage ${slippage}bps\u2026`)
       return await attemptSwap(tokenMint, balance, slippage, wallet, label)
     } catch (err) {
       lastError = err
@@ -231,8 +204,7 @@ export async function swapTokenToSol(
 }
 
 /**
- * Attempts a single Jupiter SOL→token swap at the given slippageBps.
- * Returns {sig, tokenAmount} on success, throws on failure.
+ * Attempts a single Jupiter SOL\u2192token swap at the given slippageBps.
  */
 async function attemptSwapSolToToken(
   tokenMint: string,
@@ -274,19 +246,16 @@ async function attemptSwapSolToToken(
   tx.sign([wallet]);
 
   const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
-  // Read the *actual* received balance from chain after confirm (quote.outAmount is only an estimate and can be off by slippage)
   const actualReceived = await getWalletTokenBalance(tokenMint);
-  console.log(`${label} [swap] SOL → token confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | actualReceived: ${actualReceived}`);
+  console.log(`${label} [swap] SOL \u2192 token confirmed \u2714 sig: ${sig} | slippage: ${slippage}bps | actualReceived: ${actualReceived}`);
   return { sig, tokenAmount: actualReceived };
 }
 
 /**
  * Swaps a specific amount of native SOL to `tokenMint` via Jupiter (for one-sided open).
- * Uses an escalating buy slippage ladder: 500 → 1000 → 2000 bps.
- * These thresholds match the illiquid nature of pump.fun/DBC graduates.
- * Pre-validate quote exists before calling.
- * Returns the swap sig and *actual* on-chain token amount received (post-slippage).
- * Throws on final failure — caller responsible for alerting.
+ * Uses escalating slippage ladder: 500 \u2192 1000 \u2192 2000 bps.
+ * Returns the swap sig and actual on-chain token amount received.
+ * Throws on final failure \u2014 caller responsible for alerting.
  */
 export async function swapSolToToken(
   tokenMint: string,
@@ -294,26 +263,21 @@ export async function swapSolToToken(
   label: string
 ): Promise<{ sig: string; tokenAmount: bigint } | null> {
   if (process.env.BOT_DRY_RUN === 'true') {
-    console.log(`${label} [swap] DRY RUN — skipping Jupiter swap`)
+    console.log(`${label} [swap] DRY RUN \u2014 skipping Jupiter swap`)
     return null;
   }
 
   if (solLamports <= 0n) {
-    console.log(`${label} [swap] zero SOL amount — nothing to swap`);
+    console.log(`${label} [swap] zero SOL amount \u2014 nothing to swap`);
     return null;
   }
 
-  console.log(`${label} [swap] swapping ${solLamports.toString()} lamports SOL → ${tokenMint.slice(0, 8)}`);
+  console.log(`${label} [swap] swapping ${solLamports.toString()} lamports SOL \u2192 ${tokenMint.slice(0, 8)}`);
 
-  // Buy ladder: 500 → 1000 → 2000 bps.
-  // Pump.fun/DBC graduates are illiquid; sub-500bps virtually never fills.
-  // 2000bps (20%) is the hard ceiling — beyond that, entry price is too degraded.
-  const BUY_SLIPPAGE_LADDER = [500, 1000, 2000];
   let lastError: unknown;
-
-  for (const slippage of BUY_SLIPPAGE_LADDER) {
+  for (const slippage of SWAP_SLIPPAGE_LADDER) {
     try {
-      console.log(`${label} [swap] trying slippage ${slippage}bps…`);
+      console.log(`${label} [swap] trying slippage ${slippage}bps\u2026`);
       return await attemptSwapSolToToken(tokenMint, solLamports, slippage, getWallet(), label);
     } catch (err) {
       lastError = err;
@@ -330,21 +294,16 @@ export async function swapSolToToken(
  * still have a token balance in the wallet).
  *
  * Called at the top of every monitor tick (via monitor.ts).
- * Uses only local state + direct wallet balance query + Jupiter swap ladder.
- * On successful recovery: updates the position record (status -> closed if needed,
- * records recovered timestamp/sig). Failures are left for the next tick.
  */
 export async function retryStrandedSells(): Promise<{ retried: number; recovered: number }> {
   const positions = getOpenLpPositions()
   const now = Date.now()
-  const recentMs = 7 * 24 * 3600 * 1000 // last 7 days (defense in depth for solo operator)
+  const recentMs = 7 * 24 * 3600 * 1000
 
   let retried = 0
   let recovered = 0
 
   for (const pos of positions) {
-    // Resolve the mint to recover: prefer stranded_token_mint (for failed-open stranded rows and future-proofing)
-    // otherwise fall back to the main mint field.
     const recoveryMint: string = (pos as any).stranded_token_mint || pos.mint || '';
     if (!recoveryMint) continue;
 
@@ -356,7 +315,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     if (pos.status === 'active' || pos.status === 'open') continue
 
     const isSellFailed = pos.status === 'sell_failed'
-    // Also sweep recently closed as a safety net (in case previous close left residue without setting sell_failed)
     const isRecentClosed = pos.status === 'closed' && !(pos as any).stranded_recovered_at
 
     if (!isSellFailed && !isRecentClosed) continue
@@ -367,16 +325,14 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         retried++
         const sym = (pos as any).symbol || recoveryMint.slice(0, 6)
         const label = `[stranded-sell-retry][${sym}]`
-        console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) — recovering via Jupiter`)
+        console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) \u2014 recovering via Jupiter`)
 
-        // swapTokenToSol handles BOT_DRY_RUN, native SOL, and zero-balance internally (returns null in those cases)
         const sig = await swapTokenToSol(recoveryMint, label)
         if (sig) {
           recovered++
-          console.log(`${label} recovered ✔ sig=${sig}`)
+          console.log(`${label} recovered \u2714 sig=${sig}`)
         }
 
-        // Persist recovery marker (or at least last check) using direct local-state to avoid pulling in executor
         const all = getOpenLpPositions()
         const idx = all.findIndex((p: any) => p.id === pos.id)
         if (idx !== -1) {
@@ -397,7 +353,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
       const msg = err instanceof Error ? err.message : String(err)
       const sym = (pos as any).symbol || pos.mint.slice(0, 6)
       console.warn(`[swap] stranded retry failed for ${sym}: ${msg}`)
-      // leave marker/status as-is so next monitor tick will retry
     }
   }
 
