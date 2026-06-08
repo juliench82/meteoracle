@@ -313,7 +313,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // 1. Cheap targeted list call: server filter_by (tvl + fee_24h + fee_tvl_ratio_24h) + sort_by=fee_tvl_ratio_1h:desc (bounded pages)
   // 2. Client secondary derives on the (small) result: impliedActiveTVL (volume_1h/fee_pct), fee_1h > fee_2h/2, age>2h
   // 3. LP count (expensive) only on final ~top-5 survivors
-  // 4. Deep quality gates + enter the first viable top performer ("#1 remaining")
+  // 4. Deep quality gates on survivors, then score + rank by composite (feeTvl 1h/24h + lpCountNorm) before opening
 
   const activityConfig = {
     maxPoolAgeMinutes: ACTIVITY_MAX_POOL_AGE_MINUTES,
@@ -388,6 +388,11 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // Pre-fetch live SOL price once per tick for accurate MC and position sizing
   const liveSolPriceUsd = await resolveSolPriceUsd()
 
+  // Array to collect candidates that pass all deep gates. We pass it via ctx
+  // so processActivityCandidate (module-level function) can push to it.
+  // After the loop we score + sort descending and open in that order.
+  const deepGateSurvivors: any[] = [];
+
   const tickContext: ScannerTickContext = {
     freshPools: activityCandidates, // wrapped ActivityCandidate[] for legacy selectBestPool helpers (we normalize inside)
     limitState,
@@ -400,13 +405,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
     openSkippedCount: { value: openSkippedCount },
     candidateCount: { value: candidateCount },
     dailyLossLimitHit: { value: dailyLossLimitHit },
+    deepGateSurvivors,
   };
-
-  // Collect candidates that pass *all* deep gates. After the loop we score them
-  // with the composite formula and sort descending so the single highest-scored
-  // survivor (or top N within slots) gets the open slot(s) instead of the first
-  // one that happened to be processed.
-  const deepGateSurvivors: any[] = [];
 
   for (const cand of activityCandidates) {
     await processActivityCandidate(cand, tickContext);
@@ -550,6 +550,9 @@ interface ScannerTickContext {
   openSkippedCount: { value: number };
   candidateCount: { value: number };
   dailyLossLimitHit: { value: boolean | null };
+
+  // For collecting deep survivors so we can score + rank after all gates (passed via ctx to avoid scope issues)
+  deepGateSurvivors: any[];
 }
 
 /**
@@ -632,6 +635,7 @@ async function processActivityCandidate(
     openSkippedCount: openSkippedCountRef,
     candidateCount: candidateCountRef,
     dailyLossLimitHit: dailyLossLimitHitRef,
+    deepGateSurvivors,
   } = ctx;
 
   const { pool: representativePool, ageHours } = cand;
