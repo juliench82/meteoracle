@@ -158,6 +158,23 @@ export function isFeeAccelerating(pool: MeteoraPool): boolean {
 }
 
 /**
+ * Composite score for ranking deep-gate survivors before opening positions.
+ *
+ * Formula (using only real, already-populated fields):
+ *   score = (feeTvlRatio_1h * 0.5) + (feeTvlRatio_24h * 0.3) + (lpCountNorm * 0.2)
+ *
+ * lpCountNorm caps at 20 so very large LP pools do not dominate the ranking.
+ * Higher score = higher priority for the next available open slot.
+ * Called only on candidates that have already passed every deep quality gate.
+ */
+export function computePoolScore(pool: MeteoraPool, lpCount: number): number {
+  const feeTvlRatio1h = getFeeTvlRatio(pool, '1h');
+  const feeTvlRatio24h = getFeeTvlRatio(pool, '24h');
+  const lpCountNorm = Math.min(Math.max(0, lpCount || 0), 20) / 20;
+  return (feeTvlRatio1h * 0.5) + (feeTvlRatio24h * 0.3) + (lpCountNorm * 0.2);
+}
+
+/**
  * Best-effort unique LP (position account) count for a pool.
  * Only called on the final ~top-5 survivors (expensive getProgramAccounts).
  *
