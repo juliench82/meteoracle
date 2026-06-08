@@ -52,7 +52,7 @@ import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '
 import { getBotState } from '@/lib/botState'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
-import { swapSolToToken, JUPITER_QUOTE_API } from '@/lib/swap'
+import { swapSolToToken, JUPITER_QUOTE_API, executeSwapFromPreQuote } from '@/lib/swap'
 import {
   OPEN_LP_STATUSES,
   assertCanOpenLpPosition,
@@ -285,20 +285,23 @@ export async function openPosition(
       console.warn(`${label} balance re-check before swap failed (proceeding with caution):`, balChkErr);
     }
 
-    // Pre-quote for validation (do not send yet)
+    // Pre-quote at the first ladder slippage (500bps) for validation.
+    // We will try to use this exact quote for the swap tx to minimize staleness between
+    // quote and execution (a common cause of 0x177e "route not executable" on new Token-2022 DLMMs).
+    let quote: any = null
     try {
       const params = new URLSearchParams({
         inputMint: NATIVE_MINT_STR,
         outputMint: outputMint.toBase58(),
         amount: solToSwapLamports.toString(),
-        slippageBps: '1000',
+        slippageBps: '500',
         onlyDirectRoutes: 'false',
         restrictIntermediateTokens: 'true',
       })
       const quoteUrl = `${JUPITER_QUOTE_API}/quote?${params.toString()}`
       const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(7000) })
       if (!quoteRes.ok) throw new Error(`quote http ${quoteRes.status}`)
-      const quote = await quoteRes.json()
+      quote = await quoteRes.json()
       if (quote?.error || quote?.errorCode) throw new Error(quote.error || quote.errorCode || 'quote error')
       const expectedOut = BigInt(quote.outAmount ?? quote.out_amount ?? '0')
       console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token`)
@@ -307,8 +310,13 @@ export async function openPosition(
       return null
     }
 
-    // Execute the swap
-    const swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
+    // Execute the swap: first try the fresh pre-quoted response directly (best chance to avoid 0x177e),
+    // then fall back to the full ladder (re-quotes at 500/1000/2000 bps).
+    let swapRes = await executeSwapFromPreQuote(quote, getWallet(), label)
+    if (!swapRes) {
+      console.warn(`${label} direct use of pre-quote failed (0x177e or other) — falling back to slippage ladder`)
+      swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
+    }
     if (!swapRes) {
       console.error(`${label} swap SOL to token failed`)
       return null

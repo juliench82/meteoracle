@@ -271,6 +271,53 @@ async function attemptSwapSolToToken(
 }
 
 /**
+ * Execute a swap using a pre-fetched quote response (from open.ts pre-quote at 500bps).
+ * This minimizes the time between quote and /swap, reducing "route not executable" (0x177e)
+ * errors on volatile new Token-2022 DLMM pools where the pre-quote succeeded but a later
+ * re-quote's tx fails on-chain.
+ * Returns {sig, tokenAmount} on success, null on failure (caller can fallback to ladder).
+ */
+export async function executeSwapFromPreQuote(
+  quote: any,
+  wallet: ReturnType<typeof getWallet>,
+  label: string
+): Promise<{ sig: string; tokenAmount: bigint } | null> {
+  if (!quote) return null;
+
+  try {
+    const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        quoteResponse: quote,
+        userPublicKey: wallet.publicKey.toBase58(),
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+        prioritizationFeeLamports: 'auto',
+      }),
+    });
+    if (!swapRes.ok) {
+      const body = await swapRes.text();
+      throw new Error(`Jupiter swap tx failed: ${swapRes.status} ${body}`);
+    }
+    const { swapTransaction } = await swapRes.json();
+
+    const txBuf = Buffer.from(swapTransaction, 'base64');
+    const tx = VersionedTransaction.deserialize(txBuf);
+    tx.sign([wallet]);
+
+    const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
+    const tokenAmount = await getWalletTokenBalance(quote.outputMint || '');
+    console.log(`${label} [swap] SOL → token (pre-quoted) confirmed ✔ sig: ${sig} | actualReceived: ${tokenAmount}`);
+    return { sig, tokenAmount };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`${label} [swap] executeSwapFromPreQuote failed: ${msg}`);
+    return null;
+  }
+}
+
+/**
  * Swaps a specific amount of native SOL to `tokenMint` via Jupiter (for one-sided open / Bid-Ask pre-fund).
  * Pre-validate quote exists before calling.
  * Uses unified higher slippage ladder + restrictIntermediateTokens=true.
