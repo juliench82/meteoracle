@@ -220,6 +220,9 @@ export async function openPosition(
     const freeLeft = await findFreeBoundary('left', activeBinId);
     const freeRight = await findFreeBoundary('right', activeBinId);
 
+    const freeDownBins = activeBinId - freeLeft;
+    const freeUpBins = freeRight - activeBinId;
+
     // Hard gate: if the pool's existing (free) bin arrays do not fully cover the
     // desired evil-panda range at zero cost, skip the pool entirely. Never open
     // a degraded (shrunk) position. When other traders populate the bin arrays,
@@ -280,17 +283,8 @@ export async function openPosition(
     const effectiveUpPct = (maxBinId - activeBinId) * (binStep / 10000) * 100;
     console.log(`${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% (desired was ${strategy.position.rangeDownPct}% / ${strategy.position.rangeUpPct}%)`);
 
-    // Token-2022 / pump.fun / DBC graduates are no longer forced into the manual path.
-    // We let the Zap path run for them too. Many (like TACO-SOL) can be zapped successfully
-    // via the Meteora app, so the bot should use the same clean Zap flow (atomic swap + LP).
-    // The direct-SDK fallback (pre-swap + initializePositionAndAddLiquidityByStrategy) is available
-    // if the Zap path cannot handle a particular Token-2022 pool's hooks.
-    if (isToken2022) {
-      console.log(`${label} Token-2022 / pump.fun / DBC 0.2.0 graduate — attempting Zap path first (direct SDK fallback only if Zap fails)`);
-    }
-
     // ATA pre-creation for the token side(s) (uses getTokenProgramId per mint so Token-2022 sides get the correct program).
-    // Done before path selection (direct primary or Zap fallback); direct path also ensures inside as belt-and-suspenders.
+    // Done before the direct SDK path.
     const ataIxs: TransactionInstruction[] = []
     for (const [lbl, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
       if (mint.toBase58() === NATIVE_MINT_STR) {
