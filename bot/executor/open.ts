@@ -222,6 +222,16 @@ export async function openPosition(
     const freeLeft = await findFreeBoundary('left', activeBinId);
     const freeRight = await findFreeBoundary('right', activeBinId);
 
+    // Hard gate: if the pool's existing (free) bin arrays do not fully cover the
+    // desired evil-panda range at zero cost, skip the pool entirely. Never open
+    // a degraded (shrunk) position. When other traders populate the bin arrays,
+    // the next scanner tick can open it cleanly.
+    if (freeDownBins < fullBinsDown || freeUpBins < fullBinsUp) {
+      console.log(`${label} free bin range insufficient for full evil-panda range ` +
+        `(need ${fullBinsDown}↓ ${fullBinsUp}↑, free: ${freeDownBins}↓ ${freeUpBins}↑) — skipping pool`);
+      return null;
+    }
+
     // Compute a width-capped version of the *desired* % range first (this reuses
     // calculateValidatedBinRange so the claim in strategy-config.ts is true, and
     // we get its "auto-shrunk" log when the original -50/+100 would exceed 70).
