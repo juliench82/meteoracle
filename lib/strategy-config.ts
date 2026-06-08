@@ -62,9 +62,9 @@ export const HELIUS_HOLDER_MAX_PAGES = envNumber('HELIUS_HOLDER_MAX_PAGES', 5)
 
 // ── Misc (still referenced by current ultra-simple scanner) ──────
 export const DEEP_CHECK_DELAY_MS = envNumber('DEEP_CHECK_DELAY_MS', 800)
-// Legacy TVL floor (kept only for backward compat / old monitor paths / docs).
+// Legacy TVL floor (kept only for backward compat / old monitor paths / docs / direct imports).
+// Not re-exported by the scanner anymore.
 // Active server floor is MIN_TVL_USD (500). Active strategy filter floor is EVIL_PANDA_MIN_LIQUIDITY_USD (500).
-// Do not raise FRESH_MIN_TVL_USD; it is not used in the current Evil Panda entry path.
 export const FRESH_MIN_TVL_USD = envNumber('FRESH_MIN_TVL_USD', 5000)
 export const MIN_LIQUIDITY_USD_FOR_FRESH = FRESH_MIN_TVL_USD  // kept for backward compat in strategy filters / docs
 export const CANDIDATE_DEDUP_HOURS = envNumber('CANDIDATE_DEDUP_HOURS', 1)

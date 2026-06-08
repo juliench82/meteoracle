@@ -16,6 +16,9 @@
  * Then full deep gates (price deviation, Jupiter preflight, rug/holders, strategy filter, dedup, slots, etc.)
  * Score survivors (feeTvl 1h/24h + lpCountNorm) and open highest-scored first.
  *
+ * Note on legacy: FRESH_MIN_TVL_USD and some MAX_FRESH_* constants are no longer
+ * used in the active path (see strategy-config.ts comments).
+ *
  * Kept improvements beyond the minimal spec: rich per-pool rejection logging, early SOL gate,
  * price vs market check, Jupiter route preflight for new Token-2022, full deep quality gates,
  * 0-new-bin-array range optimization on open, etc.
@@ -57,7 +60,6 @@ import {
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   MARKET_LP_SOL_PER_POSITION,
   MAX_POOL_PRICE_DEVIATION,
-  FRESH_MIN_TVL_USD,
   MIN_TVL_USD,
   MIN_POOL_AGE_HOURS,
   MIN_LP_COUNT,
@@ -206,7 +208,12 @@ function getDisabledStrategyReason(strategyId: string): string | null {
   return null
 }
 
-// OOR recheck is a no-op stub (local-state only model)
+// OOR recheck is intentionally a no-op stub in the current local-state-only model.
+// The previous Supabase-backed version used this to avoid re-entering pools that recently
+// closed due to OOR. With pure local JSON state we don't have cross-restart OOR history
+// persistence by default, so this always returns empty. If OOR_RECHECK_HOURS is set >0
+// in the future a real implementation (scanning recent closed positions in local state)
+// can be added here. Not critical for the current evil-panda flow.
 async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
   return new Set()
@@ -545,7 +552,11 @@ interface ScannerTickContext {
   heliusRpcUrl: string;
   liveSolPriceUsd: number;
 
-  // Mutable counters (passed by ref via object)
+  // Mutable counters (passed by ref via boxed objects).
+  // This pattern allows processActivityCandidate (and sub-calls like attemptOpenAndNotify)
+  // to mutate shared tick state without complex return values or closures.
+  // Used for openedCount, openSkippedCount, candidateCount, dailyLossLimitHit.
+  // (Style debt noted; works reliably for the current sequential processing.)
   openedCount: { value: number };
   openSkippedCount: { value: number };
   candidateCount: { value: number };
