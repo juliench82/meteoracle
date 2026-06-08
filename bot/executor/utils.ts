@@ -33,11 +33,6 @@ export const NATIVE_MINT_STR = 'So11111111111111111111111111111111111111112';
 export const METEORA_RENT_RESERVE_SOL = 0.07;
 export const ADD_LIQUIDITY_FALLBACK_CU = 1_400_000;
 
-export const DLMM_ZAP_SWAP_SLIPPAGE_BPS = 200; // Aligned with SWAP_SLIPPAGE_BPS default (Section 6.5)
-export const DLMM_ZAP_MAX_ACTIVE_BIN_SLIPPAGE = 10;
-export const DLMM_ZAP_MAX_ACCOUNTS = 48;
-export const DLMM_ZAP_MAX_TRANSFER_EXTEND_PERCENTAGE = 2;
-
 export const MAX_BINS_BY_STRATEGY: Record<string, number> = {
   'evil-panda':    70,  // real on-chain max per position (DLMM rejects wider with InvalidPositionWidth 0x1798). UI auto-clamps desired % to this.
 };
@@ -252,9 +247,4 @@ export async function getDLMM() {
 export async function getStrategyType() {
   const mod = await import('@meteora-ag/dlmm');
   return mod.StrategyType;
-}
-
-export async function getZap() {
-  const mod = await import('@meteora-ag/zap-sdk');
-  return new mod.Zap(getConnection());
 }
