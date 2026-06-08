@@ -15,6 +15,7 @@
  * Expensive only on final ~top-5 survivors: lp_count (via getProgramAccounts / positions)
  * Then full deep gates (price deviation, Jupiter preflight, rug/holders, strategy filter, dedup, slots, etc.)
  * Score survivors (feeTvl 1h/24h + lpCountNorm) and open highest-scored first.
+ * Ranking log now includes raw components (1h, 24h, lpNorm) for observability.
  *
  * Note on legacy: FRESH_MIN_TVL_USD and some MAX_FRESH_* constants are no longer
  * used in the active path (see strategy-config.ts comments).
@@ -433,15 +434,24 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   // if available), instead of whichever one happened to appear first in the input order.
   if (deepGateSurvivors.length > 0) {
     const scoredSurvivors = deepGateSurvivors
-      .map((s: any) => ({
-        ...s,
-        score: computePoolScore(s.pool, s.lpCount),
-      }))
+      .map((s: any) => {
+        const breakdown = computePoolScore(s.pool, s.lpCount);
+        return {
+          ...s,
+          ...breakdown,
+        };
+      })
       .sort((a: any, b: any) => b.score - a.score);
 
     console.log(
       `[scanner] ${scoredSurvivors.length} deep survivors ranked by score (highest first): ` +
-        scoredSurvivors.map((s: any) => `${s.symbol}(${s.score.toFixed(4)})`).join(' > ')
+        scoredSurvivors
+          .map(
+            (s: any) =>
+              `${s.symbol}(${s.score.toFixed(4)} ` +
+              `1h=${s.feeTvlRatio1h.toFixed(4)} 24h=${s.feeTvlRatio24h.toFixed(4)} lpNorm=${s.lpCountNorm.toFixed(2)})`
+          )
+          .join(' > ')
     );
 
     // Attempt opens in the new ranked order. The attemptOpenAndNotify logic
@@ -460,6 +470,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
         openBlockedReason: s.openBlockedReason,
         availableOpenSlots: s.availableOpenSlots,
         candidateCountRef: s.candidateCountRef,
+        score: s.score,
       });
     }
   }
@@ -846,6 +857,7 @@ async function attemptOpenAndNotify(params: {
   openBlockedReason: string | undefined;
   availableOpenSlots: number;
   candidateCountRef: { value: number };
+  score?: number; // actual composite score from ranking (for alerts / logs)
 }): Promise<ActivityCandidateProcessResult> {
   const {
     metrics,
@@ -859,12 +871,13 @@ async function attemptOpenAndNotify(params: {
     openBlockedReason,
     availableOpenSlots,
     candidateCountRef: candidateCountRefParam,
+    score = 0,
   } = params;
 
   const label = `[scanner][${symbol}]`;
 
   candidateCountRefParam.value++;
-  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score: 0, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct: metrics.bondingCurvePct });
+  await sendAlert({ type: 'candidate_found', symbol, strategy: strategy.id, score, mcUsd: metrics.mcUsd, volume24h: metrics.volume24h, bondingCurvePct: metrics.bondingCurvePct });
 
   const disabledReason = getDisabledStrategyReason(strategy.id);
   if (disabledReason) {
@@ -922,8 +935,8 @@ function evaluateCandidate(
   }
 
   // If it passed the real documented fields + derived proxies (tvl + fee_24h server-side, implied active, fee accel, age > 2h) + deep gates,
-  // we accept (subject to limits etc.). Final selection is the top survivor after lp_count enrichment on candidates.
-  console.log(`[scanner][decision] ${symbol} — ACCEPTED (top performer via real API fields + derivations, no scoring)`);
+  // we accept (subject to limits etc.). Final selection among survivors is done by composite score ranking (see ranking log).
+  console.log(`[scanner][decision] ${symbol} — ACCEPTED (top performer via real API fields + derivations; will be ranked by score for open priority)`);
 
   return { strategy, decision: 'ACCEPTED', rejectionReason: null, finalScore: 0 };
 }

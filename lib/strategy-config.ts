@@ -118,6 +118,14 @@ export const LP_FEE_TVL_SAMPLE_WINDOW_H = 4                                     
 // Pools with large deviation often have misaligned active bin, leading to bad IL/OOR right after opening.
 export const MAX_POOL_PRICE_DEVIATION = envNumber('MAX_POOL_PRICE_DEVIATION', 0.05)
 
+// ── Deep survivor scoring (post-gate ranking for open priority) ──
+// Weights and cap are env-overridable for tuning.
+// feeTvlRatio_1h gets the highest weight because recent fee velocity is the strongest signal for fresh hot pools.
+export const LP_SCORE_FEE_TVL_1H_WEIGHT = 0.5
+export const LP_SCORE_FEE_TVL_24H_WEIGHT = 0.3
+export const LP_SCORE_LP_COUNT_WEIGHT  = 0.2
+export const LP_SCORE_LP_CAP           = envNumber('LP_SCORE_LP_CAP', 20)
+
 // MAX_POOL_AGE_MINUTES and FRESH_MIN_TVL_USD are legacy names.
 // Current age rule: only MIN_POOL_AGE_HOURS (min 2h, no upper "very fresh" cap).
 // Primary logic uses real /pools fields + derivations (see README).

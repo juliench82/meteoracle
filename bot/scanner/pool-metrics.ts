@@ -12,7 +12,13 @@
  */
 
 import type { MeteoraPool } from './pool-fetcher';
-import { MIN_FEE_24H } from '@/lib/strategy-config';
+import {
+  MIN_FEE_24H,
+  LP_SCORE_FEE_TVL_1H_WEIGHT,
+  LP_SCORE_FEE_TVL_24H_WEIGHT,
+  LP_SCORE_LP_COUNT_WEIGHT,
+  LP_SCORE_LP_CAP,
+} from '@/lib/strategy-config';
 import { getHeliusRpcEndpoint } from '@/lib/solana';
 
 type UnknownRecord = Record<string, unknown>;
@@ -161,17 +167,36 @@ export function isFeeAccelerating(pool: MeteoraPool): boolean {
  * Composite score for ranking deep-gate survivors before opening positions.
  *
  * Formula (using only real, already-populated fields):
- *   score = (feeTvlRatio_1h * 0.5) + (feeTvlRatio_24h * 0.3) + (lpCountNorm * 0.2)
+ *   score = (feeTvlRatio_1h * LP_SCORE_FEE_TVL_1H_WEIGHT) +
+ *           (feeTvlRatio_24h * LP_SCORE_FEE_TVL_24H_WEIGHT) +
+ *           (lpCountNorm * LP_SCORE_LP_COUNT_WEIGHT)
  *
- * lpCountNorm caps at 20 so very large LP pools do not dominate the ranking.
- * Higher score = higher priority for the next available open slot.
+ * lpCountNorm = min(lpCount, LP_SCORE_LP_CAP) / LP_SCORE_LP_CAP
+ * (default cap 20 so very large LP pools do not dominate; Claude suggested 50 if high-LP pools
+ *  are consistently under-ranked — tune via LP_SCORE_LP_CAP env).
+ *
+ * Recent fee velocity (1h) gets the highest weight because it is the strongest signal
+ * for fresh hot pools. lp_count acts as a quality / distribution sanity cap.
+ *
+ * Returns breakdown for observability in ranking logs.
  * Called only on candidates that have already passed every deep quality gate.
  */
-export function computePoolScore(pool: MeteoraPool, lpCount: number): number {
+export function computePoolScore(pool: MeteoraPool, lpCount: number) {
   const feeTvlRatio1h = getFeeTvlRatio(pool, '1h');
   const feeTvlRatio24h = getFeeTvlRatio(pool, '24h');
-  const lpCountNorm = Math.min(Math.max(0, lpCount || 0), 20) / 20;
-  return (feeTvlRatio1h * 0.5) + (feeTvlRatio24h * 0.3) + (lpCountNorm * 0.2);
+  const lpCountNorm = Math.min(Math.max(0, lpCount || 0), LP_SCORE_LP_CAP) / LP_SCORE_LP_CAP;
+
+  const score =
+    (feeTvlRatio1h * LP_SCORE_FEE_TVL_1H_WEIGHT) +
+    (feeTvlRatio24h * LP_SCORE_FEE_TVL_24H_WEIGHT) +
+    (lpCountNorm * LP_SCORE_LP_COUNT_WEIGHT);
+
+  return {
+    score,
+    feeTvlRatio1h,
+    feeTvlRatio24h,
+    lpCountNorm,
+  };
 }
 
 /**
