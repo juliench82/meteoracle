@@ -10,8 +10,8 @@
  * the pool is skipped cleanly. When other LPs/swaps populate the arrays, a future
  * tick can open it.
  *
- * Early binStep validation + on-chain width cap (70 bins max per position for this
- * strategy). No Zap fallback (structurally impossible for 151+ bin ranges).
+ * No artificial width cap. Uses exact rounded bin range from the desired % (Meteora
+ * will use discrete boundaries; effective coverage is logged).
  */
 
 import {
@@ -53,6 +53,7 @@ import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '
 import { getBotState } from '@/lib/botState'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
+import { swapSolToToken } from '@/lib/swap'
 import {
   OPEN_LP_STATUSES,
   assertCanOpenLpPosition,
@@ -256,7 +257,7 @@ export async function openPosition(
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
     const totalSolLamports = BigInt(Math.floor(solAmount * 1e9))
-    const binsTotal = fullBinsDown + fullBinsUp
+    const binsTotal = fullBinsDown + fullBinsUp + 1  // +1 for the active bin
     const solToSwapLamports = totalSolLamports * BigInt(fullBinsDown) / BigInt(binsTotal)
     const remainingSolLamports = totalSolLamports - solToSwapLamports
 
