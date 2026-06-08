@@ -26,7 +26,6 @@ import {
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  NATIVE_MINT,
 } from '@solana/spl-token'
 import BN from 'bn.js'
 import { logInfo, logError, logWarn } from '@/lib/log'
@@ -163,8 +162,7 @@ export async function openPosition(
     const solIsTokenY = mintY.toBase58() === NATIVE_MINT_STR
 
     const outputMint = solIsTokenX ? mintY : mintX
-    const outputTokenProgram = await getTokenProgramId(outputMint)
-    const isToken2022 = outputTokenProgram.toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
+    const isToken2022 = (await getTokenProgramId(outputMint)).toBase58() === TOKEN_2022_PROGRAM_ID.toBase58()
 
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
@@ -297,13 +295,12 @@ export async function openPosition(
 
     // === DIRECT (after explicit pre-swap for the token side) ===
     console.log(`${label} attempting direct one-sided SOL (full evil-panda range, Bid-Ask shape) after Jupiter swap`);
-    const directResult = await openPositionDirectSdkFallback(
+    const directResult = await openPositionDirect(
       metrics,
       strategy,
       dlmmPool,
       poolPubkey,
       outputMint,
-      outputTokenProgram,
       solAmount,
       minBinId,
       maxBinId,
@@ -477,19 +474,16 @@ async function validateOpenEligibility(
 }
 
 /**
- * Direct one-sided SOL primary path (Zap is fallback).
- * Pure one-sided SOL (no pre-swap) + dlmmPool.initializePositionAndAddLiquidityByStrategy
- * (the method recommended in Meteora's latest DLMM SDK docs). Supports Token-2022 via the SDK.
- *
- * Primary for evil-panda to support full desired ranges (e.g. 149+ bins on binStep=100).
+ * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit Jupiter pre-swap for the token side).
+ * Calls dlmmPool.initializePositionAndAddLiquidityByStrategy using the actual post-swap token amount
+ * and the remaining SOL. Full desired range (no cap) is used only after the bin-array rent gate passes.
  */
-async function openPositionDirectSdkFallback(
+async function openPositionDirect(
   metrics: TokenMetrics,
   strategy: Strategy,
   dlmmPool: any,
   poolPubkey: PublicKey,
   outputMint: PublicKey,
-  outputTokenProgram: PublicKey,
   solAmount: number,
   minBinId: number,
   maxBinId: number,
@@ -536,32 +530,6 @@ async function openPositionDirectSdkFallback(
       `(after Jupiter swap for token side, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
-
-    // ATA pre-creation before the direct call (primary path) if the SDK doesn't handle it
-    const ataIxs: TransactionInstruction[] = []
-    for (const [lbl, mint, program] of [
-      ['X', dlmmPool.tokenX.publicKey, isTokenXSol ? TOKEN_PROGRAM_ID : outputTokenProgram],
-      ['Y', dlmmPool.tokenY.publicKey, isTokenYSol ? TOKEN_PROGRAM_ID : outputTokenProgram],
-    ] as const) {
-      if (mint.equals(NATIVE_MINT)) {
-        console.log(`${label} token ${lbl} is native SOL — skipping ATA`)
-        continue
-      }
-      const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, program, ASSOCIATED_TOKEN_PROGRAM_ID)
-      if (!(await connection.getAccountInfo(ata))) {
-        console.log(`${label} creating ATA for token ${lbl} (${mint.toBase58().slice(0, 8)}…)`)
-        ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey, ata, wallet.publicKey, mint, program, ASSOCIATED_TOKEN_PROGRAM_ID
-        ))
-      }
-    }
-    if (ataIxs.length > 0) {
-      const ataTx = new Transaction().add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }), ...ataIxs
-      )
-      const ataSig = await sendLegacyTx(ataTx, [wallet], label)
-      console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
-    }
 
     const createPositionTxOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
@@ -636,5 +604,3 @@ async function openPositionDirectSdkFallback(
     return null
   }
 }
-
-// swapSolToToken is now used for the explicit pre-swap in the one-sided Bid-Ask open flow.
