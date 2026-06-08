@@ -23,9 +23,13 @@
  *   - No ZAP code path is used for opening. Entire bot purpose depends on reliably
  *     opening the full desired discrete range (-50% down / +100% up via round() bin math)
  *     using direct DLMM SDK + pre-swap for value match + zero new bin array gate.
- *   - If we cannot open such positions the bot has no purpose.
- *   - Pre-swap leg uses aggressive same-prequoted-quote retries (see lib/swap.ts) before
- *     any ladder fallback. Pre-quote is done at the exact computed split amount.
+ *   - If we cannot open such positions the bot has no purpose at all.
+ *   - Pre-swap leg for the token side is *extremely* patient for any pool that
+ *     already passed the hard full-range zero-rent gate: post-prequote settle delay +
+ *     fresh-quote escalating attempts (in executeSwapFromPreQuote) + full ladder +
+ *     a final "patient re-prequote + execute" wave (several seconds total trying)
+ *     before giving up on an otherwise perfect deep survivor.
+ *     See the pre-swap block and lib/swap.ts (PREQUOTE_MAX_ATTEMPTS / PREQUOTE_SLIPPAGE_LEVELS).
  */
 
 import {
@@ -66,7 +70,7 @@ import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '
 import { getBotState } from '@/lib/botState'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
-import { swapSolToToken, JUPITER_QUOTE_API, executeSwapFromPreQuote } from '@/lib/swap'
+import { swapSolToToken, JUPITER_QUOTE_API, executeSwapFromPreQuote, PREQUOTE_MAX_ATTEMPTS } from '@/lib/swap'
 import {
   OPEN_LP_STATUSES,
   getOpenLpLimitState,
@@ -357,26 +361,73 @@ export async function openPosition(
         quote = await quoteRes.json()
         if (quote?.error || quote?.errorCode) throw new Error(quote.error || quote.errorCode || 'quote error')
         const expectedOut = BigInt(quote.outAmount ?? quote.out_amount ?? '0')
-        console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token`)
+        console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token (impact=${quote.priceImpactPct ?? quote.priceImpact ?? 'n/a'})`)
       } catch (e) {
         console.warn(`${label} pre-quote SOL→token failed — skipping pool: ${e instanceof Error ? e.message : e}`)
         return null
       }
 
-      // Aggressive pre-quoted execution: executeSwapFromPreQuote now retries the exact same
-      // quoteResponse internally (PREQUOTE_MAX_ATTEMPTS) with tiny backoffs before returning null.
-      // Only then do we fall back to the ladder (fresh re-quotes at 500/1000/2000).
+      // Settle delay: many 0x177e on otherwise-valid quotes for new Token-2022 DLMMs are
+      // transient (indexer propagation, thin liquidity window, hook timing). Give it a moment
+      // before the first /swap (even with a fresh pre-quoted response). This pool already passed the
+      // *critical* full-range gate (0 new bin arrays for the desired -50/+100 evil-panda range).
+      const PRE_SWAP_SETTLE_MS = 1500;
+      console.log(`${label} [swap] post-pre-quote settle ${PRE_SWAP_SETTLE_MS}ms (full-range pool, zero rent gate passed) ...`);
+      await new Promise(r => setTimeout(r, PRE_SWAP_SETTLE_MS));
+
+      // Call into executeSwapFromPreQuote (fresh quote on first try; on failure it escalates
+      // with fresh quotes at higher slippage per PREQUOTE_SLIPPAGE_LEVELS rather than
+      // re-submitting a stale route). Only after this + ladder do we consider the patient final wave.
       let swapRes = await executeSwapFromPreQuote(quote, getWallet(), label)
       if (!swapRes) {
-        console.warn(`${label} all same-prequote attempts exhausted — falling back to slippage ladder (fresh re-quotes)`)
+        console.warn(`${label} pre-quote executor attempts exhausted — falling back to slippage ladder (fresh re-quotes)`)
         swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
       }
+
+      // Patient final wave for pools that are *exactly* the ones we must be able to open.
+      // If everything (scanner score, lp_count, fee accel, full discrete range with 0 new arrays)
+      // passed but the token leg swap keeps 0x177e'ing, we are failing the bot's core purpose.
+      // One more delayed fresh pre-quote + executeSwapFromPreQuote (which will do its full
+      // escalating fresh attempts) before giving up.
       if (!swapRes) {
-        console.error(`${label} swap SOL to token failed`)
-        return null
+        const FINAL_PATIENT_DELAY = 2500;
+        console.warn(`${label} prequote + ladder both failed for full -50/+100 range pool (0 new arrays) — PATIENT FINAL WAVE: sleep ${FINAL_PATIENT_DELAY}ms then fresh pre-quote + ${PREQUOTE_MAX_ATTEMPTS} escalating attempts`);
+        await new Promise(r => setTimeout(r, FINAL_PATIENT_DELAY));
+
+        let finalQuote: any = null;
+        try {
+          const params2 = new URLSearchParams({
+            inputMint: NATIVE_MINT_STR,
+            outputMint: outputMint.toBase58(),
+            amount: solToSwapLamports.toString(),
+            slippageBps: '500',
+            onlyDirectRoutes: 'false',
+            restrictIntermediateTokens: 'true',
+          });
+          const quoteUrl2 = `${JUPITER_QUOTE_API}/quote?${params2.toString()}`;
+          const qRes2 = await fetch(quoteUrl2, { signal: AbortSignal.timeout(8000) });
+          if (qRes2.ok) {
+            finalQuote = await qRes2.json();
+            if (finalQuote && !finalQuote.error && !finalQuote.errorCode) {
+              const exp2 = BigInt(finalQuote.outAmount ?? finalQuote.out_amount ?? '0');
+              console.log(`${label} patient final pre-quote OK: ${solToSwapLamports} SOL → ~${exp2} token`);
+              swapRes = await executeSwapFromPreQuote(finalQuote, getWallet(), label);
+            } else {
+              console.warn(`${label} patient final pre-quote had error`);
+            }
+          }
+        } catch (finalErr) {
+          console.warn(`${label} patient final pre-quote fetch failed: ${finalErr instanceof Error ? finalErr.message : finalErr}`);
+        }
+
+        if (!swapRes) {
+          console.error(`${label} swap SOL to token failed (after patient final wave for full-range pool)`);
+          return null;
+        }
       }
-      actualTokenLamports = swapRes.tokenAmount
-      console.log(`${label} swap done: received ${actualTokenLamports} token lamports`)
+
+      actualTokenLamports = swapRes.tokenAmount;
+      console.log(`${label} swap done: received ${actualTokenLamports} token lamports`);
     } else {
       console.log(`${label} solBias produced zero token leg — proceeding with pure-SOL allocation for the Bid-Ask range`)
     }

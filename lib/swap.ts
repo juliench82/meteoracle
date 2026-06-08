@@ -13,13 +13,19 @@ const SWAP_RETRY_DELAY_MS = 3_000
 // Higher values help with illiquid new Token-2022 DLMM pools.
 const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000];
 
-// Fresh-quote retry config for the pre-quoted path.
+// Fresh-quote retry config for the pre-quoted path (Claude's fix).
 // Each attempt fetches a *fresh* quote at an escalating slippage level before
 // building the swap tx. This replaces the old "retry the same stale quoteResponse"
 // approach which guaranteed 0x177e on every retry since the route was already stale.
 // Slippage levels: 500 → 1000 → 2000 bps (matching the main ladder).
+//
+// Additional patience layers (from pending open.ts work): caller does a post-prequote
+// settle delay for full-range pools + a final "patient re-prequote + execute" wave
+// specifically for pools that passed the critical zero new-bin-array gate.
+// We export PREQUOTE_MAX_ATTEMPTS for logging compatibility in the caller.
 const PREQUOTE_SLIPPAGE_LEVELS = [500, 1000, 2000];
 const PREQUOTE_RETRY_BACKOFF_BASE_MS = 500;
+export const PREQUOTE_MAX_ATTEMPTS = 3;
 
 /**
  * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
