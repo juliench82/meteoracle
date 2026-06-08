@@ -222,25 +222,43 @@ export async function openPosition(
     const freeLeft = await findFreeBoundary('left', activeBinId);
     const freeRight = await findFreeBoundary('right', activeBinId);
 
-    const freeDownBins = activeBinId - freeLeft;
-    const freeUpBins = freeRight - activeBinId;
+    // Compute a width-capped version of the *desired* % range first (this reuses
+    // calculateValidatedBinRange so the claim in strategy-config.ts is true, and
+    // we get its "auto-shrunk" log when the original -50/+100 would exceed 70).
+    // Then apply free expansion relative to that valid base. We still cap the
+    // scale so the final range never exceeds the hard on-chain limit, even if
+    // free space would allow a larger position.
+    const strategyMaxBins = MAX_BINS_BY_STRATEGY[strategy.id] || MAX_BINS_DEFAULT;
+    const baseForFree = calculateValidatedBinRange(
+      activeBinId,
+      binStep,
+      rangeDownPct,
+      rangeUpPct,
+      strategyMaxBins,
+      label
+    );
+    const desiredDownBins = activeBinId - baseForFree.minBinId;
+    const desiredUpBins = baseForFree.maxBinId - activeBinId;
 
-    // Scale the desired ratio to fit the free bins (preserve -50:+100 ratio as much as possible)
-    const desiredDownBins = fullBinsDown;
-    const desiredUpBins = fullBinsUp;
-    const scale = Math.min(
+    const freeScale = Math.min(
       freeDownBins / desiredDownBins,
       freeUpBins / desiredUpBins
     );
-    const actualDown = Math.floor(desiredDownBins * scale);
-    const actualUp = Math.floor(desiredUpBins * scale);
+    const maxScaleForWidth = strategyMaxBins / (desiredDownBins + desiredUpBins + 1);
+    const effectiveScale = Math.min(freeScale, maxScaleForWidth);
+    if (effectiveScale < freeScale) {
+      console.log(`${label} free range expansion capped by on-chain position width limit (${strategyMaxBins} bins, scale limited from ${freeScale.toFixed(2)} to ${effectiveScale.toFixed(2)})`);
+    }
+
+    const actualDown = Math.floor(desiredDownBins * effectiveScale);
+    const actualUp = Math.floor(desiredUpBins * effectiveScale);
 
     let minBinId = activeBinId - actualDown;
     let maxBinId = activeBinId + actualUp;
     const binRange = maxBinId - minBinId + 1;
-    const wasShrunk = scale < 1;
+    const wasShrunk = effectiveScale < 1;
 
-    console.log(`${label} Using scaled free range (0 new bin arrays, ratio preserved): ${minBinId} → ${maxBinId} (${binRange} bins), scale=${scale.toFixed(2)}`);
+    console.log(`${label} Using scaled free range (0 new bin arrays, ratio preserved): ${minBinId} → ${maxBinId} (${binRange} bins), scale=${effectiveScale.toFixed(2)}`);
 
     if (binRange < 2) {
       console.warn(`${label} bin range still invalid after free clamp — rejecting`);
