@@ -242,7 +242,8 @@ export async function openPosition(
 
     const freeScale = Math.min(
       freeDownBins / desiredDownBins,
-      freeUpBins / desiredUpBins
+      freeUpBins / desiredUpBins,
+      1.0  // never expand beyond desired range (safety for free-bin scaling)
     );
     const maxScaleForWidth = strategyMaxBins / (desiredDownBins + desiredUpBins + 1);
     const effectiveScale = Math.min(freeScale, maxScaleForWidth);
