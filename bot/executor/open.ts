@@ -266,7 +266,7 @@ export async function openPosition(
     // Pre-quote for validation (do not send yet)
     try {
       const params = new URLSearchParams({
-        inputMint: NATIVE_MINT,
+        inputMint: NATIVE_MINT_STR,
         outputMint: outputMint.toBase58(),
         amount: solToSwapLamports.toString(),
         slippageBps: '1000',

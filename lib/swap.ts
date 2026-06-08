@@ -239,7 +239,7 @@ async function attemptSwapSolToToken(
   slippage: number,
   wallet: ReturnType<typeof getWallet>,
   label: string,
-): Promise<{ sig: string; outAmount: bigint }> {
+): Promise<{ sig: string; tokenAmount: bigint }> {
   const quoteUrl =
     `${JUPITER_QUOTE_API}/quote?inputMint=${NATIVE_MINT}&outputMint=${tokenMint}` +
     `&amount=${solLamports.toString()}&slippageBps=${slippage}&onlyDirectRoutes=false`;
@@ -273,9 +273,9 @@ async function attemptSwapSolToToken(
   tx.sign([wallet]);
 
   const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
-  const outAmount = BigInt(quote.outAmount ?? quote.out_amount ?? '0');
-  console.log(`${label} [swap] SOL → token confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | outAmount: ${outAmount}`);
-  return { sig, outAmount };
+  const tokenAmount = BigInt(quote.outAmount ?? quote.out_amount ?? '0');
+  console.log(`${label} [swap] SOL → token confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | outAmount: ${tokenAmount}`);
+  return { sig, tokenAmount };
 }
 
 /**
