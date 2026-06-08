@@ -13,15 +13,13 @@ const SWAP_RETRY_DELAY_MS = 3_000
 // Higher values help with illiquid new Token-2022 DLMM pools.
 const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000];
 
-// Aggressive same-quote retry config for the pre-quoted path (item 1).
-// We pre-quoted the *exact* split amount in open.ts; we now retry *that same
-// quoteResponse object* a few times with tiny backoff before ever falling back
-// to a fresh ladder re-quote. This targets the exact failure pattern:
-// "pre-quote OK … [swap] Jupiter route not executable (0x177e)".
-// Retrying the identical quoteResponse keeps the route construction stable
-// while the pool/indexer "catches up" on thin Token-2022 DLMMs.
-const PREQUOTE_MAX_ATTEMPTS = 3;          // 1 initial + 2 retries of the exact same pre-quoted response
-const PREQUOTE_RETRY_BACKOFF_BASE_MS = 250; // small, sub-second backoffs (250ms, 500ms, ...)
+// Fresh-quote retry config for the pre-quoted path.
+// Each attempt fetches a *fresh* quote at an escalating slippage level before
+// building the swap tx. This replaces the old "retry the same stale quoteResponse"
+// approach which guaranteed 0x177e on every retry since the route was already stale.
+// Slippage levels: 500 → 1000 → 2000 bps (matching the main ladder).
+const PREQUOTE_SLIPPAGE_LEVELS = [500, 1000, 2000];
+const PREQUOTE_RETRY_BACKOFF_BASE_MS = 500;
 
 /**
  * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
@@ -102,9 +100,6 @@ async function sendAndConfirmVersioned(
   label: string,
 ): Promise<string> {
   const connection = getConnection()
-  // Fetch a reasonably fresh blockhash *before* send for the confirm call.
-  // (Jupiter-provided swap txs already carry their own recentBlockhash baked in by the service;
-  // we do not override it after signing.)
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
 
   const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 })
@@ -132,7 +127,7 @@ async function sendAndConfirmVersioned(
 }
 
 /**
- * Attempts a single Jupiter quote+swap at the given slippageBps.
+ * Attempts a single Jupiter quote+swap at the given slippageBps (token→SOL).
  * Returns the tx signature on success, throws a typed error on failure.
  */
 async function attemptSwap(
@@ -181,8 +176,8 @@ async function attemptSwap(
 
 /**
  * Swaps all balance of `tokenMint` to native SOL via Jupiter.
- * Retries with escalating slippage (100 → 300 → 500 → 1000 → 2000 → 5000 bps)
- * before giving up. Returns the swap signature, or null if nothing to swap.
+ * Retries with escalating slippage before giving up.
+ * Returns the swap signature, or null if nothing to swap.
  * Throws on final failure — caller is responsible for alerting.
  */
 export async function swapTokenToSol(
@@ -228,11 +223,7 @@ export async function swapTokenToSol(
 }
 
 /**
- * Swaps a specific amount of native SOL to `tokenMint` via Jupiter.
- * Uses the same slippage ladder and retry logic as swapTokenToSol.
- * Pre-quote validation should be done by caller.
- * Returns {sig, tokenAmount: actual on-chain balance after confirm} on success (not the quote estimate).
- * Throws on final failure.
+ * Attempts a single SOL→token swap at the given slippage with a fresh quote.
  */
 async function attemptSwapSolToToken(
   tokenMint: string,
@@ -274,28 +265,24 @@ async function attemptSwapSolToToken(
   tx.sign([wallet]);
 
   const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
-  // Read the *actual* received balance from chain after confirm (quote.outAmount is only an estimate and can be off by slippage)
   const actualReceived = await getWalletTokenBalance(tokenMint);
   console.log(`${label} [swap] SOL → token confirmed ✔ sig: ${sig} | slippage: ${slippage}bps | actualReceived: ${actualReceived}`);
   return { sig, tokenAmount: actualReceived };
 }
 
 /**
- * Execute a swap using a pre-fetched quote response (from open.ts pre-quote at the
- * *exact* split solToSwapLamports amount, 500bps).
+ * Execute a SOL→token swap for the Bid-Ask pre-swap leg.
  *
- * AGGRESSIVE SAME-QUOTE RETRY MODE (per "1. Implement that now"):
- *   - We submit the *identical* quoteResponse object up to PREQUOTE_MAX_ATTEMPTS times.
- *   - Small backoff (PREQUOTE_RETRY_BACKOFF_BASE_MS) between attempts.
- *   - We deliberately retry even on 0x177e "route not executable" because the pre-quote
- *     was accepted moments ago; re-submitting the exact same /swap payload often succeeds
- *     as the aggregator/pool state stabilizes (new Token-2022 DLMMs are frequently racy).
- *   - Only after all same-quote attempts are exhausted do we return null, allowing the
- *     caller (open.ts) to fall back to the full slippage ladder (fresh re-quotes).
+ * Uses the initial pre-quoted quote (from open.ts) for the first attempt only.
+ * If that fails with 0x177e (stale route / thin liquidity), fetches a FRESH quote
+ * at escalating slippage levels (500 → 1000 → 2000 bps) rather than re-submitting
+ * the same stale quoteResponse. This directly fixes the log pattern:
+ *   "executeSwapFromPreQuote attempt 1/3 failed (0x177e)"
+ *   "executeSwapFromPreQuote attempt 2/3 failed (0x177e)"  ← same stale quote, same error
+ *   "executeSwapFromPreQuote attempt 3/3 failed (0x177e)"  ← same stale quote, same error
  *
- * This is the primary execution path for the Bid-Ask pre-swap leg. Our entire success
- * depends on being able to reliably land the token leg for the full desired -50%/+100%
- * range (no ZAP, no artificial bin caps — only the zero new-bin-array rent gate).
+ * Returns {sig, tokenAmount} on success, null if all levels exhausted (caller falls
+ * back to swapSolToToken ladder which also no longer bails early on 0x177e).
  */
 export async function executeSwapFromPreQuote(
   quote: any,
@@ -304,13 +291,33 @@ export async function executeSwapFromPreQuote(
 ): Promise<{ sig: string; tokenAmount: bigint } | null> {
   if (!quote) return null;
 
-  for (let attempt = 1; attempt <= PREQUOTE_MAX_ATTEMPTS; attempt++) {
+  const outputMint: string = quote.outputMint || '';
+  const solLamports = BigInt(quote.inAmount ?? quote.in_amount ?? '0');
+
+  for (let i = 0; i < PREQUOTE_SLIPPAGE_LEVELS.length; i++) {
+    const slippage = PREQUOTE_SLIPPAGE_LEVELS[i];
+    // Attempt 1: use the pre-fetched quote directly (no extra round-trip).
+    // Attempts 2+: fetch a fresh quote at the escalated slippage level.
+    let swapQuote = i === 0 ? quote : null;
+
     try {
+      if (!swapQuote) {
+        console.log(`${label} [swap] pre-quote stale — fetching fresh quote at ${slippage}bps (attempt ${i + 1}/${PREQUOTE_SLIPPAGE_LEVELS.length})…`);
+        const freshUrl = `${JUPITER_QUOTE_API}/quote?inputMint=${NATIVE_MINT}&outputMint=${outputMint}` +
+          `&amount=${solLamports.toString()}&slippageBps=${slippage}&onlyDirectRoutes=false&restrictIntermediateTokens=true`;
+        const freshRes = await fetch(freshUrl, { signal: AbortSignal.timeout(7000) });
+        if (!freshRes.ok) throw new Error(`fresh quote http ${freshRes.status}`);
+        swapQuote = await freshRes.json();
+        if (swapQuote?.error || swapQuote?.errorCode) throw new Error(swapQuote.error || swapQuote.errorCode || 'quote error');
+        const expectedOut = BigInt(swapQuote.outAmount ?? swapQuote.out_amount ?? '0');
+        console.log(`${label} [swap] fresh quote OK at ${slippage}bps: ${solLamports} SOL → ~${expectedOut} token`);
+      }
+
       const swapRes = await fetchWithRetry(`${JUPITER_QUOTE_API}/swap`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          quoteResponse: quote,
+          quoteResponse: swapQuote,
           userPublicKey: wallet.publicKey.toBase58(),
           wrapAndUnwrapSol: true,
           dynamicComputeUnitLimit: true,
@@ -328,23 +335,22 @@ export async function executeSwapFromPreQuote(
       tx.sign([wallet]);
 
       const sig = await sendAndConfirmVersioned(tx, `${label}[swap]`);
-      const tokenAmount = await getWalletTokenBalance(quote.outputMint || '');
-      console.log(`${label} [swap] SOL → token (pre-quoted, attempt ${attempt}/${PREQUOTE_MAX_ATTEMPTS}) confirmed ✔ sig: ${sig} | actualReceived: ${tokenAmount}`);
+      const tokenAmount = await getWalletTokenBalance(outputMint);
+      console.log(`${label} [swap] SOL → token confirmed ✔ (attempt ${i + 1}/${PREQUOTE_SLIPPAGE_LEVELS.length}, ${slippage}bps) sig: ${sig} | actualReceived: ${tokenAmount}`);
       return { sig, tokenAmount };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const isRouteErr = msg.includes('0x177e') || msg.includes('custom program error') || msg.includes('route not executable');
-      console.warn(`${label} [swap] executeSwapFromPreQuote attempt ${attempt}/${PREQUOTE_MAX_ATTEMPTS} failed${isRouteErr ? ' (0x177e / route)' : ''}: ${msg}`);
+      console.warn(`${label} [swap] attempt ${i + 1}/${PREQUOTE_SLIPPAGE_LEVELS.length} failed at ${slippage}bps${isRouteErr ? ' (0x177e)' : ''}: ${msg}`);
 
-      if (attempt < PREQUOTE_MAX_ATTEMPTS) {
-        const delay = PREQUOTE_RETRY_BACKOFF_BASE_MS * attempt;
-        console.log(`${label} [swap] retrying same pre-quoted quote in ${delay}ms…`);
+      if (i < PREQUOTE_SLIPPAGE_LEVELS.length - 1) {
+        const delay = PREQUOTE_RETRY_BACKOFF_BASE_MS * (i + 1);
+        console.log(`${label} [swap] escalating to ${PREQUOTE_SLIPPAGE_LEVELS[i + 1]}bps in ${delay}ms…`);
         await new Promise(r => setTimeout(r, delay));
       }
     }
   }
 
-  // All same-quote attempts exhausted — caller will decide on ladder fallback or skip.
   return null;
 }
 
@@ -352,8 +358,8 @@ export async function executeSwapFromPreQuote(
  * Swaps a specific amount of native SOL to `tokenMint` via Jupiter (for one-sided open / Bid-Ask pre-fund).
  * Pre-validate quote exists before calling.
  * Uses unified higher slippage ladder + restrictIntermediateTokens=true.
- * Returns the swap sig and *actual* on-chain token amount received (post-slippage), or null on route failure (e.g. 0x177e).
- * On persistent route failure, returns null so open path can skip cleanly (no tokens moved).
+ * Returns the swap sig and *actual* on-chain token amount received (post-slippage), or null on persistent failure.
+ * Does NOT bail early on 0x177e — escalates slippage on each attempt through the full ladder.
  */
 export async function swapSolToToken(
   tokenMint: string,
@@ -372,29 +378,21 @@ export async function swapSolToToken(
 
   console.log(`${label} [swap] swapping ${solLamports.toString()} lamports SOL → ${tokenMint.slice(0, 8)}`);
 
-  // Use the unified higher ladder (500/1000/2000) for the buy path.
-  // The special 0x177e handling returns null cleanly for new Token-2022 pools
-  // where the route is not executable even if pre-quote passed (common in logs).
   const ladder = SWAP_SLIPPAGE_LADDER;
-  let lastError: unknown;
 
   for (const slippage of ladder) {
     try {
       console.log(`${label} [swap] trying slippage ${slippage}bps…`);
       return await attemptSwapSolToToken(tokenMint, solLamports, slippage, getWallet(), label);
     } catch (err) {
-      lastError = err;
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('0x177e') || msg.includes('custom program error')) {
-        console.warn(`${label} [swap] Jupiter route not executable (0x177e - typical for new Token-2022 DLMM / transfer hooks / thin liquidity even when pre-quote passed); aborting for this pool`);
-        return null;  // clean skip for open path (no tokens moved)
-      }
+      // Log and continue to next slippage level — do NOT bail early on 0x177e.
+      // Thin Token-2022 pools often succeed at higher slippage even when 500bps fails.
       console.warn(`${label} [swap] failed at ${slippage}bps: ${msg}`);
     }
   }
 
-  // For other final failures, return null (open caller will skip cleanly); close path uses separate sell fn that throws.
-  console.warn(`${label} [swap] all ladder attempts exhausted for buy`);
+  console.warn(`${label} [swap] all ladder attempts exhausted for buy — skipping pool`);
   return null;
 }
 
@@ -410,14 +408,12 @@ export async function swapSolToToken(
 export async function retryStrandedSells(): Promise<{ retried: number; recovered: number }> {
   const positions = getOpenLpPositions()
   const now = Date.now()
-  const recentMs = 7 * 24 * 3600 * 1000 // last 7 days (defense in depth for solo operator)
+  const recentMs = 7 * 24 * 3600 * 1000
 
   let retried = 0
   let recovered = 0
 
   for (const pos of positions) {
-    // Resolve the mint to recover: prefer stranded_token_mint (for failed-open stranded rows and future-proofing)
-    // otherwise fall back to the main mint field.
     const recoveryMint: string = (pos as any).stranded_token_mint || pos.mint || '';
     if (!recoveryMint) continue;
 
@@ -429,7 +425,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     if (pos.status === 'active' || pos.status === 'open') continue
 
     const isSellFailed = pos.status === 'sell_failed'
-    // Also sweep recently closed as a safety net (in case previous close left residue without setting sell_failed)
     const isRecentClosed = pos.status === 'closed' && !(pos as any).stranded_recovered_at
 
     if (!isSellFailed && !isRecentClosed) continue
@@ -442,14 +437,12 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         const label = `[stranded-sell-retry][${sym}]`
         console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) — recovering via Jupiter`)
 
-        // swapTokenToSol handles BOT_DRY_RUN, native SOL, and zero-balance internally (returns null in those cases)
         const sig = await swapTokenToSol(recoveryMint, label)
         if (sig) {
           recovered++
           console.log(`${label} recovered ✔ sig=${sig}`)
         }
 
-        // Persist recovery marker (or at least last check) using direct local-state to avoid pulling in executor
         const all = getOpenLpPositions()
         const idx = all.findIndex((p: any) => p.id === pos.id)
         if (idx !== -1) {
@@ -470,7 +463,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
       const msg = err instanceof Error ? err.message : String(err)
       const sym = (pos as any).symbol || pos.mint.slice(0, 6)
       console.warn(`[swap] stranded retry failed for ${sym}: ${msg}`)
-      // leave marker/status as-is so next monitor tick will retry
     }
   }
 
@@ -479,5 +471,3 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   }
   return { retried, recovered }
 }
-
-
