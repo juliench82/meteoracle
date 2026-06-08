@@ -15,8 +15,7 @@ const SWAP_RETRY_DELAY_MS = 3_000
  * Used in scanner deep-check to avoid issues with very new pools (now less relevant after activity-model change)
  * fail the Jupiter buy step during live Token-2022 position open (very common for
  * brand-new pump.fun/Dynamic Bonding Curve graduates until the pool is indexed by
- * the aggregator or has visible swap routes).
- *
+ * the aggregator or has visible swap routes).\n *
  * Uses the same /swap/v1/quote endpoint + params as the live buy path in executor/open.ts
  * so the check is predictive of whether the actual swap ladder will find a route.
  */
@@ -232,11 +231,8 @@ export async function swapTokenToSol(
 }
 
 /**
- * Swaps a specific amount of native SOL to `tokenMint` via Jupiter.
- * Uses the same slippage ladder and retry logic as swapTokenToSol.
- * Pre-quote validation should be done by caller.
- * Returns {sig, tokenAmount: actual on-chain balance after confirm} on success (not the quote estimate).
- * Throws on final failure.
+ * Attempts a single Jupiter SOL→token swap at the given slippageBps.
+ * Returns {sig, tokenAmount} on success, throws on failure.
  */
 async function attemptSwapSolToToken(
   tokenMint: string,
@@ -286,6 +282,8 @@ async function attemptSwapSolToToken(
 
 /**
  * Swaps a specific amount of native SOL to `tokenMint` via Jupiter (for one-sided open).
+ * Uses an escalating buy slippage ladder: 500 → 1000 → 2000 bps.
+ * These thresholds match the illiquid nature of pump.fun/DBC graduates.
  * Pre-validate quote exists before calling.
  * Returns the swap sig and *actual* on-chain token amount received (post-slippage).
  * Throws on final failure — caller responsible for alerting.
@@ -307,13 +305,13 @@ export async function swapSolToToken(
 
   console.log(`${label} [swap] swapping ${solLamports.toString()} lamports SOL → ${tokenMint.slice(0, 8)}`);
 
-  // Use a *tighter* ladder for the buy (open) path to avoid over-paying on entry.
-  // Aggressive ladder (up to 20%) is still used for sells via swapTokenToSol.
-  const buyLadder = [100, 300, 500].filter(b => b >= baseSlippageBps()).slice(0, 3);
-  const ladder = buyLadder.length > 0 ? buyLadder : [500];
+  // Buy ladder: 500 → 1000 → 2000 bps.
+  // Pump.fun/DBC graduates are illiquid; sub-500bps virtually never fills.
+  // 2000bps (20%) is the hard ceiling — beyond that, entry price is too degraded.
+  const BUY_SLIPPAGE_LADDER = [500, 1000, 2000];
   let lastError: unknown;
 
-  for (const slippage of ladder) {
+  for (const slippage of BUY_SLIPPAGE_LADDER) {
     try {
       console.log(`${label} [swap] trying slippage ${slippage}bps…`);
       return await attemptSwapSolToToken(tokenMint, solLamports, slippage, getWallet(), label);
@@ -408,5 +406,3 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   }
   return { retried, recovered }
 }
-
-
