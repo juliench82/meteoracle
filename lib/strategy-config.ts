@@ -89,6 +89,10 @@ export const ACTIVITY_MAX_POOL_AGE_MINUTES = envNumber(
   72 * 60 // 72 hours default for activity scan
 )
 
+// Legacy name still imported/re-exported by deep-checker.ts (for scanner.ts compat).
+// Use ACTIVITY_MAX_POOL_AGE_MINUTES for the broad activity window in new code.
+export const MAX_POOL_AGE_MINUTES = ACTIVITY_MAX_POOL_AGE_MINUTES;
+
 // ── LP Position Exit Rules (ultra-minimal model) ──
 // 48h dry-run starting point (2026-06). Tune after observing real Fee/TVL decay curves + net PnL behavior.
 // Primary signal: pool-level 24h Fee/TVL efficiency sampled over rolling 4h window.

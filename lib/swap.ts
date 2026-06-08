@@ -9,6 +9,10 @@ const SWAP_TIMEOUT_MS = 20_000
 const SWAP_MAX_RETRIES = 3
 const SWAP_RETRY_DELAY_MS = 3_000
 
+// Unified ladder for buy (swapSolToToken) and sell (swapTokenToSol) paths.
+// Higher values help with illiquid new Token-2022 DLMM pools.
+const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000];
+
 /**
  * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
  * Returns true only if a quote succeeds with positive outAmount (no error).
