@@ -22,14 +22,12 @@
  * CRITICAL SUCCESS CRITERIA (user directive):
  *   - No ZAP code path is used for opening. Entire bot purpose depends on reliably
  *     opening the full desired discrete range (-50% down / +100% up via round() bin math)
- *     using direct DLMM SDK + pre-swap for value match + zero new bin array gate.
+ *     using direct DLMM SDK + pre-swap (Meteora native) for value match + zero new bin array gate.
  *   - If we cannot open such positions the bot has no purpose at all.
- *   - Pre-swap leg for the token side is *extremely* patient for any pool that
- *     already passed the hard full-range zero-rent gate: post-prequote settle delay +
- *     fresh-quote escalating attempts (in executeSwapFromPreQuote) + full ladder +
- *     a final "patient re-prequote + execute" wave (several seconds total trying)
- *     before giving up on an otherwise perfect deep survivor.
- *     See the pre-swap block and lib/swap.ts (PREQUOTE_MAX_ATTEMPTS / PREQUOTE_SLIPPAGE_LEVELS).
+ *   - Pre-swap for the token leg (and post-close sells) now uses direct Meteora DLMM swaps
+ *     via the SDK (swapQuote + swap on the target pool). Jupiter completely removed from
+ *     opening pre-swaps, closing sells, and rollback. See swapSolToTokenDirectOnDlmm and
+ *     the direct sell logic in close.ts. Detailed [direct-dlmm] logs for debugging.
  */
 
 import {
@@ -93,7 +91,7 @@ import {
   persistStrandedTokenAfterFailedOpen,
 } from './persistence'
 
-import { swapTokenToSol } from '@/lib/swap'
+// swapTokenToSol (Jupiter) fully removed - using direct Meteora DLMM for all swaps in open/close/rollback
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
@@ -377,12 +375,14 @@ export async function openPosition(
           console.log(`${label} direct DLMM swap succeeded: received ${actualTokenLamports} token lamports`);
         }
       } catch (directErr) {
-        console.warn(`${label} direct DLMM swap failed: ${directErr instanceof Error ? directErr.message : directErr} — falling back to Jupiter pre-swap`);
+        console.error(`${label} direct DLMM swap for token leg FAILED: ${directErr instanceof Error ? directErr.message : directErr}`);
+        console.error(`${label} (Jupiter completely ditched per user request — no fallback; skipping pool)`);
+        return null;
       }
     }
 
-    if (actualTokenLamports === 0n && solToSwapLamports > 0n) {
-      console.error(`${label} direct DLMM swap for token leg failed for full-range pool (Jupiter completely ditched) — skipping pool`);
+    if (solToSwapLamports > 0n && actualTokenLamports === 0n) {
+      console.error(`${label} direct DLMM swap returned 0 tokens for full-range pool (Jupiter completely ditched) — skipping pool`);
       return null;
     }
 
@@ -416,19 +416,41 @@ export async function openPosition(
       return directResult;
     }
 
-    // Rollback path (Claude critical #1): swap succeeded but the DLMM position creation failed.
-    // We must try to return the tokens to SOL, otherwise they are stranded with no OpenLpPosition row
-    // for the normal recovery path to discover.
-    console.error(`${label} position open failed after successful pre-swap — attempting rollback to SOL`);
+    // Rollback path: position creation failed after successful direct DLMM pre-swap.
+    // Use direct DLMM sell (Meteora native) to return tokens to SOL. (Jupiter fully ditched.)
+    console.error(`${label} position open failed after successful pre-swap — attempting DIRECT DLMM rollback sell to SOL`);
     try {
-      const rollbackSig = await swapTokenToSol(outputMint.toBase58(), label);
-      if (rollbackSig) {
-        console.log(`${label} rollback swap back to SOL succeeded ✔ sig: ${rollbackSig}`);
-      } else {
-        console.warn(`${label} rollback returned no sig (dry-run or zero balance?)`);
+      const isTokenX = dlmmPool.tokenX.publicKey.toBase58() === outputMint.toBase58();
+      const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
+      const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
+      const binArrays = await dlmmPool.getBinArrays();
+      const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58());
+
+      const tokenBal = actualTokenLamports; // we have the exact amount from pre-swap
+      if (tokenBal > 0n) {
+        const swapQuote = await dlmmPool.swapQuote(
+          new BN(tokenBal.toString()),
+          swapYtoX,
+          new BN(1),
+          binArrays
+        );
+        if (swapQuote.outAmount.isZero()) {
+          throw new Error('Direct DLMM rollback quote gave 0 SOL output');
+        }
+        const swapTx = await dlmmPool.swap({
+          inToken,
+          binArraysPubkey: swapQuote.binArraysPubkey,
+          inAmount: swapQuote.inAmount,
+          lbPair: dlmmPool.pubkey,
+          user: wallet.publicKey,
+          minOutAmount: swapQuote.minOutAmount,
+          outToken,
+        });
+        const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], `${label} direct-dlmm-rollback`);
+        console.log(`${label} DIRECT DLMM rollback sell to SOL succeeded ✔ sig: ${rbSig}`);
       }
     } catch (rbErr) {
-      console.error(`${label} rollback swapTokenToSol ALSO failed — persisting stranded token marker for monitor recovery`, rbErr);
+      console.error(`${label} direct DLMM rollback sell ALSO failed — persisting stranded token marker for monitor recovery`, rbErr);
       try {
         await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), actualTokenLamports);
       } catch (persistErr) {
@@ -714,7 +736,14 @@ async function swapSolToTokenDirectOnDlmm(
   const inToken = solIsTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
   const outToken = solIsTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
 
-  console.log(`${label} [direct-dlmm] swapping ${solLamports} lamports SOL → token on DLMM pool`);
+  const activeBinAtSwap = await dlmmPool.getActiveBin();
+  console.log(`${label} [direct-dlmm] swapping ${solLamports} lamports SOL → token on DLMM pool (activeBin=${activeBinAtSwap.binId}, in=${inToken.toBase58().slice(0,8)}, out=${outToken.toBase58().slice(0,8)})`);
+
+  // Pre-swap balance for debug
+  try {
+    const preBal = await getWalletTokenBalance(outToken.toBase58());
+    console.log(`${label} [direct-dlmm] pre-swap ${outToken.toBase58().slice(0,8)} balance: ${preBal}`);
+  } catch {}
 
   const binArrays = await dlmmPool.getBinArrays();
 
@@ -754,8 +783,12 @@ async function swapSolToTokenDirectOnDlmm(
 
   console.log(`${label} [direct-dlmm] swap confirmed ✔ sig: ${sig}`);
 
-  // Read actual received (same as Jupiter path)
+  // Read actual received + post balance for debug
   const actualReceived = await getWalletTokenBalance(outToken.toBase58());
+  try {
+    const postBal = await getWalletTokenBalance(outToken.toBase58());
+    console.log(`${label} [direct-dlmm] post-swap ${outToken.toBase58().slice(0,8)} balance: ${postBal} (received ${actualReceived})`);
+  } catch {}
   return actualReceived;
 }
 

@@ -180,6 +180,9 @@ export async function closePosition(
         const amount = new BN(balResp?.value?.amount ?? '0')
 
         if (!amount.isZero()) {
+          const activeBinAtSell = await dlmmPool.getActiveBin();
+          console.log(`${label} [direct-dlmm-sell] activeBin=${activeBinAtSell.binId}, in=${inToken.toBase58().slice(0,8)}, out=${outToken.toBase58().slice(0,8)}, amount=${amount}`);
+
           // swapYtoX: true if swapping from Y to X
           const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58())
           const swapQuote = await dlmmPool.swapQuote(
@@ -191,6 +194,8 @@ export async function closePosition(
           if (swapQuote.outAmount.isZero()) {
             throw new Error('Direct DLMM sell quote gave 0 output')
           }
+          console.log(`${label} [direct-dlmm-sell] quote: in=${swapQuote.inAmount} out=${swapQuote.outAmount} fee=${swapQuote.fee}`);
+
           const swapTx = await dlmmPool.swap({
             inToken,
             binArraysPubkey: swapQuote.binArraysPubkey,
@@ -201,7 +206,13 @@ export async function closePosition(
             outToken,
           })
           const sig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], label)
-          console.log(`${label} direct DLMM sell confirmed ✔ sig: ${sig}`)
+          console.log(`${label} direct DLMM sell confirmed ✔ sig: ${sig}`);
+
+          // Post-sell balance debug
+          try {
+            const postBal = await connection.getTokenAccountBalance(tokenAta).catch(() => null);
+            console.log(`${label} [direct-dlmm-sell] post-sell balance for ${inToken.toBase58().slice(0,8)}: ${postBal?.value?.amount ?? '0'}`);
+          } catch {}
         }
       } catch (swapErr) {
         console.error(`${label} direct DLMM sell failed — marking sell_failed for stranded recovery`, swapErr)
