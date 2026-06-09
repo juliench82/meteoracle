@@ -750,6 +750,9 @@ async function openPositionDirect(
  *
  * If this returns feasible=false, we skip cleanly — no non-refundable rent is paid,
  * and we wait for other LPs to populate the arrays (per design).
+ *
+ * Returned fields include the exact `fullBinsDown`/`fullBinsUp` (from Math.round) so callers
+ * can compute the Bid-Ask split without duplicating the discrete math.
  */
 export async function checkFullEvilPandaRangeFeasibility(
   connection: Connection,
@@ -764,6 +767,8 @@ export async function checkFullEvilPandaRangeFeasibility(
   activeBinId: number;
   minBinId: number;
   maxBinId: number;
+  fullBinsDown: number;
+  fullBinsUp: number;
   effectiveDownPct: number;
   effectiveUpPct: number;
 }> {
