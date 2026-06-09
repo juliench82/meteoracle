@@ -191,18 +191,19 @@ export async function closePosition(
             new BN(1),
             binArrays
           )
-          if (swapQuote.outAmount.isZero()) {
+          const q = swapQuote as any;
+          if (q.outAmount.isZero()) {
             throw new Error('Direct DLMM sell quote gave 0 output')
           }
-          console.log(`${label} [direct-dlmm-sell] quote: in=${swapQuote.inAmount} out=${swapQuote.outAmount} fee=${swapQuote.fee}`);
+          console.log(`${label} [direct-dlmm-sell] quote: in=${q.inAmount} out=${q.outAmount} fee=${q.fee}`);
 
           const swapTx = await dlmmPool.swap({
             inToken,
-            binArraysPubkey: swapQuote.binArraysPubkey,
-            inAmount: swapQuote.inAmount,
+            binArraysPubkey: q.binArraysPubkey,
+            inAmount: q.inAmount,
             lbPair: dlmmPool.pubkey,
             user: wallet.publicKey,
-            minOutAmount: swapQuote.minOutAmount,
+            minOutAmount: q.minOutAmount,
             outToken,
           })
           const sig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], label)

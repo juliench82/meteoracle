@@ -442,14 +442,20 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         retried++
         const sym = (pos as any).symbol || recoveryMint.slice(0, 6)
         const label = `[stranded-sell-retry][${sym}]`
-        console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) — recovering via Jupiter`)
+        console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) — recovering via direct DLMM`)
 
         // Direct DLMM sell for stranded recovery (Jupiter ditched completely)
+        let recoveredSig: string | undefined
         try {
+          let sig: string | undefined
           const mod = await import('@meteora-ag/dlmm')
           const DLMM = mod.default as any
           const poolAddr = (pos as any).pool_address || (pos as any).metadata?.pool_address
           if (poolAddr) {
+            const connection = getConnection()
+            const wallet = getWallet()
+            const connection = getConnection()
+            const wallet = getWallet()
             const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddr))
             const isTokenX = dlmmPool.tokenX.publicKey.toBase58() === recoveryMint
             const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey
@@ -459,27 +465,28 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
             const bal = await getWalletTokenBalance(recoveryMint)
             if (bal > 0n) {
               const swapQuote = await dlmmPool.swapQuote(new BN(bal.toString()), swapYtoX, new BN(1), binArrays)
-              if (!swapQuote.outAmount.isZero()) {
+              const q = swapQuote as any
+              if (!q.outAmount.isZero()) {
                 const swapTx = await dlmmPool.swap({
                   inToken,
-                  binArraysPubkey: swapQuote.binArraysPubkey,
-                  inAmount: swapQuote.inAmount,
+                  binArraysPubkey: q.binArraysPubkey,
+                  inAmount: q.inAmount,
                   lbPair: dlmmPool.pubkey,
                   user: wallet.publicKey,
-                  minOutAmount: swapQuote.minOutAmount,
+                  minOutAmount: q.minOutAmount,
                   outToken,
                 })
-                // Use sendLegacyTx for consistency (import if needed in this file)
-                // For recovery, simple send; in practice wrap with priority
-                const sig = await connection.sendTransaction(swapTx as any, [wallet])
-                console.log(`${label} direct DLMM stranded sell confirmed ✔ sig: ${sig}`)
+                const { sendLegacyTx, applyPriorityFee } = await import('@/lib/solana-tx')
+                const prepared = applyPriorityFee(swapTx, 100000)
+                recoveredSig = await sendLegacyTx(prepared, [wallet], label)
+                console.log(`${label} direct DLMM stranded sell confirmed ✔ sig: ${recoveredSig}`)
                 // update state as before if sig
                 const all = getOpenLpPositions()
                 const idx = all.findIndex((p: any) => p.id === pos.id)
                 if (idx !== -1) {
                   const nowIso = new Date().toISOString()
                   all[idx].stranded_recovered_at = nowIso
-                  all[idx].stranded_recovered_sig = sig
+                  all[idx].stranded_recovered_sig = recoveredSig
                   if (all[idx].status === 'sell_failed') {
                     all[idx].status = 'closed'
                   }
@@ -491,18 +498,18 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         } catch (e) {
           console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${e}`)
         }
-        if (sig) {
+        if (recoveredSig) {
           recovered++
-          console.log(`${label} recovered ✔ sig=${sig}`)
+          console.log(`${label} recovered ✔ sig=${recoveredSig}`)
         }
 
         const all = getOpenLpPositions()
         const idx = all.findIndex((p: any) => p.id === pos.id)
         if (idx !== -1) {
           const nowIso = new Date().toISOString()
-          if (sig) {
+          if (recoveredSig) {
             all[idx].stranded_recovered_at = nowIso
-            all[idx].stranded_recovered_sig = sig
+            all[idx].stranded_recovered_sig = recoveredSig
             if (all[idx].status === 'sell_failed') {
               all[idx].status = 'closed'
             }

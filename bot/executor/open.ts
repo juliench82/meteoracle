@@ -758,20 +758,21 @@ async function swapSolToTokenDirectOnDlmm(
     new BN(1), // will use the quote's minOut
     binArrays
   );
+  const q = swapQuote as any;
 
-  if (swapQuote.outAmount.isZero()) {
+  if (q.outAmount.isZero()) {
     throw new Error('Direct DLMM swap quote gave zero output (insufficient liquidity on that side)');
   }
 
-  console.log(`${label} [direct-dlmm] quote: in=${swapQuote.inAmount} out=${swapQuote.outAmount} fee=${swapQuote.fee}`);
+  console.log(`${label} [direct-dlmm] quote: in=${q.inAmount} out=${q.outAmount} fee=${q.fee}`);
 
   const swapTx = await dlmmPool.swap({
     inToken,
-    binArraysPubkey: swapQuote.binArraysPubkey,
-    inAmount: swapQuote.inAmount,
+    binArraysPubkey: q.binArraysPubkey,
+    inAmount: q.inAmount,
     lbPair: dlmmPool.pubkey,
     user: wallet.publicKey,
-    minOutAmount: swapQuote.minOutAmount,
+    minOutAmount: q.minOutAmount,
     outToken,
   });
 
