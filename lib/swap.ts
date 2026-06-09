@@ -462,7 +462,8 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
             const currentBal = await getWalletTokenBalance(recoveryMint)
             if (currentBal > 0n) {
               const inputAmountBN = new BN(currentBal.toString())
-              const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(1), binArrays)
+              // Very loose slippage for stranded recovery sells (same large-raw microcap legs as open rollback).
+              const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(10000), binArrays)
               const q = swapQuote as any
               if (!q.outAmount.isZero()) {
                 const quotedIn = q.inAmount ?? inputAmountBN;
@@ -470,10 +471,10 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                 const swapTx = await dlmmPool.swap({
                   inToken,
                   binArraysPubkey: q.binArraysPubkey,
-                  inAmount: inputAmountBN,  // known input we quoted (q.inAmount not always populated reliably)
+                  inAmount: inputAmountBN,
                   lbPair: dlmmPool.pubkey,
                   user: wallet.publicKey,
-                  minOutAmount: q.minOutAmount,
+                  minOutAmount: new BN(0),  // recovery mode — land the unwind
                   outToken,
                 })
                 const { sendLegacyTx, applyPriorityFee } = await import('@/lib/solana-tx')

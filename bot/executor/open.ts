@@ -450,11 +450,13 @@ export async function openPosition(
       }
       if (tokenBal > 0n) {
         const inputAmountBN = new BN(tokenBal.toString());
-        // Looser allowed slippage for rollback (was BN(1) which was far too tight after time/price move).
+        // Very loose allowed slippage for emergency rollback unwind of the (often large-raw) token leg.
+        // These microcap pools + large raw counts from a "good fill" on pre-swap can have massive price
+        // impact on the reverse swap; we prefer to get *something* back to SOL rather than strand.
         const swapQuote = await dlmmPool.swapQuote(
           inputAmountBN,
           swapYtoX,
-          new BN(500), // ~0.5% or SDK scale equivalent — enough for volatile microcap after failed open
+          new BN(10000), // very permissive for rollback (previous 1/500 were still too tight on large legs)
           binArrays
         );
         const q = swapQuote as any;
@@ -469,7 +471,7 @@ export async function openPosition(
           inAmount: inputAmountBN,
           lbPair: dlmmPool.pubkey,
           user: wallet.publicKey,
-          minOutAmount: q.minOutAmount,
+          minOutAmount: new BN(0),   // pure recovery: we already hold the tokens, just get *some* SOL back
           outToken,
         });
         const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], `${label} direct-dlmm-rollback`);
@@ -608,9 +610,9 @@ async function validateOpenEligibility(
 }
 
 /**
- * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit Jupiter pre-swap for the token side).
- * Calls dlmmPool.initializePositionAndAddLiquidityByStrategy using the actual post-swap token amount
- * and the remaining SOL. Full desired range (no cap) is used only after the bin-array rent gate passes.
+ * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit direct DLMM pre-swap for the token leg).
+ * Uses two-phase (initializePosition then addLiquidityByStrategy) to support the full discrete ranges
+ * (150-300+ bins) that pass the 0-new-bin-array gate. Passes the real post-swap on-chain amounts.
  */
 async function openPositionDirect(
   metrics: TokenMetrics,
@@ -660,56 +662,35 @@ async function openPositionDirect(
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
-    // Two-phase open for wide evil-panda ranges (150-300+ bins on typical binSteps).
-    // The combined initialize+add often hits "InvalidRealloc" / "Failed to reallocate account data"
-    // (position account data size for the full discrete range exceeds CPI realloc budget in the
-    // combined path). We try the combined first (works for narrower ranges), then fall back to
-    // explicit initializePosition (allocates the sized account) + addLiquidityByStrategy.
-    let createPositionTxOrTxs: any;
-    try {
-      createPositionTxOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
-        positionPubKey: positionKeypair.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalX,
-        totalYAmount: totalY,
-        strategy: {
-          minBinId,
-          maxBinId,
-          strategyType,
-        },
-      });
-    } catch (combinedErr: any) {
-      const msg = combinedErr?.message || String(combinedErr);
-      const isRealloc = msg.includes('realloc') || msg.includes('InvalidRealloc') || msg.includes('reallocate account data') || msg.includes('Account data size');
-      if (isRealloc) {
-        console.warn(`${label} combined init+add hit realloc limit for ${maxBinId - minBinId + 1} bins — falling back to two-phase (initPosition then addLiquidityByStrategy)`);
-        // Phase 1: create the position account sized for the full range
-        const initTx = await dlmmPool.initializePosition({
-          user: wallet.publicKey,
-          positionPubKey: positionKeypair.publicKey,
-          minBinId,
-          maxBinId,
-        });
-        const initPrepared = applyPriorityFee(initTx, priorityFee);
-        const initSig = await sendLegacyTx(initPrepared, [wallet, positionKeypair], `${label} init-pos`);
-        console.log(`${label} position account initialized (phase 1) ✔ sig: ${initSig}`);
+    // Unconditional two-phase for evil-panda full ranges (151-300+ bins).
+    // The combined initializePositionAndAddLiquidityByStrategy hits "InvalidRealloc" / 10KB CPI
+    // realloc limit on the position account for these widths (even when 0 new bin arrays).
+    // Explicit initializePosition first allocates the properly-sized position account for the
+    // exact bin range. Then addLiquidityByStrategy funds it with the actual (post pre-swap) legs.
+    // This is required to reliably open the full discrete -50%/+100% ranges the strategy demands.
+    console.log(`${label} phase 1: initializePosition (range ${minBinId} → ${maxBinId}) to allocate position account`);
+    const initTx = await dlmmPool.initializePosition({
+      user: wallet.publicKey,
+      positionPubKey: positionKeypair.publicKey,
+      minBinId,
+      maxBinId,
+    });
+    const initPrepared = applyPriorityFee(initTx, priorityFee);
+    const initSig = await sendLegacyTx(initPrepared, [wallet, positionKeypair], `${label} init-pos`);
+    console.log(`${label} position account initialized (phase 1) ✔ sig: ${initSig}`);
 
-        // Phase 2: fund it
-        createPositionTxOrTxs = await dlmmPool.addLiquidityByStrategy({
-          positionPubKey: positionKeypair.publicKey,
-          user: wallet.publicKey,
-          totalXAmount: totalX,
-          totalYAmount: totalY,
-          strategy: {
-            minBinId,
-            maxBinId,
-            strategyType,
-          },
-        });
-      } else {
-        throw combinedErr;
-      }
-    }
+    console.log(`${label} phase 2: addLiquidityByStrategy with actual legs (the real post-swap amounts)`);
+    let createPositionTxOrTxs: any = await dlmmPool.addLiquidityByStrategy({
+      positionPubKey: positionKeypair.publicKey,
+      user: wallet.publicKey,
+      totalXAmount: totalX,
+      totalYAmount: totalY,
+      strategy: {
+        minBinId,
+        maxBinId,
+        strategyType,
+      },
+    });
 
     const txsToSend = Array.isArray(createPositionTxOrTxs) ? createPositionTxOrTxs : [createPositionTxOrTxs]
     let liqSig = ''

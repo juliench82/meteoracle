@@ -451,23 +451,28 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
           .join(' > ')
     );
 
-    // Attempt opens in the new ranked order. The attemptOpenAndNotify logic
-    // handles daily-loss circuit, remaining slots, mint dedup this tick,
-    // the actual openPosition call, counter updates, and alerts.
-    for (const s of scoredSurvivors) {
+    // Only attempt the single best (top-ranked) survivor per scanner tick.
+    // This prevents "purchasing" (pre-swapping the token leg for) 4-5 different tokens in one cycle
+    // when earlier attempts fail to open a position (e.g. transient realloc, balance, etc.).
+    // With MAX_CONCURRENT=1, we want at most one pre-swap + open attempt per 15min tick.
+    // If the best one fails, next tick will re-evaluate the (new) top candidate.
+    // The attemptOpenAndNotify still does all the per-attempt slot/daily-loss/dedup checks.
+    if (scoredSurvivors.length > 0) {
+      const top = scoredSurvivors[0];
+      console.log(`[scanner] attempting single top-ranked open this tick (best score first; no cascade on failure)`);
       await attemptOpenAndNotify({
-        metrics: s.metrics,
-        strategy: s.strategy,
-        symbol: s.symbol,
-        liveSolPriceUsd: s.liveSolPriceUsd,
-        openedMintsThisTick: s.openedMintsThisTick,
-        openedCountRef: s.openedCountRef,
-        openSkippedCountRef: s.openSkippedCountRef,
-        dailyLossLimitHitRef: s.dailyLossLimitHitRef,
-        openBlockedReason: s.openBlockedReason,
-        availableOpenSlots: s.availableOpenSlots,
-        candidateCountRef: s.candidateCountRef,
-        score: s.score,
+        metrics: top.metrics,
+        strategy: top.strategy,
+        symbol: top.symbol,
+        liveSolPriceUsd: top.liveSolPriceUsd,
+        openedMintsThisTick: top.openedMintsThisTick,
+        openedCountRef: top.openedCountRef,
+        openSkippedCountRef: top.openSkippedCountRef,
+        dailyLossLimitHitRef: top.dailyLossLimitHitRef,
+        openBlockedReason: top.openBlockedReason,
+        availableOpenSlots: top.availableOpenSlots,
+        candidateCountRef: top.candidateCountRef,
+        score: top.score,
       });
     }
   }
