@@ -382,7 +382,8 @@ export async function openPosition(
         quote = await quoteRes.json()
         if (quote?.error || quote?.errorCode) throw new Error(quote.error || quote.errorCode || 'quote error')
         const expectedOut = BigInt(quote.outAmount ?? quote.out_amount ?? '0')
-        console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token (impact=${quote.priceImpactPct ?? quote.priceImpact ?? 'n/a'})`)
+        const routeHops = Array.isArray(quote.routePlan) ? quote.routePlan.length : 1;
+        console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token (impact=${quote.priceImpactPct ?? quote.priceImpact ?? 'n/a'}, routeHops=${routeHops})`)
       } catch (e) {
         console.warn(`${label} pre-quote SOL→token failed — skipping pool: ${e instanceof Error ? e.message : e}`)
         return null
@@ -405,44 +406,58 @@ export async function openPosition(
         swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
       }
 
-      // Patient final wave for pools that are *exactly* the ones we must be able to open.
+      // Patient final wave(s) for pools that are *exactly* the ones we must be able to open.
       // If everything (scanner score, lp_count, fee accel, full discrete range with 0 new arrays)
       // passed but the token leg swap keeps 0x177e'ing, we are failing the bot's core purpose.
-      // One more delayed fresh pre-quote + executeSwapFromPreQuote (which will do its full
-      // escalating fresh attempts) before giving up.
+      // We do the delayed fresh pre-quote + full escalating execute, and if it still fails
+      // we do ONE MORE longer-delay cycle (super-patient mode) before giving up.
       if (!swapRes) {
-        const FINAL_PATIENT_DELAY = 2500;
-        console.warn(`${label} prequote + ladder both failed for full -50/+100 range pool (0 new arrays) — PATIENT FINAL WAVE: sleep ${FINAL_PATIENT_DELAY}ms then fresh pre-quote + ${PREQUOTE_MAX_ATTEMPTS} escalating attempts`);
-        await new Promise(r => setTimeout(r, FINAL_PATIENT_DELAY));
+        for (let wave = 1; wave <= 2; wave++) {
+          const isLastWave = wave === 2;
+          const delay = isLastWave ? 5000 : 2500;
+          const waveLabel = isLastWave ? 'SUPER-PATIENT FINAL WAVE' : 'PATIENT FINAL WAVE';
 
-        let finalQuote: any = null;
-        try {
-          const params2 = new URLSearchParams({
-            inputMint: NATIVE_MINT_STR,
-            outputMint: outputMint.toBase58(),
-            amount: solToSwapLamports.toString(),
-            slippageBps: '500',
-            onlyDirectRoutes: 'false',
-            restrictIntermediateTokens: 'true',
-          });
-          const quoteUrl2 = `${JUPITER_QUOTE_API}/quote?${params2.toString()}`;
-          const qRes2 = await fetch(quoteUrl2, { signal: AbortSignal.timeout(8000) });
-          if (qRes2.ok) {
-            finalQuote = await qRes2.json();
-            if (finalQuote && !finalQuote.error && !finalQuote.errorCode) {
-              const exp2 = BigInt(finalQuote.outAmount ?? finalQuote.out_amount ?? '0');
-              console.log(`${label} patient final pre-quote OK: ${solToSwapLamports} SOL → ~${exp2} token`);
-              swapRes = await executeSwapFromPreQuote(finalQuote, getWallet(), label);
-            } else {
-              console.warn(`${label} patient final pre-quote had error`);
+          console.warn(`${label} prequote + ladder both failed for full -50/+100 range pool (0 new arrays) — ${waveLabel} #${wave}: sleep ${delay}ms then fresh pre-quote + ${PREQUOTE_MAX_ATTEMPTS} escalating attempts`);
+          await new Promise(r => setTimeout(r, delay));
+
+          let waveQuote: any = null;
+          try {
+            const paramsW = new URLSearchParams({
+              inputMint: NATIVE_MINT_STR,
+              outputMint: outputMint.toBase58(),
+              amount: solToSwapLamports.toString(),
+              slippageBps: '500',
+              onlyDirectRoutes: 'false',
+              restrictIntermediateTokens: 'true',
+            });
+            const quoteUrlW = `${JUPITER_QUOTE_API}/quote?${paramsW.toString()}`;
+            const qResW = await fetch(quoteUrlW, { signal: AbortSignal.timeout(8000) });
+            if (qResW.ok) {
+              waveQuote = await qResW.json();
+              if (waveQuote && !waveQuote.error && !waveQuote.errorCode) {
+                const expW = BigInt(waveQuote.outAmount ?? waveQuote.out_amount ?? '0');
+                const routeHopsW = Array.isArray(waveQuote.routePlan) ? waveQuote.routePlan.length : 1;
+                console.log(`${label} ${waveLabel.toLowerCase()} pre-quote OK: ${solToSwapLamports} SOL → ~${expW} token (routeHops=${routeHopsW})`);
+                swapRes = await executeSwapFromPreQuote(waveQuote, getWallet(), label);
+              } else {
+                console.warn(`${label} ${waveLabel.toLowerCase()} pre-quote had error`);
+              }
             }
+          } catch (waveErr) {
+            console.warn(`${label} ${waveLabel.toLowerCase()} pre-quote fetch failed: ${waveErr instanceof Error ? waveErr.message : waveErr}`);
           }
-        } catch (finalErr) {
-          console.warn(`${label} patient final pre-quote fetch failed: ${finalErr instanceof Error ? finalErr.message : finalErr}`);
+
+          if (swapRes) {
+            break; // success on this wave
+          }
+
+          if (!isLastWave) {
+            console.warn(`${label} ${waveLabel.toLowerCase()} #${wave} still failed — will try one more super-patient cycle`);
+          }
         }
 
         if (!swapRes) {
-          console.error(`${label} swap SOL to token failed (after patient final wave for full-range pool)`);
+          console.error(`${label} swap SOL to token failed (after all patient + super-patient waves for full-range pool)`);
           return null;
         }
       }
