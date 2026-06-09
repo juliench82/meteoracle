@@ -170,10 +170,10 @@ export async function openPosition(
     const DLMM = await getDLMM()
     const dlmmPool = await DLMM.create(connection, poolPubkey)
     const activeBin = await dlmmPool.getActiveBin()
-    const activeBinId = activeBin.binId
+    const initialActiveBinId = activeBin.binId
 
     const entryPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin)
-    console.log(`${label} entry price: ${entryPriceSol.toFixed(9)} SOL/token (bin ${activeBinId})`)
+    console.log(`${label} entry price: ${entryPriceSol.toFixed(9)} SOL/token (bin ${initialActiveBinId})`)
 
     const binStep = dlmmPool.lbPair.binStep
     const mintX = dlmmPool.tokenX.publicKey
@@ -203,7 +203,7 @@ export async function openPosition(
     const rangeDownPct = strategy.position.rangeDownPct;
     const rangeUpPct = strategy.position.rangeUpPct;
 
-    const feasibility = await checkFullEvilPandaRangeFeasibility(
+    let feasibility = await checkFullEvilPandaRangeFeasibility(
       connection,
       poolPubkey,
       rangeDownPct,
@@ -218,13 +218,34 @@ export async function openPosition(
     );
 
     if (!feasibility.feasible) {
-      console.log(
-        `${label} SKIPPING: full evil-panda range (-50% / +100%) not possible with zero new bin arrays ` +
-        `(would need ${feasibility.newBinArrayCount} new array(s) for ${feasibility.totalBins} bins @ step=${feasibility.binStep}). ` +
-        `This is by design — we only open when the entire desired discrete range is already populated on-chain (no non-refundable rent). ` +
-        `Waiting for other LPs to create the missing bin arrays.`
-      );
-      return null;
+      // Active bin drift detection (Claude suggestion): the active bin can move between the
+      // initial fetch (used for entry price) and the range feasibility check. If it drifted,
+      // the "infeasible" result may be transient. Give it one short retry with fresh state.
+      if (feasibility.activeBinId !== initialActiveBinId) {
+        console.log(
+          `${label} active bin drifted (initial=${initialActiveBinId}, feasibility=${feasibility.activeBinId}) — ` +
+          `waiting 1500ms and retrying full evil-panda range feasibility once`
+        );
+        await new Promise(r => setTimeout(r, 1500));
+        feasibility = await checkFullEvilPandaRangeFeasibility(
+          connection,
+          poolPubkey,
+          rangeDownPct,
+          rangeUpPct
+        );
+      }
+
+      if (!feasibility.feasible) {
+        console.log(
+          `${label} SKIPPING: full evil-panda range (-50% / +100%) not possible with zero new bin arrays ` +
+          `(would need ${feasibility.newBinArrayCount} new array(s) for ${feasibility.totalBins} bins @ step=${feasibility.binStep}). ` +
+          `This is by design — we only open when the entire desired discrete range is already populated on-chain (no non-refundable rent). ` +
+          `Waiting for other LPs to create the missing bin arrays.`
+        );
+        return null;
+      } else {
+        console.log(`${label} range feasibility recovered after active bin drift retry`);
+      }
     }
 
     // Use values from the centralized feasibility check (full range with 0 new bin arrays guaranteed here)
@@ -753,6 +774,10 @@ async function openPositionDirect(
  *
  * Returned fields include the exact `fullBinsDown`/`fullBinsUp` (from Math.round) so callers
  * can compute the Bid-Ask split without duplicating the discrete math.
+ *
+ * Callers (currently open.ts) may implement active-bin-drift retry: if the active bin moved
+ * between an earlier fetch and this check, a short re-check can be performed before deciding
+ * to skip.
  */
 export async function checkFullEvilPandaRangeFeasibility(
   connection: Connection,

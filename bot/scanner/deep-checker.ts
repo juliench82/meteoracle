@@ -814,41 +814,14 @@ async function processActivityCandidate(
     poolPriceDeviation: priceDev ?? undefined,
   });
 
-  const { strategy, decision, rejectionReason } = evaluateCandidate(metrics, symbol);
+  const { strategy, decision, rejectionReason } = await evaluateCandidate(metrics, symbol);
 
   if (decision === 'ACCEPTED' && strategy) {
-    // For evil-panda, additionally require that the full desired range (-50% / +100% discrete)
-    // is currently possible with zero new bin arrays. This is the strategy's hard requirement
-    // (no non-refundable rent for the Bid-Ask full range). We enforce it here (early) in
-    // addition to the gate inside openPosition so that only truly openable full-range pools
-    // become "deep survivors", get scored/ranked, and produce "ACCEPTED" logs.
-    if (strategy.id === 'evil-panda') {
-      try {
-        const { checkFullEvilPandaRangeFeasibility } = await import('../executor/open');
-        const { getConnection } = await import('@/lib/solana');
-        const { PublicKey } = await import('@solana/web3.js');
-        const rangeCheck = await checkFullEvilPandaRangeFeasibility(
-          getConnection(),
-          new PublicKey(bestPool.address),
-          strategy.position?.rangeDownPct ?? -50,
-          strategy.position?.rangeUpPct ?? 100
-        );
-        if (!rangeCheck.feasible) {
-          console.log(
-            `${label} SKIPPING (early): full evil-panda range (-50% / +100%) not free with 0 new bin arrays ` +
-            `(${rangeCheck.newBinArrayCount} new array(s) needed for ${rangeCheck.totalBins} bins, step=${rangeCheck.binStep}). ` +
-            `By design we only ACCEPT for ranking when the complete desired range is already on-chain.`
-          );
-          return { wasCandidate: false, wasOpened: false, wasSkipped: true };
-        }
-      } catch (rangeErr) {
-        console.warn(`${label} range feasibility pre-check failed (open will still enforce the gate): ${rangeErr}`);
-      }
-    }
-
-    // Collect for post-loop scoring + ranking instead of opening in processing order.
-    // This ensures the highest-scored survivor (after all deep gates + range feasibility for evil-panda)
-    // gets slot priority.
+    // Range feasibility for evil-panda is now enforced inside evaluateCandidate (before we ever
+    // log "ACCEPTED"). This prevents "ACCEPTED" followed by a range skip in the logs, which was
+    // confusing for expected "we only open full -50/+100 with zero rent" behavior.
+    //
+    // Only pools that passed every gate (including full range) reach here and get ranked.
     const poolForScore = bestPool || representativePool;
     const lpCountForScore = (poolForScore as any)._enriched_lp_count || 0;
     deepGateSurvivors.push({
@@ -973,7 +946,7 @@ async function attemptOpenAndNotify(params: {
   }
 }
 
-function evaluateCandidate(
+async function evaluateCandidate(
   metrics: TokenMetrics,
   symbol: string
 ) {
@@ -983,6 +956,34 @@ function evaluateCandidate(
     const rejectionReason = explainNoStrategy(metrics);
     console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy): ${rejectionReason}`);
     return { strategy: null, decision: 'REJECTED', rejectionReason, finalScore: 0 };
+  }
+
+  // Evil-panda core requirement: full desired range must be possible with zero new bin arrays.
+  // Check this here (before logging ACCEPTED) so we never say "ACCEPTED" for pools that
+  // cannot support the strategy's full -50%/+100% Bid-Ask range. This keeps logs and any
+  // downstream notifications clean for expected design-driven skips.
+  if (strategy.id === 'evil-panda') {
+    try {
+      const { checkFullEvilPandaRangeFeasibility } = await import('../executor/open');
+      const { getConnection } = await import('@/lib/solana');
+      const { PublicKey } = await import('@solana/web3.js');
+      const rangeCheck = await checkFullEvilPandaRangeFeasibility(
+        getConnection(),
+        new PublicKey(metrics.poolAddress || metrics.address),
+        strategy.position?.rangeDownPct ?? -50,
+        strategy.position?.rangeUpPct ?? 100
+      );
+      if (!rangeCheck.feasible) {
+        console.log(
+          `[scanner][${symbol}] SKIPPING (range gate): full evil-panda range (-50% / +100%) not free with 0 new bin arrays ` +
+          `(${rangeCheck.newBinArrayCount} new array(s) for ${rangeCheck.totalBins} bins, step=${rangeCheck.binStep}). ` +
+          `This is expected behavior — we only open when the complete discrete range is already populated on-chain (no rent).`
+        );
+        return { strategy: null, decision: 'REJECTED', rejectionReason: 'full evil-panda range requires new bin arrays', finalScore: 0 };
+      }
+    } catch (e) {
+      console.warn(`[scanner][${symbol}] range feasibility check in evaluate failed (will let later gates decide):`, e);
+    }
   }
 
   // If it passed the real documented fields + derived proxies (tvl + fee_24h server-side, implied active, fee accel, age > 2h) + deep gates,
