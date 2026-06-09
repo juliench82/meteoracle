@@ -450,32 +450,39 @@ export async function openPosition(
       }
       if (tokenBal > 0n) {
         const inputAmountBN = new BN(tokenBal.toString());
-        // Very loose allowed slippage for emergency rollback unwind of the (often large-raw) token leg.
-        // These microcap pools + large raw counts from a "good fill" on pre-swap can have massive price
-        // impact on the reverse swap; we prefer to get *something* back to SOL rather than strand.
-        const swapQuote = await dlmmPool.swapQuote(
-          inputAmountBN,
-          swapYtoX,
-          new BN(10000), // very permissive for rollback (previous 1/500 were still too tight on large legs)
-          binArrays
-        );
-        const q = swapQuote as any;
-        if (q.outAmount.isZero()) {
-          throw new Error('Direct DLMM rollback quote gave 0 SOL output');
+        // Very loose allowed slippage + minOut=0 for emergency rollback.
+        // Large raw token legs on microcaps frequently cause swapQuote to fail with
+        // "Insufficient liquidity in binArrays" (the snapshot from getBinArrays may not have
+        // depth for a 20B+ sell on the reverse side). We catch the quote error, log it, and
+        // let the stranded marker be persisted so the monitor retry (fresh binArrays each time)
+        // can try again later when conditions are better.
+        try {
+          const swapQuote = await dlmmPool.swapQuote(
+            inputAmountBN,
+            swapYtoX,
+            new BN(10000),
+            binArrays
+          );
+          const q = swapQuote as any;
+          if (q.outAmount.isZero()) {
+            throw new Error('Direct DLMM rollback quote gave 0 SOL output');
+          }
+          const quotedIn = q.inAmount ?? inputAmountBN;
+          console.log(`${label} [direct-dlmm-rollback] quote: in=${quotedIn} out=${q.outAmount}`);
+          const swapTx = await dlmmPool.swap({
+            inToken,
+            binArraysPubkey: q.binArraysPubkey,
+            inAmount: inputAmountBN,
+            lbPair: dlmmPool.pubkey,
+            user: wallet.publicKey,
+            minOutAmount: new BN(0),
+            outToken,
+          });
+          const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], `${label} direct-dlmm-rollback`);
+          console.log(`${label} DIRECT DLMM rollback sell to SOL succeeded ✔ sig: ${rbSig}`);
+        } catch (rbQuoteErr) {
+          console.warn(`${label} direct DLMM rollback quote/swap failed (insufficient liquidity or other) — persisting stranded for monitor retry: ${rbQuoteErr instanceof Error ? rbQuoteErr.message : rbQuoteErr}`);
         }
-        const quotedIn = q.inAmount ?? inputAmountBN;
-        console.log(`${label} [direct-dlmm-rollback] quote: in=${quotedIn} out=${q.outAmount}`);
-        const swapTx = await dlmmPool.swap({
-          inToken,
-          binArraysPubkey: q.binArraysPubkey,
-          inAmount: inputAmountBN,
-          lbPair: dlmmPool.pubkey,
-          user: wallet.publicKey,
-          minOutAmount: new BN(0),   // pure recovery: we already hold the tokens, just get *some* SOL back
-          outToken,
-        });
-        const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], `${label} direct-dlmm-rollback`);
-        console.log(`${label} DIRECT DLMM rollback sell to SOL succeeded ✔ sig: ${rbSig}`);
       }
     } catch (rbErr) {
       console.error(`${label} direct DLMM rollback sell ALSO failed — persisting stranded token marker for monitor recovery`, rbErr);
@@ -611,8 +618,9 @@ async function validateOpenEligibility(
 
 /**
  * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit direct DLMM pre-swap for the token leg).
- * Uses two-phase (initializePosition then addLiquidityByStrategy) to support the full discrete ranges
- * (150-300+ bins) that pass the 0-new-bin-array gate. Passes the real post-swap on-chain amounts.
+ * Uses the combined `initializePositionAndAddLiquidityByStrategy` with the *value-matched quotedOut*
+ * from the pre-swap (small number) rather than the raw on-chain delta (often 100k×+ larger on cheap tokens).
+ * This keeps the 151-bin position account size reasonable for the DLMM initializer.
  */
 async function openPositionDirect(
   metrics: TokenMetrics,
@@ -662,25 +670,13 @@ async function openPositionDirect(
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
-    // Unconditional two-phase for evil-panda full ranges (151-300+ bins).
-    // The combined initializePositionAndAddLiquidityByStrategy hits "InvalidRealloc" / 10KB CPI
-    // realloc limit on the position account for these widths (even when 0 new bin arrays).
-    // Explicit initializePosition first allocates the properly-sized position account for the
-    // exact bin range. Then addLiquidityByStrategy funds it with the actual (post pre-swap) legs.
-    // This is required to reliably open the full discrete -50%/+100% ranges the strategy demands.
-    console.log(`${label} phase 1: initializePosition (range ${minBinId} → ${maxBinId}) to allocate position account`);
-    const initTx = await dlmmPool.initializePosition({
-      user: wallet.publicKey,
-      positionPubKey: positionKeypair.publicKey,
-      minBinId,
-      maxBinId,
-    });
-    const initPrepared = applyPriorityFee(initTx, priorityFee);
-    const initSig = await sendLegacyTx(initPrepared, [wallet, positionKeypair], `${label} init-pos`);
-    console.log(`${label} position account initialized (phase 1) ✔ sig: ${initSig}`);
-
-    console.log(`${label} phase 2: addLiquidityByStrategy with actual legs (the real post-swap amounts)`);
-    let createPositionTxOrTxs: any = await dlmmPool.addLiquidityByStrategy({
+    // Use the combined initializer with the *quoted* (value-matched) token leg amount.
+    // Passing the raw on-chain delta (often 100k-700k× larger on these cheap tokens) makes the
+    // position account for a 151-bin range too big for the SDK's internal realloc path.
+    // By using the small quotedOut we keep the deposited liquidity at the intended scale
+    // from the Bid-Ask split, which fits the 151-bin position creation.
+    console.log(`${label} using combined initializePositionAndAddLiquidityByStrategy with value-matched (quoted) leg amounts`);
+    const createPositionTxOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
       totalXAmount: totalX,
@@ -836,32 +832,28 @@ async function swapSolToTokenDirectOnDlmm(
   console.log(`${label} [direct-dlmm] swap confirmed ✔ sig: ${sig}`);
 
   // Read actual received (delta) + post balance for debug.
-  // Token-2022 + hooks can have visibility lag on getParsedTokenAccountsByOwner right after the tx lands,
-  // so we retry a few times and also fall back to the SDK quote's outAmount (the amount the pool math
-  // said we should have received for this inAmount). This fixes "received 0" / wrong-scale bugs that
-  // caused PARQ to skip after a successful swap and LIFE/KINS to pass gigantic raw amounts into the
-  // position initializer (triggering realloc failures).
+  // Token-2022 + hooks can have visibility lag. We always prefer the SDK's quotedOut for the
+  // amount passed to the position initializer (this is the "value matched" leg from the split
+  // calculation at the entry price). The on-chain delta can be much larger (good execution or
+  // raw unit scale on cheap tokens); we log it for visibility but use the quoted for totals
+  // so the 151-bin position account stays a reasonable size for the DLMM initializer.
   let postBal = 0n;
   try {
-    // small settle + retry for Token-2022 balance visibility
     for (let i = 0; i < 4; i++) {
       await new Promise(r => setTimeout(r, 600));
       postBal = await getWalletTokenBalance(outToken.toBase58());
       if (postBal > 0n) break;
     }
   } catch {}
-  const delta = postBal > preBalForDelta ? postBal - preBalForDelta : postBal; // if pre fetch missed, delta≈post when starting from 0
+  const delta = postBal > preBalForDelta ? postBal - preBalForDelta : postBal;
 
-  let receivedForLp = delta;
-  if (receivedForLp === 0n && q && q.outAmount && !q.outAmount.isZero()) {
-    receivedForLp = BigInt(q.outAmount.toString());
-    console.log(`${label} [direct-dlmm] balance delta=0 after retries — falling back to quote outAmount=${receivedForLp} for LP deposit amount`);
-  }
+  const quotedOut = q?.outAmount && !q.outAmount.isZero() ? BigInt(q.outAmount.toString()) : 0n;
+  const amountForPosition = quotedOut > 0n ? quotedOut : delta;
 
   try {
-    console.log(`${label} [direct-dlmm] post-swap ${outToken.toBase58().slice(0,8)} balance: ${postBal} (delta=${delta}, usedForLp=${receivedForLp}, quotedOut=${q?.outAmount ?? 'n/a'})`);
+    console.log(`${label} [direct-dlmm] post-swap ${outToken.toBase58().slice(0,8)} balance: ${postBal} (delta=${delta}, usedForLp=${amountForPosition}, quotedOut=${quotedOut || 'n/a'})`);
   } catch {}
-  return receivedForLp;
+  return amountForPosition;
 }
 
 /**
