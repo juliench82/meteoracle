@@ -202,34 +202,46 @@ export async function openPosition(
     // =============================================================================
     const rangeDownPct = strategy.position.rangeDownPct;
     const rangeUpPct = strategy.position.rangeUpPct;
-    const fullBinsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
-    const fullBinsUp = Math.round((rangeUpPct / 100) / (binStep / 10000));
-    const fullDesiredMin = activeBinId - fullBinsDown;
-    const fullDesiredMax = activeBinId + fullBinsUp;
-    const fullTotalBins = fullDesiredMax - fullDesiredMin + 1;
 
-    const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
-    const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
-
-    const requiredBinArrays = getBinArraysRequiredByPositionRange(
+    const feasibility = await checkFullEvilPandaRangeFeasibility(
+      connection,
       poolPubkey,
-      new BN(fullDesiredMin),
-      new BN(fullDesiredMax),
-      DLMM_PROGRAM_ID
+      rangeDownPct,
+      rangeUpPct
     );
-    let newBinArrayCount = 0;
-    for (const ba of requiredBinArrays) {
-      if (!(await connection.getAccountInfo(ba.key))) newBinArrayCount++;
-    }
 
     const rentPerArray = await connection.getMinimumBalanceForRentExemption(3472) / 1e9;
-    const nonRefundCost = (newBinArrayCount * rentPerArray).toFixed(2);
-    console.log(`${label} Desired range cost check: ${fullTotalBins} bins would require ${newBinArrayCount} new bin array(s) (~${nonRefundCost} SOL non-refundable)`);
+    const nonRefundCost = (feasibility.newBinArrayCount * rentPerArray).toFixed(2);
+    console.log(
+      `${label} Desired range cost check: ${feasibility.totalBins} bins would require ` +
+      `${feasibility.newBinArrayCount} new bin array(s) (~${nonRefundCost} SOL non-refundable)`
+    );
 
-    if (newBinArrayCount > 0) {
-      console.log(`${label} free bin range insufficient for full evil-panda range — skipping pool (would require new bin arrays)`);
+    if (!feasibility.feasible) {
+      console.log(
+        `${label} SKIPPING: full evil-panda range (-50% / +100%) not possible with zero new bin arrays ` +
+        `(would need ${feasibility.newBinArrayCount} new array(s) for ${feasibility.totalBins} bins @ step=${feasibility.binStep}). ` +
+        `This is by design — we only open when the entire desired discrete range is already populated on-chain (no non-refundable rent). ` +
+        `Waiting for other LPs to create the missing bin arrays.`
+      );
       return null;
     }
+
+    // Use values from the centralized feasibility check (full range with 0 new bin arrays guaranteed here)
+    const minBinId = feasibility.minBinId;
+    const maxBinId = feasibility.maxBinId;
+    const binRange = feasibility.totalBins;
+    const fullBinsDown = feasibility.fullBinsDown;
+    const fullBinsUp = feasibility.fullBinsUp;
+    const effectiveDownPct = feasibility.effectiveDownPct;
+    const effectiveUpPct = feasibility.effectiveUpPct;
+
+    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${feasibility.binStep})`);
+
+    console.log(
+      `${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% ` +
+      `(desired was ${rangeDownPct}% / ${rangeUpPct}%; Meteora snaps to nearest discrete bins)`
+    );
 
     // NOTE on range:
     // We deliberately do *not* hard-cap the number of bins here.
@@ -238,20 +250,8 @@ export async function openPosition(
     // as long as the required bin arrays already exist on-chain (the gate above).
     //
     // Meteora never gives you exactly the requested % because of discrete bin boundaries.
-    // The Math.round() below + the bin-array existence gate is the "subtle" part:
-    // we ask for the closest achievable discrete range and only open if it costs zero rent.
-    const minBinId = fullDesiredMin;
-    const maxBinId = fullDesiredMax;
-    const binRange = fullTotalBins;
-
-    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${binStep})`);
-
-    const effectiveDownPct = fullBinsDown * (binStep / 10000) * 100;
-    const effectiveUpPct = fullBinsUp * (binStep / 10000) * 100;
-    console.log(
-      `${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% ` +
-      `(desired was ${rangeDownPct}% / ${rangeUpPct}%; Meteora snaps to nearest discrete bins)`
-    );
+    // The Math.round() + the bin-array existence gate (enforced both here and early in deep-checker for evil-panda)
+    // is the "subtle" part: we ask for the closest achievable discrete range and only open if it costs zero rent.
 
     // ATA pre-creation for the token side(s) (uses getTokenProgramId per mint so Token-2022 sides get the correct program).
     // Done before the direct SDK path.
@@ -735,4 +735,81 @@ async function openPositionDirect(
     })
     return null
   }
+}
+
+/**
+ * Centralized check for whether a pool currently supports the full desired evil-panda
+ * Bid-Ask range (-50% / +100% by default, via env) with *zero* new bin arrays.
+ *
+ * This is the hard economic gate for the strategy:
+ *   - Uses Math.round() for discrete bin math (Meteora never gives literal %).
+ *   - Queries getBinArraysRequiredByPositionRange + on-chain account existence.
+ *   - Returns detailed info so callers (open.ts and deep-checker.ts) can log precisely
+ *     and early-reject in the scanner (so "deep survivors" and ranked list only include
+ *     pools where we can actually open the full range the user requires).
+ *
+ * If this returns feasible=false, we skip cleanly — no non-refundable rent is paid,
+ * and we wait for other LPs to populate the arrays (per design).
+ */
+export async function checkFullEvilPandaRangeFeasibility(
+  connection: Connection,
+  poolPubkey: PublicKey,
+  rangeDownPct: number,
+  rangeUpPct: number
+): Promise<{
+  feasible: boolean;
+  newBinArrayCount: number;
+  totalBins: number;
+  binStep: number;
+  activeBinId: number;
+  minBinId: number;
+  maxBinId: number;
+  effectiveDownPct: number;
+  effectiveUpPct: number;
+}> {
+  const DLMM = await getDLMM();
+  const dlmmPool = await DLMM.create(connection, poolPubkey);
+  const activeBin = await dlmmPool.getActiveBin();
+  const activeBinId = activeBin.binId;
+  const binStep = dlmmPool.lbPair.binStep;
+
+  const fullBinsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
+  const fullBinsUp = Math.round((rangeUpPct / 100) / (binStep / 10000));
+  const fullDesiredMin = activeBinId - fullBinsDown;
+  const fullDesiredMax = activeBinId + fullBinsUp;
+  const fullTotalBins = fullDesiredMax - fullDesiredMin + 1;
+
+  const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
+  const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
+
+  const requiredBinArrays = getBinArraysRequiredByPositionRange(
+    poolPubkey,
+    new BN(fullDesiredMin),
+    new BN(fullDesiredMax),
+    DLMM_PROGRAM_ID
+  );
+
+  let newBinArrayCount = 0;
+  for (const ba of requiredBinArrays) {
+    if (!(await connection.getAccountInfo(ba.key))) newBinArrayCount++;
+  }
+
+  const feasible = newBinArrayCount === 0;
+
+  const effectiveDownPct = fullBinsDown * (binStep / 10000) * 100;
+  const effectiveUpPct = fullBinsUp * (binStep / 10000) * 100;
+
+  return {
+    feasible,
+    newBinArrayCount,
+    totalBins: fullTotalBins,
+    binStep,
+    activeBinId,
+    minBinId: fullDesiredMin,
+    maxBinId: fullDesiredMax,
+    fullBinsDown,
+    fullBinsUp,
+    effectiveDownPct,
+    effectiveUpPct,
+  };
 }

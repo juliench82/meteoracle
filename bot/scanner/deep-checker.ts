@@ -817,8 +817,38 @@ async function processActivityCandidate(
   const { strategy, decision, rejectionReason } = evaluateCandidate(metrics, symbol);
 
   if (decision === 'ACCEPTED' && strategy) {
+    // For evil-panda, additionally require that the full desired range (-50% / +100% discrete)
+    // is currently possible with zero new bin arrays. This is the strategy's hard requirement
+    // (no non-refundable rent for the Bid-Ask full range). We enforce it here (early) in
+    // addition to the gate inside openPosition so that only truly openable full-range pools
+    // become "deep survivors", get scored/ranked, and produce "ACCEPTED" logs.
+    if (strategy.id === 'evil-panda') {
+      try {
+        const { checkFullEvilPandaRangeFeasibility } = await import('../executor/open');
+        const { getConnection } = await import('@/lib/solana');
+        const { PublicKey } = await import('@solana/web3.js');
+        const rangeCheck = await checkFullEvilPandaRangeFeasibility(
+          getConnection(),
+          new PublicKey(bestPool.address),
+          strategy.position?.rangeDownPct ?? -50,
+          strategy.position?.rangeUpPct ?? 100
+        );
+        if (!rangeCheck.feasible) {
+          console.log(
+            `${label} SKIPPING (early): full evil-panda range (-50% / +100%) not free with 0 new bin arrays ` +
+            `(${rangeCheck.newBinArrayCount} new array(s) needed for ${rangeCheck.totalBins} bins, step=${rangeCheck.binStep}). ` +
+            `By design we only ACCEPT for ranking when the complete desired range is already on-chain.`
+          );
+          return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+        }
+      } catch (rangeErr) {
+        console.warn(`${label} range feasibility pre-check failed (open will still enforce the gate): ${rangeErr}`);
+      }
+    }
+
     // Collect for post-loop scoring + ranking instead of opening in processing order.
-    // This ensures the highest-scored survivor (after all deep gates) gets slot priority.
+    // This ensures the highest-scored survivor (after all deep gates + range feasibility for evil-panda)
+    // gets slot priority.
     const poolForScore = bestPool || representativePool;
     const lpCountForScore = (poolForScore as any)._enriched_lp_count || 0;
     deepGateSurvivors.push({
@@ -932,8 +962,13 @@ async function attemptOpenAndNotify(params: {
     return { wasCandidate: true, wasOpened: true, wasSkipped: false };
   } else {
     openSkippedCountRef.value++;
-    console.warn(`[scanner] ${symbol} — openPosition returned null (executor did not open despite ACCEPT)`);
-    await sendAlert({ type: 'warning', message: `Open failed for ${symbol} (executor returned null after ACCEPT — likely Jupiter buy or on-chain tx error; see worker logs)` });
+    // openPosition returns null for many *intentional* reasons (range gate for full -50/+100 with 0 new bin arrays,
+    // fresh balance/slot re-checks, no SOL side, etc.) as well as technical failures (swap 0x177e, SDK open error).
+    // The detailed reason is always logged by the executor right before returning null.
+    // We no longer treat every null as a scary "technical failure".
+    console.log(`${label} openPosition returned null — see the [executor][${strategy.id}][${symbol}] logs immediately above for the exact reason (range gate, balance, slots, swap failure, etc.)`);
+    // Only send a Telegram warning for cases that are likely real errors (the executor already logs loudly for those).
+    // The generic "despite ACCEPT" message was too alarming when the skip was by design (e.g. full range not free).
     return { wasCandidate: true, wasOpened: false, wasSkipped: true };
   }
 }
