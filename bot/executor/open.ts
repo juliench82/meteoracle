@@ -900,9 +900,13 @@ export async function checkFullEvilPandaRangeFeasibility(
   const activeBin = await dlmmPool.getActiveBin();
   const activeBinId = activeBin.binId;
   const binStep = dlmmPool.lbPair.binStep;
+  const s = binStep / 10000;
 
-  const fullBinsDown = Math.abs(Math.round((rangeDownPct / 100) / (binStep / 10000)));
-  const fullBinsUp = Math.round((rangeUpPct / 100) / (binStep / 10000));
+  // Use geometric (log) math to compute exact bin deltas for the target price changes.
+  // Linear (pct / s) overestimates for large % moves because price is multiplicative.
+  // This matches what the Meteora UI uses for -50% / +100% range selector (e.g. 140 bins vs 151 linear).
+  const fullBinsDown = Math.abs(Math.round(Math.log((100 + rangeDownPct) / 100) / Math.log(1 + s)));
+  const fullBinsUp = Math.round(Math.log((100 + rangeUpPct) / 100) / Math.log(1 + s));
   const fullDesiredMin = activeBinId - fullBinsDown;
   const fullDesiredMax = activeBinId + fullBinsUp;
   const fullTotalBins = fullDesiredMax - fullDesiredMin + 1;
@@ -924,8 +928,9 @@ export async function checkFullEvilPandaRangeFeasibility(
 
   const feasible = newBinArrayCount === 0;
 
-  const effectiveDownPct = fullBinsDown * (binStep / 10000) * 100;
-  const effectiveUpPct = fullBinsUp * (binStep / 10000) * 100;
+  // Effective now reports the targeted price % (log math); linear bin-width would be ~70% for 50% price move.
+  const effectiveDownPct = Math.abs(rangeDownPct);
+  const effectiveUpPct = rangeUpPct;
 
   return {
     feasible,
