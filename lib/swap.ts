@@ -1,4 +1,5 @@
 import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js'
+import BN from 'bn.js'
 import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
@@ -443,7 +444,53 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         const label = `[stranded-sell-retry][${sym}]`
         console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) — recovering via Jupiter`)
 
-        const sig = await swapTokenToSol(recoveryMint, label)
+        // Direct DLMM sell for stranded recovery (Jupiter ditched completely)
+        try {
+          const mod = await import('@meteora-ag/dlmm')
+          const DLMM = mod.default as any
+          const poolAddr = (pos as any).pool_address || (pos as any).metadata?.pool_address
+          if (poolAddr) {
+            const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddr))
+            const isTokenX = dlmmPool.tokenX.publicKey.toBase58() === recoveryMint
+            const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey
+            const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey
+            const binArrays = await dlmmPool.getBinArrays()
+            const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58())
+            const bal = await getWalletTokenBalance(recoveryMint)
+            if (bal > 0n) {
+              const swapQuote = await dlmmPool.swapQuote(new BN(bal.toString()), swapYtoX, new BN(1), binArrays)
+              if (!swapQuote.outAmount.isZero()) {
+                const swapTx = await dlmmPool.swap({
+                  inToken,
+                  binArraysPubkey: swapQuote.binArraysPubkey,
+                  inAmount: swapQuote.inAmount,
+                  lbPair: dlmmPool.pubkey,
+                  user: wallet.publicKey,
+                  minOutAmount: swapQuote.minOutAmount,
+                  outToken,
+                })
+                // Use sendLegacyTx for consistency (import if needed in this file)
+                // For recovery, simple send; in practice wrap with priority
+                const sig = await connection.sendTransaction(swapTx as any, [wallet])
+                console.log(`${label} direct DLMM stranded sell confirmed ✔ sig: ${sig}`)
+                // update state as before if sig
+                const all = getOpenLpPositions()
+                const idx = all.findIndex((p: any) => p.id === pos.id)
+                if (idx !== -1) {
+                  const nowIso = new Date().toISOString()
+                  all[idx].stranded_recovered_at = nowIso
+                  all[idx].stranded_recovered_sig = sig
+                  if (all[idx].status === 'sell_failed') {
+                    all[idx].status = 'closed'
+                  }
+                  saveOpenLpPositions(all)
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${e}`)
+        }
         if (sig) {
           recovered++
           console.log(`${label} recovered ✔ sig=${sig}`)

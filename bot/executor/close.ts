@@ -9,7 +9,7 @@ import { getAssociatedTokenAddressSync, NATIVE_MINT } from '@solana/spl-token'
 import BN from 'bn.js'
 
 import { getConnection, getWallet } from '@/lib/solana'
-import { swapTokenToSol } from '@/lib/swap'
+// Jupiter swap removed - using direct Meteora DLMM swap for sell too
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions } from '@/lib/local-state'
 import { logWarn, logInfo } from '@/lib/log'
@@ -167,9 +167,44 @@ export async function closePosition(
 
     if (hasTokenBalance) {
       try {
-        await swapTokenToSol(position.mint, label)
+        // Direct DLMM sell (Meteora native) - ditching Jupiter completely.
+        const tokenMint = new PublicKey(position.mint)
+        const isTokenX = dlmmPool.tokenX.publicKey.toBase58() === position.mint
+        const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey
+        const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey
+        const binArrays = await dlmmPool.getBinArrays()
+
+        const tokenProgramId = await getTokenProgramId(tokenMint)
+        const tokenAta = getAssociatedTokenAddressSync(tokenMint, wallet.publicKey, false, tokenProgramId)
+        const balResp = await connection.getTokenAccountBalance(tokenAta).catch(() => null)
+        const amount = new BN(balResp?.value?.amount ?? '0')
+
+        if (!amount.isZero()) {
+          // swapYtoX: true if swapping from Y to X
+          const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58())
+          const swapQuote = await dlmmPool.swapQuote(
+            amount,
+            swapYtoX,
+            new BN(1),
+            binArrays
+          )
+          if (swapQuote.outAmount.isZero()) {
+            throw new Error('Direct DLMM sell quote gave 0 output')
+          }
+          const swapTx = await dlmmPool.swap({
+            inToken,
+            binArraysPubkey: swapQuote.binArraysPubkey,
+            inAmount: swapQuote.inAmount,
+            lbPair: dlmmPool.pubkey,
+            user: wallet.publicKey,
+            minOutAmount: swapQuote.minOutAmount,
+            outToken,
+          })
+          const sig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], label)
+          console.log(`${label} direct DLMM sell confirmed ✔ sig: ${sig}`)
+        }
       } catch (swapErr) {
-        console.error(`${label} post-close swapTokenToSol failed — marking sell_failed for stranded recovery`, swapErr)
+        console.error(`${label} direct DLMM sell failed — marking sell_failed for stranded recovery`, swapErr)
         // LP liquidity has been removed; flag for background stranded sell retry (monitor will pick up).
         // Recovery relies on the sell_failed marker + balance sweep in retryStrandedSells.
         await markPositionSellFailed(positionId, claimableFeesUsd, `${reason}_sell_failed`)

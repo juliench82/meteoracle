@@ -70,7 +70,7 @@ import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '
 import { getBotState } from '@/lib/botState'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
-import { swapSolToToken, JUPITER_QUOTE_API, executeSwapFromPreQuote, PREQUOTE_MAX_ATTEMPTS } from '@/lib/swap'
+import { getWalletTokenBalance } from '@/lib/swap'
 import {
   OPEN_LP_STATUSES,
   getOpenLpLimitState,
@@ -359,113 +359,35 @@ export async function openPosition(
 
     let actualTokenLamports = 0n
     if (solToSwapLamports > 0n) {
-      // Pre-quote at the *exact* split amount (solToSwapLamports) with 500bps.
-      // Per design: X SOL budget → calc TOKEN for value match → gate on -50/+100 range (zero rent) →
-      // then SWAP using this pre-quoted response (aggressively retried) → open with landed amounts.
-      // The pre-quoted quoteResponse object is passed to executeSwapFromPreQuote which will
-      // retry the *identical* quote (same route construction) multiple times with small backoff
-      // before the caller falls back to a fresh ladder re-quote. This directly targets the
-      // observed "pre-quote OK … 0x177e on first ladder 500" pattern on new Token-2022 pools.
-      let quote: any = null
+      // Prefer direct swap on the DLMM pool itself using Meteora SDK (native swap, no Jupiter).
+      // Meteora UI exposes swap on DLMM pools; the SDK has swapQuote + swap for exactly this.
+      // Since the pool already passed the full evil-panda range gate (bin arrays exist and populated),
+      // direct swap on this pool is the natural way to acquire the token leg for the Bid-Ask.
+      // This completely bypasses Jupiter 0x177e issues for these specific pools.
+      console.log(`${label} attempting direct DLMM swap for token leg (Meteora SDK native, bypassing Jupiter)`);
       try {
-        const params = new URLSearchParams({
-          inputMint: NATIVE_MINT_STR,
-          outputMint: outputMint.toBase58(),
-          amount: solToSwapLamports.toString(),
-          slippageBps: '500',
-          onlyDirectRoutes: 'false',
-          restrictIntermediateTokens: 'true',
-        })
-        const quoteUrl = `${JUPITER_QUOTE_API}/quote?${params.toString()}`
-        const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(7000) })
-        if (!quoteRes.ok) throw new Error(`quote http ${quoteRes.status}`)
-        quote = await quoteRes.json()
-        if (quote?.error || quote?.errorCode) throw new Error(quote.error || quote.errorCode || 'quote error')
-        const expectedOut = BigInt(quote.outAmount ?? quote.out_amount ?? '0')
-        const routeHops = Array.isArray(quote.routePlan) ? quote.routePlan.length : 1;
-        console.log(`${label} pre-quote OK: ${solToSwapLamports} SOL → ~${expectedOut} ${outputMint.toBase58().slice(0,8)} token (impact=${quote.priceImpactPct ?? quote.priceImpact ?? 'n/a'}, routeHops=${routeHops})`)
-      } catch (e) {
-        console.warn(`${label} pre-quote SOL→token failed — skipping pool: ${e instanceof Error ? e.message : e}`)
-        return null
-      }
-
-      // Settle delay: many 0x177e on otherwise-valid quotes for new Token-2022 DLMMs are
-      // transient (indexer propagation, thin liquidity window, hook timing). Give it a moment
-      // before the first /swap (even with a fresh pre-quoted response). This pool already passed the
-      // *critical* full-range gate (0 new bin arrays for the desired -50/+100 evil-panda range).
-      const PRE_SWAP_SETTLE_MS = 1500;
-      console.log(`${label} [swap] post-pre-quote settle ${PRE_SWAP_SETTLE_MS}ms (full-range pool, zero rent gate passed) ...`);
-      await new Promise(r => setTimeout(r, PRE_SWAP_SETTLE_MS));
-
-      // Call into executeSwapFromPreQuote (fresh quote on first try; on failure it escalates
-      // with fresh quotes at higher slippage per PREQUOTE_SLIPPAGE_LEVELS rather than
-      // re-submitting a stale route). Only after this + ladder do we consider the patient final wave.
-      let swapRes = await executeSwapFromPreQuote(quote, getWallet(), label)
-      if (!swapRes) {
-        console.warn(`${label} pre-quote executor attempts exhausted — falling back to slippage ladder (fresh re-quotes)`)
-        swapRes = await swapSolToToken(outputMint.toBase58(), solToSwapLamports, label)
-      }
-
-      // Patient final wave(s) for pools that are *exactly* the ones we must be able to open.
-      // If everything (scanner score, lp_count, fee accel, full discrete range with 0 new arrays)
-      // passed but the token leg swap keeps 0x177e'ing, we are failing the bot's core purpose.
-      // We do the delayed fresh pre-quote + full escalating execute, and if it still fails
-      // we do ONE MORE longer-delay cycle (super-patient mode) before giving up.
-      if (!swapRes) {
-        for (let wave = 1; wave <= 2; wave++) {
-          const isLastWave = wave === 2;
-          const delay = isLastWave ? 5000 : 2500;
-          const waveLabel = isLastWave ? 'SUPER-PATIENT FINAL WAVE' : 'PATIENT FINAL WAVE';
-
-          console.warn(`${label} prequote + ladder both failed for full -50/+100 range pool (0 new arrays) — ${waveLabel} #${wave}: sleep ${delay}ms then fresh pre-quote + ${PREQUOTE_MAX_ATTEMPTS} escalating attempts`);
-          await new Promise(r => setTimeout(r, delay));
-
-          let waveQuote: any = null;
-          try {
-            const paramsW = new URLSearchParams({
-              inputMint: NATIVE_MINT_STR,
-              outputMint: outputMint.toBase58(),
-              amount: solToSwapLamports.toString(),
-              slippageBps: '500',
-              onlyDirectRoutes: 'false',
-              restrictIntermediateTokens: 'true',
-            });
-            const quoteUrlW = `${JUPITER_QUOTE_API}/quote?${paramsW.toString()}`;
-            const qResW = await fetch(quoteUrlW, { signal: AbortSignal.timeout(8000) });
-            if (qResW.ok) {
-              waveQuote = await qResW.json();
-              if (waveQuote && !waveQuote.error && !waveQuote.errorCode) {
-                const expW = BigInt(waveQuote.outAmount ?? waveQuote.out_amount ?? '0');
-                const routeHopsW = Array.isArray(waveQuote.routePlan) ? waveQuote.routePlan.length : 1;
-                console.log(`${label} ${waveLabel.toLowerCase()} pre-quote OK: ${solToSwapLamports} SOL → ~${expW} token (routeHops=${routeHopsW})`);
-                swapRes = await executeSwapFromPreQuote(waveQuote, getWallet(), label);
-              } else {
-                console.warn(`${label} ${waveLabel.toLowerCase()} pre-quote had error`);
-              }
-            }
-          } catch (waveErr) {
-            console.warn(`${label} ${waveLabel.toLowerCase()} pre-quote fetch failed: ${waveErr instanceof Error ? waveErr.message : waveErr}`);
-          }
-
-          if (swapRes) {
-            break; // success on this wave
-          }
-
-          if (!isLastWave) {
-            console.warn(`${label} ${waveLabel.toLowerCase()} #${wave} still failed — will try one more super-patient cycle`);
-          }
+        actualTokenLamports = await swapSolToTokenDirectOnDlmm(
+          dlmmPool,
+          solToSwapLamports,
+          outputMint,
+          solIsTokenX,
+          label
+        );
+        if (actualTokenLamports > 0n) {
+          console.log(`${label} direct DLMM swap succeeded: received ${actualTokenLamports} token lamports`);
         }
-
-        if (!swapRes) {
-          console.error(`${label} swap SOL to token failed (after all patient + super-patient waves for full-range pool)`);
-          return null;
-        }
+      } catch (directErr) {
+        console.warn(`${label} direct DLMM swap failed: ${directErr instanceof Error ? directErr.message : directErr} — falling back to Jupiter pre-swap`);
       }
+    }
 
-      actualTokenLamports = swapRes.tokenAmount;
+    if (actualTokenLamports === 0n && solToSwapLamports > 0n) {
+      console.error(`${label} direct DLMM swap for token leg failed for full-range pool (Jupiter completely ditched) — skipping pool`);
+      return null;
+    }
+
+    if (solToSwapLamports > 0n) {
       console.log(`${label} swap done: received ${actualTokenLamports} token lamports`);
-    } else {
-      console.log(`${label} solBias produced zero token leg — proceeding with pure-SOL allocation for the Bid-Ask range`)
     }
 
     const positionKeypair = new Keypair()
@@ -771,6 +693,70 @@ async function openPositionDirect(
     })
     return null
   }
+}
+
+/**
+ * Direct swap on the DLMM pool itself using Meteora SDK (native swap, no aggregator).
+ * This acquires the token leg for the Bid-Ask pre-swap directly against the target pool's liquidity.
+ * Since the pool passed the full evil-panda range gate, the necessary bin arrays exist.
+ * Uses the same dlmmPool already loaded for range/price calculation.
+ */
+async function swapSolToTokenDirectOnDlmm(
+  dlmmPool: any,
+  solLamports: bigint,
+  outputMint: PublicKey,
+  solIsTokenX: boolean,
+  label: string
+): Promise<bigint> {
+  const connection = getConnection();
+  const wallet = getWallet();
+
+  const inToken = solIsTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
+  const outToken = solIsTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
+
+  console.log(`${label} [direct-dlmm] swapping ${solLamports} lamports SOL → token on DLMM pool`);
+
+  const binArrays = await dlmmPool.getBinArrays();
+
+  // swapYtoX: true if swapping Y (the non-SOL if solIsTokenX false?) into X.
+  // If solIsTokenX, SOL is X, we are swapping X (SOL) for Y (token) → swapYtoX = false
+  // If !solIsTokenX, SOL is Y, swapping Y (SOL) for X (token) → swapYtoX = true
+  const swapYtoX = !solIsTokenX;
+
+  const swapQuote = await dlmmPool.swapQuote(
+    new BN(solLamports.toString()),
+    swapYtoX,
+    new BN(1), // will use the quote's minOut
+    binArrays
+  );
+
+  if (swapQuote.outAmount.isZero()) {
+    throw new Error('Direct DLMM swap quote gave zero output (insufficient liquidity on that side)');
+  }
+
+  console.log(`${label} [direct-dlmm] quote: in=${swapQuote.inAmount} out=${swapQuote.outAmount} fee=${swapQuote.fee}`);
+
+  const swapTx = await dlmmPool.swap({
+    inToken,
+    binArraysPubkey: swapQuote.binArraysPubkey,
+    inAmount: swapQuote.inAmount,
+    lbPair: dlmmPool.pubkey,
+    user: wallet.publicKey,
+    minOutAmount: swapQuote.minOutAmount,
+    outToken,
+  });
+
+  // The SDK returns a Transaction (legacy). Apply priority fee and send.
+  const priorityFee = await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]);
+  const preparedTx = applyPriorityFee(swapTx, priorityFee);
+
+  const sig = await sendLegacyTx(preparedTx, [wallet], `${label} direct-dlmm-swap`);
+
+  console.log(`${label} [direct-dlmm] swap confirmed ✔ sig: ${sig}`);
+
+  // Read actual received (same as Jupiter path)
+  const actualReceived = await getWalletTokenBalance(outToken.toBase58());
+  return actualReceived;
 }
 
 /**
