@@ -408,7 +408,7 @@ export async function swapSolToToken(
  * still have a token balance in the wallet).
  *
  * Called at the top of every monitor tick (via monitor.ts).
- * Uses only local state + direct wallet balance query + Jupiter swap ladder.
+ * Uses only local state + direct wallet balance query + direct Meteora DLMM swap (Jupiter ditched).
  * On successful recovery: updates the position record (status -> closed if needed,
  * records recovered timestamp/sig). Failures are left for the next tick.
  */
@@ -459,15 +459,18 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
             const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey
             const binArrays = await dlmmPool.getBinArrays()
             const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58())
-            const bal = await getWalletTokenBalance(recoveryMint)
-            if (bal > 0n) {
-              const swapQuote = await dlmmPool.swapQuote(new BN(bal.toString()), swapYtoX, new BN(1), binArrays)
+            const currentBal = await getWalletTokenBalance(recoveryMint)
+            if (currentBal > 0n) {
+              const inputAmountBN = new BN(currentBal.toString())
+              const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(1), binArrays)
               const q = swapQuote as any
               if (!q.outAmount.isZero()) {
+                const quotedIn = q.inAmount ?? inputAmountBN;
+                console.log(`${label} [direct-dlmm-recovery] quote: in=${quotedIn} out=${q.outAmount}`);
                 const swapTx = await dlmmPool.swap({
                   inToken,
                   binArraysPubkey: q.binArraysPubkey,
-                  inAmount: q.inAmount,
+                  inAmount: inputAmountBN,  // known input we quoted (q.inAmount not always populated reliably)
                   lbPair: dlmmPool.pubkey,
                   user: wallet.publicKey,
                   minOutAmount: q.minOutAmount,

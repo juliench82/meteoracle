@@ -428,8 +428,9 @@ export async function openPosition(
 
       const tokenBal = actualTokenLamports; // we have the exact amount from pre-swap
       if (tokenBal > 0n) {
+        const inputAmountBN = new BN(tokenBal.toString());
         const swapQuote = await dlmmPool.swapQuote(
-          new BN(tokenBal.toString()),
+          inputAmountBN,
           swapYtoX,
           new BN(1),
           binArrays
@@ -438,10 +439,12 @@ export async function openPosition(
         if (q.outAmount.isZero()) {
           throw new Error('Direct DLMM rollback quote gave 0 SOL output');
         }
+        const quotedIn = q.inAmount ?? inputAmountBN;
+        console.log(`${label} [direct-dlmm-rollback] quote: in=${quotedIn} out=${q.outAmount}`);
         const swapTx = await dlmmPool.swap({
           inToken,
           binArraysPubkey: q.binArraysPubkey,
-          inAmount: q.inAmount,
+          inAmount: inputAmountBN,  // known input we quoted (avoids q.inAmount undefined on some pools)
           lbPair: dlmmPool.pubkey,
           user: wallet.publicKey,
           minOutAmount: q.minOutAmount,
@@ -753,8 +756,9 @@ async function swapSolToTokenDirectOnDlmm(
   // If !solIsTokenX, SOL is Y, swapping Y (SOL) for X (token) → swapYtoX = true
   const swapYtoX = !solIsTokenX;
 
+  const inputAmountBN = new BN(solLamports.toString());
   const swapQuote = await dlmmPool.swapQuote(
-    new BN(solLamports.toString()),
+    inputAmountBN,
     swapYtoX,
     new BN(1), // will use the quote's minOut
     binArrays
@@ -765,12 +769,13 @@ async function swapSolToTokenDirectOnDlmm(
     throw new Error('Direct DLMM swap quote gave zero output (insufficient liquidity on that side)');
   }
 
-  console.log(`${label} [direct-dlmm] quote: in=${q.inAmount} out=${q.outAmount} fee=${q.fee}`);
+  const quotedIn = q.inAmount ?? inputAmountBN;
+  console.log(`${label} [direct-dlmm] quote: in=${quotedIn} out=${q.outAmount} fee=${q.fee}`);
 
   const swapTx = await dlmmPool.swap({
     inToken,
     binArraysPubkey: q.binArraysPubkey,
-    inAmount: q.inAmount,
+    inAmount: inputAmountBN,  // use the exact input we quoted for (more reliable than q.inAmount across SDK responses)
     lbPair: dlmmPool.pubkey,
     user: wallet.publicKey,
     minOutAmount: q.minOutAmount,

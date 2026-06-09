@@ -185,8 +185,9 @@ export async function closePosition(
 
           // swapYtoX: true if swapping from Y to X
           const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58())
+          const inputAmountBN = amount;  // the exact balance we read and will sell
           const swapQuote = await dlmmPool.swapQuote(
-            amount,
+            inputAmountBN,
             swapYtoX,
             new BN(1),
             binArrays
@@ -195,12 +196,13 @@ export async function closePosition(
           if (q.outAmount.isZero()) {
             throw new Error('Direct DLMM sell quote gave 0 output')
           }
-          console.log(`${label} [direct-dlmm-sell] quote: in=${q.inAmount} out=${q.outAmount} fee=${q.fee}`);
+          const quotedIn = q.inAmount ?? inputAmountBN;
+          console.log(`${label} [direct-dlmm-sell] quote: in=${quotedIn} out=${q.outAmount} fee=${q.fee}`);
 
           const swapTx = await dlmmPool.swap({
             inToken,
             binArraysPubkey: q.binArraysPubkey,
-            inAmount: q.inAmount,
+            inAmount: inputAmountBN,  // known input we quoted (reliable; q.inAmount can be missing/undefined on some DLMM responses)
             lbPair: dlmmPool.pubkey,
             user: wallet.publicKey,
             minOutAmount: q.minOutAmount,
