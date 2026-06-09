@@ -434,16 +434,17 @@ export async function openPosition(
           new BN(1),
           binArrays
         );
-        if (swapQuote.outAmount.isZero()) {
+        const q = swapQuote as any;
+        if (q.outAmount.isZero()) {
           throw new Error('Direct DLMM rollback quote gave 0 SOL output');
         }
         const swapTx = await dlmmPool.swap({
           inToken,
-          binArraysPubkey: swapQuote.binArraysPubkey,
-          inAmount: swapQuote.inAmount,
+          binArraysPubkey: q.binArraysPubkey,
+          inAmount: q.inAmount,
           lbPair: dlmmPool.pubkey,
           user: wallet.publicKey,
-          minOutAmount: swapQuote.minOutAmount,
+          minOutAmount: q.minOutAmount,
           outToken,
         });
         const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], `${label} direct-dlmm-rollback`);

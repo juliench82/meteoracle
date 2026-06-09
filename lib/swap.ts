@@ -447,13 +447,10 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         // Direct DLMM sell for stranded recovery (Jupiter ditched completely)
         let recoveredSig: string | undefined
         try {
-          let sig: string | undefined
           const mod = await import('@meteora-ag/dlmm')
           const DLMM = mod.default as any
           const poolAddr = (pos as any).pool_address || (pos as any).metadata?.pool_address
           if (poolAddr) {
-            const connection = getConnection()
-            const wallet = getWallet()
             const connection = getConnection()
             const wallet = getWallet()
             const dlmmPool = await DLMM.create(connection, new PublicKey(poolAddr))
@@ -480,7 +477,9 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                 const prepared = applyPriorityFee(swapTx, 100000)
                 recoveredSig = await sendLegacyTx(prepared, [wallet], label)
                 console.log(`${label} direct DLMM stranded sell confirmed ✔ sig: ${recoveredSig}`)
-                // update state as before if sig
+                recovered++
+                console.log(`${label} recovered ✔ sig=${recoveredSig}`)
+                // update state
                 const all = getOpenLpPositions()
                 const idx = all.findIndex((p: any) => p.id === pos.id)
                 if (idx !== -1) {
@@ -497,26 +496,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
           }
         } catch (e) {
           console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${e}`)
-        }
-        if (recoveredSig) {
-          recovered++
-          console.log(`${label} recovered ✔ sig=${recoveredSig}`)
-        }
-
-        const all = getOpenLpPositions()
-        const idx = all.findIndex((p: any) => p.id === pos.id)
-        if (idx !== -1) {
-          const nowIso = new Date().toISOString()
-          if (recoveredSig) {
-            all[idx].stranded_recovered_at = nowIso
-            all[idx].stranded_recovered_sig = recoveredSig
-            if (all[idx].status === 'sell_failed') {
-              all[idx].status = 'closed'
-            }
-          } else {
-            all[idx].last_stranded_check_at = nowIso
-          }
-          saveOpenLpPositions(all)
         }
       }
     } catch (err) {
