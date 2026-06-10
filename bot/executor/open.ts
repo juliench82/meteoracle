@@ -681,17 +681,15 @@ async function openPositionDirect(
     // We pass the *quoted* (value-matched) amounts from the pre-swap to keep the deposited size reasonable.
 
     // Phase 1: create position account
-    console.log(`${label} phase 1: initializePosition account for range ${minBinId} → ${maxBinId} (using program instruction to pre-allocate full size)`);
+    const lowerBinId = minBinId;
+    const width = maxBinId - minBinId;
+    console.log(`${label} phase 1: initializePosition(lowerBinId=${lowerBinId}, width=${width}) for range ${minBinId} → ${maxBinId} (raw program ix to pre-allocate full size for ${binRange} bins, bypassing combined realloc limit)`);
     const [eventAuthority] = PublicKey.findProgramAddressSync(
       [Buffer.from('__event_authority')],
       dlmmPool.program.programId
     );
     const initPositionIx = await dlmmPool.program.methods
-      .initializePosition(
-        positionKeypair.publicKey,
-        minBinId,
-        maxBinId
-      )
+      .initializePosition(lowerBinId, width)
       .accounts({
         position: positionKeypair.publicKey,
         lbPair: dlmmPool.pubkey,
@@ -706,7 +704,7 @@ async function openPositionDirect(
     const initTx = new Transaction().add(initPositionIx);
     const initPrepared = applyPriorityFee(initTx, priorityFee);
     const initSig = await sendLegacyTx(initPrepared, [wallet, positionKeypair], `${label} init-position`);
-    console.log(`${label} position account initialized (phase 1) ✔ sig: ${initSig}`);
+    console.log(`${label} phase 1 complete: position account created ✔ sig: ${initSig} (now calling combined add with pre-allocated range)`);
 
     // Phase 2: add liquidity (now that position account exists with full size)
     console.log(`${label} phase 2: initializePositionAndAddLiquidityByStrategy (position exists, using quoted totals to avoid bloat)`);
