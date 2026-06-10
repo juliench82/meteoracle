@@ -318,6 +318,16 @@ export async function openPosition(
     const totalSolLamports = BigInt(Math.floor(solAmount * 1e9))
     const binsTotal = fullBinsDown + fullBinsUp + 1  // +1 for the active bin
 
+    // Safety guard: even with the split-tx pre-size + init, extremely wide position accounts can hit
+    // other limits (program max bins per position, CU, or future on-chain changes). If the discrete
+    // range math produced something absurd, skip *before* the pre-swap to avoid stranding tokens.
+    const MAX_SAFE_POSITION_WIDTH = 220; // ~28KB worst-case at our conservative 128B/bin estimate; well under account size limits
+    const computedWidth = (maxBinId - minBinId);
+    if (computedWidth > MAX_SAFE_POSITION_WIDTH) {
+      console.warn(`${label} SKIPPING: computed position width ${computedWidth} exceeds safe max ${MAX_SAFE_POSITION_WIDTH} (full range ${minBinId}→${maxBinId}). Avoiding potential init or CU issues and pre-swap stranding.`);
+      return null;
+    }
+
     // Base allocation for the token leg is bin-proportional for value-matching the Bid-Ask range.
     // solBias (from strategy, default 1) allows tilting the split:
     //   - solBias = 1 : use exact bin proportion (current default behavior)
@@ -435,69 +445,93 @@ export async function openPosition(
     // may be stale/huge/wrong due to prior bugs or the failed open attempt). Use looser slippage
     // for the emergency sell so we don't strand on 0x1773 like before.
     console.error(`${label} position open failed after successful pre-swap — attempting DIRECT DLMM rollback sell to SOL`);
+    let rollbackSucceeded = false;
     try {
       const isTokenX = dlmmPool.tokenX.publicKey.toBase58() === outputMint.toBase58();
       const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
       const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
-      const binArrays = await dlmmPool.getBinArrays();
-      console.log(`${label} [direct-dlmm-rollback] fetched ${binArrays.length} bin arrays for sell quote (passing full list to swap to avoid AccountNotEnoughKeys for bin_array)`);
       const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58());
 
-      // Re-fetch what we actually still hold of the token we pre-swapped for (hooks/partial fills/visibility).
+      // Re-fetch what we actually still hold (Token-2022/hook visibility lag is common).
       let tokenBal = 0n;
       try {
         tokenBal = await getWalletTokenBalance(outputMint.toBase58());
       } catch {}
       if (tokenBal === 0n && actualTokenLamports > 0n) {
-        tokenBal = actualTokenLamports; // last resort
+        tokenBal = actualTokenLamports;
       }
       if (tokenBal > 0n) {
         const inputAmountBN = new BN(tokenBal.toString());
-        // Very loose allowed slippage + minOut=0 for emergency rollback.
-        // Large raw token legs on microcaps frequently cause swapQuote to fail with
-        // "Insufficient liquidity in binArrays" (the snapshot from getBinArrays may not have
-        // depth for a 20B+ sell on the reverse side). We catch the quote error, log it, and
-        // let the stranded marker be persisted so the monitor retry (fresh binArrays each time)
-        // can try again later when conditions are better.
-        try {
-          const swapQuote = await dlmmPool.swapQuote(
-            inputAmountBN,
-            swapYtoX,
-            new BN(10000),
-            binArrays
-          );
-          const q = swapQuote as any;
-          if (q.outAmount.isZero()) {
-            throw new Error('Direct DLMM rollback quote gave 0 SOL output');
+
+        // Retry the quote + swap a few times with *fresh* binArrays each attempt.
+        // "Insufficient liquidity in binArrays for swapQuote" is common on the reverse leg right after
+        // the pre-swap (thin microcap depth + active bin moved by our own buy). A later monitor
+        // recovery tick with new on-chain state often succeeds.
+        const MAX_ROLLBACK_ATTEMPTS = 3;
+        for (let attempt = 1; attempt <= MAX_ROLLBACK_ATTEMPTS && !rollbackSucceeded; attempt++) {
+          try {
+            // Fresh snapshot every attempt — critical for thin pools.
+            const binArrays = await dlmmPool.getBinArrays();
+            console.log(`${label} [direct-dlmm-rollback] attempt ${attempt}/${MAX_ROLLBACK_ATTEMPTS} — fetched ${binArrays.length} bin arrays (full list for swap)`);
+
+            // Extremely loose for emergency unwind (100% slippage, minOut=0).
+            const swapQuote = await dlmmPool.swapQuote(
+              inputAmountBN,
+              swapYtoX,
+              new BN(10000),
+              binArrays
+            );
+            const q = swapQuote as any;
+            if (q.outAmount.isZero()) {
+              throw new Error('Direct DLMM rollback quote gave 0 SOL output');
+            }
+            const quotedIn = q.inAmount ?? inputAmountBN;
+            console.log(`${label} [direct-dlmm-rollback] quote: in=${quotedIn} out=${q.outAmount}`);
+            const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
+            console.log(`${label} [direct-dlmm-rollback] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys`);
+            const swapTx = await dlmmPool.swap({
+              inToken,
+              binArraysPubkey: binArrayKeysForSwap,
+              inAmount: inputAmountBN,
+              lbPair: dlmmPool.pubkey,
+              user: wallet.publicKey,
+              minOutAmount: new BN(0),
+              outToken,
+            });
+            const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], `${label} direct-dlmm-rollback`);
+            console.log(`${label} DIRECT DLMM rollback sell to SOL succeeded ✔ sig: ${rbSig}`);
+            rollbackSucceeded = true;
+          } catch (rbQuoteErr) {
+            const msg = rbQuoteErr instanceof Error ? rbQuoteErr.message : String(rbQuoteErr);
+            console.warn(`${label} [direct-dlmm-rollback] attempt ${attempt} failed: ${msg}`);
+            if (attempt < MAX_ROLLBACK_ATTEMPTS) {
+              await new Promise(r => setTimeout(r, 600));
+            }
           }
-          const quotedIn = q.inAmount ?? inputAmountBN;
-          console.log(`${label} [direct-dlmm-rollback] quote: in=${quotedIn} out=${q.outAmount}`);
-          const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
-          console.log(`${label} [direct-dlmm-rollback] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys (not q.binArraysPubkey)`);
-          const swapTx = await dlmmPool.swap({
-            inToken,
-            binArraysPubkey: binArrayKeysForSwap,
-            inAmount: inputAmountBN,
-            lbPair: dlmmPool.pubkey,
-            user: wallet.publicKey,
-            minOutAmount: new BN(0),
-            outToken,
-          });
-          const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], `${label} direct-dlmm-rollback`);
-          console.log(`${label} DIRECT DLMM rollback sell to SOL succeeded ✔ sig: ${rbSig}`);
-        } catch (rbQuoteErr) {
-          console.warn(`${label} direct DLMM rollback quote/swap failed (insufficient liquidity or other) — persisting stranded for monitor retry: ${rbQuoteErr instanceof Error ? rbQuoteErr.message : rbQuoteErr}`);
+        }
+
+        if (!rollbackSucceeded) {
+          console.warn(`${label} direct DLMM rollback quote/swap failed after ${MAX_ROLLBACK_ATTEMPTS} attempts (insufficient liquidity or other) — persisting stranded for monitor retry`);
         }
       }
     } catch (rbErr) {
       console.error(`${label} direct DLMM rollback sell ALSO failed — persisting stranded token marker for monitor recovery`, rbErr);
       try {
-        // Persist using a fresh balance if possible so recovery has the real amount.
         const freshBal = await getWalletTokenBalance(outputMint.toBase58()).catch(() => actualTokenLamports);
         await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), freshBal || actualTokenLamports);
       } catch (persistErr) {
         console.error(`${label} failed to persist stranded marker:`, persistErr);
       }
+    }
+
+    if (!rollbackSucceeded) {
+      // Ensure a stranded marker exists even if the outer try didn't reach the persist (e.g. early throws before balance check).
+      try {
+        const freshBal = await getWalletTokenBalance(outputMint.toBase58()).catch(() => actualTokenLamports);
+        if (freshBal > 0n) {
+          await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), freshBal);
+        }
+      } catch {}
     }
     return null;
 
@@ -623,11 +657,13 @@ async function validateOpenEligibility(
 
 /**
  * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit direct DLMM pre-swap for the token leg).
- * Uses two-phase:
- *   Phase 1: SystemProgram.createAccount (pre-sized for the full bin width) + raw initializePosition.
- *            This bypasses the DLMM program's inner CPI realloc limit (10KB) that hits on 100+ bin ranges.
+ * Uses two-phase *split transactions*:
+ *   Phase 1a: Top-level SystemProgram.createAccount (full space for width; no inner-CPI realloc cap).
+ *   Phase 1b: raw initializePosition (runs against the pre-sized account → program skips its realloc CPI).
  *   Phase 2: addLiquidityByStrategy (range already initialized + sized in phase 1; same call used for later adds).
- * Supports the full discrete evil-panda range (e.g. 113-141 bins) when the 0-new-bin-array gate passes.
+ * This is required because the DLMM program's InitializePosition does a CPI realloc which is capped at
+ * 10,240 bytes delta when performed from inside the program ("InvalidRealloc" / "Failed to reallocate account data").
+ * Supports the full discrete evil-panda range (113-151+ bins) when the 0-new-bin-array gate passes.
  * Passes the value-matched *quoted* amount from pre-swap (not the huge on-chain delta) to keep position data reasonable.
  */
 async function openPositionDirect(
@@ -673,34 +709,38 @@ async function openPositionDirect(
     const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
 
     console.log(
-      `${label} using OFFICIAL direct DLMM SDK initializePositionAndAddLiquidityByStrategy ` +
+      `${label} using TWO-PHASE direct (System createAccount + initializePosition + addLiquidityByStrategy) ` +
       `(after direct DLMM pre-swap, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
     console.log(`${label} using quoted amounts for position totals (value-matched from pre-swap delta/quotedOut, NOT the raw on-chain wallet delta)`)
 
-    // Two-phase to work around the 10KB inner-CPI realloc limit for wide ranges (100+ bins).
-    // Phase 1: Top-level System createAccount (full space for the width) + raw initializePosition.
-    // Phase 2: addLiquidityByStrategy (using the exact same pattern as later manual adds to existing positions).
-    // We pass the *quoted* (value-matched) amounts from the pre-swap to keep the deposited size reasonable.
-
-    // Phase 1: pre-create the position account at full size (via top-level System createAccount)
-    // then call initializePosition. This is required for wide ranges (100+ bins) because the DLMM
-    // program's InitializePosition internally does CPI reallocs, which are capped at 10KB delta
-    // ("Account data size realloc limited to 10240 in inner instructions"). By sizing the account
-    // up-front with a top-level createAccount (no CPI limit), the init ix only writes fields.
+    // Two-phase (split txs) to work around the 10KB *inner CPI* realloc limit for wide ranges (100+ bins).
+    // The DLMM program's InitializePosition instruction performs a CPI to SystemProgram for account
+    // realloc when it thinks the position needs more space. Solana caps *inner* (CPI) realloc deltas
+    // at 10,240 bytes ("Account data size realloc limited to 10240 in inner instructions").
+    //
+    // Solution: two *separate* top-level transactions:
+    //   Tx1: SystemProgram.createAccount (top-level → no CPI realloc limit; we allocate the *full*
+    //        computed size for the width up front, paying rent for the worst-case position data).
+    //   Tx2: raw initializePosition (now runs against an *already full-sized* account owned by the
+    //        DLMM program. The program's init path should see sufficient space and skip its internal
+    //        realloc CPI entirely).
+    // Then Phase 2: addLiquidityByStrategy (identical to later manual adds on existing positions).
+    //
+    // This matches the original intent of the "raw program ix to pre-allocate" comment but actually
+    // delivers a top-level allocation for the large data section.
     const lowerBinId = minBinId;
     const width = maxBinId - minBinId;
-    // Conservative per-bin data size (covers liquidity shares, fees, etc. for the range).
-    // 113-141 bin evil-panda ranges commonly need ~12-18KB total; pre-size safely.
+    // Conservative per-bin data size (covers liquidity shares + fees + extra for Token-2022 variants).
+    // 113-151 bin evil-panda ranges on binStep 100-125 commonly land in the 12-20KB range.
     const POSITION_HEADER = 256;
     const BYTES_PER_BIN = 128;
     const positionAccountSize = Math.max(POSITION_HEADER + width * BYTES_PER_BIN, 8192);
     const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
 
     console.log(
-      `${label} phase 1: pre-creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${width + 1} bins via System createAccount, ` +
-      `then initializePosition(lowerBinId=${lowerBinId}, width=${width}) — bypasses inner realloc 10KB limit for wide ranges`
+      `${label} phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${width + 1} bins via top-level System createAccount`
     );
 
     const createPositionAccountIx = SystemProgram.createAccount({
@@ -708,8 +748,13 @@ async function openPositionDirect(
       newAccountPubkey: positionKeypair.publicKey,
       lamports: positionRentLamports,
       space: positionAccountSize,
-      programId: dlmmPool.program.programId, // own it to DLMM program immediately
+      programId: dlmmPool.program.programId, // transfer ownership to DLMM program immediately
     });
+
+    const createTx = new Transaction().add(createPositionAccountIx);
+    const createPrep = applyPriorityFee(createTx, priorityFee);
+    const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
+    console.log(`${label} phase 1a complete ✔ sig: ${createSig} (account exists full-sized; now initializing)`);
 
     const [eventAuthority] = PublicKey.findProgramAddressSync(
       [Buffer.from('__event_authority')],
@@ -729,10 +774,11 @@ async function openPositionDirect(
       })
       .instruction();
 
-    const initTx = new Transaction().add(createPositionAccountIx, initPositionIx);
-    const initPrepared = applyPriorityFee(initTx, priorityFee);
-    const initSig = await sendLegacyTx(initPrepared, [wallet, positionKeypair], `${label} init-position`);
-    console.log(`${label} phase 1 complete: position account pre-sized + initialized ✔ sig: ${initSig} (now calling addLiquidityByStrategy)`);
+    console.log(`${label} phase 1b: initializePosition(lowerBinId=${lowerBinId}, width=${width}) on pre-sized account (no realloc expected in this tx)`);
+    const initTx = new Transaction().add(initPositionIx);
+    const initPrep = applyPriorityFee(initTx, priorityFee);
+    const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} init-position`);
+    console.log(`${label} phase 1b complete: position initialized ✔ sig: ${initSig} (now calling addLiquidityByStrategy)`);
 
     // Phase 2: add liquidity (position + range already initialized + sized in phase 1).
     // Use the same addLiquidityByStrategy pattern the rest of the bot uses for existing positions
