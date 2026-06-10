@@ -693,6 +693,7 @@ async function openPositionDirect(
       .accounts({
         payer: wallet.publicKey,
         position: positionKeypair.publicKey,
+        owner: wallet.publicKey,
         lbPair: dlmmPool.pubkey,
         systemProgram: SystemProgram.programId,
         rent: SYSVAR_RENT_PUBKEY,
