@@ -691,9 +691,9 @@ async function openPositionDirect(
     const initPositionIx = await dlmmPool.program.methods
       .initializePosition(lowerBinId, width)
       .accounts({
+        payer: wallet.publicKey,
         position: positionKeypair.publicKey,
         lbPair: dlmmPool.pubkey,
-        user: wallet.publicKey,
         systemProgram: SystemProgram.programId,
         rent: SYSVAR_RENT_PUBKEY,
         eventAuthority,
