@@ -458,7 +458,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
             const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey
             const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey
             const binArrays = await dlmmPool.getBinArrays()
-            console.log(`${label} [direct-dlmm-recovery] fetched ${binArrays.length} bin arrays for stranded sell quote (pool=${poolAddr})`);
+            console.log(`${label} [direct-dlmm-recovery] fetched ${binArrays.length} bin arrays for stranded sell quote (pool=${poolAddr}; passing FULL list to swap)`);
             const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58())
             const currentBal = await getWalletTokenBalance(recoveryMint)
             if (currentBal > 0n) {
@@ -469,9 +469,11 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
               if (!q.outAmount.isZero()) {
                 const quotedIn = q.inAmount ?? inputAmountBN;
                 console.log(`${label} [direct-dlmm-recovery] quote: in=${quotedIn} out=${q.outAmount}`);
+                const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
+                console.log(`${label} [direct-dlmm-recovery] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys (not q.binArraysPubkey) to prevent AccountNotEnoughKeys`);
                 const swapTx = await dlmmPool.swap({
                   inToken,
-                  binArraysPubkey: q.binArraysPubkey,
+                  binArraysPubkey: binArrayKeysForSwap,
                   inAmount: inputAmountBN,
                   lbPair: dlmmPool.pubkey,
                   user: wallet.publicKey,

@@ -173,6 +173,7 @@ export async function closePosition(
         const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey
         const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey
         const binArrays = await dlmmPool.getBinArrays()
+        console.log(`${label} [direct-dlmm-sell] fetched ${binArrays.length} bin arrays (passing FULL list to swap to avoid AccountNotEnoughKeys for bin_array)`);
 
         const tokenProgramId = await getTokenProgramId(tokenMint)
         const tokenAta = getAssociatedTokenAddressSync(tokenMint, wallet.publicKey, false, tokenProgramId)
@@ -199,9 +200,11 @@ export async function closePosition(
           const quotedIn = q.inAmount ?? inputAmountBN;
           console.log(`${label} [direct-dlmm-sell] quote: in=${quotedIn} out=${q.outAmount} fee=${q.fee}`);
 
+          const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
+          console.log(`${label} [direct-dlmm-sell] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys (not q.binArraysPubkey)`);
           const swapTx = await dlmmPool.swap({
             inToken,
-            binArraysPubkey: q.binArraysPubkey,
+            binArraysPubkey: binArrayKeysForSwap,
             inAmount: inputAmountBN,  // known input we quoted (reliable; q.inAmount can be missing/undefined on some DLMM responses)
             lbPair: dlmmPool.pubkey,
             user: wallet.publicKey,

@@ -67,10 +67,12 @@ async function main() {
     process.exit(1);
   }
 
-  // Build the swap transaction
+  // Build the swap transaction — use FULL fetched list (same hardening as prod paths) to avoid "Not enough account keys" for bin_array in SDK sim/builder.
+  const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
+  console.log(`[test-direct] using FULL ${binArrayKeysForSwap.length} bin array pubkeys for swap (fetched=${binArrays.length})`);
   const swapTx = await dlmmPool.swap({
     inToken,
-    binArraysPubkey: swapQuote.binArraysPubkey,
+    binArraysPubkey: binArrayKeysForSwap,
     inAmount: swapQuote.inAmount,
     lbPair: dlmmPool.pubkey,
     user: new PublicKey('11111111111111111111111111111111'), // dummy for build; we'll replace with real if sending

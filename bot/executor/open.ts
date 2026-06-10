@@ -440,7 +440,7 @@ export async function openPosition(
       const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
       const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
       const binArrays = await dlmmPool.getBinArrays();
-      console.log(`${label} [direct-dlmm-rollback] fetched ${binArrays.length} bin arrays for sell quote`);
+      console.log(`${label} [direct-dlmm-rollback] fetched ${binArrays.length} bin arrays for sell quote (passing full list to swap to avoid AccountNotEnoughKeys for bin_array)`);
       const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58());
 
       // Re-fetch what we actually still hold of the token we pre-swapped for (hooks/partial fills/visibility).
@@ -472,9 +472,11 @@ export async function openPosition(
           }
           const quotedIn = q.inAmount ?? inputAmountBN;
           console.log(`${label} [direct-dlmm-rollback] quote: in=${quotedIn} out=${q.outAmount}`);
+          const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
+          console.log(`${label} [direct-dlmm-rollback] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys (not q.binArraysPubkey)`);
           const swapTx = await dlmmPool.swap({
             inToken,
-            binArraysPubkey: q.binArraysPubkey,
+            binArraysPubkey: binArrayKeysForSwap,
             inAmount: inputAmountBN,
             lbPair: dlmmPool.pubkey,
             user: wallet.publicKey,
@@ -824,7 +826,7 @@ async function swapSolToTokenDirectOnDlmm(
   } catch {}
 
   const binArrays = await dlmmPool.getBinArrays();
-  console.log(`${label} [direct-dlmm] fetched ${binArrays.length} bin arrays (for quote + swap on this pool)`);
+  console.log(`${label} [direct-dlmm] fetched ${binArrays.length} bin arrays (for quote + swap on this pool; will pass FULL list to swap builder to satisfy Swap2 bin_array keys)`);
 
   // swapYtoX: true if swapping Y (the non-SOL if solIsTokenX false?) into X.
   // If solIsTokenX, SOL is X, we are swapping X (SOL) for Y (token) → swapYtoX = false
@@ -847,9 +849,11 @@ async function swapSolToTokenDirectOnDlmm(
   const quotedIn = q.inAmount ?? inputAmountBN;
   console.log(`${label} [direct-dlmm] quote: in=${quotedIn} out=${q.outAmount} fee=${q.fee}`);
 
+  const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
+  console.log(`${label} [direct-dlmm] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys (not q.binArraysPubkey) to prevent Anchor AccountNotEnoughKeys 3005 on bin_array during internal CU sim`);
   const swapTx = await dlmmPool.swap({
     inToken,
-    binArraysPubkey: q.binArraysPubkey,
+    binArraysPubkey: binArrayKeysForSwap,
     inAmount: inputAmountBN,  // use the exact input we quoted for (more reliable than q.inAmount across SDK responses)
     lbPair: dlmmPool.pubkey,
     user: wallet.publicKey,
