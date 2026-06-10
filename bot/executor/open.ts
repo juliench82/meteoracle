@@ -623,9 +623,12 @@ async function validateOpenEligibility(
 
 /**
  * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit direct DLMM pre-swap for the token leg).
- * Uses two-phase (raw initializePosition via program + combined add) to support wide discrete ranges
- * (120-150+ bins) that pass the 0-new-bin-array gate. Passes the value-matched quoted amount from pre-swap
- * (not the huge on-chain delta) to keep position account data size manageable.
+ * Uses two-phase:
+ *   Phase 1: SystemProgram.createAccount (pre-sized for the full bin width) + raw initializePosition.
+ *            This bypasses the DLMM program's inner CPI realloc limit (10KB) that hits on 100+ bin ranges.
+ *   Phase 2: addLiquidityByStrategy (range already initialized + sized in phase 1; same call used for later adds).
+ * Supports the full discrete evil-panda range (e.g. 113-141 bins) when the 0-new-bin-array gate passes.
+ * Passes the value-matched *quoted* amount from pre-swap (not the huge on-chain delta) to keep position data reasonable.
  */
 async function openPositionDirect(
   metrics: TokenMetrics,
@@ -676,16 +679,38 @@ async function openPositionDirect(
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
     console.log(`${label} using quoted amounts for position totals (value-matched from pre-swap delta/quotedOut, NOT the raw on-chain wallet delta)`)
 
-    // Two-phase to work around the 10KB inner-CPI realloc limit for wide ranges (120+ bins).
-    // Phase 1: Initialize the position account alone via the raw program instruction.
-    // This allocates the full data size needed for the bin range in a dedicated tx (no liquidity add yet).
-    // Phase 2: Then use the combined to add the liquidity (position already exists, so no realloc for the account).
+    // Two-phase to work around the 10KB inner-CPI realloc limit for wide ranges (100+ bins).
+    // Phase 1: Top-level System createAccount (full space for the width) + raw initializePosition.
+    // Phase 2: addLiquidityByStrategy (using the exact same pattern as later manual adds to existing positions).
     // We pass the *quoted* (value-matched) amounts from the pre-swap to keep the deposited size reasonable.
 
-    // Phase 1: create position account
+    // Phase 1: pre-create the position account at full size (via top-level System createAccount)
+    // then call initializePosition. This is required for wide ranges (100+ bins) because the DLMM
+    // program's InitializePosition internally does CPI reallocs, which are capped at 10KB delta
+    // ("Account data size realloc limited to 10240 in inner instructions"). By sizing the account
+    // up-front with a top-level createAccount (no CPI limit), the init ix only writes fields.
     const lowerBinId = minBinId;
     const width = maxBinId - minBinId;
-    console.log(`${label} phase 1: initializePosition(lowerBinId=${lowerBinId}, width=${width}) for range ${minBinId} → ${maxBinId} (raw program ix to pre-allocate full size for ${width + 1} bins, bypassing combined realloc limit)`);
+    // Conservative per-bin data size (covers liquidity shares, fees, etc. for the range).
+    // 113-141 bin evil-panda ranges commonly need ~12-18KB total; pre-size safely.
+    const POSITION_HEADER = 256;
+    const BYTES_PER_BIN = 128;
+    const positionAccountSize = Math.max(POSITION_HEADER + width * BYTES_PER_BIN, 8192);
+    const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
+
+    console.log(
+      `${label} phase 1: pre-creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${width + 1} bins via System createAccount, ` +
+      `then initializePosition(lowerBinId=${lowerBinId}, width=${width}) — bypasses inner realloc 10KB limit for wide ranges`
+    );
+
+    const createPositionAccountIx = SystemProgram.createAccount({
+      fromPubkey: wallet.publicKey,
+      newAccountPubkey: positionKeypair.publicKey,
+      lamports: positionRentLamports,
+      space: positionAccountSize,
+      programId: dlmmPool.program.programId, // own it to DLMM program immediately
+    });
+
     const [eventAuthority] = PublicKey.findProgramAddressSync(
       [Buffer.from('__event_authority')],
       dlmmPool.program.programId
@@ -704,14 +729,16 @@ async function openPositionDirect(
       })
       .instruction();
 
-    const initTx = new Transaction().add(initPositionIx);
+    const initTx = new Transaction().add(createPositionAccountIx, initPositionIx);
     const initPrepared = applyPriorityFee(initTx, priorityFee);
     const initSig = await sendLegacyTx(initPrepared, [wallet, positionKeypair], `${label} init-position`);
-    console.log(`${label} phase 1 complete: position account created ✔ sig: ${initSig} (now calling combined add with pre-allocated range)`);
+    console.log(`${label} phase 1 complete: position account pre-sized + initialized ✔ sig: ${initSig} (now calling addLiquidityByStrategy)`);
 
-    // Phase 2: add liquidity (now that position account exists with full size)
-    console.log(`${label} phase 2: initializePositionAndAddLiquidityByStrategy (position exists, using quoted totals to avoid bloat)`);
-    const createPositionTxOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+    // Phase 2: add liquidity (position + range already initialized + sized in phase 1).
+    // Use the same addLiquidityByStrategy pattern the rest of the bot uses for existing positions
+    // (avoids any "initialize" logic in the combined method now that we did the raw init ourselves).
+    console.log(`${label} phase 2: addLiquidityByStrategy (range pre-initialized in phase 1, using quoted totals)`);
+    const addResult: any = await dlmmPool.addLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
       totalXAmount: totalX,
@@ -723,13 +750,25 @@ async function openPositionDirect(
       },
     });
 
-    const txsToSend = Array.isArray(createPositionTxOrTxs) ? createPositionTxOrTxs : [createPositionTxOrTxs]
-    let liqSig = ''
-    for (const tx of txsToSend) {
-      const preparedTx = applyPriorityFee(tx, priorityFee)
-      const sig = await sendLegacyTx(preparedTx, [wallet, positionKeypair], `${label} direct-sdk`)
-      console.log(`${label} ✓ direct SDK position created & confirmed. Sig: ${sig}`)
-      liqSig = sig
+    const ixs = addResult?.instructions || (Array.isArray(addResult) ? addResult : []);
+    let liqSig = '';
+    if (ixs.length > 0) {
+      const tx = new Transaction();
+      ixs.forEach((ix: any) => tx.add(ix));
+      const preparedTx = applyPriorityFee(tx, priorityFee);
+      const sig = await sendLegacyTx(preparedTx, [wallet, positionKeypair], `${label} add-liquidity`);
+      console.log(`${label} ✓ direct SDK add liquidity confirmed. Sig: ${sig}`);
+      liqSig = sig;
+    } else {
+      // Some SDK responses may already be transaction(s); fall back to previous handling
+      const txsToSend = Array.isArray(addResult) ? addResult : [addResult];
+      for (const t of txsToSend) {
+        if (!t) continue;
+        const preparedTx = applyPriorityFee(t, priorityFee);
+        const sig = await sendLegacyTx(preparedTx, [wallet, positionKeypair], `${label} add-liquidity`);
+        console.log(`${label} ✓ direct SDK add liquidity confirmed. Sig: ${sig}`);
+        liqSig = sig;
+      }
     }
 
     // Fetch position data for persistence (best effort)
