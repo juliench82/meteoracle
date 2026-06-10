@@ -458,6 +458,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
             const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey
             const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey
             const binArrays = await dlmmPool.getBinArrays()
+            console.log(`${label} [direct-dlmm-recovery] fetched ${binArrays.length} bin arrays for stranded sell quote (pool=${poolAddr})`);
             const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58())
             const currentBal = await getWalletTokenBalance(recoveryMint)
             if (currentBal > 0n) {

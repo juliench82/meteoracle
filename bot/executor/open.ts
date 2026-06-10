@@ -35,6 +35,8 @@ import {
   ComputeBudgetProgram,
   TransactionInstruction,
   Connection,
+  SystemProgram,
+  SYSVAR_RENT_PUBKEY,
 } from '@solana/web3.js'
 import {
   getAssociatedTokenAddressSync,
@@ -255,7 +257,7 @@ export async function openPosition(
     const effectiveDownPct = feasibility.effectiveDownPct;
     const effectiveUpPct = feasibility.effectiveUpPct;
 
-    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${feasibility.binStep})`);
+    console.log(`${label} bin range validated: ${minBinId} → ${maxBinId} (${binRange} bins total, step=${feasibility.binStep}) (fullBinsDown=${fullBinsDown} fullBinsUp=${fullBinsUp} via geometric log math to match UI)`);
 
     console.log(
       `${label} effective coverage ~${effectiveDownPct.toFixed(1)}% / +${effectiveUpPct.toFixed(1)}% ` +
@@ -438,6 +440,7 @@ export async function openPosition(
       const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
       const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
       const binArrays = await dlmmPool.getBinArrays();
+      console.log(`${label} [direct-dlmm-rollback] fetched ${binArrays.length} bin arrays for sell quote`);
       const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58());
 
       // Re-fetch what we actually still hold of the token we pre-swapped for (hooks/partial fills/visibility).
@@ -618,9 +621,9 @@ async function validateOpenEligibility(
 
 /**
  * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit direct DLMM pre-swap for the token leg).
- * Uses the combined `initializePositionAndAddLiquidityByStrategy` with the *value-matched quotedOut*
- * from the pre-swap (small number) rather than the raw on-chain delta (often 100k×+ larger on cheap tokens).
- * This keeps the 151-bin position account size reasonable for the DLMM initializer.
+ * Uses two-phase (raw initializePosition via program + combined add) to support wide discrete ranges
+ * (120-150+ bins) that pass the 0-new-bin-array gate. Passes the value-matched quoted amount from pre-swap
+ * (not the huge on-chain delta) to keep position account data size manageable.
  */
 async function openPositionDirect(
   metrics: TokenMetrics,
@@ -669,13 +672,44 @@ async function openPositionDirect(
       `(after direct DLMM pre-swap, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
     console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
+    console.log(`${label} using quoted amounts for position totals (value-matched from pre-swap delta/quotedOut, NOT the raw on-chain wallet delta)`)
 
-    // Use the combined initializer with the *quoted* (value-matched) token leg amount.
-    // Passing the raw on-chain delta (often 100k-700k× larger on these cheap tokens) makes the
-    // position account for a 151-bin range too big for the SDK's internal realloc path.
-    // By using the small quotedOut we keep the deposited liquidity at the intended scale
-    // from the Bid-Ask split, which fits the 151-bin position creation.
-    console.log(`${label} using combined initializePositionAndAddLiquidityByStrategy with value-matched (quoted) leg amounts`);
+    // Two-phase to work around the 10KB inner-CPI realloc limit for wide ranges (120+ bins).
+    // Phase 1: Initialize the position account alone via the raw program instruction.
+    // This allocates the full data size needed for the bin range in a dedicated tx (no liquidity add yet).
+    // Phase 2: Then use the combined to add the liquidity (position already exists, so no realloc for the account).
+    // We pass the *quoted* (value-matched) amounts from the pre-swap to keep the deposited size reasonable.
+
+    // Phase 1: create position account
+    console.log(`${label} phase 1: initializePosition account for range ${minBinId} → ${maxBinId} (using program instruction to pre-allocate full size)`);
+    const [eventAuthority] = PublicKey.findProgramAddressSync(
+      [Buffer.from('__event_authority')],
+      dlmmPool.program.programId
+    );
+    const initPositionIx = await dlmmPool.program.methods
+      .initializePosition(
+        positionKeypair.publicKey,
+        minBinId,
+        maxBinId
+      )
+      .accounts({
+        position: positionKeypair.publicKey,
+        lbPair: dlmmPool.pubkey,
+        user: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+        rent: SYSVAR_RENT_PUBKEY,
+        eventAuthority,
+        program: dlmmPool.program.programId,
+      })
+      .instruction();
+
+    const initTx = new Transaction().add(initPositionIx);
+    const initPrepared = applyPriorityFee(initTx, priorityFee);
+    const initSig = await sendLegacyTx(initPrepared, [wallet, positionKeypair], `${label} init-position`);
+    console.log(`${label} position account initialized (phase 1) ✔ sig: ${initSig}`);
+
+    // Phase 2: add liquidity (now that position account exists with full size)
+    console.log(`${label} phase 2: initializePositionAndAddLiquidityByStrategy (position exists, using quoted totals to avoid bloat)`);
     const createPositionTxOrTxs = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
@@ -791,6 +825,7 @@ async function swapSolToTokenDirectOnDlmm(
   } catch {}
 
   const binArrays = await dlmmPool.getBinArrays();
+  console.log(`${label} [direct-dlmm] fetched ${binArrays.length} bin arrays (for quote + swap on this pool)`);
 
   // swapYtoX: true if swapping Y (the non-SOL if solIsTokenX false?) into X.
   // If solIsTokenX, SOL is X, we are swapping X (SOL) for Y (token) → swapYtoX = false
