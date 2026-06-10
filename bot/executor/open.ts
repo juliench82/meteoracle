@@ -683,7 +683,7 @@ async function openPositionDirect(
     // Phase 1: create position account
     const lowerBinId = minBinId;
     const width = maxBinId - minBinId;
-    console.log(`${label} phase 1: initializePosition(lowerBinId=${lowerBinId}, width=${width}) for range ${minBinId} → ${maxBinId} (raw program ix to pre-allocate full size for ${binRange} bins, bypassing combined realloc limit)`);
+    console.log(`${label} phase 1: initializePosition(lowerBinId=${lowerBinId}, width=${width}) for range ${minBinId} → ${maxBinId} (raw program ix to pre-allocate full size for ${width + 1} bins, bypassing combined realloc limit)`);
     const [eventAuthority] = PublicKey.findProgramAddressSync(
       [Buffer.from('__event_authority')],
       dlmmPool.program.programId
