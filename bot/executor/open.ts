@@ -19,6 +19,10 @@
  * The only limit is economic: if the desired range would require new bin arrays,
  * we skip cleanly and wait for other LPs to populate them.
  *
+ * Position account sizing note: We correctly compute numBins = (maxBinId - minBinId) + 1
+ * when pre-allocating via top-level createAccount so the subsequent initializePosition
+ * does not trigger an inner-CPI realloc (which is capped at 10,240 bytes).
+ *
  * CRITICAL SUCCESS CRITERIA (user directive):
  *   - No ZAP code path is used for opening. Entire bot purpose depends on reliably
  *     opening the full desired discrete range (-50% down / +100% up via round() bin math)
@@ -321,10 +325,10 @@ export async function openPosition(
     // Safety guard: even with the split-tx pre-size + init, extremely wide position accounts can hit
     // other limits (program max bins per position, CU, or future on-chain changes). If the discrete
     // range math produced something absurd, skip *before* the pre-swap to avoid stranding tokens.
-    const MAX_SAFE_POSITION_WIDTH = 220; // ~28KB worst-case at our conservative 128B/bin estimate; well under account size limits
-    const computedWidth = (maxBinId - minBinId);
-    if (computedWidth > MAX_SAFE_POSITION_WIDTH) {
-      console.warn(`${label} SKIPPING: computed position width ${computedWidth} exceeds safe max ${MAX_SAFE_POSITION_WIDTH} (full range ${minBinId}→${maxBinId}). Avoiding potential init or CU issues and pre-swap stranding.`);
+    const MAX_SAFE_NUM_BINS = 220; // ~28KB worst-case at our conservative 128B/bin estimate; well under account size limits
+    const numBinsForGuard = (maxBinId - minBinId) + 1;
+    if (numBinsForGuard > MAX_SAFE_NUM_BINS) {
+      console.warn(`${label} SKIPPING: computed position spans ${numBinsForGuard} bins (range ${minBinId}→${maxBinId}) exceeds safe max ${MAX_SAFE_NUM_BINS}. Avoiding potential init or CU issues and pre-swap stranding.`);
       return null;
     }
 
@@ -658,13 +662,17 @@ async function validateOpenEligibility(
 /**
  * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit direct DLMM pre-swap for the token leg).
  * Uses two-phase *split transactions*:
- *   Phase 1a: Top-level SystemProgram.createAccount (full space for width; no inner-CPI realloc cap).
+ *   Phase 1a: Top-level SystemProgram.createAccount (full space for the position; no inner-CPI realloc cap).
  *   Phase 1b: raw initializePosition (runs against the pre-sized account → program skips its realloc CPI).
  *   Phase 2: addLiquidityByStrategy (range already initialized + sized in phase 1; same call used for later adds).
  * This is required because the DLMM program's InitializePosition does a CPI realloc which is capped at
  * 10,240 bytes delta when performed from inside the program ("InvalidRealloc" / "Failed to reallocate account data").
  * Supports the full discrete evil-panda range (113-151+ bins) when the 0-new-bin-array gate passes.
  * Passes the value-matched *quoted* amount from pre-swap (not the huge on-chain delta) to keep position data reasonable.
+ *
+ * NOTE on sizing: `width = maxBinId - minBinId` (the value passed to initializePosition), but the on-chain
+ * Position account must reserve space for `numBins = width + 1` bin entries. The previous size calc used
+ * only `width`, which left the account one bin short and would still trigger a CPI realloc inside Phase 1b.
  */
 async function openPositionDirect(
   metrics: TokenMetrics,
@@ -722,7 +730,7 @@ async function openPositionDirect(
     //
     // Solution: two *separate* top-level transactions:
     //   Tx1: SystemProgram.createAccount (top-level → no CPI realloc limit; we allocate the *full*
-    //        computed size for the width up front, paying rent for the worst-case position data).
+    //        computed size for the position up front, paying rent for the worst-case position data).
     //   Tx2: raw initializePosition (now runs against an *already full-sized* account owned by the
     //        DLMM program. The program's init path should see sufficient space and skip its internal
     //        realloc CPI entirely).
@@ -730,17 +738,22 @@ async function openPositionDirect(
     //
     // This matches the original intent of the "raw program ix to pre-allocate" comment but actually
     // delivers a top-level allocation for the large data section.
+    //
+    // Important: `width` (max - min) is what the SDK's initializePosition expects, but the account
+    // must be sized for `numBins = width + 1` bin records. Off-by-one here was the remaining cause
+    // of realloc attempts even after the split-tx change.
     const lowerBinId = minBinId;
-    const width = maxBinId - minBinId;
+    const width = maxBinId - minBinId;   // delta passed to the SDK's initializePosition(lowerBinId, width)
+    const numBins = width + 1;           // actual number of bins the position will cover (fencepost)
     // Conservative per-bin data size (covers liquidity shares + fees + extra for Token-2022 variants).
     // 113-151 bin evil-panda ranges on binStep 100-125 commonly land in the 12-20KB range.
     const POSITION_HEADER = 256;
     const BYTES_PER_BIN = 128;
-    const positionAccountSize = Math.max(POSITION_HEADER + width * BYTES_PER_BIN, 8192);
+    const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
     const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
 
     console.log(
-      `${label} phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${width + 1} bins via top-level System createAccount`
+      `${label} phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${numBins} bins via top-level System createAccount`
     );
 
     const createPositionAccountIx = SystemProgram.createAccount({
@@ -774,7 +787,7 @@ async function openPositionDirect(
       })
       .instruction();
 
-    console.log(`${label} phase 1b: initializePosition(lowerBinId=${lowerBinId}, width=${width}) on pre-sized account (no realloc expected in this tx)`);
+    console.log(`${label} phase 1b: initializePosition(lowerBinId=${lowerBinId}, width=${width}) on pre-sized account for ${numBins} bins (no realloc expected in this tx)`);
     const initTx = new Transaction().add(initPositionIx);
     const initPrep = applyPriorityFee(initTx, priorityFee);
     const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} init-position`);
