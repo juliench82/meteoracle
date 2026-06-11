@@ -425,6 +425,12 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   const backoff: Map<string, number> = (globalThis as any).__strandedBackoff
   const LIQUIDITY_BACKOFF_MS = 5 * 60 * 1000 // 5 minutes after a liquidity failure
 
+  // Track consecutive direct-DLMM liquidity failures per mint so we can fall back to Jupiter.
+  if (!(globalThis as any).__strandedDirectFails) {
+    (globalThis as any).__strandedDirectFails = new Map<string, number>()
+  }
+  const consecutiveDirectFailures: Map<string, number> = (globalThis as any).__strandedDirectFails
+
   let retried = 0
   let recovered = 0
 
@@ -514,6 +520,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                 }
                 // clear backoff on success
                 backoff.delete(recoveryMint)
+                consecutiveDirectFailures.set(recoveryMint, 0)
               }
             }
           }
@@ -522,6 +529,39 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
           console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${msg}`)
           if (msg.includes('Insufficient liquidity') || msg.includes('SWAP_QUOTE_INSUFFICIENT')) {
             backoff.set(recoveryMint, now)
+            const prev = consecutiveDirectFailures.get(recoveryMint) || 0
+            consecutiveDirectFailures.set(recoveryMint, prev + 1)
+          }
+        }
+
+        // Jupiter fallback after repeated direct DLMM liquidity failures (Priority 2 from analysis).
+        // The goal of stranded recovery is to get capital back; when the native pool is dead we fall back.
+        const directFails = consecutiveDirectFailures.get(recoveryMint) || 0
+        if (directFails >= 3 && !recoveredSig && bal > 0n) {
+          console.log(`${label} direct DLMM has failed ${directFails} consecutive times with liquidity — attempting Jupiter fallback for recovery`);
+          try {
+            const jupSig = await swapTokenToSol(recoveryMint, `${label}[jupiter-fallback]`);
+            if (jupSig) {
+              recoveredSig = jupSig;
+              recovered++;
+              console.log(`${label} Jupiter fallback recovery succeeded ✔ sig: ${recoveredSig}`);
+              // update state
+              const all = getOpenLpPositions();
+              const idx = all.findIndex((p: any) => p.id === pos.id);
+              if (idx !== -1) {
+                const nowIso = new Date().toISOString();
+                all[idx].stranded_recovered_at = nowIso;
+                all[idx].stranded_recovered_sig = recoveredSig;
+                if (all[idx].status === 'sell_failed') {
+                  all[idx].status = 'closed';
+                }
+                saveOpenLpPositions(all);
+              }
+              consecutiveDirectFailures.set(recoveryMint, 0);
+              backoff.delete(recoveryMint);
+            }
+          } catch (jupErr) {
+            console.warn(`${label} Jupiter fallback also failed: ${jupErr instanceof Error ? jupErr.message : jupErr}`);
           }
         }
       }

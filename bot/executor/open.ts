@@ -371,6 +371,27 @@ export async function openPosition(
       console.warn(`${label} balance re-check before swap failed (proceeding with caution):`, balChkErr);
     }
 
+    // === Pre-flight position keypair + existence check (Priority 1 & 3) ===
+    // Generate the position keypair *before* any pre-swap. Check on-chain that its pubkey is free.
+    // If the address is already allocated (collision with a prior/closed position account or other use),
+    // we regenerate a few times. If we still can't get a clean address, we skip *before* spending SOL
+    // on the token leg. This prevents the exact loss pattern: successful pre-swap followed by
+    // "init-position" failure because the account was already in use.
+    let positionKeypair = new Keypair();
+    for (let i = 0; i < 3; i++) {
+      const existing = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
+      if (!existing || existing.lamports === 0) {
+        break;
+      }
+      console.warn(`${label} position address ${positionKeypair.publicKey.toBase58().slice(0,8)} already allocated on-chain — regenerating fresh keypair`);
+      positionKeypair = new Keypair();
+    }
+    const finalCheck = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
+    if (finalCheck && finalCheck.lamports > 0) {
+      console.error(`${label} could not obtain a clean unused position keypair after 3 attempts — skipping to avoid pre-swap followed by unrecoverable collision`);
+      return null;
+    }
+
     let actualTokenLamports = 0n
     if (solToSwapLamports > 0n) {
       // Prefer direct swap on the DLMM pool itself using Meteora SDK (native swap, no Jupiter).
@@ -417,7 +438,7 @@ export async function openPosition(
       console.log(`${label} swap done: received ${actualTokenLamports} token lamports`);
     }
 
-    const positionKeypair = new Keypair()
+    // (positionKeypair was already generated + pre-flight checked earlier, before the pre-swap)
 
     // === DIRECT (using remaining SOL + actual received token from any pre-swap) ===
     console.log(`${label} attempting direct (Bid-Ask range) with computed legs`);
