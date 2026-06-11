@@ -417,6 +417,14 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   const now = Date.now()
   const recentMs = 7 * 24 * 3600 * 1000
 
+  // Simple in-memory backoff for tokens that are consistently failing with liquidity issues.
+  // Prevents hammering the chain (and paying priority fees on any marginal sends) every single monitor tick.
+  if (!(globalThis as any).__strandedBackoff) {
+    (globalThis as any).__strandedBackoff = new Map<string, number>()
+  }
+  const backoff: Map<string, number> = (globalThis as any).__strandedBackoff
+  const LIQUIDITY_BACKOFF_MS = 5 * 60 * 1000 // 5 minutes after a liquidity failure
+
   let retried = 0
   let recovered = 0
 
@@ -435,6 +443,12 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     const isRecentClosed = pos.status === 'closed' && !(pos as any).stranded_recovered_at
 
     if (!isSellFailed && !isRecentClosed) continue
+
+    // Backoff check
+    const lastFail = backoff.get(recoveryMint) || 0
+    if (now - lastFail < LIQUIDITY_BACKOFF_MS) {
+      continue
+    }
 
     try {
       const bal = await getWalletTokenBalance(recoveryMint)
@@ -498,11 +512,17 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                   }
                   saveOpenLpPositions(all)
                 }
+                // clear backoff on success
+                backoff.delete(recoveryMint)
               }
             }
           }
         } catch (e) {
-          console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${e}`)
+          const msg = e instanceof Error ? e.message : String(e)
+          console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${msg}`)
+          if (msg.includes('Insufficient liquidity') || msg.includes('SWAP_QUOTE_INSUFFICIENT')) {
+            backoff.set(recoveryMint, now)
+          }
         }
       }
     } catch (err) {

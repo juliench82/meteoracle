@@ -788,15 +788,25 @@ async function openPositionDirect(
       .instruction();
 
     console.log(`${label} phase 1b: initializePosition(lowerBinId=${lowerBinId}, width=${width}) on pre-sized account for ${numBins} bins (no realloc expected in this tx)`);
-    const initTx = new Transaction().add(initPositionIx);
-    const initPrep = applyPriorityFee(initTx, priorityFee);
-    const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} init-position`);
-    console.log(`${label} phase 1b complete: position initialized ✔ sig: ${initSig} (now calling addLiquidityByStrategy)`);
+    let initSig = '';
+    try {
+      const initTx = new Transaction().add(initPositionIx);
+      const initPrep = applyPriorityFee(initTx, priorityFee);
+      initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} init-position`);
+      console.log(`${label} phase 1b complete: position initialized ✔ sig: ${initSig} (now calling addLiquidityByStrategy)`);
+    } catch (initErr: any) {
+      const msg = initErr instanceof Error ? initErr.message : String(initErr);
+      if (msg.includes('already in use') || msg.includes('Allocate') || msg.includes('custom program error: 0x0')) {
+        console.warn(`${label} phase 1b init failed with allocate/already-in-use (expected after top-level pre-create for some DLMM program versions) — proceeding directly to addLiquidityByStrategy on the pre-sized account`);
+      } else {
+        throw initErr;
+      }
+    }
 
-    // Phase 2: add liquidity (position + range already initialized + sized in phase 1).
-    // Use the same addLiquidityByStrategy pattern the rest of the bot uses for existing positions
-    // (avoids any "initialize" logic in the combined method now that we did the raw init ourselves).
-    console.log(`${label} phase 2: addLiquidityByStrategy (range pre-initialized in phase 1, using quoted totals)`);
+    // Phase 2: add liquidity (position + range already initialized + sized in phase 1, or pre-sized account).
+    // Use the same addLiquidityByStrategy pattern the rest of the bot uses for existing positions.
+    // If we skipped the explicit init above, the add may perform the necessary data initialization on the pre-created account.
+    console.log(`${label} phase 2: addLiquidityByStrategy (range pre-initialized in phase 1 or pre-sized account, using quoted totals)`);
     const addResult: any = await dlmmPool.addLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
