@@ -10,8 +10,8 @@ const SWAP_TIMEOUT_MS = 20_000
 const SWAP_MAX_RETRIES = 3
 const SWAP_RETRY_DELAY_MS = 3_000
 
-// Unified ladder for buy (swapSolToToken) and sell (swapTokenToSol) paths.
-// Higher values help with illiquid new Token-2022 DLMM pools.
+// Note: main paths now use direct Meteora DLMM (see swapSolToTokenDirectOnDlmm in open.ts).
+// The Jupiter-based helpers below are legacy (only for tests now).
 const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000];
 
 // Fresh-quote retry config for the pre-quoted path (Claude's fix).
@@ -20,50 +20,10 @@ const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000];
 // approach which guaranteed 0x177e on every retry since the route was already stale.
 // Slippage levels: 500 → 1000 → 2000 bps (matching the main ladder).
 //
-// Additional patience layers (from pending open.ts work): caller does a post-prequote
-// settle delay for full-range pools + a final "patient re-prequote + execute" wave
-// specifically for pools that passed the critical zero new-bin-array gate.
-// We export PREQUOTE_MAX_ATTEMPTS for logging compatibility in the caller.
+// (PREQUOTE_* kept for the legacy Jupiter helpers below; main bot no longer uses Jupiter ladders.)
 const PREQUOTE_SLIPPAGE_LEVELS = [500, 1000, 2000];
 const PREQUOTE_RETRY_BACKOFF_BASE_MS = 500;
 export const PREQUOTE_MAX_ATTEMPTS = 3;
-
-/**
- * Pre-flight check: can we currently buy `outputMint` paying with SOL on Jupiter?
- * Returns true only if a quote succeeds with positive outAmount (no error).
- * Used in scanner deep-check to avoid issues with very new pools (now less relevant after activity-model change)
- * fail the Jupiter buy step during live Token-2022 position open (very common for
- * brand-new pump.fun/Dynamic Bonding Curve graduates until the pool is indexed by
- * the aggregator or has visible swap routes).
- *
- * Uses the same /swap/v1/quote endpoint + params as the live buy path in executor/open.ts
- * so the check is predictive of whether the actual swap ladder will find a route.
- */
-export async function hasJupiterRouteSolToToken(
-  outputMint: string,
-  amountLamports = '50000000', // ~0.05 SOL test amount (larger than dust to avoid min-size false-negatives)
-  slippageBps = 1000
-): Promise<boolean> {
-  try {
-    const params = new URLSearchParams({
-      inputMint: NATIVE_MINT,
-      outputMint,
-      amount: amountLamports,
-      slippageBps: slippageBps.toString(),
-      onlyDirectRoutes: 'false',
-      restrictIntermediateTokens: 'true',
-    });
-    const url = `${JUPITER_QUOTE_API}/quote?${params.toString()}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(7000) });
-    if (!res.ok) return false;
-    const quote = await res.json();
-    if (quote?.error || quote?.errorCode) return false;
-    const out = quote?.outAmount ?? quote?.out_amount;
-    return !!(out && BigInt(out) > 0n);
-  } catch {
-    return false;
-  }
-}
 
 async function getTokenBalance(connection: Connection, mint: string, owner: PublicKey): Promise<bigint> {
   const accounts = await connection.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(mint) })
@@ -408,7 +368,8 @@ export async function swapSolToToken(
  * still have a token balance in the wallet).
  *
  * Called at the top of every monitor tick (via monitor.ts).
- * Uses only local state + direct wallet balance query + direct Meteora DLMM swap (Jupiter ditched).
+ * Uses only local state + direct wallet balance query + direct Meteora DLMM swap.
+ * Pure direct path — no Jupiter or other fallbacks.
  * On successful recovery: updates the position record (status -> closed if needed,
  * records recovered timestamp/sig). Failures are left for the next tick.
  */
@@ -424,12 +385,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   }
   const backoff: Map<string, number> = (globalThis as any).__strandedBackoff
   const LIQUIDITY_BACKOFF_MS = 5 * 60 * 1000 // 5 minutes after a liquidity failure
-
-  // Track consecutive direct-DLMM liquidity failures per mint so we can fall back to Jupiter.
-  if (!(globalThis as any).__strandedDirectFails) {
-    (globalThis as any).__strandedDirectFails = new Map<string, number>()
-  }
-  const consecutiveDirectFailures: Map<string, number> = (globalThis as any).__strandedDirectFails
 
   let retried = 0
   let recovered = 0
@@ -464,7 +419,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         const label = `[stranded-sell-retry][${sym}]`
         console.log(`${label} stranded balance=${bal} for ${recoveryMint} (status=${pos.status}) — recovering via direct DLMM`)
 
-        // Direct DLMM sell for stranded recovery (Jupiter ditched completely)
+        // Direct DLMM sell for stranded recovery (no fallbacks)
         let recoveredSig: string | undefined
         try {
           const mod = await import('@meteora-ag/dlmm')
@@ -520,7 +475,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                 }
                 // clear backoff on success
                 backoff.delete(recoveryMint)
-                consecutiveDirectFailures.set(recoveryMint, 0)
               }
             }
           }
@@ -529,39 +483,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
           console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${msg}`)
           if (msg.includes('Insufficient liquidity') || msg.includes('SWAP_QUOTE_INSUFFICIENT')) {
             backoff.set(recoveryMint, now)
-            const prev = consecutiveDirectFailures.get(recoveryMint) || 0
-            consecutiveDirectFailures.set(recoveryMint, prev + 1)
-          }
-        }
-
-        // Jupiter fallback after repeated direct DLMM liquidity failures (Priority 2 from analysis).
-        // The goal of stranded recovery is to get capital back; when the native pool is dead we fall back.
-        const directFails = consecutiveDirectFailures.get(recoveryMint) || 0
-        if (directFails >= 3 && !recoveredSig && bal > 0n) {
-          console.log(`${label} direct DLMM has failed ${directFails} consecutive times with liquidity — attempting Jupiter fallback for recovery`);
-          try {
-            const jupSig = await swapTokenToSol(recoveryMint, `${label}[jupiter-fallback]`);
-            if (jupSig) {
-              recoveredSig = jupSig;
-              recovered++;
-              console.log(`${label} Jupiter fallback recovery succeeded ✔ sig: ${recoveredSig}`);
-              // update state
-              const all = getOpenLpPositions();
-              const idx = all.findIndex((p: any) => p.id === pos.id);
-              if (idx !== -1) {
-                const nowIso = new Date().toISOString();
-                all[idx].stranded_recovered_at = nowIso;
-                all[idx].stranded_recovered_sig = recoveredSig;
-                if (all[idx].status === 'sell_failed') {
-                  all[idx].status = 'closed';
-                }
-                saveOpenLpPositions(all);
-              }
-              consecutiveDirectFailures.set(recoveryMint, 0);
-              backoff.delete(recoveryMint);
-            }
-          } catch (jupErr) {
-            console.warn(`${label} Jupiter fallback also failed: ${jupErr instanceof Error ? jupErr.message : jupErr}`);
           }
         }
       }

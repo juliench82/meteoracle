@@ -986,7 +986,7 @@ async function openPositionDirect(
       console.log(`${label} ✓ direct SDK add liquidity confirmed. Sig: ${sig}`);
       liqSig = sig;
     } else {
-      // Some SDK responses may already be transaction(s); fall back to previous handling
+      // SDK returned full Transaction(s) instead of {instructions}
       const txsToSend = Array.isArray(addResult) ? addResult : [addResult];
       for (const t of txsToSend) {
         if (!t) continue;

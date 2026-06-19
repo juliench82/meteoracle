@@ -27,20 +27,12 @@ export const EVIL_PANDA_MIN_RUGCHECK_SCORE = envNumber('EVIL_PANDA_MIN_RUGCHECK_
 export const EVIL_PANDA_MIN_LIQUIDITY_USD = envNumber('EVIL_PANDA_MIN_LIQUIDITY_USD', 500)  // must match server-side MIN_TVL_USD floor to avoid wasting deep-check quota on pools the scanner already accepted
 
 // ── Position sizing ─────────────────────────────────────────────
-export const MARKET_LP_SOL_PER_POSITION = envNumber(
-  'MAX_MARKET_LP_SOL_PER_POSITION',
-  envNumber('MARKET_LP_SOL_PER_POSITION', envNumber('MAX_SOL_PER_POSITION', 0.1))
-)
+// Single preferred env var per setting. Legacy names (MARKET_*, MAX_*) removed.
+export const MARKET_LP_SOL_PER_POSITION = envNumber('MAX_MARKET_LP_SOL_PER_POSITION', 0.1)
 
-export const MAX_CONCURRENT_MARKET_LP_POSITIONS = envNumber(
-  'MAX_CONCURRENT_MARKET_LP_POSITIONS',
-  envNumber('MAX_CONCURRENT_POSITIONS', 5)
-) as number
+export const MAX_CONCURRENT_MARKET_LP_POSITIONS = envNumber('MAX_CONCURRENT_MARKET_LP_POSITIONS', 5) as number
 
-export const MAX_MARKET_LP_SOL_DEPLOYED = envNumber(
-  'MAX_MARKET_LP_SOL_DEPLOYED',
-  envNumber('MAX_TOTAL_SOL_DEPLOYED', 1)
-)
+export const MAX_MARKET_LP_SOL_DEPLOYED = envNumber('MAX_MARKET_LP_SOL_DEPLOYED', 1)
 
 // ── Scanner timing ──────────────────────────────────────────────
 export const LP_SCAN_INTERVAL_SEC = envNumber('LP_SCAN_INTERVAL_SEC', 900)
