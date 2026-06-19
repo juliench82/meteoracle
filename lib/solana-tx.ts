@@ -58,6 +58,12 @@ export function applyPriorityFee(
 export async function simulateAndCheck(tx: Transaction, label: string): Promise<boolean> {
   const connection = getConnection()
   try {
+    // Ensure the tx is minimally prepared for simulation (prevents "fee payer required" etc.)
+    if (!tx.recentBlockhash || !tx.feePayer) {
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      if (!tx.recentBlockhash) tx.recentBlockhash = blockhash;
+      if (!tx.feePayer) tx.feePayer = (tx as any)._defaultFeePayer || null; // best effort
+    }
     const sim = await connection.simulateTransaction(tx)
     if (sim.value.err) {
       const errorPayload = {
@@ -69,7 +75,6 @@ export async function simulateAndCheck(tx: Transaction, label: string): Promise<
 
       console.error(`${label} ⚠ simulation FAILED — aborting send`, errorPayload)
 
-      // Persist to bot_logs so we can actually debug these failures later
       try {
         logError('tx_simulation_failed', errorPayload)
       } catch (logErr) {
@@ -86,8 +91,8 @@ export async function simulateAndCheck(tx: Transaction, label: string): Promise<
       console.error(`${label} ⚠ simulation OOM — position too large, aborting`, { error: msg })
       return false
     }
-    console.warn(`${label} simulation threw (proceeding):`, msg)
-    return true
+    console.error(`${label} simulation threw — treating as failure for gate:`, msg)
+    return false
   }
 }
 

@@ -27,6 +27,9 @@
  *   - No ZAP code path is used for opening. Entire bot purpose depends on reliably
  *     opening the full desired discrete range (-50% down / +100% up via round() bin math)
  *     using direct DLMM SDK + pre-swap (Meteora native) for value match + zero new bin array gate.
+ *   - Pre-sim gate (create + initializePosition + add sims) MUST abort before any pre-swap
+ *     on candidates that will fail create/init/add. Pre-swap is irreversible; rollback only
+ *     mitigates (fees + slippage loss possible).
  *   - If we cannot open such positions the bot has no purpose at all.
  *   - Pre-swap for the token leg (and post-close sells) now uses direct Meteora DLMM swaps
  *     via the SDK (swapQuote + swap on the target pool). Jupiter completely removed from
@@ -371,32 +374,97 @@ export async function openPosition(
       console.warn(`${label} balance re-check before swap failed (proceeding with caution):`, balChkErr);
     }
 
-    // === Pre-flight position keypair + existence check (Priority 1 & 3) ===
-    // Generate the position keypair *before* any pre-swap. Check on-chain that its pubkey is free.
-    // If the address is already allocated (collision with a prior/closed position account or other use),
-    // we regenerate a few times. If we still can't get a clean address, we skip *before* spending SOL
-    // on the token leg. This prevents the exact loss pattern: successful pre-swap followed by
-    // "init-position" failure because the account was already in use.
+    // === Pre-flight position keypair + smart existence check (Bug 3) ===
+    // Generate fresh keypair before any pre-swap.
+    // - If free (no account or 0 lamports): use it, will need create.
+    // - If exists and owned by DLMM program: reuse the address, skip create (and init if already has discriminator).
+    // - If exists but other owner: collision, regenerate.
+    // - After 3 fails to find usable: skip before swap.
+    const DLMM_PROGRAM_ID = dlmmPool.program.programId.toBase58();
     let positionKeypair = new Keypair();
+    let needsCreate = true;
+    let needsInitialize = true;
     for (let i = 0; i < 3; i++) {
       const existing = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
       if (!existing || existing.lamports === 0) {
+        needsCreate = true;
+        needsInitialize = true;
         break;
       }
-      console.warn(`${label} position address ${positionKeypair.publicKey.toBase58().slice(0,8)} already allocated on-chain — regenerating fresh keypair`);
+      if (existing.owner.toBase58() === DLMM_PROGRAM_ID) {
+        // Already allocated to the program from a prior partial attempt on this key.
+        // Skip create. Check if it looks initialized (has substantial data beyond rent + header).
+        needsCreate = false;
+        const data = existing.data;
+        needsInitialize = !(data && data.length > 100); // rough heuristic; init will be safe to attempt anyway
+        console.log(`${label} position address ${positionKeypair.publicKey.toBase58().slice(0,8)} already DLMM-owned — skipping create, needsInit=${needsInitialize}`);
+        break;
+      }
+      // Occupied by something else (or previous non-DLMM use)
+      console.warn(`${label} position address ${positionKeypair.publicKey.toBase58().slice(0,8)} occupied by non-DLMM owner (${existing.owner.toBase58().slice(0,8)}) — regenerating fresh keypair`);
       positionKeypair = new Keypair();
     }
     const finalCheck = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
-    if (finalCheck && finalCheck.lamports > 0) {
-      console.error(`${label} could not obtain a clean unused position keypair after 3 attempts — skipping to avoid pre-swap followed by unrecoverable collision`);
+    if (finalCheck && finalCheck.lamports > 0 && finalCheck.owner.toBase58() !== DLMM_PROGRAM_ID) {
+      console.error(`${label} could not obtain a clean DLMM-writable position keypair after 3 attempts — skipping to avoid pre-swap followed by unrecoverable collision`);
       return null;
     }
 
-    // === Pre-swap creation simulation gate (to debug failures without spending on pre-swap) ===
-    // We first compute what the pre-swap would give us (via quote only), then build and simulate
-    // the create + (skipped init) + add sequence using the *planned* amounts.
-    // If the creation simulations fail, we log the full details and abort *before* the real pre-swap.
-    // This lets us see exactly what's failing (e.g. add on pre-created account) without the bleeding.
+    // =============================================================================
+    // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
+    // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
+    // exist on-chain. This makes the subsequent add pre-sim *meaningful*.
+    // Only after this + passing add sim do we do the irreversible token pre-swap.
+    // =============================================================================
+    const lowerBinId = minBinId;
+    const width = maxBinId - minBinId;
+    const numBins = width + 1;
+    const POSITION_HEADER = 256;
+    const BYTES_PER_BIN = 128;
+    const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
+    const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
+
+    if (needsCreate) {
+      console.log(
+        `${label} phase 1a (early): creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${numBins} bins`
+      );
+      const createPositionAccountIx = SystemProgram.createAccount({
+        fromPubkey: wallet.publicKey,
+        newAccountPubkey: positionKeypair.publicKey,
+        lamports: positionRentLamports,
+        space: positionAccountSize,
+        programId: dlmmPool.program.programId,
+      });
+      const createTx = new Transaction().add(createPositionAccountIx);
+      const createPrep = applyPriorityFee(createTx, priorityFee);
+      const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
+      console.log(`${label} phase 1a complete ✔ sig: ${createSig}`);
+    } else {
+      console.log(`${label} phase 1a skipped — position account already DLMM-owned`);
+    }
+
+    if (needsInitialize) {
+      console.log(`${label} phase 1b (early): initializePosition (lower=${lowerBinId}, width=${width})`);
+      const initializePositionIx = await dlmmPool.program.methods
+        .initializePosition(new BN(lowerBinId), new BN(width))
+        .accounts({
+          payer: wallet.publicKey,
+          position: positionKeypair.publicKey,
+          lbPair: dlmmPool.pubkey,
+          owner: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .instruction();
+      const initTx = new Transaction().add(initializePositionIx);
+      const initPrep = applyPriorityFee(initTx, priorityFee);
+      const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} initialize-position`);
+      console.log(`${label} phase 1b complete ✔ sig: ${initSig}`);
+    } else {
+      console.log(`${label} phase 1b skipped — position appears already initialized`);
+    }
+
+    // Pre-swap quote for planned token leg amount (used for add sim + split)
     let plannedTokenLamportsForSim = 0n;
     if (solToSwapLamports > 0n) {
       try {
@@ -416,30 +484,9 @@ export async function openPosition(
     const plannedTotalX = solIsTokenX ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
     const plannedTotalY = solIsTokenY ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
 
-    // Simulate create (phase 1a)
-    const simLower = minBinId;
-    const simWidth = maxBinId - minBinId;
-    const simNumBins = simWidth + 1;
-    const simSize = Math.max(256 + simNumBins * 128, 8192);
-    const simRent = await connection.getMinimumBalanceForRentExemption(simSize);
-    const simCreateIx = SystemProgram.createAccount({
-      fromPubkey: wallet.publicKey,
-      newAccountPubkey: positionKeypair.publicKey,
-      lamports: simRent,
-      space: simSize,
-      programId: dlmmPool.program.programId,
-    });
-    const simCreateTx = new Transaction().add(simCreateIx);
-    const simCreatePrep = applyPriorityFee(simCreateTx, priorityFee);
-    const createSimOk = await simulateAndCheck(simCreatePrep, `${label} [pre-sim-create]`);
-    if (!createSimOk) {
-      console.log(`${label} ABORT before pre-swap: create simulation failed. See detailed sim logs above for the exact reason.`);
-      return null;
-    }
-
-    // Note: we intentionally skip simulating init here (we skip it in real path too for pre-create).
-    // Simulate the add (this is the part that actually funds the position on the pre-created account)
-    console.log(`${label} [pre-sim] simulating addLiquidityByStrategy on pre-created account...`);
+    // Post-scaffold add pre-sim gate (meaningful now — account + discriminator exist on-chain)
+    console.log(`${label} [pre-sim] simulating addLiquidityByStrategy on *live* initialized position (using planned amounts)...`);
+    let addSimOk = false;
     try {
       const simAddResult: any = await dlmmPool.addLiquidityByStrategy({
         positionPubKey: positionKeypair.publicKey,
@@ -455,42 +502,44 @@ export async function openPosition(
           })(),
         },
       });
-      let addSimPerformed = false;
       const simIxs = simAddResult?.instructions || (Array.isArray(simAddResult) ? simAddResult : []);
       if (simIxs.length > 0) {
         const simAddTx = new Transaction();
         simIxs.forEach((ix: any) => simAddTx.add(ix));
+        const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
+        simAddTx.recentBlockhash = bh;
+        simAddTx.feePayer = wallet.publicKey;
         const simAddPrep = applyPriorityFee(simAddTx, priorityFee);
-        const addSimOk = await simulateAndCheck(simAddPrep, `${label} [pre-sim-add]`);
-        addSimPerformed = true;
-        if (!addSimOk) {
-          console.log(`${label} ABORT before pre-swap: add simulation failed on pre-created account. This is likely the root cause (or the account isn't properly set up for add). See detailed sim logs above.`);
-          return null;
-        }
+        simAddPrep.recentBlockhash = bh;
+        simAddPrep.feePayer = wallet.publicKey;
+        addSimOk = await simulateAndCheck(simAddPrep, `${label} [pre-sim-add]`);
       } else if (simAddResult) {
-        // SDK returned Transaction (or array of them) directly instead of {instructions}
         const txs = Array.isArray(simAddResult) ? simAddResult : [simAddResult];
         for (const t of txs) {
           if (!t) continue;
+          const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
+          t.recentBlockhash = bh;
+          t.feePayer = wallet.publicKey;
           const prepared = applyPriorityFee(t, priorityFee);
-          const addSimOk = await simulateAndCheck(prepared, `${label} [pre-sim-add-tx]`);
-          addSimPerformed = true;
-          if (!addSimOk) {
-            console.log(`${label} ABORT before pre-swap: add simulation (via Transaction) failed on pre-created account. See detailed sim logs above.`);
-            return null;
-          }
+          prepared.recentBlockhash = bh;
+          prepared.feePayer = wallet.publicKey;
+          addSimOk = await simulateAndCheck(prepared, `${label} [pre-sim-add-tx]`);
+          if (!addSimOk) break;
         }
+      } else {
+        console.warn(`${label} [pre-sim-add] no instructions/Transaction from SDK — cannot validate add`);
+        addSimOk = false;
       }
-      if (!addSimPerformed) {
-        console.warn(`${label} [pre-sim] WARNING: addLiquidityByStrategy returned neither instructions nor a Transaction — add simulation was SKIPPED. This may hide failures.`);
-      }
-    } catch (simAddErr) {
-      console.error(`${label} pre-sim for add threw: ${simAddErr}`);
-      console.log(`${label} ABORT before pre-swap due to add simulation error.`);
-      return null;
+    } catch (e) {
+      console.error(`${label} [pre-sim-add] threw: ${e}`);
+      addSimOk = false;
     }
 
-    console.log(`${label} creation simulations passed — proceeding with real pre-swap.`);
+    if (!addSimOk) {
+      console.log(`${label} ABORT before pre-swap: add simulation failed after real create+initialize. See logs above. (Position rent may have been paid; no token swap executed.)`);
+      return null;
+    }
+    console.log(`${label} [pre-sim-add] OK on live initialized account — safe to pre-swap.`);
 
     let actualTokenLamports = 0n
     if (solToSwapLamports > 0n) {
@@ -782,10 +831,10 @@ async function validateOpenEligibility(
 
 /**
  * Direct SDK open for evil-panda Bid-Ask strategy (one-sided SOL + explicit direct DLMM pre-swap for the token leg).
- * Uses two-phase *split transactions*:
- *   Phase 1a: Top-level SystemProgram.createAccount (full space for the position; no inner-CPI realloc cap).
- *   Phase 1b: raw initializePosition (runs against the pre-sized account → program skips its realloc CPI).
- *   Phase 2: addLiquidityByStrategy (range already initialized + sized in phase 1; same call used for later adds).
+ * Uses split transactions:
+ *   Phase 1a: Top-level SystemProgram.createAccount (full space; no inner-CPI realloc cap).
+ *   Phase 1b: initializePosition (via program.methods) on the pre-sized account owned by DLMM program.
+ *   Phase 2: addLiquidityByStrategy (position is now initialized; only wallet signer needed).
  * This is required because the DLMM program's InitializePosition does a CPI realloc which is capped at
  * 10,240 bytes delta when performed from inside the program ("InvalidRealloc" / "Failed to reallocate account data").
  * Supports the full discrete evil-panda range (113-151+ bins) when the 0-new-bin-array gate passes.
@@ -838,11 +887,9 @@ async function openPositionDirect(
     const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
 
     console.log(
-      `${label} using TWO-PHASE direct (System createAccount + initializePosition + addLiquidityByStrategy) ` +
-      `(after direct DLMM pre-swap, range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
+      `${label} add (scaffolding done pre-swap if needed) — totals from actual post-swap (range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
-    console.log(`${label} totals for SDK call: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
-    console.log(`${label} using quoted amounts for position totals (value-matched from pre-swap delta/quotedOut, NOT the raw on-chain wallet delta)`)
+    console.log(`${label} totals for add: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
     // Two-phase (split txs) to work around the 10KB *inner CPI* realloc limit for wide ranges (100+ bins).
     // The DLMM program's InitializePosition instruction performs a CPI to SystemProgram for account
@@ -860,50 +907,63 @@ async function openPositionDirect(
     // This matches the original intent of the "raw program ix to pre-allocate" comment but actually
     // delivers a top-level allocation for the large data section.
     //
-    // Important: `width` (max - min) is what the SDK's initializePosition expects, but the account
-    // must be sized for `numBins = width + 1` bin records. Off-by-one here was the remaining cause
-    // of realloc attempts even after the split-tx change.
+    // Smart scaffold inside direct (defensive): if early scaffold in caller already did it,
+    // or a prior partial left a DLMM-owned account, skip to avoid "already in use".
+    const DLMM_PROGRAM_ID = dlmmPool.program.programId.toBase58();
+    const posInfo = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
+    const isDlmmOwned = !!(posInfo && posInfo.owner.toBase58() === DLMM_PROGRAM_ID);
+    const looksInitialized = !!(posInfo && posInfo.data && posInfo.data.length > 100);
+
     const lowerBinId = minBinId;
-    const width = maxBinId - minBinId;   // delta passed to the SDK's initializePosition(lowerBinId, width)
-    const numBins = width + 1;           // actual number of bins the position will cover (fencepost)
-    // Conservative per-bin data size (covers liquidity shares + fees + extra for Token-2022 variants).
-    // 113-151 bin evil-panda ranges on binStep 100-125 commonly land in the 12-20KB range.
+    const width = maxBinId - minBinId;
+    const numBins = width + 1;
     const POSITION_HEADER = 256;
     const BYTES_PER_BIN = 128;
     const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
     const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
 
-    console.log(
-      `${label} phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${numBins} bins via top-level System createAccount`
-    );
+    if (!isDlmmOwned) {
+      console.log(
+        `${label} phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${numBins} bins`
+      );
+      const createPositionAccountIx = SystemProgram.createAccount({
+        fromPubkey: wallet.publicKey,
+        newAccountPubkey: positionKeypair.publicKey,
+        lamports: positionRentLamports,
+        space: positionAccountSize,
+        programId: dlmmPool.program.programId,
+      });
+      const createTx = new Transaction().add(createPositionAccountIx);
+      const createPrep = applyPriorityFee(createTx, priorityFee);
+      const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
+      console.log(`${label} phase 1a complete ✔ sig: ${createSig}`);
+    } else {
+      console.log(`${label} phase 1a: position already DLMM-owned — skipping create`);
+    }
 
-    const createPositionAccountIx = SystemProgram.createAccount({
-      fromPubkey: wallet.publicKey,
-      newAccountPubkey: positionKeypair.publicKey,
-      lamports: positionRentLamports,
-      space: positionAccountSize,
-      programId: dlmmPool.program.programId, // transfer ownership to DLMM program immediately
-    });
+    if (!looksInitialized) {
+      console.log(`${label} phase 1b: initializePosition (lower=${lowerBinId}, width=${width})`);
+      const initializePositionIx = await dlmmPool.program.methods
+        .initializePosition(new BN(lowerBinId), new BN(width))
+        .accounts({
+          payer: wallet.publicKey,
+          position: positionKeypair.publicKey,
+          lbPair: dlmmPool.pubkey,
+          owner: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .instruction();
+      const initTx = new Transaction().add(initializePositionIx);
+      const initPrep = applyPriorityFee(initTx, priorityFee);
+      const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} initialize-position`);
+      console.log(`${label} phase 1b complete ✔ sig: ${initSig}`);
+    } else {
+      console.log(`${label} phase 1b: position already initialized — skipping init`);
+    }
 
-    const createTx = new Transaction().add(createPositionAccountIx);
-    const createPrep = applyPriorityFee(createTx, priorityFee);
-    const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
-    console.log(`${label} phase 1a complete ✔ sig: ${createSig} (account exists full-sized)`);
-
-    // CRITICAL FOR STOPPING BLEEDING:
-    // We deliberately SKIP calling initializePosition when we used the top-level pre-create.
-    // The program's InitializePosition *always* tries to allocate the position account internally.
-    // After our createAccount, this predictably fails with "already in use".
-    // We go straight to addLiquidityByStrategy on the pre-sized account.
-    // This gives the open the best chance to succeed for 141-bin ranges.
-    // If add succeeds: position opened, no rollback, no stranded.
-    // If add fails: then we fall back to rollback (still loss, but we tried everything).
-    console.log(`${label} skipping initializePosition (pre-create + program's init conflict) — going straight to addLiquidityByStrategy`);
-
-    // Phase 2: add liquidity (position + range already initialized + sized in phase 1, or pre-sized account).
-    // Use the same addLiquidityByStrategy pattern the rest of the bot uses for existing positions.
-    // If we skipped the explicit init above, the add may perform the necessary data initialization on the pre-created account.
-    console.log(`${label} phase 2: addLiquidityByStrategy (range pre-initialized in phase 1 or pre-sized account, using quoted totals)`);
+    // Phase 2: addLiquidityByStrategy (position is now properly initialized).
+    console.log(`${label} phase 2: addLiquidityByStrategy`);
     const addResult: any = await dlmmPool.addLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
       user: wallet.publicKey,
@@ -922,7 +982,7 @@ async function openPositionDirect(
       const tx = new Transaction();
       ixs.forEach((ix: any) => tx.add(ix));
       const preparedTx = applyPriorityFee(tx, priorityFee);
-      const sig = await sendLegacyTx(preparedTx, [wallet, positionKeypair], `${label} add-liquidity`);
+      const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);
       console.log(`${label} ✓ direct SDK add liquidity confirmed. Sig: ${sig}`);
       liqSig = sig;
     } else {
@@ -931,7 +991,7 @@ async function openPositionDirect(
       for (const t of txsToSend) {
         if (!t) continue;
         const preparedTx = applyPriorityFee(t, priorityFee);
-        const sig = await sendLegacyTx(preparedTx, [wallet, positionKeypair], `${label} add-liquidity`);
+        const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);
         console.log(`${label} ✓ direct SDK add liquidity confirmed. Sig: ${sig}`);
         liqSig = sig;
       }
