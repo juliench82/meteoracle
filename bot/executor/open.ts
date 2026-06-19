@@ -455,16 +455,34 @@ export async function openPosition(
           })(),
         },
       });
+      let addSimPerformed = false;
       const simIxs = simAddResult?.instructions || (Array.isArray(simAddResult) ? simAddResult : []);
       if (simIxs.length > 0) {
         const simAddTx = new Transaction();
         simIxs.forEach((ix: any) => simAddTx.add(ix));
         const simAddPrep = applyPriorityFee(simAddTx, priorityFee);
         const addSimOk = await simulateAndCheck(simAddPrep, `${label} [pre-sim-add]`);
+        addSimPerformed = true;
         if (!addSimOk) {
           console.log(`${label} ABORT before pre-swap: add simulation failed on pre-created account. This is likely the root cause (or the account isn't properly set up for add). See detailed sim logs above.`);
           return null;
         }
+      } else if (simAddResult) {
+        // SDK returned Transaction (or array of them) directly instead of {instructions}
+        const txs = Array.isArray(simAddResult) ? simAddResult : [simAddResult];
+        for (const t of txs) {
+          if (!t) continue;
+          const prepared = applyPriorityFee(t, priorityFee);
+          const addSimOk = await simulateAndCheck(prepared, `${label} [pre-sim-add-tx]`);
+          addSimPerformed = true;
+          if (!addSimOk) {
+            console.log(`${label} ABORT before pre-swap: add simulation (via Transaction) failed on pre-created account. See detailed sim logs above.`);
+            return null;
+          }
+        }
+      }
+      if (!addSimPerformed) {
+        console.warn(`${label} [pre-sim] WARNING: addLiquidityByStrategy returned neither instructions nor a Transaction — add simulation was SKIPPED. This may hide failures.`);
       }
     } catch (simAddErr) {
       console.error(`${label} pre-sim for add threw: ${simAddErr}`);
