@@ -193,6 +193,10 @@ export async function openPosition(
 
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
+    // Compute priority fee early so it is available for pre-scaffold simulations and early aborts.
+    const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
+    console.log(`${label} priority fee: ${priorityFee} microlamports`)
+
     // =============================================================================
     // Desired range calculation (-50% / +100% target) + bin array existence gate
     //
@@ -281,31 +285,6 @@ export async function openPosition(
     // The Math.round() + the bin-array existence gate (enforced both here and early in deep-checker for evil-panda)
     // is the "subtle" part: we ask for the closest achievable discrete range and only open if it costs zero rent.
 
-    // ATA pre-creation for the token side(s) (uses getTokenProgramId per mint so Token-2022 sides get the correct program).
-    // Done before the direct SDK path.
-    const ataIxs: TransactionInstruction[] = []
-    for (const [lbl, mint] of [['X', mintX], ['Y', mintY]] as [string, PublicKey][]) {
-      if (mint.toBase58() === NATIVE_MINT_STR) {
-        console.log(`${label} token ${lbl} is native SOL — skipping ATA`)
-        continue
-      }
-      const tokenProgramId = await getTokenProgramId(mint)
-      const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID)
-      if (!(await connection.getAccountInfo(ata))) {
-        console.log(`${label} creating ATA for token ${lbl} (${mint.toBase58().slice(0, 8)}…)`)
-        ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey, ata, wallet.publicKey, mint, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
-        ))
-      }
-    }
-    if (ataIxs.length > 0) {
-      const ataTx = new Transaction().add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }), ...ataIxs
-      )
-      const ataSig = await sendLegacyTx(ataTx, [wallet], label)
-      console.log(`${label} ATA(s) created ✔ sig: ${ataSig}`)
-    }
-
     if (!solIsTokenX && !solIsTokenY) {
       console.warn(`${label} pool has no SOL side — rejecting one-sided SOL`)
       logWarn('legacy_bot_log', {
@@ -313,14 +292,12 @@ export async function openPosition(
         event: 'open_position_skipped_non_sol_pair',
         payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },
       })
+      await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
       return null
     }
 
     const StrategyTypeEnum = await getStrategyType()
     const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
-
-    const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
-    console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
     const totalSolLamports = BigInt(Math.floor(solAmount * 1e9))
     const binsTotal = fullBinsDown + fullBinsUp + 1  // +1 for the active bin
@@ -410,6 +387,73 @@ export async function openPosition(
       return null;
     }
 
+    // Pre-swap quote for planned token leg amount (used for add sim + split).
+    // Done early, before any on-chain spend (scaffold rent), so we can abort without paying rent
+    // if the swap quote itself looks bad (0 out or throws). This prevents paying the position rent
+    // on cases where the pre-swap would fail.
+    let plannedTokenLamportsForSim = 0n;
+    if (solToSwapLamports > 0n) {
+      try {
+        const binArrays = await dlmmPool.getBinArrays();
+        const swapYtoX = !solIsTokenX;
+        const inputAmountBN = new BN(solToSwapLamports.toString());
+        const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(500), binArrays);
+        const q = swapQuote as any;
+        plannedTokenLamportsForSim = BigInt(q.outAmount.toString());
+        console.log(`${label} [pre-sim] pre-swap quote only: would receive ~${plannedTokenLamportsForSim} tokens`);
+      } catch (qErr) {
+        console.error(`${label} pre-swap quote for sim failed: ${qErr}`);
+        return null;
+      }
+    }
+
+    // Pre-scaffold swap quote viability gate (Claude recommendation).
+    // If the planned swap would give zero tokens, abort *before* paying any position rent.
+    // This is a pure read (no on-chain cost) and catches the main failure mode seen in production logs.
+    if (solToSwapLamports > 0n && plannedTokenLamportsForSim === 0n) {
+      console.log(`${label} pre-swap quote gave zero output — skipping entire open (including scaffold rent) before any money is spent`);
+      return null;
+    }
+
+    // Pre-scaffold swap tx simulation (full tx sim, not just quote).
+    // Builds the swap tx (using planned amounts) and runs simulateAndCheck before paying any position rent.
+    // This catches more realistic failures (account setup, CU limits, program errors, bin array issues)
+    // that a pure quote might miss. Zero on-chain cost.
+    if (solToSwapLamports > 0n && plannedTokenLamportsForSim > 0n) {
+      try {
+        const binArrays = await dlmmPool.getBinArrays();
+        const swapYtoX = !solIsTokenX;
+        const inputAmountBN = new BN(solToSwapLamports.toString());
+        const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(500), binArrays);
+        const q = swapQuote as any;
+        const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
+        const inToken = solIsTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
+        const outToken = solIsTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
+        const swapTx = await dlmmPool.swap({
+          inToken,
+          binArraysPubkey: binArrayKeysForSwap,
+          inAmount: inputAmountBN,
+          lbPair: dlmmPool.pubkey,
+          user: wallet.publicKey,
+          minOutAmount: q.minOutAmount,
+          outToken,
+        });
+        const prepared = applyPriorityFee(swapTx, priorityFee);
+        const simOk = await simulateAndCheck(prepared, `${label} [pre-scaffold-swap-tx-sim]`);
+        if (!simOk) {
+          console.log(`${label} pre-scaffold swap tx simulation failed — aborting before paying position rent`);
+          return null;
+        }
+        console.log(`${label} [pre-scaffold] swap tx simulation OK`);
+      } catch (simErr) {
+        console.error(`${label} pre-scaffold swap tx sim threw: ${simErr}`);
+        return null;
+      }
+    }
+
+    const plannedTotalX = solIsTokenX ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
+    const plannedTotalY = solIsTokenY ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
+
     // =============================================================================
     // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
     // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
@@ -464,26 +508,6 @@ export async function openPosition(
       console.log(`${label} phase 1b skipped — position appears already initialized`);
     }
 
-    // Pre-swap quote for planned token leg amount (used for add sim + split)
-    let plannedTokenLamportsForSim = 0n;
-    if (solToSwapLamports > 0n) {
-      try {
-        const binArrays = await dlmmPool.getBinArrays();
-        const swapYtoX = !solIsTokenX;
-        const inputAmountBN = new BN(solToSwapLamports.toString());
-        const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(1), binArrays);
-        const q = swapQuote as any;
-        plannedTokenLamportsForSim = BigInt(q.outAmount.toString());
-        console.log(`${label} [pre-sim] pre-swap quote only: would receive ~${plannedTokenLamportsForSim} tokens`);
-      } catch (qErr) {
-        console.error(`${label} pre-swap quote for sim failed: ${qErr}`);
-        return null;
-      }
-    }
-
-    const plannedTotalX = solIsTokenX ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
-    const plannedTotalY = solIsTokenY ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
-
     // Post-scaffold add pre-sim gate (meaningful now — account + discriminator exist on-chain)
     console.log(`${label} [pre-sim] simulating addLiquidityByStrategy on *live* initialized position (using planned amounts)...`);
     let addSimOk = false;
@@ -537,9 +561,50 @@ export async function openPosition(
 
     if (!addSimOk) {
       console.log(`${label} ABORT before pre-swap: add simulation failed after real create+initialize. See logs above. (Position rent may have been paid; no token swap executed.)`);
+      await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
       return null;
     }
     console.log(`${label} [pre-sim-add] OK on live initialized account — safe to pre-swap.`);
+
+    // Last-second active bin sanity check before the irreversible pre-swap.
+    // Active bin can drift on volatile pools between feasibility/scaffold/pre-sim and now.
+    try {
+      const currentActive = await dlmmPool.getActiveBin();
+      const binDrift = Math.abs(currentActive.binId - initialActiveBinId);
+      if (binDrift > 3) {
+        console.warn(`${label} active bin drifted significantly (initial=${initialActiveBinId}, now=${currentActive.binId}, drift=${binDrift}) — aborting before pre-swap to avoid out-of-range position`);
+        await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
+        return null;
+      }
+    } catch (driftErr) {
+      console.warn(`${label} failed to re-check active bin before swap (proceeding with caution): ${driftErr}`);
+    }
+
+    // Create the required ATA (only the non-SOL token side) at the last responsible moment.
+    // Only after pre-sim gate passes. If it doesn't exist, create it now.
+    // This avoids wasting ATA rent on candidates that fail the add pre-sim.
+    const outputMintForAta = solIsTokenX ? mintY : mintX;
+    if (outputMintForAta.toBase58() !== NATIVE_MINT_STR) {
+      try {
+        const tokenProgramId = await getTokenProgramId(outputMintForAta);
+        const ata = getAssociatedTokenAddressSync(outputMintForAta, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID);
+        if (!(await connection.getAccountInfo(ata))) {
+          console.log(`${label} creating ATA for output token ${outputMintForAta.toBase58().slice(0, 8)}…`);
+          const ataIx = createAssociatedTokenAccountIdempotentInstruction(
+            wallet.publicKey, ata, wallet.publicKey, outputMintForAta, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
+          );
+          const ataTx = new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }), ataIx
+          );
+          const ataSig = await sendLegacyTx(ataTx, [wallet], label);
+          console.log(`${label} ATA created ✔ sig: ${ataSig}`);
+        }
+      } catch (ataErr) {
+        console.error(`${label} failed to ensure ATA for output token — closing scaffolded position and aborting`);
+        await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
+        return null;
+      }
+    }
 
     let actualTokenLamports = 0n
     if (solToSwapLamports > 0n) {
@@ -563,6 +628,7 @@ export async function openPosition(
       } catch (directErr) {
         console.error(`${label} direct DLMM swap for token leg FAILED: ${directErr instanceof Error ? directErr.message : directErr}`);
         console.error(`${label} (Jupiter completely ditched per user request — no fallback; skipping pool)`);
+        await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
         return null;
       }
     }
@@ -580,6 +646,7 @@ export async function openPosition(
       } catch (e) {
         console.warn(`${label} could not persist stranded for 0-reported pre-swap:`, e);
       }
+      await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
       return null;
     }
 
@@ -688,6 +755,8 @@ export async function openPosition(
           console.warn(`${label} direct DLMM rollback quote/swap failed after ${MAX_ROLLBACK_ATTEMPTS} attempts (insufficient liquidity or other) — persisting stranded for monitor retry`);
         }
       }
+      // After token rollback (success or fail), attempt to close the (empty) position to reclaim the rent paid in Phase 1a.
+      await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
     } catch (rbErr) {
       console.error(`${label} direct DLMM rollback sell ALSO failed — persisting stranded token marker for monitor recovery`, rbErr);
       try {
@@ -1067,6 +1136,41 @@ async function openPositionDirect(
  * Since the pool passed the full evil-panda range gate, the necessary bin arrays exist.
  * Uses the same dlmmPool already loaded for range/price calculation.
  */
+/**
+ * Attempt to close an empty (or zero-liquidity) position to reclaim the rent
+ * paid during createAccount. Called on failure paths after scaffolding.
+ * This is the main defense against orphaned position account rent losses.
+ */
+async function tryCloseEmptyPosition(
+  dlmmPool: any,
+  positionPubKey: PublicKey,
+  minBinId: number,
+  maxBinId: number,
+  wallet: any,
+  label: string,
+  priorityFee: number
+) {
+  try {
+    const removeTx = await dlmmPool.removeLiquidity({
+      position: positionPubKey,
+      user: wallet.publicKey,
+      fromBinId: minBinId,
+      toBinId: maxBinId,
+      bps: new BN(10000),
+      shouldClaimAndClose: true,
+    });
+    for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
+      const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), [wallet], `${label} close-empty-for-rent`);
+      console.log(`${label} closed empty position to reclaim rent ✔ sig: ${sig}`);
+    }
+  } catch (closeErr) {
+    console.warn(`${label} failed to close empty position (rent may be locked until manual recovery): ${closeErr}`);
+  }
+}
+
+// Also export for potential use in monitor or recovery if needed
+export { tryCloseEmptyPosition };
+
 async function swapSolToTokenDirectOnDlmm(
   dlmmPool: any,
   solLamports: bigint,
@@ -1102,7 +1206,7 @@ async function swapSolToTokenDirectOnDlmm(
   const swapQuote = await dlmmPool.swapQuote(
     inputAmountBN,
     swapYtoX,
-    new BN(1), // will use the quote's minOut
+    new BN(500), // 5% slippage for pre-swap on volatile pools
     binArrays
   );
   const q = swapQuote as any;
