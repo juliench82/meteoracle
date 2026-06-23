@@ -152,6 +152,14 @@ async function main() {
     const pub = new PublicKey(s.pubkey);
     const lbPair = new PublicKey(s.pool);
     console.log(`\n=== Attempting reclaim for ${s.pubkey.slice(0,8)} on pool ${s.pool.slice(0,8)} ${s.note ? '(' + s.note + ')' : ''}`);
+
+    let dlmmPool = null;
+    try {
+      dlmmPool = await DLMM.create(connection, lbPair);
+    } catch (e) {
+      console.log(`  Warning: could not create DLMM pool object, will use fallback dummies for accounts`);
+    }
+
     try {
       const sig = await closeGhostPositionRaw(connection, wallet, pub, lbPair, dlmmPool, s.minBin, s.maxBin);
       console.log(`  ✔ Recovered via raw closePosition`);
