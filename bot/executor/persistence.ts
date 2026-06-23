@@ -272,3 +272,53 @@ export async function persistStrandedTokenAfterFailedOpen(
     console.warn('[executor] failed to persist stranded token marker:', e);
   }
 }
+
+/**
+ * Persist a marker for a position account that was created (rent paid via createAccount)
+ * but the full open failed. This allows background recovery of the position rent via closePosition
+ * even if the immediate finally close failed or the bot restarted.
+ * These are "stranded rent" / orphan DLMM position accounts (no liquidity, possibly uninitialized).
+ */
+export async function persistStrandedPositionRent(
+  positionPubkey: string,
+  poolAddress: string,
+  minBinId: number,
+  maxBinId: number,
+  symbol?: string
+) {
+  try {
+    const positions = getOpenLpPositions();
+    // Avoid duplicates
+    const exists = positions.some((p: any) => p.position_pubkey === positionPubkey && (p.status === 'stranded_rent' || p.close_reason?.includes('stranded_rent')));
+    if (exists) return;
+
+    const marker = {
+      id: `stranded-rent-${positionPubkey.slice(0, 8)}-${Date.now()}`,
+      mint: symbol || 'unknown',
+      symbol: symbol || 'stranded-rent',
+      pool_address: poolAddress,
+      position_pubkey: positionPubkey,
+      strategy_id: 'evil-panda',
+      position_type: 'dlmm',
+      status: 'stranded_rent',
+      sol_deposited: 0,
+      token_amount: 0,
+      entry_price_sol: 0,
+      entry_price_usd: 0,
+      opened_at: new Date().toISOString(),
+      close_reason: 'stranded_rent_from_failed_open',
+      metadata: {
+        min_bin_id: minBinId,
+        max_bin_id: maxBinId,
+        stranded_from_scaffold: true,
+        note: 'Position account created but open aborted before liquidity. Attempt rent reclaim via close.',
+      },
+    } as any;
+
+    positions.push(marker);
+    saveOpenLpPositions(positions);
+    console.log(`[executor] persisted stranded position rent marker for recovery (pubkey=${positionPubkey.slice(0,8)}, pool=${poolAddress.slice(0,8)})`);
+  } catch (e) {
+    console.warn('[executor] failed to persist stranded position rent marker:', e);
+  }
+}

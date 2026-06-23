@@ -98,6 +98,7 @@ import {
   sendOpenAlert,
   findExistingActivePosition,
   persistStrandedTokenAfterFailedOpen,
+  persistStrandedPositionRent,
 } from './persistence'
 
 // swapTokenToSol (Jupiter) fully removed - using direct Meteora DLMM for all swaps in open/close/rollback
@@ -943,6 +944,20 @@ export async function openPosition(
         // partials, prior-run orphans for this key, or edge cases. If account doesn't exist
         // or isn't closable this way, the close logs the error and we move on (no extra loss).
         console.log(`${label} [TRACE] [FINALLY-CLOSE] !successfullyOpened — ATTEMPTING rent reclaim close (covers scaffolded or partial-create cases).`);
+        if (positionScaffolded) {
+          // Persist for background recovery in case this immediate close fails or bot restarts.
+          try {
+            await persistStrandedPositionRent(
+              positionKeypair.publicKey.toBase58(),
+              dlmmPool.pubkey.toBase58(),
+              minBinId,
+              maxBinId,
+              metrics.symbol
+            );
+          } catch (pErr) {
+            console.warn(`${label} [TRACE] failed to persist stranded rent marker: ${pErr}`);
+          }
+        }
         try {
           await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
           console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed.`);
@@ -1362,13 +1377,14 @@ async function openPositionDirect(
 async function tryCloseEmptyPosition(
   dlmmPool: any,
   positionPubKey: PublicKey,
-  minBinId: number,
-  maxBinId: number,
+  minBinId?: number,
+  maxBinId?: number,
   wallet: any,
-  label: string,
-  priorityFee: number
+  label: string = '[recover]',
+  priorityFee: number = 100000
 ) {
-  console.log(`${label} [TRACE] [CLOSE-ENTRY] Entering tryCloseEmptyPosition for key=${positionPubKey.toBase58().slice(0,8)} (range ${minBinId}→${maxBinId}). This is the rent-reclaim attempt.`);
+  const hasRange = typeof minBinId === 'number' && typeof maxBinId === 'number';
+  console.log(`${label} [TRACE] [CLOSE-ENTRY] Entering tryCloseEmptyPosition for key=${positionPubKey.toBase58().slice(0,8)} ${hasRange ? `(range ${minBinId}→${maxBinId})` : '(no range - using closePosition only)'}. This is the rent-reclaim attempt.`);
   console.log(`${label} [TRACE] [CLOSE-ENTRY] Using priority ${Math.max(priorityFee, 100000)} for close.`);
 
   // Use higher priority for recovery closes to increase chance of landing
@@ -1382,59 +1398,63 @@ async function tryCloseEmptyPosition(
     console.log(`${label} [TRACE] [CLOSE-POS-INFO] could not fetch pos info: ${e}`);
   }
 
-  // Try removeLiquidity first (standard path for initialized positions)
-  try {
-    console.log(`${label} [TRACE] [CLOSE-REMOVE] Attempting removeLiquidity + shouldClaimAndClose (100% bps) to close empty pos...`);
-    const removeTx = await dlmmPool.removeLiquidity({
-      position: positionPubKey,
-      user: wallet.publicKey,
-      fromBinId: minBinId,
-      toBinId: maxBinId,
-      bps: new BN(10000),
-      shouldClaimAndClose: true,
-    });
-    console.log(`${label} [TRACE] [CLOSE-REMOVE] removeLiquidity call returned ${Array.isArray(removeTx) ? removeTx.length : 1} tx(s)`);
-    for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
-      const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-for-rent`);
-      console.log(`${label} [TRACE] [CLOSE-REMOVE-SUCCESS] removeLiquidity close succeeded.`);
-      console.log(`${label} closed empty position to reclaim rent ✔ sig: ${sig}`);
-      return; // success
-    }
-  } catch (closeErr) {
-    const msg = closeErr instanceof Error ? closeErr.message : String(closeErr);
-    console.log(`${label} [TRACE] [CLOSE-REMOVE-THROW] removeLiquidity threw: ${msg}`);
-    if (msg.includes('liquidity') || msg.includes('Liquidity') || msg.includes('zero')) {
-      console.log(`${label} [TRACE] [CLOSE-REMOVE-ZERO] removeLiquidity rejected for zero-liquidity (EXPECTED for empty post-abort case); trying direct close fallback...`);
-    } else {
-      console.warn(`${label} [TRACE] [CLOSE-REMOVE-OTHER] removeLiquidity close failed: ${msg}`);
-      console.warn(`${label} removeLiquidity close failed: ${msg}`);
-    }
-
-    // Fallback to closePosition for truly empty initialized accounts
+  // If we have a valid range, try the standard remove + close first (for properly initialized empty positions)
+  if (hasRange) {
     try {
-      if (typeof dlmmPool.closePosition === 'function') {
-        console.log(`${label} [TRACE] [CLOSE-FALLBACK] Attempting dlmmPool.closePosition() fallback...`);
-        const closeTx = await dlmmPool.closePosition(positionPubKey, wallet.publicKey);
-        const txs = Array.isArray(closeTx) ? closeTx : [closeTx];
-        for (const tx of txs) {
-          const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-fallback`);
-          console.log(`${label} [TRACE] [CLOSE-FALLBACK-SUCCESS] closePosition fallback succeeded.`);
-          console.log(`${label} closed empty position via direct close ✔ sig: ${sig}`);
-        }
-        return;
-      } else {
-        console.log(`${label} [TRACE] [CLOSE-FALLBACK-NOOP] dlmmPool has no closePosition() method.`);
+      console.log(`${label} [TRACE] [CLOSE-REMOVE] Attempting removeLiquidity + shouldClaimAndClose (100% bps) to close empty pos...`);
+      const removeTx = await dlmmPool.removeLiquidity({
+        position: positionPubKey,
+        user: wallet.publicKey,
+        fromBinId: minBinId,
+        toBinId: maxBinId,
+        bps: new BN(10000),
+        shouldClaimAndClose: true,
+      });
+      console.log(`${label} [TRACE] [CLOSE-REMOVE] removeLiquidity call returned ${Array.isArray(removeTx) ? removeTx.length : 1} tx(s)`);
+      for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
+        const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-for-rent`);
+        console.log(`${label} [TRACE] [CLOSE-REMOVE-SUCCESS] removeLiquidity close succeeded.`);
+        console.log(`${label} closed empty position to reclaim rent ✔ sig: ${sig}`);
+        return; // success
       }
-    } catch (fallbackErr) {
-      console.log(`${label} [TRACE] [CLOSE-FALLBACK-THROW] closePosition fallback threw: ${fallbackErr}`);
-      console.warn(`${label} [TRACE] direct closePosition also failed: ${fallbackErr}`);
-      console.warn(`${label} direct closePosition also failed: ${fallbackErr}`);
+    } catch (closeErr) {
+      const msg = closeErr instanceof Error ? closeErr.message : String(closeErr);
+      console.log(`${label} [TRACE] [CLOSE-REMOVE-THROW] removeLiquidity threw: ${msg}`);
+      if (msg.includes('liquidity') || msg.includes('Liquidity') || msg.includes('zero')) {
+        console.log(`${label} [TRACE] [CLOSE-REMOVE-ZERO] removeLiquidity rejected for zero-liquidity (EXPECTED for empty post-abort case); trying direct close fallback...`);
+      } else {
+        console.warn(`${label} [TRACE] [CLOSE-REMOVE-OTHER] removeLiquidity close failed: ${msg}`);
+        console.warn(`${label} removeLiquidity close failed: ${msg}`);
+      }
     }
-
-    console.warn(`${label} [TRACE] [CLOSE-EXHAUSTED] All rent-reclaim attempts exhausted.`);
-    console.warn(`${label} [TRACE] All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
-    console.warn(`${label} All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
+  } else {
+    console.log(`${label} [TRACE] [CLOSE-SKIP-REMOVE] No bin range provided (uninitialized/ghost account) — skipping removeLiquidity, going straight to closePosition fallback.`);
   }
+
+  // Fallback (or primary for ghost/uninit accounts): use closePosition directly. This works for many empty or partially-created accounts without needing bin range.
+  try {
+    if (typeof dlmmPool.closePosition === 'function') {
+      console.log(`${label} [TRACE] [CLOSE-FALLBACK] Attempting dlmmPool.closePosition() (primary for uninit/stranded accounts)...`);
+      const closeTx = await dlmmPool.closePosition(positionPubKey, wallet.publicKey);
+      const txs = Array.isArray(closeTx) ? closeTx : [closeTx];
+      for (const tx of txs) {
+        const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-fallback`);
+        console.log(`${label} [TRACE] [CLOSE-FALLBACK-SUCCESS] closePosition succeeded.`);
+        console.log(`${label} closed empty/stranded position via direct close ✔ sig: ${sig}`);
+      }
+      return;
+    } else {
+      console.log(`${label} [TRACE] [CLOSE-FALLBACK-NOOP] dlmmPool has no closePosition() method.`);
+    }
+  } catch (fallbackErr) {
+    console.log(`${label} [TRACE] [CLOSE-FALLBACK-THROW] closePosition fallback threw: ${fallbackErr}`);
+    console.warn(`${label} [TRACE] direct closePosition also failed: ${fallbackErr}`);
+    console.warn(`${label} direct closePosition also failed: ${fallbackErr}`);
+  }
+
+  console.warn(`${label} [TRACE] [CLOSE-EXHAUSTED] All rent-reclaim attempts exhausted.`);
+  console.warn(`${label} [TRACE] All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
+  console.warn(`${label} All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
 }
 
 // Also export for potential use in monitor or recovery if needed

@@ -6,6 +6,7 @@ import { closePosition } from '@/bot/executor/close'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
 import { getConnection, getWallet } from '@/lib/solana'
 import { getDLMM, getDecimalAdjustedPrice, getClaimableFeesUsd } from '@/bot/executor/utils'
+import { tryCloseEmptyPosition } from '@/bot/executor/open'
 import {
   getCurrentPoolFeeTvl24h,
   getFeesActiveTvl24hPct,
@@ -73,6 +74,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
   tickCount++ // incremented for potential future use / debugging
 
   await retryStrandedSells().catch(err => console.error('[monitor] stranded sells failed:', err))
+  await retryStrandedPositionRents().catch(err => console.error('[monitor] stranded position rents failed:', err))
 
   if (!LP_MONITOR_ENABLED) {
     console.log('[lp-monitor] disabled')
@@ -383,4 +385,45 @@ function toNumber(v: any): number {
   if (typeof v === 'object' && typeof v.toNumber === 'function') return v.toNumber()
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * Background recovery for stranded position rent accounts (createAccount only, never fully opened).
+ * These are persisted when a scaffold bundle succeeds but the open later aborts.
+ * We attempt close using the saved bin range (or closePosition only if no range).
+ */
+export async function retryStrandedPositionRents() {
+  const positions = getOpenLpPositions() as any[];
+  const stranded = positions.filter((p: any) => p.status === 'stranded_rent' || (p.close_reason || '').includes('stranded_rent'));
+  if (stranded.length === 0) return;
+
+  console.log(`[monitor] checking ${stranded.length} stranded position rent accounts for reclaim...`);
+  const wallet = getWallet();
+  const connection = getConnection();
+
+  for (const s of stranded) {
+    if (!s.position_pubkey || !s.pool_address) continue;
+    try {
+      const dlmmPool = await (await getDLMM()).create(connection, new PublicKey(s.pool_address));
+      const pub = new PublicKey(s.position_pubkey);
+      const minB = (s.metadata && typeof s.metadata.min_bin_id === 'number') ? s.metadata.min_bin_id : undefined;
+      const maxB = (s.metadata && typeof s.metadata.max_bin_id === 'number') ? s.metadata.max_bin_id : undefined;
+
+      console.log(`[monitor] attempting reclaim for stranded rent ${s.position_pubkey.slice(0,8)} pool ${s.pool_address.slice(0,8)}`);
+      // Use the exported tryClose (it now supports optional bins and will prefer closePosition for uninit ghosts)
+      await tryCloseEmptyPosition(dlmmPool, pub, minB, maxB, wallet, `[monitor-stranded-rent-${s.position_pubkey.slice(0,8)}]`, 200000);
+
+      // If we reached here without throwing, consider it done or remove the marker.
+      // For safety, only remove if the account no longer exists or data is small.
+      const info = await connection.getAccountInfo(pub).catch(() => null);
+      if (!info || info.lamports === 0 || (info.data && info.data.length < 100)) {
+        const all = getOpenLpPositions();
+        const filtered = all.filter((p: any) => p.position_pubkey !== s.position_pubkey || p.status !== 'stranded_rent');
+        saveOpenLpPositions(filtered);
+        console.log(`[monitor] reclaimed/removed stranded rent marker for ${s.position_pubkey.slice(0,8)}`);
+      }
+    } catch (e) {
+      console.warn(`[monitor] stranded rent reclaim attempt for ${s.position_pubkey.slice(0,8)} failed (will retry next tick): ${e}`);
+    }
+  }
 }
