@@ -578,6 +578,15 @@ export async function openPosition(
       }
 
       if (scaffoldIxs.length > 0) {
+        // Last-second defensive check: the account must still not exist.
+        // With a fresh random keypair this is virtually certain, but prevents any
+        // weird "we just created it in a prior partial attempt" or collision surprises.
+        const preBundleCheck = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
+        if (preBundleCheck && preBundleCheck.lamports > 0) {
+          console.error(`${label} [TRACE] [SCAFFOLD-BUNDLE-ABORT] position keypair suddenly exists on-chain right before bundle — aborting to avoid double-spend or conflict. No rent paid.`);
+          return null;
+        }
+
         const scaffoldTx = new Transaction();
         scaffoldIxs.forEach((ix) => scaffoldTx.add(ix));
         const scaffoldPrep = applyPriorityFee(scaffoldTx, priorityFee);
@@ -586,6 +595,12 @@ export async function openPosition(
         const scaffoldSig = await sendLegacyTx(scaffoldPrep, [wallet, positionKeypair], `${label} position-scaffold`);
         console.log(`${label} [TRACE] [SCAFFOLD-BUNDLE] ${what} COMPLETE ✔ sig: ${scaffoldSig}`);
         console.log(`${label} position scaffold complete ✔ sig: ${scaffoldSig}`);
+
+        // Post-success verification snapshot (best effort)
+        try {
+          const after = await connection.getAccountInfo(positionKeypair.publicKey);
+          console.log(`${label} [TRACE] [SCAFFOLD-VERIFY] after bundle: owner=${after?.owner?.toBase58?.().slice(0,8)} lamports=${after?.lamports} dataLen=${after?.data?.length}`);
+        } catch {}
       }
 
       positionScaffolded = scaffoldIxs.length > 0;
@@ -1207,14 +1222,20 @@ async function openPositionDirect(
     }
 
     if (directScaffoldIxs.length > 0) {
-      const scaffoldTx = new Transaction();
-      directScaffoldIxs.forEach((ix) => scaffoldTx.add(ix));
-      const scaffoldPrep = applyPriorityFee(scaffoldTx, priorityFee);
-      const what = (!isDlmmOwned && !looksInitialized) ? 'create+init (bundled)' : !isDlmmOwned ? 'create' : 'init';
-      console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-BUNDLE] sending ${what} (atomic to avoid orphan rent)...`);
-      const scaffoldSig = await sendLegacyTx(scaffoldPrep, [wallet, positionKeypair], `${label} position-scaffold`);
-      console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-BUNDLE] ${what} COMPLETE ✔ sig: ${scaffoldSig}`);
-      console.log(`${label} phase 1a/1b complete ✔ sig: ${scaffoldSig}`);
+      // Last-second defensive check in direct path too.
+      const preBundleCheck = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
+      if (preBundleCheck && preBundleCheck.lamports > 0) {
+        console.warn(`${label} [TRACE] [DIRECT-SCAFFOLD-BUNDLE] key already exists — skipping (should have been caught by early scaffold or preflight).`);
+      } else {
+        const scaffoldTx = new Transaction();
+        directScaffoldIxs.forEach((ix) => scaffoldTx.add(ix));
+        const scaffoldPrep = applyPriorityFee(scaffoldTx, priorityFee);
+        const what = (!isDlmmOwned && !looksInitialized) ? 'create+init (bundled)' : !isDlmmOwned ? 'create' : 'init';
+        console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-BUNDLE] sending ${what} (atomic to avoid orphan rent)...`);
+        const scaffoldSig = await sendLegacyTx(scaffoldPrep, [wallet, positionKeypair], `${label} position-scaffold`);
+        console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-BUNDLE] ${what} COMPLETE ✔ sig: ${scaffoldSig}`);
+        console.log(`${label} phase 1a/1b complete ✔ sig: ${scaffoldSig}`);
+      }
     }
 
     // Final belt-and-suspenders verification right before actually adding liquidity.
