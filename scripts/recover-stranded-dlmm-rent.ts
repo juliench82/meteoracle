@@ -26,7 +26,10 @@ dotenv.config({
 import { getConnection, getWallet } from '@/lib/solana';
 import { getDLMM } from '@/bot/executor/utils';
 import { tryCloseEmptyPosition } from '@/bot/executor/open';
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, Transaction, TransactionInstruction, SystemProgram, sendAndConfirmTransaction } from '@solana/web3.js';
+import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+
+const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
 
 const STRANDED = [
   {
@@ -59,6 +62,56 @@ const STRANDED = [
   },
 ];
 
+async function closeGhostPositionRaw(
+  conn: any,
+  wallet: any,
+  positionPubkey: PublicKey,
+  lbPair: PublicKey
+): Promise<string> {
+  const closeDiscriminator = Buffer.from([123, 134, 81, 0, 49, 68, 98, 172]); // closePosition
+
+  const eventAuthority = PublicKey.findProgramAddressSync(
+    [Buffer.from("__event_authority")],
+    DLMM_PROGRAM_ID
+  )[0];
+
+  // For ghost accounts, we pass the actual lb_pair, and zeros/dummies for others.
+  // Bin arrays may need correct ones, but try with zeros first; if fails, we can compute.
+  const zero = SystemProgram.programId;
+
+  const ix = new TransactionInstruction({
+    programId: DLMM_PROGRAM_ID,
+    keys: [
+      { pubkey: positionPubkey, isSigner: false, isWritable: true },  // position
+      { pubkey: lbPair,         isSigner: false, isWritable: true },  // lb_pair (correct one)
+      { pubkey: zero,           isSigner: false, isWritable: true },  // bin_array_bitmap_extension
+      { pubkey: wallet.publicKey, isSigner: false, isWritable: true }, // user_token_x
+      { pubkey: wallet.publicKey, isSigner: false, isWritable: true }, // user_token_y
+      { pubkey: zero,           isSigner: false, isWritable: true },  // reserve_x
+      { pubkey: zero,           isSigner: false, isWritable: true },  // reserve_y
+      { pubkey: zero,           isSigner: false, isWritable: false }, // token_x_mint
+      { pubkey: zero,           isSigner: false, isWritable: false }, // token_y_mint
+      { pubkey: zero,           isSigner: false, isWritable: true },  // bin_array_lower
+      { pubkey: zero,           isSigner: false, isWritable: true },  // bin_array_upper
+      { pubkey: wallet.publicKey, isSigner: true,  isWritable: true },// sender
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: eventAuthority, isSigner: false, isWritable: false },
+      { pubkey: DLMM_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: closeDiscriminator,
+  });
+
+  const tx = new Transaction().add(ix);
+  tx.feePayer = wallet.publicKey;
+  const { blockhash } = await conn.getLatestBlockhash('confirmed');
+  tx.recentBlockhash = blockhash;
+
+  // Use the project's send logic if possible, but for script use direct for simplicity
+  const { sendAndConfirmTransaction } = await import('@solana/web3.js');
+  return await sendAndConfirmTransaction(conn, tx, [wallet], { commitment: 'confirmed' });
+}
+
 async function main() {
   const wallet = getWallet();
   const connection = getConnection();
@@ -71,26 +124,21 @@ async function main() {
       console.warn(`Skipping ${s.pubkey} — pool not provided`);
       continue;
     }
+    const pub = new PublicKey(s.pubkey);
+    const lbPair = new PublicKey(s.pool);
+    console.log(`\n=== Attempting reclaim for ${s.pubkey.slice(0,8)} on pool ${s.pool.slice(0,8)} ${s.note ? '(' + s.note + ')' : ''}`);
     try {
-      const dlmmPool = await DLMM.create(connection, new PublicKey(s.pool));
-      const pub = new PublicKey(s.pubkey);
-      console.log(`\n=== Attempting reclaim for ${s.pubkey.slice(0,8)} on pool ${s.pool.slice(0,8)} ${s.note ? '(' + s.note + ')' : ''}`);
-      await tryCloseEmptyPosition(
-        dlmmPool,
-        pub,
-        wallet,
-        s.minBin,
-        s.maxBin,
-        `[manual-recover-${s.pubkey.slice(0,8)}]`,
-        300000 // very high priority for recovery
-      );
+      const sig = await closeGhostPositionRaw(connection, wallet, pub, lbPair);
+      console.log(`  ✔ Recovered via raw closePosition`);
+      console.log(`  Sig: ${sig}`);
+      console.log(`  Explorer: https://explorer.solana.com/tx/${sig}`);
     } catch (e) {
-      console.error(`Failed attempt for ${s.pubkey.slice(0,8)}:`, e);
+      console.error(`  Failed: ${(e as Error).message}`);
+      console.warn(`  Position rent may be locked (manual recovery needed via key ${s.pubkey})`);
     }
   }
 
-  console.log('\nRecovery attempts complete. Check logs for success sigs or "may be locked" messages.');
-  console.log('If closePosition succeeded, the rent should be back in your wallet.');
+  console.log('\nRecovery attempts complete.');
 }
 
 main().catch(err => {
