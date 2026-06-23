@@ -66,36 +66,61 @@ async function closeGhostPositionRaw(
   conn: any,
   wallet: any,
   positionPubkey: PublicKey,
-  lbPair: PublicKey
+  lbPair: PublicKey,
+  dlmmPool?: any,
+  minBinId?: number,
+  maxBinId?: number
 ): Promise<string> {
-  const closeDiscriminator = Buffer.from([123, 134, 81, 0, 49, 68, 98, 172]); // closePosition
+  // Get correct discriminator from IDL (run the extraction command if this is still wrong)
+  const closeDiscriminator = Buffer.from([123, 134, 81, 0, 49, 68, 98, 172]);
 
   const eventAuthority = PublicKey.findProgramAddressSync(
     [Buffer.from("__event_authority")],
     DLMM_PROGRAM_ID
   )[0];
 
-  // For ghost accounts, we pass the actual lb_pair, and zeros/dummies for others.
-  // Bin arrays may need correct ones, but try with zeros first; if fails, we can compute.
-  const zero = SystemProgram.programId;
+  let binArrayLower = SystemProgram.programId;
+  let binArrayUpper = SystemProgram.programId;
+  let tokenXMint = SystemProgram.programId;
+  let tokenYMint = SystemProgram.programId;
+  let tokenXProgram = TOKEN_PROGRAM_ID;
+  let tokenYProgram = TOKEN_PROGRAM_ID;
+
+  if (dlmmPool && typeof minBinId === "number" && typeof maxBinId === "number") {
+    try {
+      const { getBinArraysRequiredByPositionRange } = await import("@meteora-ag/dlmm");
+      const required = getBinArraysRequiredByPositionRange(lbPair, new (await import("bn.js")).default(minBinId), new (await import("bn.js")).default(maxBinId), DLMM_PROGRAM_ID);
+      if (required.length > 0) {
+        binArrayLower = required[0].key;
+        binArrayUpper = required[required.length - 1].key;
+      }
+      tokenXMint = dlmmPool.tokenX.publicKey;
+      tokenYMint = dlmmPool.tokenY.publicKey;
+      // Get token programs if available
+      if (dlmmPool.tokenX.tokenProgram) tokenXProgram = dlmmPool.tokenX.tokenProgram;
+      if (dlmmPool.tokenY.tokenProgram) tokenYProgram = dlmmPool.tokenY.tokenProgram;
+    } catch (e) {
+      console.log("  Could not compute exact bin arrays, using dummies");
+    }
+  }
 
   const ix = new TransactionInstruction({
     programId: DLMM_PROGRAM_ID,
     keys: [
       { pubkey: positionPubkey, isSigner: false, isWritable: true },  // position
-      { pubkey: lbPair,         isSigner: false, isWritable: true },  // lb_pair (correct one)
-      { pubkey: zero,           isSigner: false, isWritable: true },  // bin_array_bitmap_extension
+      { pubkey: lbPair,         isSigner: false, isWritable: true },  // lb_pair
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: true },  // bin_array_bitmap_extension
       { pubkey: wallet.publicKey, isSigner: false, isWritable: true }, // user_token_x
       { pubkey: wallet.publicKey, isSigner: false, isWritable: true }, // user_token_y
-      { pubkey: zero,           isSigner: false, isWritable: true },  // reserve_x
-      { pubkey: zero,           isSigner: false, isWritable: true },  // reserve_y
-      { pubkey: zero,           isSigner: false, isWritable: false }, // token_x_mint
-      { pubkey: zero,           isSigner: false, isWritable: false }, // token_y_mint
-      { pubkey: zero,           isSigner: false, isWritable: true },  // bin_array_lower
-      { pubkey: zero,           isSigner: false, isWritable: true },  // bin_array_upper
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: true },  // reserve_x
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: true },  // reserve_y
+      { pubkey: tokenXMint, isSigner: false, isWritable: false },
+      { pubkey: tokenYMint, isSigner: false, isWritable: false },
+      { pubkey: binArrayLower, isSigner: false, isWritable: true },
+      { pubkey: binArrayUpper, isSigner: false, isWritable: true },
       { pubkey: wallet.publicKey, isSigner: true,  isWritable: true },// sender
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: tokenXProgram, isSigner: false, isWritable: false },
+      { pubkey: tokenYProgram, isSigner: false, isWritable: false },
       { pubkey: eventAuthority, isSigner: false, isWritable: false },
       { pubkey: DLMM_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
@@ -104,12 +129,12 @@ async function closeGhostPositionRaw(
 
   const tx = new Transaction().add(ix);
   tx.feePayer = wallet.publicKey;
-  const { blockhash } = await conn.getLatestBlockhash('confirmed');
+  const { blockhash } = await conn.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
 
-  // Use the project's send logic if possible, but for script use direct for simplicity
-  const { sendAndConfirmTransaction } = await import('@solana/web3.js');
-  return await sendAndConfirmTransaction(conn, tx, [wallet], { commitment: 'confirmed' });
+  return await sendAndConfirmTransaction(conn, tx, [wallet], {
+    commitment: "confirmed",
+  });
 }
 
 async function main() {
@@ -128,7 +153,7 @@ async function main() {
     const lbPair = new PublicKey(s.pool);
     console.log(`\n=== Attempting reclaim for ${s.pubkey.slice(0,8)} on pool ${s.pool.slice(0,8)} ${s.note ? '(' + s.note + ')' : ''}`);
     try {
-      const sig = await closeGhostPositionRaw(connection, wallet, pub, lbPair);
+      const sig = await closeGhostPositionRaw(connection, wallet, pub, lbPair, dlmmPool, s.minBin, s.maxBin);
       console.log(`  ✔ Recovered via raw closePosition`);
       console.log(`  Sig: ${sig}`);
       console.log(`  Explorer: https://explorer.solana.com/tx/${sig}`);
