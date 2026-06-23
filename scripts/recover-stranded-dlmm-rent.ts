@@ -69,33 +69,50 @@ function loadDiscriminators() {
 const DISCRIMINATORS = loadDiscriminators();
 
 const STRANDED = [
+  // Full accurate list from consolidated createAccount scan (wallet GULXj8Fk...)
+  // All are pure createAccount shells (SystemProgram.createAccount with owner=DLMM, zero data, rent locked).
+  // No on-chain link from these position shells back to lb_pair (init txs either never sent or not indexed with the key).
+  // => Pools + ranges must come from your application logs at the moment the keypair was generated for that open.
+
   {
     pubkey: '4PXeYHXhbU1RPUgHhQTEE2sMxDxELazCvGmzNZdYf4Fo',
-    pool: 'NYKZsVV3nqq4VXFaGEbfxai3kCmFiXEgjxNeafrbZpJ', // from Jun 23 failure logs
+    createSig: 'QRECnXorAaGqf7iW3hcRAfzRcC9NckcZQwY9BF4BKL8QSGUtc6Le5pCeuH7H37UnsPtE3SPmb1HFiMPqYDFctZ6',
+    pool: 'NYKZsVV3nqq4VXFaGEbfxai3kCmFiXEgjxNeafrbZpJ',
     minBin: -734,
     maxBin: -594,
-    note: 'Jun 23 2026 ███-SOL (width 140)',
+    note: 'Jun 23 2026 width-140 (known from logs)',
   },
   {
     pubkey: '67jgEFj6HyQrRYpJGVDx8N94q6nmnDYmwNCBe5tyW9bz',
-    pool: 'F4azS6PdTRHANHoPnro3zZUFXiHQLqVhYKwzv7meKo4d', // Ranch-SOL from history
+    createSig: 'n4dcNbmMGoiQ2Y3nU9RGJpvn13NXBVPubodTtASfyF4yNhEarFMbUiBSy1TkBGe1ZorsMLiC3UF22jbG2JXWR4p',
+    pool: 'F4azS6PdTRHANHoPnro3zZUFXiHQLqVhYKwzv7meKo4d',
     minBin: undefined,
     maxBin: undefined,
-    note: 'Jun 19 2026 - fill exact bins from old logs if known (try width ~140 or from open context)',
+    note: 'Jun 19 2026 (Ranch-SOL?) — fill exact bins if you have them',
+  },
+  {
+    pubkey: 'EHsvgQMWqZ26dKux8kreRC2tS14iZKyVFDDsuowE8nut',
+    createSig: '4JQb6p5XZRBmf5BLUjxHQLe52kUKzaa8ojavVQ7u7f9T6abUo3Rrd1yB7WAwK62X86fTby6HV2W31HkraFqn7hMa',
+    pool: 'REPLACE_WITH_POOL_ADDRESS',  // same day as 67jg — likely same pool or another active one that day
+    minBin: undefined,
+    maxBin: undefined,
+    note: 'Jun 19 2026 (new from consolidated scan) — fill from logs for this createSig',
   },
   {
     pubkey: 'BUcSdNX2msJH3ZZkW7UVvCdP2ZKQpnAyDntxSxcU4LTz',
+    createSig: '3fdcbvJ5EcGHce8dbd28PSPbJzdq4vE6qYTPeQ1oacnUyZoFziLjmEQLRBWQeKyPce9ba5sUJK4qn6of2PTLDGML',
     pool: 'REPLACE_WITH_POOL_ADDRESS',
     minBin: undefined,
     maxBin: undefined,
-    note: 'Jun 10 - replace pool',
+    note: 'Jun 10 2026 — fill from logs around this createSig (slot ~425645512)',
   },
   {
     pubkey: 'DWoSDWPPbiKXigGGjuRPneRkJFvyy6BfU1qjf73kfzMz',
+    createSig: '3yv5UsMb1gDhGdDk6r6J3nCmrGmMgaRSQv1q3Bj9FJDcHhYKfy4znsWNNFVQtDUUpHxFCqjYoAk3irqLEQdLZQfz',
     pool: 'REPLACE_WITH_POOL_ADDRESS',
     minBin: undefined,
     maxBin: undefined,
-    note: 'Jun 10 - replace pool',
+    note: 'Jun 10 2026 — fill from logs around this createSig (slot ~425643200)',
   },
 ];
 
@@ -242,15 +259,20 @@ async function main() {
 
   console.log(`Recovering ${STRANDED.length} stranded DLMM position accounts...`);
   console.log(`[disc] using close disc = [${DISCRIMINATORS.close.join(', ')}]`);
+  console.log('Full list (with createSig for log correlation):');
+  for (const s of STRANDED) {
+    console.log(`  ${s.pubkey}  create=${(s as any).createSig?.slice(0,16) || 'n/a'}  pool=${s.pool}  ${s.note || ''}`);
+  }
 
   for (const s of STRANDED) {
     if (s.pool === 'REPLACE_WITH_POOL_ADDRESS') {
-      console.warn(`Skipping ${s.pubkey} — pool not provided`);
+      console.warn(`Skipping ${s.pubkey.slice(0,8)} — pool not provided (createSig=${(s as any).createSig?.slice(0,12) || 'n/a'})`);
       continue;
     }
     const pub = new PublicKey(s.pubkey);
     const lbPair = new PublicKey(s.pool);
-    console.log(`\n=== Attempting reclaim for ${s.pubkey.slice(0,8)} on pool ${s.pool.slice(0,8)} ${s.note ? '(' + s.note + ')' : ''}`);
+    const createNote = (s as any).createSig ? ` createSig=${(s as any).createSig.slice(0,12)}` : '';
+    console.log(`\n=== Attempting reclaim for ${s.pubkey.slice(0,8)} on pool ${s.pool.slice(0,8)} ${s.note ? '(' + s.note + ')' : ''}${createNote}`);
 
     let dlmmPool: any = null;
     try {

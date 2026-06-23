@@ -39,11 +39,12 @@ dotenv.config();
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 
 const STRANDED_ACCOUNTS: string[] = [
-  "4PXeYHXhbU1RPUgHhQTEE2sMxDxELazCvGmzNZdYf4Fo", // Jun 23 ~0.12828672 SOL
-  "67jgEFj6HyQrRYpJGVDx8N94q6nmnDYmwNCBe5tyW9bz", // Jun 19 ~0.12828672 SOL
-  "BUcSdNX2msJH3ZZkW7UVvCdP2ZKQpnAyDntxSxcU4LTz", // Jun 10 ~0.12739584 SOL
-  "DWoSDWPPbiKXigGGjuRPneRkJFvyy6BfU1qjf73kfzMz", // Jun 10 ~0.12739584 SOL
-  "BJGJStnGcMcX53hYV1bicpLpoSPPAqyfwZYFcRKapW6H", // Jun 11 ~0.05790720 SOL (smaller)
+  // Consolidated 5 from createAccount scan (full data + create sigs in recover-stranded-dlmm-rent.ts)
+  "4PXeYHXhbU1RPUgHhQTEE2sMxDxELazCvGmzNZdYf4Fo", // Jun 23 ~0.12828672 SOL  create QRECnXor...
+  "67jgEFj6HyQrRYpJGVDx8N94q6nmnDYmwNCBe5tyW9bz", // Jun 19 ~0.12828672 SOL  create n4dcNbmM...
+  "EHsvgQMWqZ26dKux8kreRC2tS14iZKyVFDDsuowE8nut", // Jun 19 ~0.12828672 SOL  (new) create 4JQb6p5X...
+  "BUcSdNX2msJH3ZZkW7UVvCdP2ZKQpnAyDntxSxcU4LTz", // Jun 10 ~0.12739584 SOL  create 3fdcbvJ5...
+  "DWoSDWPPbiKXigGGjuRPneRkJFvyy6BfU1qjf73kfzMz", // Jun 10 ~0.12739584 SOL  create 3yv5UsMb...
 ];
 
 const DLMM_PROGRAM_ID = new PublicKey(
