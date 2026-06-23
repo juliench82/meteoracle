@@ -42,6 +42,7 @@ import {
   ComputeBudgetProgram,
   Connection,
   SystemProgram,
+  SYSVAR_RENT_PUBKEY,
 } from '@solana/web3.js'
 import {
   getAssociatedTokenAddressSync,
@@ -561,6 +562,8 @@ export async function openPosition(
             position: positionKeypair.publicKey,
             lbPair: dlmmPool.pubkey,
             owner: wallet.publicKey,
+            rent: SYSVAR_RENT_PUBKEY,
+            program: dlmmPool.program.programId,
           })
           .instruction();
         const initTx = new Transaction().add(initializePositionIx);
@@ -1181,6 +1184,8 @@ async function openPositionDirect(
           position: positionKeypair.publicKey,
           lbPair: dlmmPool.pubkey,
           owner: wallet.publicKey,
+          rent: SYSVAR_RENT_PUBKEY,
+          program: dlmmPool.program.programId,
         })
         .instruction();
       const initTx = new Transaction().add(initializePositionIx);
