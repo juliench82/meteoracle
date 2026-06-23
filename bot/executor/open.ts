@@ -1403,13 +1403,14 @@ export async function checkFullEvilPandaRangeFeasibility(
   const fullTotalBins = fullDesiredMax - fullDesiredMin + 1;
 
   const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
-  const DLMM_PROGRAM_ID = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
 
+  // Use the same program ID that the SDK/pool object uses (no hardcode) so bin array PDA derivation
+  // stays consistent with assertNoNewBinArraysForRange and any future program upgrades.
   const requiredBinArrays = getBinArraysRequiredByPositionRange(
     poolPubkey,
     new BN(fullDesiredMin),
     new BN(fullDesiredMax),
-    DLMM_PROGRAM_ID
+    dlmmPool.program.programId
   );
 
   let newBinArrayCount = 0;
