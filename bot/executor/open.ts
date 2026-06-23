@@ -959,7 +959,7 @@ export async function openPosition(
           }
         }
         try {
-          await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
+          await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, wallet, minBinId, maxBinId, label, priorityFee);
           console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed.`);
         } catch (closeErr) {
           console.warn(`${label} [TRACE] [FINALLY-CLOSE-ERR] Finally close attempt threw (non-fatal).`);
@@ -1377,9 +1377,9 @@ async function openPositionDirect(
 async function tryCloseEmptyPosition(
   dlmmPool: any,
   positionPubKey: PublicKey,
+  wallet: any,
   minBinId?: number,
   maxBinId?: number,
-  wallet: any,
   label: string = '[recover]',
   priorityFee: number = 100000
 ) {

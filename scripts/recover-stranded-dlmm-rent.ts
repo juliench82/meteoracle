@@ -5,12 +5,23 @@
  * These have rent paid (account assigned to LBUZ program) but were never initialized
  * with liquidity.
  *
- * Usage:
+ * Usage (recommended):
  *   npx tsx --tsconfig tsconfig.worker.json scripts/recover-stranded-dlmm-rent.ts
  *
+ * The script auto-loads .env.local (same as the worker).
  * Edit the STRANDED list below with the pubkeys + their original pool + (optional) bin range.
  * If you don't know the exact bins, leave them undefined — it will use closePosition only.
  */
+
+import * as dotenv from 'dotenv'
+import * as path from 'path'
+
+// Load .env.local exactly like worker.ts does
+dotenv.config({
+  path: path.resolve(process.cwd(), '.env.local'),
+  override: false,
+  quiet: true,
+})
 
 import { getConnection, getWallet } from '@/lib/solana';
 import { getDLMM } from '@/bot/executor/utils';
@@ -67,9 +78,9 @@ async function main() {
       await tryCloseEmptyPosition(
         dlmmPool,
         pub,
+        wallet,
         s.minBin,
         s.maxBin,
-        wallet,
         `[manual-recover-${s.pubkey.slice(0,8)}]`,
         300000 // very high priority for recovery
       );

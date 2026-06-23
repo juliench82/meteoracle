@@ -411,7 +411,7 @@ export async function retryStrandedPositionRents() {
 
       console.log(`[monitor] attempting reclaim for stranded rent ${s.position_pubkey.slice(0,8)} pool ${s.pool_address.slice(0,8)}`);
       // Use the exported tryClose (it now supports optional bins and will prefer closePosition for uninit ghosts)
-      await tryCloseEmptyPosition(dlmmPool, pub, minB, maxB, wallet, `[monitor-stranded-rent-${s.position_pubkey.slice(0,8)}]`, 200000);
+      await tryCloseEmptyPosition(dlmmPool, pub, wallet, minB, maxB, `[monitor-stranded-rent-${s.position_pubkey.slice(0,8)}]`, 200000);
 
       // If we reached here without throwing, consider it done or remove the marker.
       // For safety, only remove if the account no longer exists or data is small.
