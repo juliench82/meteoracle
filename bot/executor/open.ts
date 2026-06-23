@@ -40,10 +40,8 @@
 import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
-  TransactionInstruction,
   Connection,
   SystemProgram,
-  SYSVAR_RENT_PUBKEY,
 } from '@solana/web3.js'
 import {
   getAssociatedTokenAddressSync,
@@ -557,14 +555,12 @@ export async function openPosition(
       if (needsInitialize) {
         console.log(`${label} [TRACE] [SCAFFOLD-INIT] phase 1b (early): initializePosition (lower=${lowerBinId}, width=${width})`);
         const initializePositionIx = await dlmmPool.program.methods
-          .initializePosition(new BN(lowerBinId), new BN(width))
+          .initializePosition(lowerBinId, width)
           .accounts({
             payer: wallet.publicKey,
             position: positionKeypair.publicKey,
             lbPair: dlmmPool.pubkey,
             owner: wallet.publicKey,
-            systemProgram: SystemProgram.programId,
-            rent: SYSVAR_RENT_PUBKEY,
           })
           .instruction();
         const initTx = new Transaction().add(initializePositionIx);
@@ -1179,14 +1175,12 @@ async function openPositionDirect(
     if (!looksInitialized) {
       console.log(`${label} [TRACE] [DIRECT-INIT] phase 1b: initializePosition (lower=${lowerBinId}, width=${width})`);
       const initializePositionIx = await dlmmPool.program.methods
-        .initializePosition(new BN(lowerBinId), new BN(width))
+        .initializePosition(lowerBinId, width)
         .accounts({
           payer: wallet.publicKey,
           position: positionKeypair.publicKey,
           lbPair: dlmmPool.pubkey,
           owner: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-          rent: SYSVAR_RENT_PUBKEY,
         })
         .instruction();
       const initTx = new Transaction().add(initializePositionIx);
