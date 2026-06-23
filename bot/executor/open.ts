@@ -292,7 +292,6 @@ export async function openPosition(
         event: 'open_position_skipped_non_sol_pair',
         payload: { symbol: metrics.symbol, strategy: strategy.id, poolAddress: metrics.poolAddress },
       })
-      await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
       return null
     }
 
@@ -1131,12 +1130,6 @@ async function openPositionDirect(
 }
 
 /**
- * Direct swap on the DLMM pool itself using Meteora SDK (native swap, no aggregator).
- * This acquires the token leg for the Bid-Ask pre-swap directly against the target pool's liquidity.
- * Since the pool passed the full evil-panda range gate, the necessary bin arrays exist.
- * Uses the same dlmmPool already loaded for range/price calculation.
- */
-/**
  * Attempt to close an empty (or zero-liquidity) position to reclaim the rent
  * paid during createAccount. Called on failure paths after scaffolding.
  * This is the main defense against orphaned position account rent losses.
@@ -1164,7 +1157,21 @@ async function tryCloseEmptyPosition(
       console.log(`${label} closed empty position to reclaim rent ✔ sig: ${sig}`);
     }
   } catch (closeErr) {
-    console.warn(`${label} failed to close empty position (rent may be locked until manual recovery): ${closeErr}`);
+    console.warn(`${label} removeLiquidity close failed for empty position (may be expected for zero-liq): ${closeErr}`);
+    // Fallback: try dlmmPool.closePosition() if available in the SDK (for zero-liquidity positions)
+    try {
+      if (typeof dlmmPool.closePosition === 'function') {
+        const closeTx = await dlmmPool.closePosition(positionPubKey, wallet.publicKey);
+        for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
+          const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), [wallet], `${label} close-empty-fallback`);
+          console.log(`${label} closed empty position via fallback ✔ sig: ${sig}`);
+        }
+      } else {
+        console.log(`${label} no closePosition fallback in SDK; rent may need manual reclaim via on-chain close`);
+      }
+    } catch (fallbackErr) {
+      console.warn(`${label} fallback close also failed (rent locked): ${fallbackErr}`);
+    }
   }
 }
 
