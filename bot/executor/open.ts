@@ -40,6 +40,7 @@
 import {
   Keypair, PublicKey, Transaction,
   ComputeBudgetProgram,
+  TransactionInstruction,
   Connection,
   SystemProgram,
   SYSVAR_RENT_PUBKEY,
@@ -531,6 +532,15 @@ export async function openPosition(
       const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
       const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
 
+      // CRITICAL: bundle createAccount + initializePosition into a SINGLE atomic transaction
+      // when both are needed. This prevents the previous failure mode where create landed
+      // (rent paid, ~0.13 SOL locked), then a separate initializePosition tx sim/send failed
+      // ("already in use" / discriminator / owned-by-wrong), leaving an uninitialized position
+      // account with no automatic reclaim because positionScaffolded was never set.
+      // With bundle: the sim happens on the combined tx; if it would fail, we abort with ZERO
+      // rent paid. If it succeeds and lands, both create+init happened atomically.
+      const scaffoldIxs: TransactionInstruction[] = [];
+
       if (needsCreate) {
         console.log(
           `${label} [TRACE] [SCAFFOLD-CREATE] phase 1a (early): creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(9)} SOL) for ${numBins} bins`
@@ -542,12 +552,7 @@ export async function openPosition(
           space: positionAccountSize,
           programId: dlmmPool.program.programId,
         });
-        const createTx = new Transaction().add(createPositionAccountIx);
-        const createPrep = applyPriorityFee(createTx, priorityFee);
-        console.log(`${label} [TRACE] [SCAFFOLD-CREATE] about to sendLegacyTx for createAccount...`);
-        const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
-        console.log(`${label} [TRACE] [SCAFFOLD-CREATE] phase 1a COMPLETE ✔ sig: ${createSig}`);
-        console.log(`${label} phase 1a complete ✔ sig: ${createSig}`);
+        scaffoldIxs.push(createPositionAccountIx);
       } else {
         console.log(`${label} [TRACE] [SCAFFOLD-CREATE-SKIP] phase 1a skipped — position account already DLMM-owned`);
         console.log(`${label} phase 1a skipped — position account already DLMM-owned`);
@@ -566,18 +571,24 @@ export async function openPosition(
             program: dlmmPool.program.programId,
           })
           .instruction();
-        const initTx = new Transaction().add(initializePositionIx);
-        const initPrep = applyPriorityFee(initTx, priorityFee);
-        console.log(`${label} [TRACE] [SCAFFOLD-INIT] about to sendLegacyTx for initializePosition...`);
-        const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} initialize-position`);
-        console.log(`${label} [TRACE] [SCAFFOLD-INIT] phase 1b COMPLETE ✔ sig: ${initSig}`);
-        console.log(`${label} phase 1b complete ✔ sig: ${initSig}`);
+        scaffoldIxs.push(initializePositionIx);
       } else {
         console.log(`${label} [TRACE] [SCAFFOLD-INIT-SKIP] phase 1b skipped — position appears already initialized`);
         console.log(`${label} phase 1b skipped — position appears already initialized`);
       }
 
-      positionScaffolded = true;
+      if (scaffoldIxs.length > 0) {
+        const scaffoldTx = new Transaction();
+        scaffoldIxs.forEach((ix) => scaffoldTx.add(ix));
+        const scaffoldPrep = applyPriorityFee(scaffoldTx, priorityFee);
+        const what = needsCreate && needsInitialize ? 'create+init (bundled atomic)' : needsCreate ? 'create' : 'init';
+        console.log(`${label} [TRACE] [SCAFFOLD-BUNDLE] sending combined ${what} tx (atomic — if sim fails here, ZERO rent paid)...`);
+        const scaffoldSig = await sendLegacyTx(scaffoldPrep, [wallet, positionKeypair], `${label} position-scaffold`);
+        console.log(`${label} [TRACE] [SCAFFOLD-BUNDLE] ${what} COMPLETE ✔ sig: ${scaffoldSig}`);
+        console.log(`${label} position scaffold complete ✔ sig: ${scaffoldSig}`);
+      }
+
+      positionScaffolded = scaffoldIxs.length > 0;
       console.log(`${label} [TRACE] [SCAFFOLD-DONE] positionScaffolded=TRUE, rent paid.`);
       console.log(`${label} [TRACE] SCAFFOLD COMPLETE — rent paid for position account.`);
       console.log(`${label} Position account scaffolded (rent paid). Add pre-sim and swap will follow. Rent will be reclaimed on any failure via finally.`);
@@ -911,21 +922,21 @@ export async function openPosition(
 
     } finally {
       console.log(`${label} [TRACE] [FINALLY-ENTER] entered finally | positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
-      if (positionScaffolded && !successfullyOpened) {
-        console.log(`${label} [TRACE] [FINALLY-CLOSE] SCAFFOLDED but NOT successfullyOpened — ATTEMPTING RENT RECLAIM via tryCloseEmptyPosition.`);
-        console.log(`${label} [TRACE] [FINALLY-CLOSE] This is the critical path to recover position rent after post-scaffold abort.`);
+      if (!successfullyOpened) {
+        // Always attempt reclaim for the keypair we considered in this attempt.
+        // With bundling, rent is only paid on full scaffold success; this covers any
+        // partials, prior-run orphans for this key, or edge cases. If account doesn't exist
+        // or isn't closable this way, the close logs the error and we move on (no extra loss).
+        console.log(`${label} [TRACE] [FINALLY-CLOSE] !successfullyOpened — ATTEMPTING rent reclaim close (covers scaffolded or partial-create cases).`);
         try {
           await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
-          console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed (check prior logs for success/fail details).`);
+          console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed.`);
         } catch (closeErr) {
-          console.warn(`${label} [TRACE] [FINALLY-CLOSE-ERR] Finally close attempt threw (non-fatal for open return).`);
-          console.warn(`${label} [TRACE] Finally close attempt failed.`);
+          console.warn(`${label} [TRACE] [FINALLY-CLOSE-ERR] Finally close attempt threw (non-fatal).`);
           console.warn(`${label} finally close failed: ${closeErr}`);
         }
-      } else if (successfullyOpened) {
-        console.log(`${label} [TRACE] [FINALLY-SUCCESS] success path — position fully opened, no rent reclaim needed.`);
       } else {
-        console.log(`${label} [TRACE] [FINALLY-NOOP] never scaffolded (or early exit) — no rent to reclaim, no close attempted.`);
+        console.log(`${label} [TRACE] [FINALLY-SUCCESS] success path — position fully opened, no rent reclaim needed.`);
       }
       console.log(`${label} [TRACE] [FINALLY-EXIT] leaving finally block`);
     }
@@ -1153,6 +1164,12 @@ async function openPositionDirect(
     const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
 
     console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-CHECK] isDlmmOwned=${isDlmmOwned} looksInitialized=${looksInitialized}`);
+
+    // Bundle create + init (same atomicity reason as early scaffold).
+    // If early scaffold already ran successfully, isDlmmOwned + looksInitialized will both be true and we skip.
+    // If we reach here needing work, bundle so a failure doesn't leave rent paid without init.
+    const directScaffoldIxs: TransactionInstruction[] = [];
+
     if (!isDlmmOwned) {
       console.log(
         `${label} [TRACE] [DIRECT-CREATE] phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(9)} SOL) for ${numBins} bins`
@@ -1164,12 +1181,7 @@ async function openPositionDirect(
         space: positionAccountSize,
         programId: dlmmPool.program.programId,
       });
-      const createTx = new Transaction().add(createPositionAccountIx);
-      const createPrep = applyPriorityFee(createTx, priorityFee);
-      console.log(`${label} [TRACE] [DIRECT-CREATE] sending create tx...`);
-      const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
-      console.log(`${label} [TRACE] [DIRECT-CREATE] phase 1a complete ✔ sig: ${createSig}`);
-      console.log(`${label} phase 1a complete ✔ sig: ${createSig}`);
+      directScaffoldIxs.push(createPositionAccountIx);
     } else {
       console.log(`${label} [TRACE] [DIRECT-CREATE-SKIP] phase 1a: position already DLMM-owned — skipping create`);
       console.log(`${label} phase 1a: position already DLMM-owned — skipping create`);
@@ -1188,15 +1200,21 @@ async function openPositionDirect(
           program: dlmmPool.program.programId,
         })
         .instruction();
-      const initTx = new Transaction().add(initializePositionIx);
-      const initPrep = applyPriorityFee(initTx, priorityFee);
-      console.log(`${label} [TRACE] [DIRECT-INIT] sending init tx...`);
-      const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} initialize-position`);
-      console.log(`${label} [TRACE] [DIRECT-INIT] phase 1b complete ✔ sig: ${initSig}`);
-      console.log(`${label} phase 1b complete ✔ sig: ${initSig}`);
+      directScaffoldIxs.push(initializePositionIx);
     } else {
       console.log(`${label} [TRACE] [DIRECT-INIT-SKIP] phase 1b: position already initialized — skipping init`);
       console.log(`${label} phase 1b: position already initialized — skipping init`);
+    }
+
+    if (directScaffoldIxs.length > 0) {
+      const scaffoldTx = new Transaction();
+      directScaffoldIxs.forEach((ix) => scaffoldTx.add(ix));
+      const scaffoldPrep = applyPriorityFee(scaffoldTx, priorityFee);
+      const what = (!isDlmmOwned && !looksInitialized) ? 'create+init (bundled)' : !isDlmmOwned ? 'create' : 'init';
+      console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-BUNDLE] sending ${what} (atomic to avoid orphan rent)...`);
+      const scaffoldSig = await sendLegacyTx(scaffoldPrep, [wallet, positionKeypair], `${label} position-scaffold`);
+      console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-BUNDLE] ${what} COMPLETE ✔ sig: ${scaffoldSig}`);
+      console.log(`${label} phase 1a/1b complete ✔ sig: ${scaffoldSig}`);
     }
 
     // Final belt-and-suspenders verification right before actually adding liquidity.
