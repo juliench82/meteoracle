@@ -460,66 +460,72 @@ export async function openPosition(
     // This is the critical "no non-refundable bin arrays" guard.
     await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
 
-    // =============================================================================
-    // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
-    // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
-    // exist on-chain. This makes the subsequent add pre-sim *meaningful*.
-    // Only after this + passing add sim do we do the irreversible token pre-swap.
-    //
-    // TRADEOFF (acknowledged): position rent is paid before the add pre-sim can fail.
-    // The pre-scaffold swap quote + tx simulation (earlier in this function) is the primary
-    // guard that prevents us from reaching this point on bad candidates.
-    // If add pre-sim (or later steps) fail, tryCloseEmptyPosition is called to reclaim rent.
-    // =============================================================================
-    const lowerBinId = minBinId;
-    const width = maxBinId - minBinId;
-    const numBins = width + 1;
-    const POSITION_HEADER = 256;
-    const BYTES_PER_BIN = 128;
-    const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
-    const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
+    let positionScaffolded = false;
+    let successfullyOpened = false;
 
-    if (needsCreate) {
-      console.log(
-        `${label} phase 1a (early): creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${numBins} bins`
-      );
-      const createPositionAccountIx = SystemProgram.createAccount({
-        fromPubkey: wallet.publicKey,
-        newAccountPubkey: positionKeypair.publicKey,
-        lamports: positionRentLamports,
-        space: positionAccountSize,
-        programId: dlmmPool.program.programId,
-      });
-      const createTx = new Transaction().add(createPositionAccountIx);
-      const createPrep = applyPriorityFee(createTx, priorityFee);
-      const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
-      console.log(`${label} phase 1a complete ✔ sig: ${createSig}`);
-    } else {
-      console.log(`${label} phase 1a skipped — position account already DLMM-owned`);
-    }
+    try {
+      // =============================================================================
+      // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
+      // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
+      // exist on-chain. This makes the subsequent add pre-sim *meaningful*.
+      // Only after this + passing add sim do we do the irreversible token pre-swap.
+      //
+      // TRADEOFF (acknowledged): position rent is paid before the add pre-sim can fail.
+      // The pre-scaffold swap quote + tx simulation (earlier in this function) is the primary
+      // guard that prevents us from reaching this point on bad candidates.
+      // The finally block at the end of this scope ensures we attempt to close the empty
+      // position and reclaim rent on ANY abort after scaffolding.
+      // =============================================================================
+      const lowerBinId = minBinId;
+      const width = maxBinId - minBinId;
+      const numBins = width + 1;
+      const POSITION_HEADER = 256;
+      const BYTES_PER_BIN = 128;
+      const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
+      const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
 
-    if (needsInitialize) {
-      console.log(`${label} phase 1b (early): initializePosition (lower=${lowerBinId}, width=${width})`);
-      const initializePositionIx = await dlmmPool.program.methods
-        .initializePosition(new BN(lowerBinId), new BN(width))
-        .accounts({
-          payer: wallet.publicKey,
-          position: positionKeypair.publicKey,
-          lbPair: dlmmPool.pubkey,
-          owner: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-          rent: SYSVAR_RENT_PUBKEY,
-        })
-        .instruction();
-      const initTx = new Transaction().add(initializePositionIx);
-      const initPrep = applyPriorityFee(initTx, priorityFee);
-      const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} initialize-position`);
-      console.log(`${label} phase 1b complete ✔ sig: ${initSig}`);
-    } else {
-      console.log(`${label} phase 1b skipped — position appears already initialized`);
-    }
+      if (needsCreate) {
+        console.log(
+          `${label} phase 1a (early): creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${numBins} bins`
+        );
+        const createPositionAccountIx = SystemProgram.createAccount({
+          fromPubkey: wallet.publicKey,
+          newAccountPubkey: positionKeypair.publicKey,
+          lamports: positionRentLamports,
+          space: positionAccountSize,
+          programId: dlmmPool.program.programId,
+        });
+        const createTx = new Transaction().add(createPositionAccountIx);
+        const createPrep = applyPriorityFee(createTx, priorityFee);
+        const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
+        console.log(`${label} phase 1a complete ✔ sig: ${createSig}`);
+      } else {
+        console.log(`${label} phase 1a skipped — position account already DLMM-owned`);
+      }
 
-    console.log(`${label} Position account scaffolded (rent paid). Add pre-sim and swap will follow. Rent will be reclaimed on any failure via tryCloseEmptyPosition.`);
+      if (needsInitialize) {
+        console.log(`${label} phase 1b (early): initializePosition (lower=${lowerBinId}, width=${width})`);
+        const initializePositionIx = await dlmmPool.program.methods
+          .initializePosition(new BN(lowerBinId), new BN(width))
+          .accounts({
+            payer: wallet.publicKey,
+            position: positionKeypair.publicKey,
+            lbPair: dlmmPool.pubkey,
+            owner: wallet.publicKey,
+            systemProgram: SystemProgram.programId,
+            rent: SYSVAR_RENT_PUBKEY,
+          })
+          .instruction();
+        const initTx = new Transaction().add(initializePositionIx);
+        const initPrep = applyPriorityFee(initTx, priorityFee);
+        const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} initialize-position`);
+        console.log(`${label} phase 1b complete ✔ sig: ${initSig}`);
+      } else {
+        console.log(`${label} phase 1b skipped — position appears already initialized`);
+      }
+
+      positionScaffolded = true;
+      console.log(`${label} Position account scaffolded (rent paid). Add pre-sim and swap will follow. Rent will be reclaimed on any failure.`);
 
     // Post-scaffold add pre-sim gate (meaningful now — account + discriminator exist on-chain)
     console.log(`${label} [pre-sim] simulating addLiquidityByStrategy on *live* initialized position (using planned amounts)...`);
@@ -574,7 +580,6 @@ export async function openPosition(
 
     if (!addSimOk) {
       console.log(`${label} ABORT before pre-swap: add simulation failed after real create+initialize. See logs above. (Position rent may have been paid; no token swap executed.)`);
-      await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
       return null;
     }
     console.log(`${label} [pre-sim-add] OK on live initialized account — safe to pre-swap.`);
@@ -586,7 +591,6 @@ export async function openPosition(
       const binDrift = Math.abs(currentActive.binId - initialActiveBinId);
       if (binDrift > 3) {
         console.warn(`${label} active bin drifted significantly (initial=${initialActiveBinId}, now=${currentActive.binId}, drift=${binDrift}) — aborting before pre-swap to avoid out-of-range position`);
-        await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
         return null;
       }
     } catch (driftErr) {
@@ -614,7 +618,6 @@ export async function openPosition(
         }
       } catch (ataErr) {
         console.error(`${label} failed to ensure ATA for output token — closing scaffolded position and aborting`);
-        await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
         return null;
       }
     }
@@ -644,7 +647,6 @@ export async function openPosition(
       } catch (directErr) {
         console.error(`${label} direct DLMM swap for token leg FAILED: ${directErr instanceof Error ? directErr.message : directErr}`);
         console.error(`${label} (Jupiter completely ditched per user request — no fallback; skipping pool)`);
-        await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
         return null;
       }
     }
@@ -662,7 +664,6 @@ export async function openPosition(
       } catch (e) {
         console.warn(`${label} could not persist stranded for 0-reported pre-swap:`, e);
       }
-      await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
       return null;
     }
 
@@ -692,6 +693,7 @@ export async function openPosition(
       actualTokenLamports
     );
     if (directResult) {
+      successfullyOpened = true;
       console.log(`${label} position opened successfully via direct SDK ✔`);
       return directResult;
     }
@@ -771,8 +773,6 @@ export async function openPosition(
           console.warn(`${label} direct DLMM rollback quote/swap failed after ${MAX_ROLLBACK_ATTEMPTS} attempts (insufficient liquidity or other) — persisting stranded for monitor retry`);
         }
       }
-      // After token rollback (success or fail), attempt to close the (empty) position to reclaim the rent paid in Phase 1a.
-      await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
     } catch (rbErr) {
       console.error(`${label} direct DLMM rollback sell ALSO failed — persisting stranded token marker for monitor recovery`, rbErr);
       try {
@@ -793,6 +793,16 @@ export async function openPosition(
       } catch {}
     }
     return null;
+
+    } finally {
+      if (positionScaffolded && !successfullyOpened) {
+        try {
+          await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
+        } catch (closeErr) {
+          console.warn(`${label} finally close failed: ${closeErr}`);
+        }
+      }
+    }
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
