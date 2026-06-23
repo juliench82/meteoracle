@@ -174,6 +174,15 @@ export async function openPosition(
       `${label} market LP cap ok (${limitState.effectiveOpenCount || 0}/${MAX_CONCURRENT_MARKET_LP_POSITIONS})`,
     );
 
+    console.log(`${label} [TRACE] Starting open flow for pool ${metrics.poolAddress} — all early checks passed, no money spent yet`);
+    console.log(`${label} [TRACE] [PRE-SCAFFOLD-STATE] positionScaffolded=false successfullyOpened=false — NO RENT PAID YET`);
+
+    // Snapshot balances right at open flow entry (pre-any spend)
+    try {
+      const bal0 = await connection.getBalance(wallet.publicKey);
+      console.log(`${label} [TRACE] [BAL-SNAPSHOT] entry wallet SOL=${(bal0 / 1e9).toFixed(9)} (no position rent or swap yet)`);
+    } catch (e) { console.log(`${label} [TRACE] [BAL-SNAPSHOT] entry balance read failed: ${e}`); }
+
     const DLMM = await getDLMM()
     const dlmmPool = await DLMM.create(connection, poolPubkey)
     const activeBin = await dlmmPool.getActiveBin()
@@ -181,6 +190,7 @@ export async function openPosition(
 
     const entryPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin)
     console.log(`${label} entry price: ${entryPriceSol.toFixed(9)} SOL/token (bin ${initialActiveBinId})`)
+    console.log(`${label} [TRACE] DLMM pool created, activeBin=${initialActiveBinId}, binStep=${dlmmPool.lbPair.binStep}`);
 
     const binStep = dlmmPool.lbPair.binStep
     const mintX = dlmmPool.tokenX.publicKey
@@ -275,8 +285,12 @@ export async function openPosition(
       `(desired was ${rangeDownPct}% / ${rangeUpPct}%; Meteora snaps to nearest discrete bins)`
     );
 
+    console.log(`${label} [TRACE] About to run final bin-array assert and enter pre-scaffold checks. No rent paid yet.`);
+    console.log(`${label} [TRACE] [VERIFICATION] Will now HARD VERIFY that chosen range ${minBinId}→${maxBinId} has ZERO missing bin arrays (no non-refundable rent).`);
+
     // Immediate verification after finalizing the exact bin ids we will use.
     await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
+    console.log(`${label} [TRACE] [VERIFIED] assertNoNewBinArraysForRange PASSED for ${minBinId}→${maxBinId} — ZERO new bin arrays. Safe to proceed without non-refundable spend.`);
 
     // NOTE on range:
     // We deliberately do *not* hard-cap the number of bins here.
@@ -389,6 +403,13 @@ export async function openPosition(
       return null;
     }
 
+    console.log(`${label} [TRACE] Entering pre-scaffold phase: will compute planned swap amounts and run full tx simulation before any rent is paid.`);
+    console.log(`${label} [TRACE] [PRE-SCAFFOLD-STATE] about to quote/swap-sim | solToSwapLamports=${solToSwapLamports} remainingSolLamports=${remainingSolLamports} | positionScaffolded=false`);
+    try {
+      const balPre = await connection.getBalance(wallet.publicKey);
+      console.log(`${label} [TRACE] [BAL-SNAPSHOT] pre-quote wallet SOL=${(balPre / 1e9).toFixed(9)} — still no rent paid`);
+    } catch {}
+
     // Pre-swap quote for planned token leg amount (used for add sim + split).
     // Done early, before any on-chain spend (scaffold rent), so we can abort without paying rent
     // if the swap quote itself looks bad (0 out or throws). This prevents paying the position rent
@@ -396,26 +417,34 @@ export async function openPosition(
     let plannedTokenLamportsForSim = 0n;
     if (solToSwapLamports > 0n) {
       try {
+        console.log(`${label} [TRACE] [PRE-SCAFFOLD-QUOTE] calling dlmmPool.swapQuote for ${solToSwapLamports} lamports (slippage 500bps)`);
         const binArrays = await dlmmPool.getBinArrays();
         const swapYtoX = !solIsTokenX;
         const inputAmountBN = new BN(solToSwapLamports.toString());
         const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(500), binArrays);
         const q = swapQuote as any;
         plannedTokenLamportsForSim = BigInt(q.outAmount.toString());
-        console.log(`${label} [pre-sim] pre-swap quote only: would receive ~${plannedTokenLamportsForSim} tokens`);
+        console.log(`${label} [TRACE] [PRE-SCAFFOLD-QUOTE] Planned quote OK: outAmount=${plannedTokenLamportsForSim}, minOut=${(q.minOutAmount?.toString?.() ?? 'n/a')}`);
       } catch (qErr) {
+        console.error(`${label} [TRACE] [PRE-SCAFFOLD-QUOTE-FAIL] pre-swap quote for sim failed (ABORT, NO RENT): ${qErr}`);
         console.error(`${label} pre-swap quote for sim failed: ${qErr}`);
         return null;
       }
+    } else {
+      console.log(`${label} [TRACE] [PRE-SCAFFOLD-QUOTE] solToSwapLamports=0 — skipping quote (pure SOL leg)`);
     }
 
     // Pre-scaffold swap quote viability gate (Claude recommendation).
     // If the planned swap would give zero tokens, abort *before* paying any position rent.
     // This is a pure read (no on-chain cost) and catches the main failure mode seen in production logs.
     if (solToSwapLamports > 0n && plannedTokenLamportsForSim === 0n) {
+      console.log(`${label} [TRACE] [PRE-SCAFFOLD-ZERO] ZERO output from planned quote — ABORTING BEFORE scaffold. positionScaffolded=false successfullyOpened=false`);
+      console.log(`${label} [TRACE] [NO-RENT-YET][VERIFIED] pre-swap quote gave zero output — skipping entire open (including scaffold rent) before any money is spent`);
       console.log(`${label} pre-swap quote gave zero output — skipping entire open (including scaffold rent) before any money is spent`);
       return null;
     }
+
+    console.log(`${label} [TRACE] About to run full swap TX simulation (pre-scaffold). This is the critical gate that protects us from paying rent on bad candidates.`);
 
     // Pre-scaffold swap tx simulation (full tx sim, not just quote).
     // Builds the swap tx (using planned amounts) and runs simulateAndCheck before paying any position rent.
@@ -423,6 +452,7 @@ export async function openPosition(
     // that a pure quote might miss. Zero on-chain cost.
     if (solToSwapLamports > 0n && plannedTokenLamportsForSim > 0n) {
       try {
+        console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM] fetching binArrays + building full swap tx for simulateAndCheck`);
         const binArrays = await dlmmPool.getBinArrays();
         const swapYtoX = !solIsTokenX;
         const inputAmountBN = new BN(solToSwapLamports.toString());
@@ -441,16 +471,24 @@ export async function openPosition(
           outToken,
         });
         const prepared = applyPriorityFee(swapTx, priorityFee);
+        console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM] swap tx constructed, calling simulateAndCheck now (pre-rent)`);
         const simOk = await simulateAndCheck(prepared, `${label} [pre-scaffold-swap-tx-sim]`);
         if (!simOk) {
+          console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM-FAIL] Swap TX sim FAILED — ABORT before scaffold. positionScaffolded=false NO RENT PAID`);
+          console.log(`${label} [TRACE] [NO-RENT-YET] pre-scaffold swap tx simulation failed — aborting before paying position rent`);
           console.log(`${label} pre-scaffold swap tx simulation failed — aborting before paying position rent`);
           return null;
         }
+        console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM-OK] Swap TX simulation PASSED ✔ Safe to proceed to scaffold rent (still zero rent paid at this point).`);
         console.log(`${label} [pre-scaffold] swap tx simulation OK`);
       } catch (simErr) {
+        console.error(`${label} [TRACE] [PRE-SCAFFOLD-SIM-THROW] Swap TX sim threw — ABORT before scaffold. positionScaffolded=false`);
+        console.error(`${label} [TRACE] [NO-RENT-YET] pre-scaffold swap tx sim threw: ${simErr}`);
         console.error(`${label} pre-scaffold swap tx sim threw: ${simErr}`);
         return null;
       }
+    } else {
+      console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM-SKIP] skipping full tx sim (no swap leg or zero planned output)`);
     }
 
     const plannedTotalX = solIsTokenX ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
@@ -458,12 +496,22 @@ export async function openPosition(
 
     // Final hard verification right before we pay any position rent.
     // This is the critical "no non-refundable bin arrays" guard.
+    console.log(`${label} [TRACE] [FINAL-PRE-RENT-VERIFY] About to assert no new bin arrays ONE FINAL TIME before paying ANY rent.`);
+    console.log(`${label} [TRACE] [FINAL-PRE-RENT-VERIFY] plannedTotalX=${plannedTotalX.toString()} plannedTotalY=${plannedTotalY.toString()}`);
+    try {
+      const balPreRent = await connection.getBalance(wallet.publicKey);
+      console.log(`${label} [TRACE] [BAL-SNAPSHOT] immediately pre-rent wallet SOL=${(balPreRent / 1e9).toFixed(9)}`);
+    } catch {}
     await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
+    console.log(`${label} [TRACE] [VERIFIED-NO-NONREFUNDABLE] ✅✅✅ FINAL assert PASSED — range ${minBinId}→${maxBinId} has 0 new bin arrays. WE ARE NOT BUYING INTO NONE-REFUNDABLE BIN STEPS.`);
+    console.log(`${label} [TRACE] [VERIFIED-NO-NONREFUNDABLE] About to set positionScaffolded=true and pay rent.`);
 
     let positionScaffolded = false;
     let successfullyOpened = false;
 
     try {
+      console.log(`${label} [TRACE] [SCAFFOLD-START] Entering scaffold block NOW — next logs will show rent being spent. positionScaffolded will flip to true.`);
+      console.log(`${label} [TRACE] [SCAFFOLD-STATE] positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
       // =============================================================================
       // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
       // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
@@ -486,7 +534,7 @@ export async function openPosition(
 
       if (needsCreate) {
         console.log(
-          `${label} phase 1a (early): creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${numBins} bins`
+          `${label} [TRACE] [SCAFFOLD-CREATE] phase 1a (early): creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(9)} SOL) for ${numBins} bins`
         );
         const createPositionAccountIx = SystemProgram.createAccount({
           fromPubkey: wallet.publicKey,
@@ -497,14 +545,17 @@ export async function openPosition(
         });
         const createTx = new Transaction().add(createPositionAccountIx);
         const createPrep = applyPriorityFee(createTx, priorityFee);
+        console.log(`${label} [TRACE] [SCAFFOLD-CREATE] about to sendLegacyTx for createAccount...`);
         const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
+        console.log(`${label} [TRACE] [SCAFFOLD-CREATE] phase 1a COMPLETE ✔ sig: ${createSig}`);
         console.log(`${label} phase 1a complete ✔ sig: ${createSig}`);
       } else {
+        console.log(`${label} [TRACE] [SCAFFOLD-CREATE-SKIP] phase 1a skipped — position account already DLMM-owned`);
         console.log(`${label} phase 1a skipped — position account already DLMM-owned`);
       }
 
       if (needsInitialize) {
-        console.log(`${label} phase 1b (early): initializePosition (lower=${lowerBinId}, width=${width})`);
+        console.log(`${label} [TRACE] [SCAFFOLD-INIT] phase 1b (early): initializePosition (lower=${lowerBinId}, width=${width})`);
         const initializePositionIx = await dlmmPool.program.methods
           .initializePosition(new BN(lowerBinId), new BN(width))
           .accounts({
@@ -518,19 +569,29 @@ export async function openPosition(
           .instruction();
         const initTx = new Transaction().add(initializePositionIx);
         const initPrep = applyPriorityFee(initTx, priorityFee);
+        console.log(`${label} [TRACE] [SCAFFOLD-INIT] about to sendLegacyTx for initializePosition...`);
         const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} initialize-position`);
+        console.log(`${label} [TRACE] [SCAFFOLD-INIT] phase 1b COMPLETE ✔ sig: ${initSig}`);
         console.log(`${label} phase 1b complete ✔ sig: ${initSig}`);
       } else {
+        console.log(`${label} [TRACE] [SCAFFOLD-INIT-SKIP] phase 1b skipped — position appears already initialized`);
         console.log(`${label} phase 1b skipped — position appears already initialized`);
       }
 
       positionScaffolded = true;
-      console.log(`${label} Position account scaffolded (rent paid). Add pre-sim and swap will follow. Rent will be reclaimed on any failure.`);
+      console.log(`${label} [TRACE] [SCAFFOLD-DONE] positionScaffolded=TRUE, rent paid.`);
+      console.log(`${label} [TRACE] SCAFFOLD COMPLETE — rent paid for position account.`);
+      console.log(`${label} Position account scaffolded (rent paid). Add pre-sim and swap will follow. Rent will be reclaimed on any failure via finally.`);
+      console.log(`${label} [TRACE] [SCAFFOLD-STATE] positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
+
+      console.log(`${label} [TRACE] [POST-SCAFFOLD] Starting post-scaffold add pre-sim gate on *LIVE* initialized account (using planned amounts). positionScaffolded=${positionScaffolded}`);
 
     // Post-scaffold add pre-sim gate (meaningful now — account + discriminator exist on-chain)
+    console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] simulating addLiquidityByStrategy on *live* initialized position (using planned amounts)...`);
     console.log(`${label} [pre-sim] simulating addLiquidityByStrategy on *live* initialized position (using planned amounts)...`);
     let addSimOk = false;
     try {
+      console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] calling dlmmPool.addLiquidityByStrategy for sim...`);
       const simAddResult: any = await dlmmPool.addLiquidityByStrategy({
         positionPubKey: positionKeypair.publicKey,
         user: wallet.publicKey,
@@ -546,6 +607,7 @@ export async function openPosition(
         },
       });
       const simIxs = simAddResult?.instructions || (Array.isArray(simAddResult) ? simAddResult : []);
+      console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] sim returned ${simIxs.length} instructions (or full txs)`);
       if (simIxs.length > 0) {
         const simAddTx = new Transaction();
         simIxs.forEach((ix: any) => simAddTx.add(ix));
@@ -555,6 +617,7 @@ export async function openPosition(
         const simAddPrep = applyPriorityFee(simAddTx, priorityFee);
         simAddPrep.recentBlockhash = bh;
         simAddPrep.feePayer = wallet.publicKey;
+        console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] running simulateAndCheck on add sim tx...`);
         addSimOk = await simulateAndCheck(simAddPrep, `${label} [pre-sim-add]`);
       } else if (simAddResult) {
         const txs = Array.isArray(simAddResult) ? simAddResult : [simAddResult];
@@ -566,36 +629,55 @@ export async function openPosition(
           const prepared = applyPriorityFee(t, priorityFee);
           prepared.recentBlockhash = bh;
           prepared.feePayer = wallet.publicKey;
+          console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] running simulateAndCheck on one of the returned txs...`);
           addSimOk = await simulateAndCheck(prepared, `${label} [pre-sim-add-tx]`);
           if (!addSimOk) break;
         }
       } else {
+        console.warn(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM-FAIL] no instructions/Transaction from SDK — cannot validate add`);
         console.warn(`${label} [pre-sim-add] no instructions/Transaction from SDK — cannot validate add`);
         addSimOk = false;
       }
     } catch (e) {
+      console.error(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM-THROW] add pre-sim threw: ${e}`);
       console.error(`${label} [pre-sim-add] threw: ${e}`);
       addSimOk = false;
     }
 
+    console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM-RESULT] addSimOk=${addSimOk} (positionScaffolded=${positionScaffolded})`);
+    console.log(`${label} [TRACE] Add pre-sim result: addSimOk=${addSimOk}`);
+
     if (!addSimOk) {
+      console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM-ABORT] Add pre-sim FAILED — will trigger FINALLY close to reclaim rent. positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
+      console.log(`${label} [TRACE] ABORT before pre-swap: add simulation failed after real create+initialize. (Rent was paid; finally will attempt close.)`);
       console.log(`${label} ABORT before pre-swap: add simulation failed after real create+initialize. See logs above. (Position rent may have been paid; no token swap executed.)`);
       return null;
     }
+    console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM-OK] Add pre-sim PASSED on live account. Proceeding to drift check + late ATA + pre-swap.`);
+    console.log(`${label} [TRACE] Add pre-sim PASSED on live account. Proceeding to drift check + late ATA + pre-swap.`);
     console.log(`${label} [pre-sim-add] OK on live initialized account — safe to pre-swap.`);
+
+    console.log(`${label} [TRACE] [DRIFT-CHECK] Starting last-second active bin drift check before pre-swap (post-sim gate).`);
+    console.log(`${label} [TRACE] [DRIFT-CHECK] initialActiveBinId=${initialActiveBinId} positionScaffolded=${positionScaffolded}`);
 
     // Last-second active bin sanity check before the irreversible pre-swap.
     // Active bin can drift on volatile pools between feasibility/scaffold/pre-sim and now.
     try {
       const currentActive = await dlmmPool.getActiveBin();
       const binDrift = Math.abs(currentActive.binId - initialActiveBinId);
+      console.log(`${label} [TRACE] [DRIFT-CHECK] re-fetched activeBin=${currentActive.binId} drift=${binDrift}`);
       if (binDrift > 3) {
+        console.warn(`${label} [TRACE] [DRIFT-ABORT] DRIFT DETECTED — aborting before pre-swap. positionScaffolded=${positionScaffolded} will trigger finally close.`);
         console.warn(`${label} active bin drifted significantly (initial=${initialActiveBinId}, now=${currentActive.binId}, drift=${binDrift}) — aborting before pre-swap to avoid out-of-range position`);
         return null;
       }
+      console.log(`${label} [TRACE] [DRIFT-OK] Active bin drift OK (drift=${binDrift} bins). Safe to continue.`);
     } catch (driftErr) {
+      console.warn(`${label} [TRACE] [DRIFT-WARN] failed to re-check active bin before swap (proceeding with caution): ${driftErr}`);
       console.warn(`${label} failed to re-check active bin before swap (proceeding with caution): ${driftErr}`);
     }
+
+    console.log(`${label} [TRACE] [LATE-ATA] Post-drift check passed. About to ensure (late) ATA for output token only (only after sim gate).`);
 
     // Create the required ATA (only the non-SOL token side) at the last responsible moment.
     // Only after pre-sim gate passes. If it doesn't exist, create it now.
@@ -605,7 +687,10 @@ export async function openPosition(
       try {
         const tokenProgramId = await getTokenProgramId(outputMintForAta);
         const ata = getAssociatedTokenAddressSync(outputMintForAta, wallet.publicKey, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID);
-        if (!(await connection.getAccountInfo(ata))) {
+        const ataExists = !!(await connection.getAccountInfo(ata));
+        console.log(`${label} [TRACE] [LATE-ATA] checking ATA for ${outputMintForAta.toBase58().slice(0,8)} exists=${ataExists}`);
+        if (!ataExists) {
+          console.log(`${label} [TRACE] [LATE-ATA] ATA missing — creating now (after all gates).`);
           console.log(`${label} creating ATA for output token ${outputMintForAta.toBase58().slice(0, 8)}…`);
           const ataIx = createAssociatedTokenAccountIdempotentInstruction(
             wallet.publicKey, ata, wallet.publicKey, outputMintForAta, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID
@@ -614,13 +699,27 @@ export async function openPosition(
             ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }), ataIx
           );
           const ataSig = await sendLegacyTx(ataTx, [wallet], label);
+          console.log(`${label} [TRACE] [LATE-ATA] ATA creation tx sent ✔ sig: ${ataSig}`);
           console.log(`${label} ATA created ✔ sig: ${ataSig}`);
+        } else {
+          console.log(`${label} [TRACE] [LATE-ATA] Output token ATA already existed — no creation needed.`);
         }
       } catch (ataErr) {
+        console.error(`${label} [TRACE] [LATE-ATA-FAIL] ATA creation failed — will trigger finally close. positionScaffolded=${positionScaffolded}`);
+        console.error(`${label} [TRACE] ATA creation failed — will trigger finally close.`);
         console.error(`${label} failed to ensure ATA for output token — closing scaffolded position and aborting`);
         return null;
       }
+    } else {
+      console.log(`${label} [TRACE] [LATE-ATA-SKIP] Output side is SOL — no ATA needed.`);
     }
+
+    console.log(`${label} [TRACE] [ALL-GATES-PASSED] All pre-swap gates passed (sim, drift, ATA). About to do the real (irreversible) pre-swap.`);
+    console.log(`${label} [TRACE] [PRE-SWAP-STATE] positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
+    try {
+      const balPreSwap = await connection.getBalance(wallet.publicKey);
+      console.log(`${label} [TRACE] [BAL-SNAPSHOT] pre-swap (post-scaffold+pre-sim) wallet SOL=${(balPreSwap / 1e9).toFixed(9)}`);
+    } catch {}
 
     let actualTokenLamports = 0n
     if (solToSwapLamports > 0n) {
@@ -632,7 +731,8 @@ export async function openPosition(
       // Last-chance verification before the irreversible pre-swap.
       await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
 
-      console.log(`${label} attempting direct DLMM swap for token leg (Meteora SDK native, bypassing Jupiter)`);
+      console.log(`${label} [TRACE] [PRE-SWAP-EXEC] attempting direct DLMM swap for token leg (Meteora SDK native, bypassing Jupiter)`);
+      console.log(`${label} [TRACE] [PRE-SWAP-EXEC] solToSwapLamports=${solToSwapLamports} outputMint=${outputMint.toBase58().slice(0,8)}`);
       try {
         actualTokenLamports = await swapSolToTokenDirectOnDlmm(
           dlmmPool,
@@ -641,17 +741,24 @@ export async function openPosition(
           solIsTokenX,
           label
         );
+        console.log(`${label} [TRACE] [PRE-SWAP-EXEC] swapSolToTokenDirectOnDlmm returned ${actualTokenLamports}`);
         if (actualTokenLamports > 0n) {
-          console.log(`${label} direct DLMM swap succeeded: received ${actualTokenLamports} token lamports`);
+          console.log(`${label} [TRACE] [PRE-SWAP-OK] Pre-swap swap completed successfully. Received ${actualTokenLamports} tokens.`);
         }
       } catch (directErr) {
+        console.error(`${label} [TRACE] [PRE-SWAP-FAIL] Pre-swap FAILED — will trigger finally close to reclaim rent. positionScaffolded=${positionScaffolded}`);
+        console.error(`${label} [TRACE] Pre-swap FAILED — will trigger finally close to reclaim rent.`);
         console.error(`${label} direct DLMM swap for token leg FAILED: ${directErr instanceof Error ? directErr.message : directErr}`);
         console.error(`${label} (Jupiter completely ditched per user request — no fallback; skipping pool)`);
         return null;
       }
+    } else if (solToSwapLamports === 0n) {
+      console.log(`${label} [TRACE] [PRE-SWAP-SKIP] solToSwapLamports=0 — no pre-swap executed (pure SOL leg)`);
     }
 
     if (solToSwapLamports > 0n && actualTokenLamports === 0n) {
+      console.error(`${label} [TRACE] [PRE-SWAP-ZERO] Pre-swap returned 0 tokens — will trigger finally close. positionScaffolded=${positionScaffolded}`);
+      console.error(`${label} [TRACE] Pre-swap returned 0 tokens — will trigger finally close.`);
       console.error(`${label} direct DLMM swap returned 0 tokens for full-range pool (Jupiter completely ditched) — skipping pool`);
       // The pre-swap tx may still have landed (e.g. PARQ case: sig confirmed but post-swap balance query saw 0 due to
       // Token-2022/hook visibility). Persist a stranded marker using a fresh query so the monitor recovery can clean it.
@@ -668,12 +775,17 @@ export async function openPosition(
     }
 
     if (solToSwapLamports > 0n) {
+      console.log(`${label} [TRACE] Pre-swap done. Received ${actualTokenLamports} tokens. About to call openPositionDirect for the add.`);
       console.log(`${label} swap done: received ${actualTokenLamports} token lamports`);
     }
 
     // (positionKeypair was already generated + pre-flight checked earlier, before the pre-swap)
 
+    console.log(`${label} [TRACE] [ADD-STEP] About to call openPositionDirect (the actual add/fund step).`);
+    console.log(`${label} [TRACE] [ADD-STEP] remainingSolLamports=${remainingSolLamports} actualTokenLamports=${actualTokenLamports}`);
+
     // === DIRECT (using remaining SOL + actual received token from any pre-swap) ===
+    console.log(`${label} [TRACE] [ADD-STEP] attempting direct (Bid-Ask range) with computed legs`);
     console.log(`${label} attempting direct (Bid-Ask range) with computed legs`);
     const directResult = await openPositionDirect(
       metrics,
@@ -694,9 +806,13 @@ export async function openPosition(
     );
     if (directResult) {
       successfullyOpened = true;
+      console.log(`${label} [TRACE] [SUCCESS] directResult=${directResult} successfullyOpened=true`);
+      console.log(`${label} [TRACE] FULL SUCCESS — position opened and persisted. No close needed in finally.`);
       console.log(`${label} position opened successfully via direct SDK ✔`);
       return directResult;
     }
+
+    console.log(`${label} [TRACE] [ADD-FAILED] openPositionDirect returned null — will enter rollback then finally close. positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
 
     // Rollback path: position creation failed after successful direct DLMM pre-swap.
     // Use direct DLMM sell (Meteora native) to return tokens to SOL. (Jupiter fully ditched.)
@@ -795,17 +911,30 @@ export async function openPosition(
     return null;
 
     } finally {
+      console.log(`${label} [TRACE] [FINALLY-ENTER] entered finally | positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
       if (positionScaffolded && !successfullyOpened) {
+        console.log(`${label} [TRACE] [FINALLY-CLOSE] SCAFFOLDED but NOT successfullyOpened — ATTEMPTING RENT RECLAIM via tryCloseEmptyPosition.`);
+        console.log(`${label} [TRACE] [FINALLY-CLOSE] This is the critical path to recover position rent after post-scaffold abort.`);
         try {
           await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, minBinId, maxBinId, wallet, label, priorityFee);
+          console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed (check prior logs for success/fail details).`);
         } catch (closeErr) {
+          console.warn(`${label} [TRACE] [FINALLY-CLOSE-ERR] Finally close attempt threw (non-fatal for open return).`);
+          console.warn(`${label} [TRACE] Finally close attempt failed.`);
           console.warn(`${label} finally close failed: ${closeErr}`);
         }
+      } else if (successfullyOpened) {
+        console.log(`${label} [TRACE] [FINALLY-SUCCESS] success path — position fully opened, no rent reclaim needed.`);
+      } else {
+        console.log(`${label} [TRACE] [FINALLY-NOOP] never scaffolded (or early exit) — no rent to reclaim, no close attempted.`);
       }
+      console.log(`${label} [TRACE] [FINALLY-EXIT] leaving finally block`);
     }
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    console.log(`${label} [TRACE] [TOP-CATCH] Top-level catch in openPosition — if we scaffolded, finally SHOULD have run the close attempt.`);
+    console.log(`${label} [TRACE] [TOP-CATCH] positionScaffolded state is only visible inside the try; finally is guaranteed to have executed on throw.`);
     console.error(`${label} failed:`, message)
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
@@ -958,9 +1087,11 @@ async function openPositionDirect(
 ): Promise<string | null> {
   const label = `${attemptLabel}[direct-primary]`
 
+  console.log(`${label} [TRACE] [DIRECT-ENTER] openPositionDirect ENTERED. DRY_RUN=${DRY_RUN}`);
   console.log(`${label} [DRY-RUN GUARD] DRY_RUN param received: ${DRY_RUN}`)
 
   if (DRY_RUN) {
+    console.log(`${label} [TRACE] [DIRECT-DRY] DRY RUN — skipping on-chain tx`);
     console.log(`${label} DRY RUN — skipping on-chain tx`)
     return null
   }
@@ -969,6 +1100,7 @@ async function openPositionDirect(
   const wallet = getWallet()
 
   try {
+    console.log(`${label} [TRACE] [DIRECT-START] fetching activeBin + computing totals...`);
     const activeBin = await dlmmPool.getActiveBin()
 
     const isTokenXSol = dlmmPool.tokenX.publicKey.toBase58() === NATIVE_MINT_STR
@@ -982,8 +1114,12 @@ async function openPositionDirect(
     const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
 
     console.log(
+      `${label} [TRACE] [DIRECT-TOTALS] add (scaffolding done pre-swap if needed) — totals from actual post-swap (range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
+    );
+    console.log(
       `${label} add (scaffolding done pre-swap if needed) — totals from actual post-swap (range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     )
+    console.log(`${label} [TRACE] [DIRECT-TOTALS] totals for add: totalX=${totalX.toString()} totalY=${totalY.toString()}`);
     console.log(`${label} totals for add: totalX=${totalX.toString()} totalY=${totalY.toString()}`)
 
     // Two-phase (split txs) to work around the 10KB *inner CPI* realloc limit for wide ranges (100+ bins).
@@ -1017,9 +1153,10 @@ async function openPositionDirect(
     const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
     const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
 
+    console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-CHECK] isDlmmOwned=${isDlmmOwned} looksInitialized=${looksInitialized}`);
     if (!isDlmmOwned) {
       console.log(
-        `${label} phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(6)} SOL) for ${numBins} bins`
+        `${label} [TRACE] [DIRECT-CREATE] phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(9)} SOL) for ${numBins} bins`
       );
       const createPositionAccountIx = SystemProgram.createAccount({
         fromPubkey: wallet.publicKey,
@@ -1030,14 +1167,17 @@ async function openPositionDirect(
       });
       const createTx = new Transaction().add(createPositionAccountIx);
       const createPrep = applyPriorityFee(createTx, priorityFee);
+      console.log(`${label} [TRACE] [DIRECT-CREATE] sending create tx...`);
       const createSig = await sendLegacyTx(createPrep, [wallet, positionKeypair], `${label} create-pos-account`);
+      console.log(`${label} [TRACE] [DIRECT-CREATE] phase 1a complete ✔ sig: ${createSig}`);
       console.log(`${label} phase 1a complete ✔ sig: ${createSig}`);
     } else {
+      console.log(`${label} [TRACE] [DIRECT-CREATE-SKIP] phase 1a: position already DLMM-owned — skipping create`);
       console.log(`${label} phase 1a: position already DLMM-owned — skipping create`);
     }
 
     if (!looksInitialized) {
-      console.log(`${label} phase 1b: initializePosition (lower=${lowerBinId}, width=${width})`);
+      console.log(`${label} [TRACE] [DIRECT-INIT] phase 1b: initializePosition (lower=${lowerBinId}, width=${width})`);
       const initializePositionIx = await dlmmPool.program.methods
         .initializePosition(new BN(lowerBinId), new BN(width))
         .accounts({
@@ -1051,16 +1191,23 @@ async function openPositionDirect(
         .instruction();
       const initTx = new Transaction().add(initializePositionIx);
       const initPrep = applyPriorityFee(initTx, priorityFee);
+      console.log(`${label} [TRACE] [DIRECT-INIT] sending init tx...`);
       const initSig = await sendLegacyTx(initPrep, [wallet, positionKeypair], `${label} initialize-position`);
+      console.log(`${label} [TRACE] [DIRECT-INIT] phase 1b complete ✔ sig: ${initSig}`);
       console.log(`${label} phase 1b complete ✔ sig: ${initSig}`);
     } else {
+      console.log(`${label} [TRACE] [DIRECT-INIT-SKIP] phase 1b: position already initialized — skipping init`);
       console.log(`${label} phase 1b: position already initialized — skipping init`);
     }
 
     // Final belt-and-suspenders verification right before actually adding liquidity.
+    console.log(`${label} [TRACE] [DIRECT-VERIFY] final assertNoNewBinArraysForRange before funding...`);
     await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
+    console.log(`${label} [TRACE] [DIRECT-VERIFY] ✅ bin arrays still verified zero-new before add.`);
 
     // Phase 2: addLiquidityByStrategy (position is now properly initialized).
+    console.log(`${label} [TRACE] [DIRECT-ADD] In openPositionDirect: about to call addLiquidityByStrategy (the actual funding step).`);
+    console.log(`${label} [TRACE] In openPositionDirect: about to call addLiquidityByStrategy (the actual funding step).`);
     console.log(`${label} phase 2: addLiquidityByStrategy`);
     const addResult: any = await dlmmPool.addLiquidityByStrategy({
       positionPubKey: positionKeypair.publicKey,
@@ -1076,11 +1223,14 @@ async function openPositionDirect(
 
     const ixs = addResult?.instructions || (Array.isArray(addResult) ? addResult : []);
     let liqSig = '';
+    console.log(`${label} [TRACE] [DIRECT-ADD-SEND] addResult has ${ixs.length} instructions (or full tx objects)`);
     if (ixs.length > 0) {
       const tx = new Transaction();
       ixs.forEach((ix: any) => tx.add(ix));
       const preparedTx = applyPriorityFee(tx, priorityFee);
+      console.log(`${label} [TRACE] [DIRECT-ADD-SEND] sending add-liquidity tx...`);
       const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);
+      console.log(`${label} [TRACE] [DIRECT-ADD-OK] add liquidity confirmed ✔ sig: ${sig}`);
       console.log(`${label} ✓ direct SDK add liquidity confirmed. Sig: ${sig}`);
       liqSig = sig;
     } else {
@@ -1089,7 +1239,9 @@ async function openPositionDirect(
       for (const t of txsToSend) {
         if (!t) continue;
         const preparedTx = applyPriorityFee(t, priorityFee);
+        console.log(`${label} [TRACE] [DIRECT-ADD-SEND] sending one of the full txs from SDK...`);
         const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);
+        console.log(`${label} [TRACE] [DIRECT-ADD-OK] add liquidity confirmed ✔ sig: ${sig}`);
         console.log(`${label} ✓ direct SDK add liquidity confirmed. Sig: ${sig}`);
         liqSig = sig;
       }
@@ -1140,11 +1292,16 @@ async function openPositionDirect(
 
     await sendOpenAlert(metrics, strategy, positionId, effectiveDeployedSol, entryPriceSol)
 
+    console.log(`${label} [TRACE] [DIRECT-SUCCESS] openPositionDirect completed successfully — persist and alert done.`);
+    console.log(`${label} [TRACE] [DIRECT-SUCCESS] successfullyOpened should be set by caller now.`);
+    console.log(`${label} [TRACE] openPositionDirect completed successfully — persist and alert done.`);
     console.log(`${label} position opened successfully via direct SDK primary path ✔`)
     return positionId
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    console.log(`${label} [TRACE] [DIRECT-THROW] openPositionDirect threw — outer finally (in openPosition) will attempt close if scaffolded.`);
+    console.log(`${label} [TRACE] openPositionDirect threw — this will be caught by outer finally for close.`);
     console.error(`${label} failed:`, message)
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
@@ -1173,11 +1330,23 @@ async function tryCloseEmptyPosition(
   label: string,
   priorityFee: number
 ) {
+  console.log(`${label} [TRACE] [CLOSE-ENTRY] Entering tryCloseEmptyPosition for key=${positionPubKey.toBase58().slice(0,8)} (range ${minBinId}→${maxBinId}). This is the rent-reclaim attempt.`);
+  console.log(`${label} [TRACE] [CLOSE-ENTRY] Using priority ${Math.max(priorityFee, 100000)} for close.`);
+
   // Use higher priority for recovery closes to increase chance of landing
   const closePriority = Math.max(priorityFee, 100000);
 
+  // Snapshot on-chain state before attempting close (best effort)
+  try {
+    const posInfo = await getConnection().getAccountInfo(positionPubKey).catch(() => null);
+    console.log(`${label} [TRACE] [CLOSE-POS-INFO] on-chain account exists=${!!posInfo} owner=${posInfo?.owner?.toBase58?.().slice(0,8) ?? 'n/a'} dataLen=${posInfo?.data?.length ?? 0}`);
+  } catch (e) {
+    console.log(`${label} [TRACE] [CLOSE-POS-INFO] could not fetch pos info: ${e}`);
+  }
+
   // Try removeLiquidity first (standard path for initialized positions)
   try {
+    console.log(`${label} [TRACE] [CLOSE-REMOVE] Attempting removeLiquidity + shouldClaimAndClose (100% bps) to close empty pos...`);
     const removeTx = await dlmmPool.removeLiquidity({
       position: positionPubKey,
       user: wallet.publicKey,
@@ -1186,34 +1355,46 @@ async function tryCloseEmptyPosition(
       bps: new BN(10000),
       shouldClaimAndClose: true,
     });
+    console.log(`${label} [TRACE] [CLOSE-REMOVE] removeLiquidity call returned ${Array.isArray(removeTx) ? removeTx.length : 1} tx(s)`);
     for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
       const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-for-rent`);
+      console.log(`${label} [TRACE] [CLOSE-REMOVE-SUCCESS] removeLiquidity close succeeded.`);
       console.log(`${label} closed empty position to reclaim rent ✔ sig: ${sig}`);
       return; // success
     }
   } catch (closeErr) {
     const msg = closeErr instanceof Error ? closeErr.message : String(closeErr);
+    console.log(`${label} [TRACE] [CLOSE-REMOVE-THROW] removeLiquidity threw: ${msg}`);
     if (msg.includes('liquidity') || msg.includes('Liquidity') || msg.includes('zero')) {
-      console.log(`${label} removeLiquidity rejected for zero-liquidity (expected); trying direct close...`);
+      console.log(`${label} [TRACE] [CLOSE-REMOVE-ZERO] removeLiquidity rejected for zero-liquidity (EXPECTED for empty post-abort case); trying direct close fallback...`);
     } else {
+      console.warn(`${label} [TRACE] [CLOSE-REMOVE-OTHER] removeLiquidity close failed: ${msg}`);
       console.warn(`${label} removeLiquidity close failed: ${msg}`);
     }
 
     // Fallback to closePosition for truly empty initialized accounts
     try {
       if (typeof dlmmPool.closePosition === 'function') {
+        console.log(`${label} [TRACE] [CLOSE-FALLBACK] Attempting dlmmPool.closePosition() fallback...`);
         const closeTx = await dlmmPool.closePosition(positionPubKey, wallet.publicKey);
         const txs = Array.isArray(closeTx) ? closeTx : [closeTx];
         for (const tx of txs) {
           const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-fallback`);
+          console.log(`${label} [TRACE] [CLOSE-FALLBACK-SUCCESS] closePosition fallback succeeded.`);
           console.log(`${label} closed empty position via direct close ✔ sig: ${sig}`);
         }
         return;
+      } else {
+        console.log(`${label} [TRACE] [CLOSE-FALLBACK-NOOP] dlmmPool has no closePosition() method.`);
       }
     } catch (fallbackErr) {
+      console.log(`${label} [TRACE] [CLOSE-FALLBACK-THROW] closePosition fallback threw: ${fallbackErr}`);
+      console.warn(`${label} [TRACE] direct closePosition also failed: ${fallbackErr}`);
       console.warn(`${label} direct closePosition also failed: ${fallbackErr}`);
     }
 
+    console.warn(`${label} [TRACE] [CLOSE-EXHAUSTED] All rent-reclaim attempts exhausted.`);
+    console.warn(`${label} [TRACE] All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
     console.warn(`${label} All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
   }
 }
@@ -1234,17 +1415,22 @@ async function swapSolToTokenDirectOnDlmm(
   const inToken = solIsTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
   const outToken = solIsTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
 
+  console.log(`${label} [TRACE] [SWAP-FUNC-ENTER] Inside swapSolToTokenDirectOnDlmm — fetching fresh state for actual pre-swap.`);
   const activeBinAtSwap = await dlmmPool.getActiveBin();
+  console.log(`${label} [TRACE] [SWAP-FUNC] activeBinAtSwap=${activeBinAtSwap.binId}`);
   console.log(`${label} [direct-dlmm] swapping ${solLamports} lamports SOL → token on DLMM pool (activeBin=${activeBinAtSwap.binId}, in=${inToken.toBase58().slice(0,8)}, out=${outToken.toBase58().slice(0,8)})`);
 
   // Pre-swap balance for debug (also captured for delta calc below)
   let preBalForDelta = 0n;
   try {
     preBalForDelta = await getWalletTokenBalance(outToken.toBase58());
+    console.log(`${label} [TRACE] [SWAP-PRE-BAL] pre-swap ${outToken.toBase58().slice(0,8)} balance: ${preBalForDelta}`);
     console.log(`${label} [direct-dlmm] pre-swap ${outToken.toBase58().slice(0,8)} balance: ${preBalForDelta}`);
-  } catch {}
+  } catch (e) { console.log(`${label} [TRACE] [SWAP-PRE-BAL] pre-swap balance read failed: ${e}`); }
 
+  console.log(`${label} [TRACE] [SWAP-BINARRAYS] calling getBinArrays()...`);
   const binArrays = await dlmmPool.getBinArrays();
+  console.log(`${label} [TRACE] [SWAP-BINARRAYS] fetched ${binArrays.length} bin arrays`);
   console.log(`${label} [direct-dlmm] fetched ${binArrays.length} bin arrays (for quote + swap on this pool; will pass FULL list to swap builder to satisfy Swap2 bin_array keys)`);
 
   // swapYtoX: true if swapping Y (the non-SOL if solIsTokenX false?) into X.
@@ -1253,6 +1439,7 @@ async function swapSolToTokenDirectOnDlmm(
   const swapYtoX = !solIsTokenX;
 
   const inputAmountBN = new BN(solLamports.toString());
+  console.log(`${label} [TRACE] [SWAP-QUOTE] calling swapQuote(input=${inputAmountBN.toString()}, swapYtoX=${swapYtoX}, slippage=500)`);
   const swapQuote = await dlmmPool.swapQuote(
     inputAmountBN,
     swapYtoX,
@@ -1262,13 +1449,16 @@ async function swapSolToTokenDirectOnDlmm(
   const q = swapQuote as any;
 
   if (q.outAmount.isZero()) {
+    console.log(`${label} [TRACE] [SWAP-QUOTE-ZERO] quote returned zero outAmount — will throw`);
     throw new Error('Direct DLMM swap quote gave zero output (insufficient liquidity on that side)');
   }
 
   const quotedIn = q.inAmount ?? inputAmountBN;
+  console.log(`${label} [TRACE] [SWAP-QUOTE-OK] quote: in=${quotedIn} out=${q.outAmount} fee=${q.fee}`);
   console.log(`${label} [direct-dlmm] quote: in=${quotedIn} out=${q.outAmount} fee=${q.fee}`);
 
   const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
+  console.log(`${label} [TRACE] [SWAP-TX] calling dlmmPool.swap() with ${binArrayKeysForSwap.length} binArrayKeys`);
   console.log(`${label} [direct-dlmm] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys (not q.binArraysPubkey) to prevent Anchor AccountNotEnoughKeys 3005 on bin_array during internal CU sim`);
   const swapTx = await dlmmPool.swap({
     inToken,
@@ -1284,8 +1474,10 @@ async function swapSolToTokenDirectOnDlmm(
   const priorityFee = await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]);
   const preparedTx = applyPriorityFee(swapTx, priorityFee);
 
+  console.log(`${label} [TRACE] [SWAP-SEND] sending swap tx...`);
   const sig = await sendLegacyTx(preparedTx, [wallet], `${label} direct-dlmm-swap`);
 
+  console.log(`${label} [TRACE] [SWAP-CONFIRMED] swap confirmed ✔ sig: ${sig}`);
   console.log(`${label} [direct-dlmm] swap confirmed ✔ sig: ${sig}`);
 
   // Read actual received (delta) + post balance for debug.
@@ -1299,15 +1491,17 @@ async function swapSolToTokenDirectOnDlmm(
     for (let i = 0; i < 4; i++) {
       await new Promise(r => setTimeout(r, 600));
       postBal = await getWalletTokenBalance(outToken.toBase58());
+      console.log(`${label} [TRACE] [SWAP-POST-BAL-POLL] poll ${i+1}/4 postBal=${postBal}`);
       if (postBal > 0n) break;
     }
-  } catch {}
+  } catch (e) { console.log(`${label} [TRACE] [SWAP-POST-BAL] post balance poll error: ${e}`); }
   const delta = postBal > preBalForDelta ? postBal - preBalForDelta : postBal;
 
   const quotedOut = q?.outAmount && !q.outAmount.isZero() ? BigInt(q.outAmount.toString()) : 0n;
   const amountForPosition = quotedOut > 0n ? quotedOut : delta;
 
   try {
+    console.log(`${label} [TRACE] [SWAP-RESULT] post-swap ${outToken.toBase58().slice(0,8)} balance: ${postBal} (delta=${delta}, usedForLp=${amountForPosition}, quotedOut=${quotedOut || 'n/a'})`);
     console.log(`${label} [direct-dlmm] post-swap ${outToken.toBase58().slice(0,8)} balance: ${postBal} (delta=${delta}, usedForLp=${amountForPosition}, quotedOut=${quotedOut || 'n/a'})`);
   } catch {}
   return amountForPosition;
@@ -1348,6 +1542,7 @@ async function assertNoNewBinArraysForRange(
       `but ${missingCount} required bin array(s) are MISSING. Aborting HARD to avoid non-refundable rent.`
     );
     console.error(`${label} ${err.message}`);
+    console.error(`${label} [TRACE] [ASSERT-BIN-FAIL] checked ${requiredBinArrays.length} arrays, ${missingCount} MISSING — HARD ABORT`);
     throw err;
   }
 
@@ -1355,6 +1550,7 @@ async function assertNoNewBinArraysForRange(
     `${label} ✅✅✅ VERIFIED (NO NON-REFUNDABLE BIN RENT): 0 new bin arrays for range ${minBinId} → ${maxBinId} ` +
     `(${requiredBinArrays.length} arrays already live on-chain).`
   );
+  console.log(`${label} [TRACE] [ASSERT-BIN-OK] ✅✅✅ VERIFIED ZERO NEW BIN ARRAYS — WE ARE NOT PAYING ANY NON-REFUNDABLE BIN RENT FOR THIS RANGE. checked=${requiredBinArrays.length} missing=0`);
 }
 
 /**
@@ -1429,6 +1625,12 @@ export async function checkFullEvilPandaRangeFeasibility(
   }
 
   const feasible = newBinArrayCount === 0;
+
+  if (feasible) {
+    console.log(`[TRACE] [FEASIBILITY] ✅ VERIFIED for pool: 0 new bin arrays needed for full desired range (totalBins=${fullTotalBins}, checked=${requiredBinArrays.length}). NO NON-REFUNDABLE RENT.`);
+  } else {
+    console.log(`[TRACE] [FEASIBILITY] range NOT free: newBinArrayCount=${newBinArrayCount} (would be non-refundable) — rejecting before any open attempt.`);
+  }
 
   // Effective now reports the targeted price % (log math); linear bin-width would be ~70% for 50% price move.
   const effectiveDownPct = Math.abs(rangeDownPct);

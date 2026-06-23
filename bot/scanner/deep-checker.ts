@@ -957,6 +957,7 @@ async function evaluateCandidate(
   // downstream notifications clean for expected design-driven skips.
   if (strategy.id === 'evil-panda') {
     try {
+      console.log(`[scanner][${symbol}] [TRACE] [RANGE-GATE] running early checkFullEvilPandaRangeFeasibility before ACCEPT`);
       const { checkFullEvilPandaRangeFeasibility } = await import('../executor/open');
       const { getConnection } = await import('@/lib/solana');
       const { PublicKey } = await import('@solana/web3.js');
@@ -966,6 +967,7 @@ async function evaluateCandidate(
         strategy.position?.rangeDownPct ?? -50,
         strategy.position?.rangeUpPct ?? 100
       );
+      console.log(`[scanner][${symbol}] [TRACE] [RANGE-GATE] feasible=${rangeCheck.feasible} newArrays=${rangeCheck.newBinArrayCount} totalBins=${rangeCheck.totalBins}`);
       if (!rangeCheck.feasible) {
         console.log(
           `[scanner][${symbol}] SKIPPING (range gate): full evil-panda range (-50% / +100%) not free with 0 new bin arrays ` +
@@ -974,7 +976,9 @@ async function evaluateCandidate(
         );
         return { strategy: null, decision: 'REJECTED', rejectionReason: 'full evil-panda range requires new bin arrays', finalScore: 0 };
       }
+      console.log(`[scanner][${symbol}] [TRACE] [RANGE-GATE] ✅ passed early zero-new-bin-array verification`);
     } catch (e) {
+      console.warn(`[scanner][${symbol}] [TRACE] [RANGE-GATE] range feasibility check in evaluate failed (will let later gates decide):`, e);
       console.warn(`[scanner][${symbol}] range feasibility check in evaluate failed (will let later gates decide):`, e);
     }
   }
