@@ -16,6 +16,8 @@
  * Set env vars (already in your .env):
  *   HELIUS_RPC_URL or RPC_ENDPOINT
  *   WALLET_KEYPAIR_PATH  (path to keypair JSON array)
+ *
+ * Uses corrected close_position discriminator.
  */
 
 import {
@@ -24,6 +26,7 @@ import {
   PublicKey,
   sendAndConfirmTransaction,
   Transaction,
+  SendTransactionError,
 } from "@solana/web3.js";
 import DLMM from "@meteora-ag/dlmm";
 import * as fs from "fs";
@@ -87,7 +90,7 @@ async function tryCloseViaSdk(
 ): Promise<string> {
   // We need a dummy lb_pair pubkey — the SDK resolves it from the position account.
   // For zeroed accounts we build the instruction manually using the known discriminator.
-  const closeDiscriminator = Buffer.from([123, 134, 81, 0, 49, 68, 98, 172]); // closePosition
+  const closeDiscriminator = Buffer.from([123, 134, 81, 0, 49, 68, 98, 98]); // close_position (Anchor global)
 
   // Anchor account metas for closePosition:
   // 0: position (writable)  — the ghost account
@@ -149,8 +152,8 @@ async function closeZeroedPositionRaw(
   const { TransactionInstruction, SystemProgram } = await import("@solana/web3.js");
   const { TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
 
-  // closePosition discriminator (Anchor IDL: sha256("global:close_position")[0..8])
-  const discriminator = Buffer.from([123, 134, 81, 0, 49, 68, 98, 172]);
+  // closePosition discriminator (Anchor: sha256("global:close_position")[0..8])
+  const discriminator = Buffer.from([123, 134, 81, 0, 49, 68, 98, 98]);
 
   const zero = SystemProgram.programId;
   const eventAuthority = PublicKey.findProgramAddressSync(
@@ -229,8 +232,14 @@ async function main() {
       try {
         sig = await closeZeroedPositionRaw(conn, wallet, pubkey);
         method = "raw closePosition";
-      } catch (rawErr) {
-        console.error(`  FAILED: ${(rawErr as Error).message}`);
+      } catch (rawErr: any) {
+        console.error(`  FAILED: ${rawErr?.message || rawErr}`);
+        if (rawErr instanceof SendTransactionError || rawErr?.getLogs || rawErr?.logs) {
+          try {
+            const logs = rawErr.logs || (await rawErr.getLogs?.(conn));
+            if (logs?.length) console.log("  SendTransactionError logs:\n" + logs.map((l: string)=>"    "+l).join("\n"));
+          } catch {}
+        }
         totalFailed++;
         console.log();
         continue;
