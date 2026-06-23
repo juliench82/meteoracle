@@ -275,6 +275,9 @@ export async function openPosition(
       `(desired was ${rangeDownPct}% / ${rangeUpPct}%; Meteora snaps to nearest discrete bins)`
     );
 
+    // Immediate verification after finalizing the exact bin ids we will use.
+    await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
+
     // NOTE on range:
     // We deliberately do *not* hard-cap the number of bins here.
     // The whole point of the current design (vs the old artificial 70-bin / Zap limits)
@@ -453,11 +456,20 @@ export async function openPosition(
     const plannedTotalX = solIsTokenX ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
     const plannedTotalY = solIsTokenY ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
 
+    // Final hard verification right before we pay any position rent.
+    // This is the critical "no non-refundable bin arrays" guard.
+    await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
+
     // =============================================================================
     // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
     // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
     // exist on-chain. This makes the subsequent add pre-sim *meaningful*.
     // Only after this + passing add sim do we do the irreversible token pre-swap.
+    //
+    // TRADEOFF (acknowledged): position rent is paid before the add pre-sim can fail.
+    // The pre-scaffold swap quote + tx simulation (earlier in this function) is the primary
+    // guard that prevents us from reaching this point on bad candidates.
+    // If add pre-sim (or later steps) fail, tryCloseEmptyPosition is called to reclaim rent.
     // =============================================================================
     const lowerBinId = minBinId;
     const width = maxBinId - minBinId;
@@ -506,6 +518,8 @@ export async function openPosition(
     } else {
       console.log(`${label} phase 1b skipped — position appears already initialized`);
     }
+
+    console.log(`${label} Position account scaffolded (rent paid). Add pre-sim and swap will follow. Rent will be reclaimed on any failure via tryCloseEmptyPosition.`);
 
     // Post-scaffold add pre-sim gate (meaningful now — account + discriminator exist on-chain)
     console.log(`${label} [pre-sim] simulating addLiquidityByStrategy on *live* initialized position (using planned amounts)...`);
@@ -612,6 +626,9 @@ export async function openPosition(
       // Since the pool already passed the full evil-panda range gate (bin arrays exist and populated),
       // direct swap on this pool is the natural way to acquire the token leg for the Bid-Ask.
       // This completely bypasses Jupiter 0x177e issues for these specific pools.
+      // Last-chance verification before the irreversible pre-swap.
+      await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
+
       console.log(`${label} attempting direct DLMM swap for token leg (Meteora SDK native, bypassing Jupiter)`);
       try {
         actualTokenLamports = await swapSolToTokenDirectOnDlmm(
@@ -1030,6 +1047,9 @@ async function openPositionDirect(
       console.log(`${label} phase 1b: position already initialized — skipping init`);
     }
 
+    // Final belt-and-suspenders verification right before actually adding liquidity.
+    await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
+
     // Phase 2: addLiquidityByStrategy (position is now properly initialized).
     console.log(`${label} phase 2: addLiquidityByStrategy`);
     const addResult: any = await dlmmPool.addLiquidityByStrategy({
@@ -1143,6 +1163,10 @@ async function tryCloseEmptyPosition(
   label: string,
   priorityFee: number
 ) {
+  // Use higher priority for recovery closes to increase chance of landing
+  const closePriority = Math.max(priorityFee, 100000);
+
+  // Try removeLiquidity first (standard path for initialized positions)
   try {
     const removeTx = await dlmmPool.removeLiquidity({
       position: positionPubKey,
@@ -1153,25 +1177,34 @@ async function tryCloseEmptyPosition(
       shouldClaimAndClose: true,
     });
     for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
-      const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), [wallet], `${label} close-empty-for-rent`);
+      const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-for-rent`);
       console.log(`${label} closed empty position to reclaim rent ✔ sig: ${sig}`);
+      return; // success
     }
   } catch (closeErr) {
-    console.warn(`${label} removeLiquidity close failed for empty position (may be expected for zero-liq): ${closeErr}`);
-    // Fallback: try dlmmPool.closePosition() if available in the SDK (for zero-liquidity positions)
+    const msg = closeErr instanceof Error ? closeErr.message : String(closeErr);
+    if (msg.includes('liquidity') || msg.includes('Liquidity') || msg.includes('zero')) {
+      console.log(`${label} removeLiquidity rejected for zero-liquidity (expected); trying direct close...`);
+    } else {
+      console.warn(`${label} removeLiquidity close failed: ${msg}`);
+    }
+
+    // Fallback to closePosition for truly empty initialized accounts
     try {
       if (typeof dlmmPool.closePosition === 'function') {
         const closeTx = await dlmmPool.closePosition(positionPubKey, wallet.publicKey);
-        for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-          const sig = await sendLegacyTx(applyPriorityFee(tx, priorityFee), [wallet], `${label} close-empty-fallback`);
-          console.log(`${label} closed empty position via fallback ✔ sig: ${sig}`);
+        const txs = Array.isArray(closeTx) ? closeTx : [closeTx];
+        for (const tx of txs) {
+          const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-fallback`);
+          console.log(`${label} closed empty position via direct close ✔ sig: ${sig}`);
         }
-      } else {
-        console.log(`${label} no closePosition fallback in SDK; rent may need manual reclaim via on-chain close`);
+        return;
       }
     } catch (fallbackErr) {
-      console.warn(`${label} fallback close also failed (rent locked): ${fallbackErr}`);
+      console.warn(`${label} direct closePosition also failed: ${fallbackErr}`);
     }
+
+    console.warn(`${label} All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
   }
 }
 
@@ -1268,6 +1301,50 @@ async function swapSolToTokenDirectOnDlmm(
     console.log(`${label} [direct-dlmm] post-swap ${outToken.toBase58().slice(0,8)} balance: ${postBal} (delta=${delta}, usedForLp=${amountForPosition}, quotedOut=${quotedOut || 'n/a'})`);
   } catch {}
   return amountForPosition;
+}
+
+/**
+ * Hard last-moment verification that the chosen discrete bin range has **zero** missing bin arrays.
+ * This is the final safeguard to guarantee we never pay non-refundable rent for new bin steps.
+ *
+ * Called immediately before we create the position account.
+ * Throws (and aborts the open) if any required bin array is still missing.
+ */
+async function assertNoNewBinArraysForRange(
+  dlmmPool: any,
+  minBinId: number,
+  maxBinId: number,
+  label: string
+) {
+  const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
+  const requiredBinArrays = getBinArraysRequiredByPositionRange(
+    dlmmPool.pubkey,
+    new BN(minBinId),
+    new BN(maxBinId),
+    dlmmPool.program.programId
+  );
+
+  let missingCount = 0;
+  const connection = getConnection();
+  for (const ba of requiredBinArrays) {
+    if (!(await connection.getAccountInfo(ba.key))) {
+      missingCount++;
+    }
+  }
+
+  if (missingCount > 0) {
+    const err = new Error(
+      `[CRITICAL][NON-REFUNDABLE RENT] About to pay position rent for range ${minBinId} → ${maxBinId} ` +
+      `but ${missingCount} required bin array(s) are MISSING. Aborting HARD to avoid non-refundable rent.`
+    );
+    console.error(`${label} ${err.message}`);
+    throw err;
+  }
+
+  console.log(
+    `${label} ✅✅✅ VERIFIED (NO NON-REFUNDABLE BIN RENT): 0 new bin arrays for range ${minBinId} → ${maxBinId} ` +
+    `(${requiredBinArrays.length} arrays already live on-chain).`
+  );
 }
 
 /**
