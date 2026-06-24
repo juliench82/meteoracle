@@ -339,7 +339,7 @@ async function tryInitializeGhost(
 
   try {
     console.log(`${label} attempting initializePosition (lower=${lower}, width=${width}) to materialize the ghost...`);
-    let ix = await dlmmPool.program.methods
+    const tx = await dlmmPool.program.methods
       .initializePosition(lower, width)
       .accounts({
         payer: wallet.publicKey,
@@ -349,22 +349,28 @@ async function tryInitializeGhost(
         rent: SYSVAR_RENT_PUBKEY,
         program: dlmmPool.program.programId,
       })
-      .instruction();
+      .transaction();
 
-    // Patch: for pre-created ghost accounts, the position must NOT be a signer
-    // (the SDK builder marks it signer because in normal flow it's a fresh keypair for createAccount).
-    // Only the payer (wallet) signs this tx.
-    ix.keys = ix.keys.map((k: any) => {
-      if (k.pubkey.equals(positionPubKey)) {
-        return { ...k, isSigner: false };
-      }
-      return k;
-    });
+    // Patch the initializePosition instruction: for pre-created ghost accounts the position must NOT be a signer.
+    // The builder marks it as signer (for the fresh-keypair + createAccount case).
+    // We set isSigner=false so only the wallet (payer) needs to sign.
+    // This avoids "Missing signature for [position]" and "signer privilege escalated".
+    if (tx.instructions.length > 0) {
+      const initIx = tx.instructions[0];
+      initIx.keys = initIx.keys.map((k: any) => {
+        if (k.pubkey.equals(positionPubKey)) {
+          return { pubkey: k.pubkey, isSigner: false, isWritable: k.isWritable };
+        }
+        return k;
+      });
+    }
 
-    const tx = new Transaction()
-      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }))
-      .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }))
-      .add(ix);
+    // Add priority fees at the front
+    const priorityIx = [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }),
+    ];
+    tx.instructions.unshift(...priorityIx);
 
     tx.feePayer = wallet.publicKey;
     const { blockhash } = await connection.getLatestBlockhash('confirmed');
