@@ -149,6 +149,23 @@ async function closeGhostPositionRaw(
     if (dlmmPool.tokenY.tokenProgram) tokenYProgram = dlmmPool.tokenY.tokenProgram;
   }
 
+  // Always resolve the *actual* token program by reading the mint account's owner.
+  // This is critical for Token-2022 mints (many meme pools) vs legacy SPL Token.
+  // The dlmmPool.tokenX.tokenProgram is sometimes missing or incorrect.
+  const resolveTokenProgram = async (mint: PublicKey): Promise<PublicKey> => {
+    const NATIVE_SOL = 'So11111111111111111111111111111111111111112';
+    if (mint.toBase58() === NATIVE_SOL) return TOKEN_PROGRAM_ID;
+    try {
+      const mintInfo = await conn.getAccountInfo(mint);
+      return mintInfo?.owner ?? TOKEN_PROGRAM_ID;
+    } catch {
+      return TOKEN_PROGRAM_ID;
+    }
+  };
+
+  tokenXProgram = await resolveTokenProgram(tokenXMint);
+  tokenYProgram = await resolveTokenProgram(tokenYMint);
+
   // Proper user ATAs (close will claim any dust fees here)
   const userTokenX = getAssociatedTokenAddressSync(tokenXMint, wallet.publicKey, false, tokenXProgram);
   const userTokenY = getAssociatedTokenAddressSync(tokenYMint, wallet.publicKey, false, tokenYProgram);
@@ -189,6 +206,15 @@ async function closeGhostPositionRaw(
   let binArrayUpper = SystemProgram.programId;
   let binArrayBitmapExtension = SystemProgram.programId;
 
+  // Try to compute a real bitmap extension PDA (common for DLMM)
+  try {
+    const [bitmap] = PublicKey.findProgramAddressSync(
+      [Buffer.from("bitmap"), lbPair.toBuffer()],
+      DLMM_PROGRAM_ID
+    );
+    binArrayBitmapExtension = bitmap;
+  } catch {}
+
   if (dlmmPool && typeof minBinId === "number" && typeof maxBinId === "number") {
     try {
       const { getBinArraysRequiredByPositionRange } = await import("@meteora-ag/dlmm");
@@ -203,10 +229,39 @@ async function closeGhostPositionRaw(
     }
   }
 
-  // Note: reserve_x / reserve_y are the pool's token vaults (can be derived or read from dlmmPool, but many closes accept the lbPair as proxy in constraints; use placeholder if unknown)
-  // For best results prefer the SDK path. Raw is last-ditch for zeroed accounts.
-  const reserveX = SystemProgram.programId;
-  const reserveY = SystemProgram.programId;
+  // Try to populate real reserve vaults (token accounts owned by the pair) from the dlmmPool if the SDK exposed them.
+  // Placeholders often cause the close ix to fail with account constraints.
+  let reserveX = SystemProgram.programId;
+  let reserveY = SystemProgram.programId;
+  if (dlmmPool) {
+    if ((dlmmPool as any).reserveX) reserveX = (dlmmPool as any).reserveX;
+    if ((dlmmPool as any).reserveY) reserveY = (dlmmPool as any).reserveY;
+    // As a last resort, try to read from the lbPair account data (common offsets in Meteora DLMM)
+    if (reserveX.equals(SystemProgram.programId) || reserveY.equals(SystemProgram.programId)) {
+      try {
+        const pairInfo = await conn.getAccountInfo(lbPair);
+        if (pairInfo && pairInfo.data.length > 200) {
+          // Heuristic: reserves are often two 32-byte pubkeys early in the struct after disc + other fields
+          // This is best-effort; if wrong the close ix will give a clear constraint error.
+          const d = pairInfo.data;
+          // Try common offset for reserve_x (varies by version, around 40-100+)
+          for (let off = 40; off < 120; off += 8) {
+            if (d.length > off + 64) {
+              const candX = new PublicKey(d.slice(off, off + 32));
+              const candY = new PublicKey(d.slice(off + 32, off + 64));
+              // Quick sanity: they should be owned by Token or Token-2022
+              const ix = await conn.getAccountInfo(candX);
+              if (ix && (ix.owner.toBase58().startsWith('Token') || ix.owner.equals(SystemProgram.programId))) {
+                reserveX = candX;
+                reserveY = candY;
+                break;
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+  }
 
   const ix = new TransactionInstruction({
     programId: DLMM_PROGRAM_ID,
