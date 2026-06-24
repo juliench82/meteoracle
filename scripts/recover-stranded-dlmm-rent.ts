@@ -36,6 +36,7 @@ import {
   sendAndConfirmTransaction,
   ComputeBudgetProgram,
   SendTransactionError,
+  SYSVAR_RENT_PUBKEY,
 } from '@solana/web3.js';
 import {
   TOKEN_PROGRAM_ID,
@@ -311,6 +312,64 @@ async function closeGhostPositionRaw(
   }
 }
 
+async function tryInitializeGhost(
+  dlmmPool: any,
+  positionPubKey: PublicKey,
+  wallet: any,
+  minBinId: number | undefined,
+  maxBinId: number | undefined,
+  label: string,
+  connection: any
+): Promise<boolean> {
+  let lower = minBinId;
+  let width = (typeof minBinId === 'number' && typeof maxBinId === 'number') ? (maxBinId - minBinId) : undefined;
+
+  if (typeof lower !== 'number' || typeof width !== 'number' || width <= 0) {
+    // Guess a range around current active bin (width ~140 like the known case)
+    try {
+      const active = await dlmmPool.getActiveBin();
+      lower = active.binId - 70;
+      width = 140;
+      console.log(`${label} no range provided — guessing around active bin ${active.binId}: lower=${lower} width=${width}`);
+    } catch (e) {
+      console.log(`${label} could not guess range for init, skipping init step`);
+      return false;
+    }
+  }
+
+  try {
+    console.log(`${label} attempting initializePosition (lower=${lower}, width=${width}) to materialize the ghost...`);
+    const ix = await dlmmPool.program.methods
+      .initializePosition(lower, width)
+      .accounts({
+        payer: wallet.publicKey,
+        position: positionPubKey,
+        lbPair: dlmmPool.pubkey,
+        owner: wallet.publicKey,
+        rent: SYSVAR_RENT_PUBKEY,
+        program: dlmmPool.program.programId,
+      })
+      .instruction();
+
+    const tx = new Transaction()
+      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }))
+      .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }))
+      .add(ix);
+
+    tx.feePayer = wallet.publicKey;
+    const { blockhash } = await connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = blockhash;
+
+    const sig = await sendAndConfirmTransaction(connection, tx, [wallet], { commitment: 'confirmed' });
+    console.log(`${label} ghost initialized ✔ ${sig}`);
+    return true;
+  } catch (e: any) {
+    console.error(`${label} initialize failed: ${e?.message || e}`);
+    if (e?.logs) console.log('  init logs:', e.logs);
+    return false;
+  }
+}
+
 async function main() {
   const wallet = getWallet();
   const connection = getConnection();
@@ -385,13 +444,36 @@ async function main() {
       } catch (rawErr: any) {
         console.error(`  Raw failed: ${rawErr?.message || rawErr}`);
         // Extra: full SendTransactionError details as recommended
+        let logs: string[] = [];
         if (rawErr instanceof SendTransactionError || rawErr?.getLogs || rawErr?.logs) {
           try {
-            const logs = rawErr.logs || (await rawErr.getLogs?.(connection));
+            logs = rawErr.logs || (await rawErr.getLogs?.(connection)) || [];
             if (logs?.length) console.log("  SendTransactionError full logs:\n" + logs.map((l: string) => "    " + l).join("\n"));
           } catch {}
         }
-        console.warn(`  Position rent may be locked (manual recovery needed via key ${s.pubkey})`);
+        const isDiscMismatch = (rawErr?.message || '').includes('AccountDiscriminatorMismatch') ||
+          (rawErr?.message || '').includes('0xbba') ||
+          logs.some((l: string) => l.includes('AccountDiscriminatorMismatch') || l.includes('0xbba'));
+
+        if (isDiscMismatch && dlmmPool) {
+          console.log(`  Detected AccountDiscriminatorMismatch on ghost position. Trying initializePosition first to materialize it...`);
+          const didInit = await tryInitializeGhost(dlmmPool, pub, wallet, s.minBin, s.maxBin, `[recover-${s.pubkey.slice(0,8)}]`, connection);
+          if (didInit) {
+            try {
+              const sig2 = await closeGhostPositionRaw(connection, wallet, pub, lbPair, dlmmPool, s.minBin, s.maxBin);
+              console.log(`  ✔ Recovered via initialize + raw closePosition`);
+              console.log(`  Sig: ${sig2}`);
+              console.log(`  Explorer: https://explorer.solana.com/tx/${sig2}`);
+              recovered = true;
+            } catch (postInitErr: any) {
+              console.error(`  Close after init also failed: ${postInitErr?.message || postInitErr}`);
+            }
+          }
+        }
+
+        if (!recovered) {
+          console.warn(`  Position rent may be locked (manual recovery needed via key ${s.pubkey})`);
+        }
       }
     }
   }
