@@ -330,6 +330,7 @@ async function tryInitializeGhost(
       const active = await dlmmPool.getActiveBin();
       lower = active.binId - 70;
       width = 140;
+      if (lower < -1000) lower = Math.max(0, active.binId - 70); // some pools dislike very negative; adjust if init fails
       console.log(`${label} no range provided — guessing around active bin ${active.binId}: lower=${lower} width=${width}`);
     } catch (e) {
       console.log(`${label} could not guess range for init, skipping init step`);
@@ -339,7 +340,9 @@ async function tryInitializeGhost(
 
   try {
     console.log(`${label} attempting initializePosition (lower=${lower}, width=${width}) to materialize the ghost...`);
-    const tx = await dlmmPool.program.methods
+
+    // Build the ix first
+    let initIx = await dlmmPool.program.methods
       .initializePosition(lower, width)
       .accounts({
         payer: wallet.publicKey,
@@ -349,28 +352,25 @@ async function tryInitializeGhost(
         rent: SYSVAR_RENT_PUBKEY,
         program: dlmmPool.program.programId,
       })
-      .transaction();
+      .instruction();
 
-    // Patch the initializePosition instruction: for pre-created ghost accounts the position must NOT be a signer.
-    // The builder marks it as signer (for the fresh-keypair + createAccount case).
-    // We set isSigner=false so only the wallet (payer) needs to sign.
-    // This avoids "Missing signature for [position]" and "signer privilege escalated".
-    if (tx.instructions.length > 0) {
-      const initIx = tx.instructions[0];
-      initIx.keys = initIx.keys.map((k: any) => {
-        if (k.pubkey.equals(positionPubKey)) {
-          return { pubkey: k.pubkey, isSigner: false, isWritable: k.isWritable };
-        }
-        return k;
-      });
-    }
+    // Patch for pre-created ghost: force the position to NOT be a signer.
+    // The IDL/builder marks it signer for the "new keypair" case.
+    // For ghosts we set isSigner=false so the tx does not require a signature for the position pubkey
+    // (we only have the wallet key). This avoids the "signer privilege escalated" / "unauthorized signer" runtime errors.
+    initIx.keys = initIx.keys.map((k: any) => {
+      if (k.pubkey.equals(positionPubKey)) {
+        return { pubkey: k.pubkey, isSigner: false, isWritable: true };
+      }
+      return k;
+    });
 
-    // Add priority fees at the front
-    const priorityIx = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }),
-    ];
-    tx.instructions.unshift(...priorityIx);
+    // Build tx from scratch with patched ix (budgets first, then the init ix).
+    // This guarantees the serialized message has the position with isSigner=false.
+    const tx = new Transaction();
+    tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
+    tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }));
+    tx.add(initIx);
 
     tx.feePayer = wallet.publicKey;
     const { blockhash } = await connection.getLatestBlockhash('confirmed');
