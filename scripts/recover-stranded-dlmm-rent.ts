@@ -320,7 +320,7 @@ async function tryInitializeGhost(
   maxBinId: number | undefined,
   label: string,
   connection: any
-): Promise<boolean> {
+): Promise<{ success: boolean; lower?: number; width?: number }> {
   let lower = minBinId;
   let width = (typeof minBinId === 'number' && typeof maxBinId === 'number') ? (maxBinId - minBinId) : undefined;
 
@@ -333,13 +333,13 @@ async function tryInitializeGhost(
       console.log(`${label} no range provided — guessing around active bin ${active.binId}: lower=${lower} width=${width}`);
     } catch (e) {
       console.log(`${label} could not guess range for init, skipping init step`);
-      return false;
+      return { success: false };
     }
   }
 
   try {
     console.log(`${label} attempting initializePosition (lower=${lower}, width=${width}) to materialize the ghost...`);
-    const ix = await dlmmPool.program.methods
+    let ix = await dlmmPool.program.methods
       .initializePosition(lower, width)
       .accounts({
         payer: wallet.publicKey,
@@ -350,6 +350,16 @@ async function tryInitializeGhost(
         program: dlmmPool.program.programId,
       })
       .instruction();
+
+    // Patch: for pre-created ghost accounts, the position must NOT be a signer
+    // (the SDK builder marks it signer because in normal flow it's a fresh keypair for createAccount).
+    // Only the payer (wallet) signs this tx.
+    ix.keys = ix.keys.map((k: any) => {
+      if (k.pubkey.equals(positionPubKey)) {
+        return { ...k, isSigner: false };
+      }
+      return k;
+    });
 
     const tx = new Transaction()
       .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }))
@@ -362,11 +372,11 @@ async function tryInitializeGhost(
 
     const sig = await sendAndConfirmTransaction(connection, tx, [wallet], { commitment: 'confirmed' });
     console.log(`${label} ghost initialized ✔ ${sig}`);
-    return true;
+    return { success: true, lower, width };
   } catch (e: any) {
     console.error(`${label} initialize failed: ${e?.message || e}`);
     if (e?.logs) console.log('  init logs:', e.logs);
-    return false;
+    return { success: false };
   }
 }
 
@@ -457,10 +467,14 @@ async function main() {
 
         if (isDiscMismatch && dlmmPool) {
           console.log(`  Detected AccountDiscriminatorMismatch on ghost position. Trying initializePosition first to materialize it...`);
-          const didInit = await tryInitializeGhost(dlmmPool, pub, wallet, s.minBin, s.maxBin, `[recover-${s.pubkey.slice(0,8)}]`, connection);
-          if (didInit) {
+          const initRes = await tryInitializeGhost(dlmmPool, pub, wallet, s.minBin, s.maxBin, `[recover-${s.pubkey.slice(0,8)}]`, connection);
+          if (initRes.success) {
+            const useMin = initRes.lower ?? s.minBin;
+            const useMax = (typeof initRes.lower === 'number' && typeof initRes.width === 'number')
+              ? initRes.lower + initRes.width
+              : s.maxBin;
             try {
-              const sig2 = await closeGhostPositionRaw(connection, wallet, pub, lbPair, dlmmPool, s.minBin, s.maxBin);
+              const sig2 = await closeGhostPositionRaw(connection, wallet, pub, lbPair, dlmmPool, useMin, useMax);
               console.log(`  ✔ Recovered via initialize + raw closePosition`);
               console.log(`  Sig: ${sig2}`);
               console.log(`  Explorer: https://explorer.solana.com/tx/${sig2}`);
