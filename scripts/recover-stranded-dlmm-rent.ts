@@ -5,14 +5,25 @@
  * These have rent paid (account assigned to LBUZ program) but initializePosition never succeeded
  * (data remains zeroed, ~0.128 SOL rent locked per account).
  *
- * Usage (recommended on server with .env.local):
- *   npx tsx --tsconfig tsconfig.worker.json scripts/recover-stranded-dlmm-rent.ts
+ * CRITICAL UNDERSTANDING:
+ * - The position accounts were created using a fresh Keypair (the "position keypair").
+ * - The createAccount tx required that keypair to sign (standard for keypair-owned new accounts).
+ * - initializePosition was never successfully called, so no Position struct (with its Anchor discriminator) was written.
+ * - closePosition (and remove) always deserialize the position account as `Position`; zero data => AccountDiscriminatorMismatch (0xbba).
+ * - initializePosition's IDL declares the `position` account as `signer`. The on-chain handler / its CPIs require the signer privilege on that pubkey.
+ * - Without the original ephemeral position Keypair's private key, we cannot provide a valid signature for the position account.
+ * - Patching isSigner:false lets the tx send, but then the program rejects with "signer privilege escalated" / "unauthorized signer or writable account" (because it expected/used the position as signer).
  *
- * The script auto-loads .env.local (same as the worker).
- * - Provide pool for each (from your open attempt logs or create tx context).
- * - Provide min/maxBin when known (from failure logs) to help bin array accounts.
- * - Prefers the SDK tryCloseEmptyPosition (used by bot/monitor), falls back to raw close with correct disc.
- * - Catches SendTransactionError and calls getLogs() for full details (per program errors).
+ * Result: these ghosts cannot be initialized or closed from the wallet alone.
+ * The rent is unrecoverable unless you can recover the original position keypairs for these exact pubkeys.
+ *
+ * The script will attempt raw close (shows the clear 0xbba) and, by default, will NOT auto-attempt init (it always fails the same way).
+ * Set TRY_INIT_GHOSTS=true to force the init attempts (for diagnosis only).
+ *
+ * Prevention (already in bot): atomic createAccount + initializePosition in one tx + finally { tryClose + persist for monitor }.
+ *
+ * Usage:
+ *   npx tsx --tsconfig tsconfig.worker.json scripts/recover-stranded-dlmm-rent.ts
  */
 
 import * as dotenv from 'dotenv'
@@ -58,16 +69,47 @@ function getAnchorDiscriminator(name: string): Buffer {
 function loadDiscriminators() {
   // Prefer computed (reliable). Fall back only if needed.
   const closeDisc = getAnchorDiscriminator('close_position');
+  const closeV2Disc = getAnchorDiscriminator('close_position_v2');
   const initDisc = getAnchorDiscriminator('initialize_position');
-  // Also try camelCase variants if the deployed program registered differently (rare)
-  console.log(`[disc] close_position: [${closeDisc.join(', ')}]`);
+
+  console.log(`[disc] close_position:    [${closeDisc.join(', ')}]`);
+  console.log(`[disc] close_position_v2: [${closeV2Disc.join(', ')}]`);
+  console.log(`[disc] initialize_position: [${initDisc.join(', ')}]`);
+
+  // Try to load real IDL from the package to list all close* instructions
+  try {
+    const fs = require('fs');
+    const pkgDir = path.join(process.cwd(), 'node_modules/@meteora-ag/dlmm');
+    let idlPath = path.join(pkgDir, 'dist/idl/dlmm.json');
+    if (!fs.existsSync(idlPath)) idlPath = path.join(pkgDir, 'idl/dlmm.json');
+    if (fs.existsSync(idlPath)) {
+      const idl = JSON.parse(fs.readFileSync(idlPath, 'utf8'));
+      console.log('[disc] IDL close-related instructions:');
+      (idl.instructions || []).forEach((ix: any) => {
+        if (/close|position/i.test(ix.name)) {
+          const d = ix.discriminator ? Buffer.from(ix.discriminator) : getAnchorDiscriminator(ix.name.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, ''));
+          console.log(`  ${ix.name}: [${[...d].join(', ')}]`);
+        }
+      });
+    }
+  } catch (e) {
+    // ignore if no IDL or on server without full package
+  }
+
+  // Default to V2 if we suspect V2 accounts (dataLen ~18304), else V1. Caller can override.
   return {
     close: closeDisc,
+    closeV2: closeV2Disc,
     initialize: initDisc,
   };
 }
 
 const DISCRIMINATORS = loadDiscriminators();
+
+// Simple heuristic: V2 positions are larger
+function isLikelyV2(dataLen: number | undefined): boolean {
+  return !!dataLen && dataLen >= 18200; // 18304 observed for V2
+}
 
 const STRANDED = [
   // Full accurate list from consolidated createAccount scan (wallet GULXj8Fk...)
@@ -130,8 +172,11 @@ async function closeGhostPositionRaw(
   minBinId?: number,
   maxBinId?: number
 ): Promise<string> {
-  // Always use the computed correct discriminator
-  const closeDiscriminator = DISCRIMINATORS.close;
+  // Use the version-appropriate discriminator chosen by main() based on observed on-chain dataLen.
+  // main() also prints the actual first 16 bytes of the position data so we can see the real discriminator (or zeros).
+  const closeDiscriminator = (globalThis as any).__CHOSEN_CLOSE_DISC
+    || DISCRIMINATORS.closeV2
+    || DISCRIMINATORS.close;
 
   const eventAuthority = PublicKey.findProgramAddressSync(
     [Buffer.from("__event_authority")],
@@ -312,6 +357,17 @@ async function closeGhostPositionRaw(
   }
 }
 
+/**
+ * tryInitializeGhost
+ *
+ * Attempts to call initializePosition on a pre-created but zero-data ghost.
+ * This is almost always doomed for these accounts because:
+ * - We don't have the original position Keypair.
+ * - The instruction requires that keypair to sign (position account is "signer" in the IDL).
+ *
+ * We only call this if TRY_INIT_GHOSTS=true (for diagnosis).
+ * It will log the exact signer escalation and the explanation.
+ */
 async function tryInitializeGhost(
   dlmmPool: any,
   positionPubKey: PublicKey,
@@ -382,6 +438,16 @@ async function tryInitializeGhost(
   } catch (e: any) {
     console.error(`${label} initialize failed: ${e?.message || e}`);
     if (e?.logs) console.log('  init logs:', e.logs);
+    const msg = (e?.message || '') + ' ' + (e?.logs || []).join(' ');
+    if (msg.includes('signer privilege escalated') || msg.includes('unauthorized signer or writable account')) {
+      console.log(`
+  >>> The "signer privilege escalated" / "unauthorized signer" on InitializePosition is expected.
+  The instruction requires the position pubkey to be a signer (IDL declares it signer; the program and any CPIs it makes require the privilege).
+  We patched isSigner=false and only signed with the wallet, so the runtime lets the tx in but the program/CPI rejects because it didn't get the expected signer flag on the position.
+  Without a signature from the original Keypair that corresponds to this position address, there is no way to call initializePosition successfully.
+  (That keypair was generated at open time with Keypair.generate() and only the pubkey was kept in state/logs.)
+`);
+    }
     return { success: false };
   }
 }
@@ -393,6 +459,15 @@ async function main() {
 
   console.log(`Recovering ${STRANDED.length} stranded DLMM position accounts...`);
   console.log(`[disc] using close disc = [${DISCRIMINATORS.close.join(', ')}]`);
+  console.log(`
+NOTE ON GHOSTS: These position accounts have data length but zero content (no Anchor Position discriminator).
+initializePosition requires the position pubkey to be a *signer* in the tx (IDL + program logic/CPI).
+We have no private key for these (they were ephemeral Keypairs at open time, only pubkey was persisted).
+Without that sig, init fails with "signer privilege escalated".
+Without init, close always fails deserial with 0xbba.
+By default we only do raw close (shows the clear error). Set TRY_INIT_GHOSTS=true only for extra diagnostics.
+If you ever recover the original position keypairs, we can sign init with [wallet, positionKeypair].
+`);
   console.log('Full list:');
   for (const s of STRANDED) {
     const src = (s as any).sourceTx ? `sourceTx=${(s as any).sourceTx.slice(0,16)}` : (s as any).createSig ? `createSig=${(s as any).createSig.slice(0,16)}` : '';
@@ -417,9 +492,11 @@ async function main() {
       console.log(`  Warning: could not create DLMM pool object for raw path`);
     }
 
-    // 1. Preferred: use the same path the bot uses for ghosts (skip remove if no bins, direct closePosition)
+    // 1. SDK path (tryCloseEmptyPosition). For ghosts (no range) we know dlmmPool.closePosition() will throw inside the SDK
+    // (TypeError on .publicKey because it assumes valid position data). Skip straight to raw for no-range to keep output clean.
     let recovered = false;
-    if (dlmmPool && typeof dlmmPool.closePosition === 'function') {
+    const hasRange = typeof s.minBin === 'number' && typeof s.maxBin === 'number';
+    if (dlmmPool && typeof dlmmPool.closePosition === 'function' && hasRange) {
       try {
         console.log(`  Trying SDK path via tryCloseEmptyPosition (dlmmPool.closePosition) ...`);
         await tryCloseEmptyPosition(
@@ -431,7 +508,6 @@ async function main() {
           `[recover-${s.pubkey.slice(0,8)}]`,
           300000 // high prio
         );
-        // tryClose logs its own success/failure traces. Check on-chain to confirm reclaim.
         const after = await connection.getAccountInfo(pub).catch(() => null);
         if (!after || after.lamports === 0 || (after.data && after.data.length < 100)) {
           console.log(`  ✔ Appears reclaimed (account gone or zeroed).`);
@@ -446,14 +522,25 @@ async function main() {
           try { console.log("  SDK getLogs():", await sdkErr.getLogs(connection)); } catch {}
         }
       }
+    } else if (!hasRange) {
+      console.log(`  Skipping SDK closePosition for ghost (no range) -- it throws inside the SDK on zero data. Going to raw.`);
     }
 
+    // Fetch on-chain data for this position so we can pick V1 vs V2 close and show the actual discriminator bytes on chain.
+    const posInfo = await connection.getAccountInfo(pub).catch(() => null);
+    const dataLen = posInfo?.data?.length || 0;
+    const first16 = posInfo?.data ? Buffer.from(posInfo.data.slice(0, 16)).toString('hex') : 'n/a';
+    const useV2 = isLikelyV2(dataLen);
+    const chosenDisc = useV2 ? (DISCRIMINATORS.closeV2 || DISCRIMINATORS.close) : DISCRIMINATORS.close;
+    console.log(`  on-chain dataLen=${dataLen} first16=${first16} → using ${useV2 ? 'close_position_v2' : 'close_position'}`);
+
     if (!recovered) {
-      // 2. Fallback raw with correct disc (for true zeroed ghosts)
+      // Raw close with version-appropriate disc. We do not auto-try initializePosition (requires lost position keypair as signer).
       try {
-        console.log(`  Trying raw closePosition with correct discriminator + high prio...`);
+        console.log(`  Trying raw ${useV2 ? 'closePositionV2' : 'closePosition'} with correct discriminator + high prio...`);
+        (globalThis as any).__CHOSEN_CLOSE_DISC = chosenDisc;
         const sig = await closeGhostPositionRaw(connection, wallet, pub, lbPair, dlmmPool, s.minBin, s.maxBin);
-        console.log(`  ✔ Recovered via raw closePosition`);
+        console.log(`  ✔ Recovered via raw close`);
         console.log(`  Sig: ${sig}`);
         console.log(`  Explorer: https://explorer.solana.com/tx/${sig}`);
         recovered = true;
@@ -471,29 +558,24 @@ async function main() {
           (rawErr?.message || '').includes('0xbba') ||
           logs.some((l: string) => l.includes('AccountDiscriminatorMismatch') || l.includes('0xbba'));
 
-        if (isDiscMismatch && dlmmPool) {
-          console.log(`  Detected AccountDiscriminatorMismatch on ghost position. Trying initializePosition first to materialize it...`);
-          const initRes = await tryInitializeGhost(dlmmPool, pub, wallet, s.minBin, s.maxBin, `[recover-${s.pubkey.slice(0,8)}]`, connection);
-          if (initRes.success) {
-            const useMin = initRes.lower ?? s.minBin;
-            const useMax = (typeof initRes.lower === 'number' && typeof initRes.width === 'number')
-              ? initRes.lower + initRes.width
-              : s.maxBin;
-            try {
-              const sig2 = await closeGhostPositionRaw(connection, wallet, pub, lbPair, dlmmPool, useMin, useMax);
-              console.log(`  ✔ Recovered via initialize + raw closePosition`);
-              console.log(`  Sig: ${sig2}`);
-              console.log(`  Explorer: https://explorer.solana.com/tx/${sig2}`);
-              recovered = true;
-            } catch (postInitErr: any) {
-              console.error(`  Close after init also failed: ${postInitErr?.message || postInitErr}`);
-            }
-          }
+        if (isDiscMismatch) {
+          console.log(`
+  >>> AccountDiscriminatorMismatch (0xbba / 3002) on the position account.
+  On-chain first 16 bytes: ${first16} (dataLen=${dataLen}).
+  The account was created (rent paid, owned by LBUZ, correct size) but initializePosition was never successfully executed (or used the wrong V1/V2 variant).
+  The close instruction (V1 or V2) deserializes as a Position struct; the leading bytes don't match.
+  initializePosition cannot be used — it requires the position pubkey to be a signer (lost ephemeral Keypair from create time).
+  Without the original key for this exact pubkey you cannot write the discriminator and cannot close.
+  These specific ghosts are not recoverable from the current wallet with normal DLMM instructions.
+  (If you recover the position keypairs, we can add code to sign init txs with [wallet, positionKeypair].)
+`);
         }
 
         if (!recovered) {
           console.warn(`  Position rent may be locked (manual recovery needed via key ${s.pubkey})`);
         }
+      } finally {
+        delete (globalThis as any).__CHOSEN_CLOSE_DISC;
       }
     }
   }
