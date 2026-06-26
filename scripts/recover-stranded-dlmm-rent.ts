@@ -67,16 +67,20 @@ function getAnchorDiscriminator(name: string): Buffer {
 }
 
 function loadDiscriminators() {
-  // Prefer computed (reliable). Fall back only if needed.
-  const closeDisc = getAnchorDiscriminator('close_position');
-  const closeV2Disc = getAnchorDiscriminator('close_position_v2');
-  const initDisc = getAnchorDiscriminator('initialize_position');
+  let closeDisc = getAnchorDiscriminator('close_position');
+  let closeV2Disc = getAnchorDiscriminator('close_position_v2');
+  let initDisc = getAnchorDiscriminator('initialize_position');
 
-  console.log(`[disc] close_position:    [${closeDisc.join(', ')}]`);
-  console.log(`[disc] close_position_v2: [${closeV2Disc.join(', ')}]`);
-  console.log(`[disc] initialize_position: [${initDisc.join(', ')}]`);
+  console.log(`[disc] computed close_position:    [${closeDisc.join(', ')}]`);
+  console.log(`[disc] computed close_position_v2: [${closeV2Disc.join(', ')}]`);
+  console.log(`[disc] computed initialize_position: [${initDisc.join(', ')}]`);
 
-  // Try to load real IDL from the package to list all close* instructions
+  // When the real IDL is loadable, the code below will print the exact bytes the *installed package* declares
+  // and will prefer those over our name-based hash for the close instructions.
+
+  let foundCloseV2FromIdl = false;
+
+  // Load the real IDL that was used to build the on-chain program and use the *exact* discriminator bytes it declares.
   try {
     const fs = require('fs');
     const pkgDir = path.join(process.cwd(), 'node_modules/@meteora-ag/dlmm');
@@ -84,19 +88,34 @@ function loadDiscriminators() {
     if (!fs.existsSync(idlPath)) idlPath = path.join(pkgDir, 'idl/dlmm.json');
     if (fs.existsSync(idlPath)) {
       const idl = JSON.parse(fs.readFileSync(idlPath, 'utf8'));
-      console.log('[disc] IDL close-related instructions:');
-      (idl.instructions || []).forEach((ix: any) => {
-        if (/close|position/i.test(ix.name)) {
-          const d = ix.discriminator ? Buffer.from(ix.discriminator) : getAnchorDiscriminator(ix.name.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, ''));
-          console.log(`  ${ix.name}: [${[...d].join(', ')}]`);
+      console.log('[disc] === Real IDL instructions from installed @meteora-ag/dlmm ===');
+      for (const ix of (idl.instructions || [])) {
+        if (/close.*position|position.*close/i.test(ix.name)) {
+          const d = ix.discriminator ? Buffer.from(ix.discriminator) : null;
+          if (d) {
+            console.log(`  ${ix.name} (IDL): [${[...d].join(', ')}]`);
+            // Prefer any instruction that looks like the V2 close
+            if (/v2|2$/i.test(ix.name) && !foundCloseV2FromIdl) {
+              closeV2Disc = d;
+              foundCloseV2FromIdl = true;
+            } else if (!/v2|2$/i.test(ix.name)) {
+              // keep the non-v2 as the default close
+              closeDisc = d;
+            }
+          }
         }
-      });
+        if (/^initializePosition$/i.test(ix.name) || /initialize.*position/i.test(ix.name)) {
+          if (ix.discriminator) {
+            initDisc = Buffer.from(ix.discriminator);
+            console.log(`  ${ix.name} (IDL): [${[...initDisc].join(', ')}]`);
+          }
+        }
+      }
     }
   } catch (e) {
-    // ignore if no IDL or on server without full package
+    console.log('[disc] Could not load real IDL from package, using computed discriminators only.');
   }
 
-  // Default to V2 if we suspect V2 accounts (dataLen ~18304), else V1. Caller can override.
   return {
     close: closeDisc,
     closeV2: closeV2Disc,
@@ -178,6 +197,47 @@ async function closeGhostPositionRaw(
     || DISCRIMINATORS.closeV2
     || DISCRIMINATORS.close;
 
+  // If we have a dlmmPool, prefer letting the SDK build the close instruction (correct disc + correct account metas for the installed SDK version).
+  // This is much safer than our hand-rolled list, especially for V2.
+  if (dlmmPool && dlmmPool.program && typeof dlmmPool.program.methods?.closePosition === 'function') {
+    try {
+      // Try the V2 method first if we decided we want V2, otherwise the regular one.
+      const methodName = (globalThis as any).__CHOSEN_CLOSE_DISC === DISCRIMINATORS.closeV2
+        ? 'closePositionV2'
+        : 'closePosition';
+
+      const closeMethod = (dlmmPool.program.methods as any)[methodName];
+      if (typeof closeMethod === 'function') {
+        const builtIx = await closeMethod()
+          .accounts({
+            position: positionPubkey,
+            lbPair: lbPair,
+            // The SDK will fill the rest (bin arrays, reserves, token accounts, event authority, etc.)
+          })
+          .instruction();
+
+        // Add priority fees + any ATA creates we decided we needed.
+        const tx = new Transaction();
+        tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
+        tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }));
+
+        // We still want the ATAs created if they don't exist (the SDK close may assume they do for fee claiming).
+        // (the ataIxs block below will still run for that)
+
+        tx.add(builtIx);
+        tx.feePayer = wallet.publicKey;
+        const { blockhash } = await conn.getLatestBlockhash("confirmed");
+        tx.recentBlockhash = blockhash;
+
+        return await sendAndConfirmTransaction(conn, tx, [wallet], { commitment: "confirmed" });
+      }
+    } catch (sdkBuildErr) {
+      console.log("  SDK could not build close ix, falling back to manual raw list:", (sdkBuildErr as any)?.message || sdkBuildErr);
+    }
+  }
+
+  // --- fallback: manual raw instruction (what we had before) ---
+
   const eventAuthority = PublicKey.findProgramAddressSync(
     [Buffer.from("__event_authority")],
     DLMM_PROGRAM_ID
@@ -196,8 +256,6 @@ async function closeGhostPositionRaw(
   }
 
   // Always resolve the *actual* token program by reading the mint account's owner.
-  // This is critical for Token-2022 mints (many meme pools) vs legacy SPL Token.
-  // The dlmmPool.tokenX.tokenProgram is sometimes missing or incorrect.
   const resolveTokenProgram = async (mint: PublicKey): Promise<PublicKey> => {
     const NATIVE_SOL = 'So11111111111111111111111111111111111111112';
     if (mint.toBase58() === NATIVE_SOL) return TOKEN_PROGRAM_ID;
@@ -212,11 +270,9 @@ async function closeGhostPositionRaw(
   tokenXProgram = await resolveTokenProgram(tokenXMint);
   tokenYProgram = await resolveTokenProgram(tokenYMint);
 
-  // Proper user ATAs (close will claim any dust fees here)
   const userTokenX = getAssociatedTokenAddressSync(tokenXMint, wallet.publicKey, false, tokenXProgram);
   const userTokenY = getAssociatedTokenAddressSync(tokenYMint, wallet.publicKey, false, tokenYProgram);
 
-  // Ensure the ATAs exist (idempotent, no-op + no extra rent if present). Critical for close to succeed on fee accounts.
   const ataIxs: TransactionInstruction[] = [];
   try {
     const infoX = await conn.getAccountInfo(userTokenX).catch(() => null);
@@ -247,12 +303,10 @@ async function closeGhostPositionRaw(
     }
   } catch {}
 
-  // Bin arrays + bitmap extension: use real if range known, else fall back (may still work for ghosts)
   let binArrayLower = SystemProgram.programId;
   let binArrayUpper = SystemProgram.programId;
   let binArrayBitmapExtension = SystemProgram.programId;
 
-  // Try to compute a real bitmap extension PDA (common for DLMM)
   try {
     const [bitmap] = PublicKey.findProgramAddressSync(
       [Buffer.from("bitmap"), lbPair.toBuffer()],
@@ -275,38 +329,11 @@ async function closeGhostPositionRaw(
     }
   }
 
-  // Try to populate real reserve vaults (token accounts owned by the pair) from the dlmmPool if the SDK exposed them.
-  // Placeholders often cause the close ix to fail with account constraints.
   let reserveX = SystemProgram.programId;
   let reserveY = SystemProgram.programId;
   if (dlmmPool) {
     if ((dlmmPool as any).reserveX) reserveX = (dlmmPool as any).reserveX;
     if ((dlmmPool as any).reserveY) reserveY = (dlmmPool as any).reserveY;
-    // As a last resort, try to read from the lbPair account data (common offsets in Meteora DLMM)
-    if (reserveX.equals(SystemProgram.programId) || reserveY.equals(SystemProgram.programId)) {
-      try {
-        const pairInfo = await conn.getAccountInfo(lbPair);
-        if (pairInfo && pairInfo.data.length > 200) {
-          // Heuristic: reserves are often two 32-byte pubkeys early in the struct after disc + other fields
-          // This is best-effort; if wrong the close ix will give a clear constraint error.
-          const d = pairInfo.data;
-          // Try common offset for reserve_x (varies by version, around 40-100+)
-          for (let off = 40; off < 120; off += 8) {
-            if (d.length > off + 64) {
-              const candX = new PublicKey(d.slice(off, off + 32));
-              const candY = new PublicKey(d.slice(off + 32, off + 64));
-              // Quick sanity: they should be owned by Token or Token-2022
-              const ix = await conn.getAccountInfo(candX);
-              if (ix && (ix.owner.toBase58().startsWith('Token') || ix.owner.equals(SystemProgram.programId))) {
-                reserveX = candX;
-                reserveY = candY;
-                break;
-              }
-            }
-          }
-        }
-      } catch {}
-    }
   }
 
   const ix = new TransactionInstruction({
