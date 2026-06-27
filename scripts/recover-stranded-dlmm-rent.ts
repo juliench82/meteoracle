@@ -43,6 +43,9 @@ dotenv.config({
 import { getConnection, getWallet } from '@/lib/solana';
 import { getDLMM } from '@/bot/executor/utils';
 import { tryCloseEmptyPosition } from '@/bot/executor/open';
+import { getPendingScaffolds, removePendingScaffold } from '@/bot/executor/persistence';
+import { Keypair, Transaction, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { ComputeBudgetProgram } from '@solana/web3.js';
 import {
   PublicKey,
   Transaction,
@@ -450,17 +453,13 @@ async function main() {
   console.log(`Recovering ${STRANDED.length} stranded DLMM position accounts...`);
   console.log(`[disc] using close disc (IDL or computed) = [${[...DISCRIMINATORS.close].join(', ')}]`);
   console.log(`
-NOTE ON GHOSTS (root cause confirmed):
-- createAccount (System) gave the accounts correct owner + size + rent (~0.128 SOL each).
-- initializePosition was never successfully executed (first 16 bytes are zeros).
-- closePosition (any variant) deserializes the "position" account expecting a valid Anchor Position (discriminator check) -> 0xbba.
-- initializePosition declares "position" as signer in IDL; the program/CPI enforces it. Ephemeral keypair from creation time is lost.
-- Result: these 5 accounts are unrecoverable with the current wallet alone.
+NOTE ON GHOSTS (root cause + status):
+- These 5 are create-only shells (rent paid, LBUZ owner, zero data). close always 0xbba (deserial). init requires the original position Keypair as signer.
+- For THESE specific accounts the rent (~0.64 SOL total) is unrecoverable without the lost ephemeral keypairs. 20+ runs with correct discs, builder, raw, high prio, ATAs etc. all confirm the same terminal errors.
+- NEW: the bot now persists the position secret *before* any create RPC (in open.ts + pending-position-scaffolds.json). monitor retry + this script will auto-init (with real signer) + close for any future partial ghosts.
+- Prevention is now the focus. Old ghosts without persisted secrets stay lost.
 
-We now always use the SDK builder (dlmmPool.program.methods.closePosition) when possible for a well-formed ix,
-then a single known-good raw close_position disc. No more guessing close_position_v2.
-
-Set TRY_INIT_GHOSTS=true only if you have the original position keypairs and want to test signing with them.
+We use SDK builder first (full accounts) + known close disc. No v2 guessing.
 `);
   console.log('Full list:');
   for (const s of STRANDED) {
@@ -484,6 +483,40 @@ Set TRY_INIT_GHOSTS=true only if you have the original position keypairs and wan
       console.log(`  DLMM pool loaded for ${lbPair.toBase58().slice(0,8)} (tokenX=${dlmmPool?.tokenX?.publicKey?.toBase58?.().slice(0,8)})`);
     } catch (e) {
       console.log(`  Warning: could not create DLMM pool object for raw path`);
+    }
+
+    // If the running bot persisted a secret for this pubkey (new prevention), use it here for a real init (with signer).
+    try {
+      const pending = getPendingScaffolds().find((p: any) => p.pubkey === s.pubkey);
+      if (pending && Array.isArray(pending.secret) && pending.secret.length === 64) {
+        const kp = Keypair.fromSecretKey(Uint8Array.from(pending.secret));
+        const lower = typeof s.minBin === 'number' ? s.minBin : 0;
+        const w = (typeof s.maxBin === 'number' && typeof s.minBin === 'number') ? (s.maxBin - s.minBin) : 140;
+        console.log(`  [recovery] pending secret found — initializing with signer lower=${lower} width=${w}`);
+        const initIx = await dlmmPool.program.methods
+          .initializePosition(lower, w)
+          .accounts({
+            payer: wallet.publicKey,
+            position: pub,
+            lbPair,
+            owner: wallet.publicKey,
+            rent: SYSVAR_RENT_PUBKEY,
+            program: dlmmPool.program.programId,
+          })
+          .instruction();
+        const tx = new Transaction();
+        tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
+        tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }));
+        tx.add(initIx);
+        tx.feePayer = wallet.publicKey;
+        const { blockhash } = await connection.getLatestBlockhash('confirmed');
+        tx.recentBlockhash = blockhash;
+        const sig = await sendAndConfirmTransaction(connection, tx, [wallet, kp], { commitment: 'confirmed' });
+        console.log(`  [recovery] initialized with secret ✔ ${sig}`);
+        removePendingScaffold(s.pubkey);
+      }
+    } catch (e: any) {
+      console.log(`  [recovery] secret init skipped/failed: ${e?.message || e}`);
     }
 
     // 1. SDK path (tryCloseEmptyPosition). For ghosts (no range) we know dlmmPool.closePosition() will throw inside the SDK

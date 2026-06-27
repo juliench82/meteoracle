@@ -9,6 +9,9 @@ import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
+import * as fs from 'fs'
+import * as path from 'path'
+import { atomicWriteJson } from '@/lib/atomic-write'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
@@ -321,4 +324,72 @@ export async function persistStrandedPositionRent(
   } catch (e) {
     console.warn('[executor] failed to persist stranded position rent marker:', e);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pending scaffold keypair persistence (prevention for ghost positions)
+// Persist the *secret* for a freshly generated position keypair *before* any
+// createAccount RPC or scaffold send. This allows later recovery of partial
+// creates (init + close) even after process restart.
+// The secret lives only for pending scaffolds and is removed on full success.
+
+const STATE_DIR = path.join(process.cwd(), 'state')
+const PENDING_SCAFFOLDS_FILE = path.join(STATE_DIR, 'pending-position-scaffolds.json')
+
+function ensureStateDir() {
+  if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true })
+}
+
+export interface PendingScaffold {
+  pubkey: string
+  secret: number[] // serializable Uint8Array
+  pool?: string
+  minBinId?: number
+  maxBinId?: number
+  createdAt: string
+}
+
+export function persistPendingScaffold(
+  pubkey: string,
+  secret: Uint8Array | number[],
+  pool?: string,
+  minBinId?: number,
+  maxBinId?: number
+) {
+  try {
+    ensureStateDir()
+    const list: PendingScaffold[] = getPendingScaffolds()
+    const secArr = secret instanceof Uint8Array ? Array.from(secret) : secret
+    const entry: PendingScaffold = {
+      pubkey,
+      secret: secArr,
+      pool,
+      minBinId,
+      maxBinId,
+      createdAt: new Date().toISOString(),
+    }
+    const next = list.filter((e) => e.pubkey !== pubkey)
+    next.push(entry)
+    atomicWriteJson(PENDING_SCAFFOLDS_FILE, next)
+  } catch (e) {
+    console.warn('[persistence] failed to persist pending scaffold keypair:', e)
+  }
+}
+
+export function getPendingScaffolds(): PendingScaffold[] {
+  ensureStateDir()
+  if (!fs.existsSync(PENDING_SCAFFOLDS_FILE)) return []
+  try {
+    const data = JSON.parse(fs.readFileSync(PENDING_SCAFFOLDS_FILE, 'utf8'))
+    return Array.isArray(data) ? data : []
+  } catch {
+    return []
+  }
+}
+
+export function removePendingScaffold(pubkey: string) {
+  try {
+    const list = getPendingScaffolds().filter((e) => e.pubkey !== pubkey)
+    atomicWriteJson(PENDING_SCAFFOLDS_FILE, list)
+  } catch {}
 }

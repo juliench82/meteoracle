@@ -14,7 +14,13 @@ import {
   getTvlChange24h,
   getTotalLps,
 } from '@/bot/scanner/pool-fetcher'
-import { PublicKey } from '@solana/web3.js'
+import { PublicKey, Keypair, Transaction, SYSVAR_RENT_PUBKEY } from '@solana/web3.js'
+import { ComputeBudgetProgram } from '@solana/web3.js'
+import { sendLegacyTx } from '@/lib/solana-tx'
+import {
+  getPendingScaffolds,
+  removePendingScaffold,
+} from '@/bot/executor/persistence'
 import {
   LP_FEE_TVL_EXIT_THRESHOLD,
   LP_OOR_EXIT_MINUTES,
@@ -410,6 +416,46 @@ export async function retryStrandedPositionRents() {
       const maxB = (s.metadata && typeof s.metadata.max_bin_id === 'number') ? s.metadata.max_bin_id : undefined;
 
       console.log(`[monitor] attempting reclaim for stranded rent ${s.position_pubkey.slice(0,8)} pool ${s.pool_address.slice(0,8)}`);
+
+      // If we persisted the secret early (before createAccount), use it now to initialize the ghost.
+      // This writes the Anchor discriminator so that closePosition can succeed.
+      try {
+        const pendings = getPendingScaffolds();
+        const match = pendings.find((p: any) => p.pubkey === s.position_pubkey);
+        if (match && Array.isArray(match.secret) && match.secret.length > 0) {
+          const kp = Keypair.fromSecretKey(Uint8Array.from(match.secret));
+          const lower = typeof minB === 'number' ? minB : 0;
+          const width = (typeof maxB === 'number' && typeof minB === 'number') ? (maxB - minB) : 140;
+          console.log(`[monitor] persisted secret found — initializing ${s.position_pubkey.slice(0,8)} lower=${lower} width=${width}`);
+
+          const initIx = await dlmmPool.program.methods
+            .initializePosition(lower, width)
+            .accounts({
+              payer: wallet.publicKey,
+              position: pub,
+              lbPair: dlmmPool.pubkey,
+              owner: wallet.publicKey,
+              rent: SYSVAR_RENT_PUBKEY,
+              program: dlmmPool.program.programId,
+            })
+            .instruction();
+
+          const initTx = new Transaction();
+          initTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
+          initTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200_000 }));
+          initTx.add(initIx);
+          const { blockhash } = await connection.getLatestBlockhash('confirmed');
+          initTx.recentBlockhash = blockhash;
+          initTx.feePayer = wallet.publicKey;
+
+          const initSig = await sendLegacyTx(initTx, [wallet, kp], `[monitor-stray-init-${s.position_pubkey.slice(0,8)}]`);
+          console.log(`[monitor] ghost initialized via persisted secret ✔ ${initSig}`);
+          removePendingScaffold(s.position_pubkey);
+        }
+      } catch (initErr: any) {
+        console.warn(`[monitor] secret init attempt failed for ${s.position_pubkey.slice(0,8)} (will try close anyway): ${initErr?.message || initErr}`);
+      }
+
       // Use the exported tryClose (it now supports optional bins and will prefer closePosition for uninit ghosts)
       await tryCloseEmptyPosition(dlmmPool, pub, wallet, minB, maxB, `[monitor-stranded-rent-${s.position_pubkey.slice(0,8)}]`, 200000);
 
@@ -420,6 +466,7 @@ export async function retryStrandedPositionRents() {
         const all = getOpenLpPositions();
         const filtered = all.filter((p: any) => p.position_pubkey !== s.position_pubkey || p.status !== 'stranded_rent');
         saveOpenLpPositions(filtered);
+        removePendingScaffold(s.position_pubkey);
         console.log(`[monitor] reclaimed/removed stranded rent marker for ${s.position_pubkey.slice(0,8)}`);
       }
     } catch (e) {

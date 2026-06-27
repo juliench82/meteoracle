@@ -99,6 +99,8 @@ import {
   findExistingActivePosition,
   persistStrandedTokenAfterFailedOpen,
   persistStrandedPositionRent,
+  persistPendingScaffold,
+  removePendingScaffold,
 } from './persistence'
 
 // swapTokenToSol (Jupiter) fully removed - using direct Meteora DLMM for all swaps in open/close/rollback
@@ -376,6 +378,16 @@ export async function openPosition(
     // - After 3 fails to find usable: skip before swap.
     const DLMM_PROGRAM_ID = dlmmPool.program.programId.toBase58();
     let positionKeypair = new Keypair();
+    // CRITICAL PREVENTION (ghosts): persist the secret *immediately*, before any RPC or createAccount.
+    // If the subsequent scaffold create lands but init does not (or process crashes), the monitor
+    // or recovery can reload this Keypair, sign initializePosition (with the real signer), then close.
+    persistPendingScaffold(
+      positionKeypair.publicKey.toBase58(),
+      positionKeypair.secretKey,
+      dlmmPool.pubkey.toBase58(),
+      typeof minBinId === 'number' ? minBinId : undefined,
+      typeof maxBinId === 'number' ? maxBinId : undefined
+    );
     let needsCreate = true;
     let needsInitialize = true;
     for (let i = 0; i < 3; i++) {
@@ -397,6 +409,13 @@ export async function openPosition(
       // Occupied by something else (or previous non-DLMM use)
       console.warn(`${label} position address ${positionKeypair.publicKey.toBase58().slice(0,8)} occupied by non-DLMM owner (${existing.owner.toBase58().slice(0,8)}) — regenerating fresh keypair`);
       positionKeypair = new Keypair();
+      persistPendingScaffold(
+        positionKeypair.publicKey.toBase58(),
+        positionKeypair.secretKey,
+        dlmmPool.pubkey.toBase58(),
+        typeof minBinId === 'number' ? minBinId : undefined,
+        typeof maxBinId === 'number' ? maxBinId : undefined
+      );
     }
     const finalCheck = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
     if (finalCheck && finalCheck.lamports > 0 && finalCheck.owner.toBase58() !== DLMM_PROGRAM_ID) {
@@ -596,6 +615,9 @@ export async function openPosition(
         const scaffoldSig = await sendLegacyTx(scaffoldPrep, [wallet, positionKeypair], `${label} position-scaffold`);
         console.log(`${label} [TRACE] [SCAFFOLD-BUNDLE] ${what} COMPLETE ✔ sig: ${scaffoldSig}`);
         console.log(`${label} position scaffold complete ✔ sig: ${scaffoldSig}`);
+
+        // Scaffold succeeded atomically (create+init or equivalent). No longer need the secret for recovery.
+        removePendingScaffold(positionKeypair.publicKey.toBase58());
 
         // Post-success verification snapshot (best effort)
         try {
@@ -967,6 +989,7 @@ export async function openPosition(
         }
       } else {
         console.log(`${label} [TRACE] [FINALLY-SUCCESS] success path — position fully opened, no rent reclaim needed.`);
+        removePendingScaffold(positionKeypair?.publicKey?.toBase58?.());
       }
       console.log(`${label} [TRACE] [FINALLY-EXIT] leaving finally block`);
     }
