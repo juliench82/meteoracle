@@ -17,10 +17,14 @@
  * Result: these ghosts cannot be initialized or closed from the wallet alone.
  * The rent is unrecoverable unless you can recover the original position keypairs for these exact pubkeys.
  *
- * The script will attempt raw close (shows the clear 0xbba) and, by default, will NOT auto-attempt init (it always fails the same way).
- * Set TRY_INIT_GHOSTS=true to force the init attempts (for diagnosis only).
+ * The script:
+ * - prints on-chain dataLen + first16 for every ghost
+ * - always prefers dlmmPool.program.methods.closePosition() to emit a correct ix (disc + accounts)
+ * - falls back to a single known-good raw close_position instruction
+ * - never guesses close_position_v2
+ * - does NOT call initialize by default (TRY_INIT_GHOSTS only for when you have the lost keypairs)
  *
- * Prevention (already in bot): atomic createAccount + initializePosition in one tx + finally { tryClose + persist for monitor }.
+ * Prevention (already in bot): atomic createAccount + initializePosition in one tx.
  *
  * Usage:
  *   npx tsx --tsconfig tsconfig.worker.json scripts/recover-stranded-dlmm-rent.ts
@@ -67,20 +71,16 @@ function getAnchorDiscriminator(name: string): Buffer {
 }
 
 function loadDiscriminators() {
-  let closeDisc = getAnchorDiscriminator('close_position');
-  let closeV2Disc = getAnchorDiscriminator('close_position_v2');
-  let initDisc = getAnchorDiscriminator('initialize_position');
+  const closeDisc = getAnchorDiscriminator('close_position');
+  const initDisc = getAnchorDiscriminator('initialize_position');
 
-  console.log(`[disc] computed close_position:    [${closeDisc.join(', ')}]`);
-  console.log(`[disc] computed close_position_v2: [${closeV2Disc.join(', ')}]`);
+  console.log(`[disc] computed close_position: [${closeDisc.join(', ')}]`);
   console.log(`[disc] computed initialize_position: [${initDisc.join(', ')}]`);
 
-  // When the real IDL is loadable, the code below will print the exact bytes the *installed package* declares
-  // and will prefer those over our name-based hash for the close instructions.
-
-  let foundCloseV2FromIdl = false;
-
-  // Load the real IDL that was used to build the on-chain program and use the *exact* discriminator bytes it declares.
+  // The published @meteora-ag/dlmm package rarely ships a dlmm.json IDL (only built JS).
+  // We still try; if present we print everything useful. Primary source of truth for a
+  // valid close ix is the *SDK builder* (dlmmPool.program.methods.closePosition) at runtime.
+  let idlCloseDisc: Buffer | null = null;
   try {
     const fs = require('fs');
     const pkgDir = path.join(process.cwd(), 'node_modules/@meteora-ag/dlmm');
@@ -88,46 +88,36 @@ function loadDiscriminators() {
     if (!fs.existsSync(idlPath)) idlPath = path.join(pkgDir, 'idl/dlmm.json');
     if (fs.existsSync(idlPath)) {
       const idl = JSON.parse(fs.readFileSync(idlPath, 'utf8'));
-      console.log('[disc] === Real IDL instructions from installed @meteora-ag/dlmm ===');
+      console.log('[disc] === IDL instructions (from package if present) ===');
       for (const ix of (idl.instructions || [])) {
-        if (/close.*position|position.*close/i.test(ix.name)) {
+        const n = (ix.name || '').toLowerCase();
+        if (n.includes('close') || n.includes('initialize') || n.includes('position')) {
           const d = ix.discriminator ? Buffer.from(ix.discriminator) : null;
           if (d) {
-            console.log(`  ${ix.name} (IDL): [${[...d].join(', ')}]`);
-            // Prefer any instruction that looks like the V2 close
-            if (/v2|2$/i.test(ix.name) && !foundCloseV2FromIdl) {
-              closeV2Disc = d;
-              foundCloseV2FromIdl = true;
-            } else if (!/v2|2$/i.test(ix.name)) {
-              // keep the non-v2 as the default close
-              closeDisc = d;
-            }
-          }
-        }
-        if (/^initializePosition$/i.test(ix.name) || /initialize.*position/i.test(ix.name)) {
-          if (ix.discriminator) {
-            initDisc = Buffer.from(ix.discriminator);
-            console.log(`  ${ix.name} (IDL): [${[...initDisc].join(', ')}]`);
+            console.log(`  ${ix.name}: [${[...d].join(', ')}]`);
+            if (!idlCloseDisc && n.includes('close')) idlCloseDisc = d;
           }
         }
       }
+    } else {
+      console.log('[disc] No dlmm.json in package (normal). Relying on SDK .methods builder for real close disc + accounts.');
     }
   } catch (e) {
-    console.log('[disc] Could not load real IDL from package, using computed discriminators only.');
+    console.log('[disc] IDL load skipped:', (e as any)?.message || e);
   }
 
   return {
-    close: closeDisc,
-    closeV2: closeV2Disc,
+    close: idlCloseDisc || closeDisc,
     initialize: initDisc,
   };
 }
 
 const DISCRIMINATORS = loadDiscriminators();
 
-// Simple heuristic: V2 positions are larger
-function isLikelyV2(dataLen: number | undefined): boolean {
-  return !!dataLen && dataLen >= 18200; // 18304 observed for V2
+// Note: account size differs for Position vs newer layout, but the *close instruction*
+// is the same (SDK builder emits the correct disc for the deployed program).
+function isLargePosition(dataLen: number | undefined): boolean {
+  return !!dataLen && dataLen >= 18200;
 }
 
 const STRANDED = [
@@ -191,82 +181,24 @@ async function closeGhostPositionRaw(
   minBinId?: number,
   maxBinId?: number
 ): Promise<string> {
-  // Use the version-appropriate discriminator chosen by main() based on observed on-chain dataLen.
-  // main() also prints the actual first 16 bytes of the position data so we can see the real discriminator (or zeros).
-  const closeDiscriminator = (globalThis as any).__CHOSEN_CLOSE_DISC
-    || DISCRIMINATORS.closeV2
-    || DISCRIMINATORS.close;
+  const hasRange = typeof minBinId === 'number' && typeof maxBinId === 'number';
 
-  // If we have a dlmmPool, prefer letting the SDK build the close instruction (correct disc + correct account metas for the installed SDK version).
-  // This is much safer than our hand-rolled list, especially for V2.
-  if (dlmmPool && dlmmPool.program && typeof dlmmPool.program.methods?.closePosition === 'function') {
-    try {
-      // Try the V2 method first if we decided we want V2, otherwise the regular one.
-      const methodName = (globalThis as any).__CHOSEN_CLOSE_DISC === DISCRIMINATORS.closeV2
-        ? 'closePositionV2'
-        : 'closePosition';
-
-      const closeMethod = (dlmmPool.program.methods as any)[methodName];
-      if (typeof closeMethod === 'function') {
-        const builtIx = await closeMethod()
-          .accounts({
-            position: positionPubkey,
-            lbPair: lbPair,
-            // The SDK will fill the rest (bin arrays, reserves, token accounts, event authority, etc.)
-          })
-          .instruction();
-
-        // Add priority fees + any ATA creates we decided we needed.
-        const tx = new Transaction();
-        tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
-        tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }));
-
-        // We still want the ATAs created if they don't exist (the SDK close may assume they do for fee claiming).
-        // (the ataIxs block below will still run for that)
-
-        tx.add(builtIx);
-        tx.feePayer = wallet.publicKey;
-        const { blockhash } = await conn.getLatestBlockhash("confirmed");
-        tx.recentBlockhash = blockhash;
-
-        return await sendAndConfirmTransaction(conn, tx, [wallet], { commitment: "confirmed" });
-      }
-    } catch (sdkBuildErr) {
-      console.log("  SDK could not build close ix, falling back to manual raw list:", (sdkBuildErr as any)?.message || sdkBuildErr);
-    }
-  }
-
-  // --- fallback: manual raw instruction (what we had before) ---
-
-  const eventAuthority = PublicKey.findProgramAddressSync(
-    [Buffer.from("__event_authority")],
-    DLMM_PROGRAM_ID
-  )[0];
-
-  // Resolve real token mints + programs from dlmmPool when available (critical)
+  // Resolve token mints + their actual TOKEN_PROGRAM_ID (legacy vs 2022)
   let tokenXMint = SystemProgram.programId;
   let tokenYMint = SystemProgram.programId;
   let tokenXProgram = TOKEN_PROGRAM_ID;
   let tokenYProgram = TOKEN_PROGRAM_ID;
-  if (dlmmPool) {
-    tokenXMint = dlmmPool.tokenX.publicKey;
-    tokenYMint = dlmmPool.tokenY.publicKey;
-    if (dlmmPool.tokenX.tokenProgram) tokenXProgram = dlmmPool.tokenX.tokenProgram;
-    if (dlmmPool.tokenY.tokenProgram) tokenYProgram = dlmmPool.tokenY.tokenProgram;
-  }
 
-  // Always resolve the *actual* token program by reading the mint account's owner.
+  if (dlmmPool?.tokenX?.publicKey) tokenXMint = dlmmPool.tokenX.publicKey;
+  if (dlmmPool?.tokenY?.publicKey) tokenYMint = dlmmPool.tokenY.publicKey;
+
   const resolveTokenProgram = async (mint: PublicKey): Promise<PublicKey> => {
-    const NATIVE_SOL = 'So11111111111111111111111111111111111111112';
-    if (mint.toBase58() === NATIVE_SOL) return TOKEN_PROGRAM_ID;
+    if (mint.toBase58() === 'So11111111111111111111111111111111111111112') return TOKEN_PROGRAM_ID;
     try {
-      const mintInfo = await conn.getAccountInfo(mint);
-      return mintInfo?.owner ?? TOKEN_PROGRAM_ID;
-    } catch {
-      return TOKEN_PROGRAM_ID;
-    }
+      const mi = await conn.getAccountInfo(mint);
+      return mi?.owner ?? TOKEN_PROGRAM_ID;
+    } catch { return TOKEN_PROGRAM_ID; }
   };
-
   tokenXProgram = await resolveTokenProgram(tokenXMint);
   tokenYProgram = await resolveTokenProgram(tokenYMint);
 
@@ -275,66 +207,100 @@ async function closeGhostPositionRaw(
 
   const ataIxs: TransactionInstruction[] = [];
   try {
-    const infoX = await conn.getAccountInfo(userTokenX).catch(() => null);
-    if (!infoX) {
-      ataIxs.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey,
-          userTokenX,
-          wallet.publicKey,
-          tokenXMint,
-          tokenXProgram,
-          ASSOCIATED_TOKEN_PROGRAM_ID
-        )
-      );
+    if (!(await conn.getAccountInfo(userTokenX))) {
+      ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
+        wallet.publicKey, userTokenX, wallet.publicKey, tokenXMint, tokenXProgram, ASSOCIATED_TOKEN_PROGRAM_ID
+      ));
     }
-    const infoY = await conn.getAccountInfo(userTokenY).catch(() => null);
-    if (!infoY) {
-      ataIxs.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          wallet.publicKey,
-          userTokenY,
-          wallet.publicKey,
-          tokenYMint,
-          tokenYProgram,
-          ASSOCIATED_TOKEN_PROGRAM_ID
-        )
-      );
+    if (!(await conn.getAccountInfo(userTokenY))) {
+      ataIxs.push(createAssociatedTokenAccountIdempotentInstruction(
+        wallet.publicKey, userTokenY, wallet.publicKey, tokenYMint, tokenYProgram, ASSOCIATED_TOKEN_PROGRAM_ID
+      ));
     }
   } catch {}
 
+  // Bitmap (always derivable)
+  let binArrayBitmapExtension = SystemProgram.programId;
+  try {
+    const [bmp] = PublicKey.findProgramAddressSync([Buffer.from('bitmap'), lbPair.toBuffer()], DLMM_PROGRAM_ID);
+    binArrayBitmapExtension = bmp;
+  } catch {}
+
+  // Bin arrays: only when range known; otherwise placeholder (close will hit position deserial error for ghosts anyway)
   let binArrayLower = SystemProgram.programId;
   let binArrayUpper = SystemProgram.programId;
-  let binArrayBitmapExtension = SystemProgram.programId;
-
-  try {
-    const [bitmap] = PublicKey.findProgramAddressSync(
-      [Buffer.from("bitmap"), lbPair.toBuffer()],
-      DLMM_PROGRAM_ID
-    );
-    binArrayBitmapExtension = bitmap;
-  } catch {}
-
-  if (dlmmPool && typeof minBinId === "number" && typeof maxBinId === "number") {
+  if (hasRange) {
     try {
-      const { getBinArraysRequiredByPositionRange } = await import("@meteora-ag/dlmm");
-      const BN = (await import("bn.js")).default;
-      const required = getBinArraysRequiredByPositionRange(lbPair, new BN(minBinId), new BN(maxBinId), DLMM_PROGRAM_ID);
-      if (required.length > 0) {
-        binArrayLower = required[0].key;
-        binArrayUpper = required[required.length - 1].key;
+      const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
+      const BN = (await import('bn.js')).default;
+      const req = getBinArraysRequiredByPositionRange(lbPair, new BN(minBinId), new BN(maxBinId), DLMM_PROGRAM_ID);
+      if (req?.length) {
+        binArrayLower = req[0].key;
+        binArrayUpper = req[req.length - 1].key;
       }
-    } catch (e) {
-      console.log("  Could not compute bin arrays, using programId placeholders (may fail)");
+    } catch {}
+  }
+
+  let reserveX = (dlmmPool as any)?.reserveX ?? SystemProgram.programId;
+  let reserveY = (dlmmPool as any)?.reserveY ?? SystemProgram.programId;
+
+  const eventAuthority = PublicKey.findProgramAddressSync(
+    [Buffer.from('__event_authority')],
+    DLMM_PROGRAM_ID
+  )[0];
+
+  // === PRIMARY: let the installed SDK build the close ix (with full accounts) ===
+  // Supplying the complete accounts map prevents "Account `xxx` not provided" from the builder.
+  // The emitted ix will have the exact disc + ordering the current @meteora-ag/dlmm expects.
+  if (dlmmPool && dlmmPool.program && typeof dlmmPool.program.methods?.closePosition === 'function') {
+    try {
+      const closeMethod = dlmmPool.program.methods.closePosition;
+
+      const accounts = {
+        position: positionPubkey,
+        lbPair,
+        binArrayBitmapExtension,
+        userTokenX,
+        userTokenY,
+        reserveX,
+        reserveY,
+        tokenXMint,
+        tokenYMint,
+        binArrayLower,
+        binArrayUpper,
+        sender: wallet.publicKey,
+        tokenXProgram,
+        tokenYProgram,
+        eventAuthority,
+        program: DLMM_PROGRAM_ID,
+      };
+
+      const builtIx = await closeMethod()
+        .accounts(accounts)
+        .instruction();
+
+      const emittedDisc = [...builtIx.data.slice(0, 8)];
+      console.log(`  [SDK-BUILD] closePosition ix built. emitted disc=[${emittedDisc.join(', ')}] (range=${hasRange})`);
+
+      const tx = new Transaction();
+      tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }));
+      tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }));
+
+      for (const a of ataIxs) tx.add(a);
+      tx.add(builtIx);
+
+      tx.feePayer = wallet.publicKey;
+      const { blockhash } = await conn.getLatestBlockhash('confirmed');
+      tx.recentBlockhash = blockhash;
+
+      return await sendAndConfirmTransaction(conn, tx, [wallet], { commitment: 'confirmed' });
+    } catch (sdkBuildErr: any) {
+      console.log('  [SDK-BUILD] dlmmPool.program.methods.closePosition failed to build ix:', sdkBuildErr?.message || sdkBuildErr);
     }
   }
 
-  let reserveX = SystemProgram.programId;
-  let reserveY = SystemProgram.programId;
-  if (dlmmPool) {
-    if ((dlmmPool as any).reserveX) reserveX = (dlmmPool as any).reserveX;
-    if ((dlmmPool as any).reserveY) reserveY = (dlmmPool as any).reserveY;
-  }
+  // === FALLBACK: manual raw using the one known good close_position disc ===
+  const closeDiscriminator = DISCRIMINATORS.close;
 
   const ix = new TransactionInstruction({
     programId: DLMM_PROGRAM_ID,
@@ -360,24 +326,21 @@ async function closeGhostPositionRaw(
   });
 
   const tx = new Transaction();
-  // High prio to help land recovery
-  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }));
   tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 300_000 }));
-  for (const a of ataIxs) tx.add(a);
+  ataIxs.forEach(a => tx.add(a));
   tx.add(ix);
-
   tx.feePayer = wallet.publicKey;
-  const { blockhash } = await conn.getLatestBlockhash("confirmed");
+  const { blockhash } = await conn.getLatestBlockhash('confirmed');
   tx.recentBlockhash = blockhash;
 
   try {
-    return await sendAndConfirmTransaction(conn, tx, [wallet], { commitment: "confirmed", skipPreflight: false });
+    return await sendAndConfirmTransaction(conn, tx, [wallet], { commitment: 'confirmed' });
   } catch (sendErr: any) {
-    // As recommended: surface full logs from SendTransactionError
-    if (sendErr instanceof SendTransactionError || sendErr?.logs || typeof sendErr?.getLogs === 'function') {
+    if (sendErr instanceof SendTransactionError || sendErr?.getLogs) {
       try {
         const logs = sendErr.logs || (await sendErr.getLogs?.(conn));
-        if (logs) console.log("  Full logs from SendTransactionError.getLogs():", logs);
+        if (logs?.length) console.log('  SendTransactionError full logs:\n' + logs.map((l: string) => '    ' + l).join('\n'));
       } catch {}
     }
     throw sendErr;
@@ -485,15 +448,19 @@ async function main() {
   const DLMM = await getDLMM();
 
   console.log(`Recovering ${STRANDED.length} stranded DLMM position accounts...`);
-  console.log(`[disc] using close disc = [${DISCRIMINATORS.close.join(', ')}]`);
+  console.log(`[disc] using close disc (IDL or computed) = [${[...DISCRIMINATORS.close].join(', ')}]`);
   console.log(`
-NOTE ON GHOSTS: These position accounts have data length but zero content (no Anchor Position discriminator).
-initializePosition requires the position pubkey to be a *signer* in the tx (IDL + program logic/CPI).
-We have no private key for these (they were ephemeral Keypairs at open time, only pubkey was persisted).
-Without that sig, init fails with "signer privilege escalated".
-Without init, close always fails deserial with 0xbba.
-By default we only do raw close (shows the clear error). Set TRY_INIT_GHOSTS=true only for extra diagnostics.
-If you ever recover the original position keypairs, we can sign init with [wallet, positionKeypair].
+NOTE ON GHOSTS (root cause confirmed):
+- createAccount (System) gave the accounts correct owner + size + rent (~0.128 SOL each).
+- initializePosition was never successfully executed (first 16 bytes are zeros).
+- closePosition (any variant) deserializes the "position" account expecting a valid Anchor Position (discriminator check) -> 0xbba.
+- initializePosition declares "position" as signer in IDL; the program/CPI enforces it. Ephemeral keypair from creation time is lost.
+- Result: these 5 accounts are unrecoverable with the current wallet alone.
+
+We now always use the SDK builder (dlmmPool.program.methods.closePosition) when possible for a well-formed ix,
+then a single known-good raw close_position disc. No more guessing close_position_v2.
+
+Set TRY_INIT_GHOSTS=true only if you have the original position keypairs and want to test signing with them.
 `);
   console.log('Full list:');
   for (const s of STRANDED) {
@@ -553,61 +520,71 @@ If you ever recover the original position keypairs, we can sign init with [walle
       console.log(`  Skipping SDK closePosition for ghost (no range) -- it throws inside the SDK on zero data. Going to raw.`);
     }
 
-    // Fetch on-chain data for this position so we can pick V1 vs V2 close and show the actual discriminator bytes on chain.
+    // Fetch on-chain state for diagnostics (size + leading bytes tell us if a Position was ever written).
     const posInfo = await connection.getAccountInfo(pub).catch(() => null);
     const dataLen = posInfo?.data?.length || 0;
     const first16 = posInfo?.data ? Buffer.from(posInfo.data.slice(0, 16)).toString('hex') : 'n/a';
-    const useV2 = isLikelyV2(dataLen);
-    const chosenDisc = useV2 ? (DISCRIMINATORS.closeV2 || DISCRIMINATORS.close) : DISCRIMINATORS.close;
-    console.log(`  on-chain dataLen=${dataLen} first16=${first16} → using ${useV2 ? 'close_position_v2' : 'close_position'}`);
+    console.log(`  on-chain dataLen=${dataLen} first16=${first16}  (large=${isLargePosition(dataLen)})`);
 
     if (!recovered) {
-      // Raw close with version-appropriate disc. We do not auto-try initializePosition (requires lost position keypair as signer).
+      // Always prefer SDK builder inside closeGhostPositionRaw (it will emit the real disc + correct accounts).
+      // No v2 guessing: the close ix is one instruction; Position layout variant does not change the ix discriminator.
+      console.log(`  Attempting raw/SDK closePosition (SDK builder first for correct disc+accounts) + high prio...`);
       try {
-        console.log(`  Trying raw ${useV2 ? 'closePositionV2' : 'closePosition'} with correct discriminator + high prio...`);
-        (globalThis as any).__CHOSEN_CLOSE_DISC = chosenDisc;
         const sig = await closeGhostPositionRaw(connection, wallet, pub, lbPair, dlmmPool, s.minBin, s.maxBin);
         console.log(`  ✔ Recovered via raw close`);
         console.log(`  Sig: ${sig}`);
         console.log(`  Explorer: https://explorer.solana.com/tx/${sig}`);
         recovered = true;
       } catch (rawErr: any) {
-        console.error(`  Raw failed: ${rawErr?.message || rawErr}`);
-        // Extra: full SendTransactionError details as recommended
+        console.error(`  Raw/SDK close failed: ${rawErr?.message || rawErr}`);
+        // Always dump full logs when available.
         let logs: string[] = [];
         if (rawErr instanceof SendTransactionError || rawErr?.getLogs || rawErr?.logs) {
           try {
             logs = rawErr.logs || (await rawErr.getLogs?.(connection)) || [];
-            if (logs?.length) console.log("  SendTransactionError full logs:\n" + logs.map((l: string) => "    " + l).join("\n"));
+            if (logs?.length) console.log('  SendTransactionError full logs:\n' + logs.map((l: string) => '    ' + l).join('\n'));
           } catch {}
         }
-        const isDiscMismatch = (rawErr?.message || '').includes('AccountDiscriminatorMismatch') ||
-          (rawErr?.message || '').includes('0xbba') ||
-          logs.some((l: string) => l.includes('AccountDiscriminatorMismatch') || l.includes('0xbba'));
+
+        const msg = (rawErr?.message || '') + ' ' + logs.join(' ');
+        const isDiscMismatch = msg.includes('AccountDiscriminatorMismatch') || msg.includes('0xbba') || logs.some((l: string) => l.includes('0xbba') || l.includes('AccountDiscriminatorMismatch'));
+        const isFallback = msg.includes('InstructionFallbackNotFound') || msg.includes('0x65') || logs.some((l: string) => l.includes('FallbackNotFound') || l.includes('0x65'));
 
         if (isDiscMismatch) {
           console.log(`
-  >>> AccountDiscriminatorMismatch (0xbba / 3002) on the position account.
-  On-chain first 16 bytes: ${first16} (dataLen=${dataLen}).
-  The account was created (rent paid, owned by LBUZ, correct size) but initializePosition was never successfully executed (or used the wrong V1/V2 variant).
-  The close instruction (V1 or V2) deserializes as a Position struct; the leading bytes don't match.
-  initializePosition cannot be used — it requires the position pubkey to be a signer (lost ephemeral Keypair from create time).
-  Without the original key for this exact pubkey you cannot write the discriminator and cannot close.
-  These specific ghosts are not recoverable from the current wallet with normal DLMM instructions.
-  (If you recover the position keypairs, we can add code to sign init txs with [wallet, positionKeypair].)
+  >>> AccountDiscriminatorMismatch (0xbba / 3002) on position.
+  first16=${first16} dataLen=${dataLen}.
+  Ghost: createAccount succeeded (rent paid, owner=LBUZ, correct size) but initializePosition was NEVER completed.
+  closePosition (the only close ix) ALWAYS does Anchor deserial of the Position account first.
+  Zero data (or wrong disc bytes) => hard 0xbba.
+`);
+        } else if (isFallback) {
+          console.log(`
+  >>> InstructionFallbackNotFound (0x65).
+  The 8-byte prefix sent did not match any registered instruction on the deployed program.
+  (Previous runs using a guessed "close_position_v2" disc hit exactly this.)
+  We now only send the disc emitted by the real SDK builder or the known close_position disc.
 `);
         }
 
+        console.log(`
+  >>> CONCLUSION FOR THIS GHOST: unrecoverable from this wallet.
+  - initializePosition requires the position pubkey to be a *signer* (IDL).
+  - The ephemeral Keypair used at create time is lost (only pubkey was saved).
+  - Without that keypair we cannot init, and without init close always 0xbba.
+  - If you ever find the original 5 position keypairs (the Keypair objects, not just pubkeys), we can do [wallet, posKeypair] init then close.
+  Manual recovery via key ${s.pubkey} (e.g. using a recovered keypair or direct program hack) is the only path.
+`);
         if (!recovered) {
-          console.warn(`  Position rent may be locked (manual recovery needed via key ${s.pubkey})`);
+          console.warn(`  Position rent locked (0.128 SOL) — manual recovery needed via key ${s.pubkey}`);
         }
-      } finally {
-        delete (globalThis as any).__CHOSEN_CLOSE_DISC;
       }
     }
   }
 
   console.log('\nRecovery attempts complete.');
+  console.log('Each ghost locks ~0.128 SOL. These 5 are not reclaimable without the original position Keypairs.');
 }
 
 main().catch(err => {
