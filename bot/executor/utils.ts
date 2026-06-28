@@ -5,7 +5,7 @@
  * used across open.ts, close.ts, and add-liquidity.ts.
  */
 
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import BN from 'bn.js';
 import {
   TOKEN_PROGRAM_ID,
@@ -185,4 +185,26 @@ export async function getDLMM() {
 export async function getStrategyType() {
   const mod = await import('@meteora-ag/dlmm');
   return mod.StrategyType;
+}
+
+/**
+ * Returns the accounts object for dlmmPool.program.methods.initializePosition(...)
+ * using the names from the current @meteora-ag/dlmm client/IDL.
+ */
+export function getInitializePositionAccounts(
+  dlmmPool: any,
+  walletPubkey: PublicKey,
+  positionPubkey: PublicKey,
+  lbPairPubkey: PublicKey
+) {
+  return {
+    payer: walletPubkey,
+    position: positionPubkey,
+    lbPair: lbPairPubkey,
+    owner: walletPubkey,
+    rent: SYSVAR_RENT_PUBKEY,
+    // The account name in the IDL for initializePosition is "systemProgram".
+    // (Some older client generations used "program"; we standardize on systemProgram here.)
+    systemProgram: SystemProgram.programId,
+  };
 }

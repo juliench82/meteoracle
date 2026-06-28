@@ -65,6 +65,7 @@ import {
   getTotalDeployedSolForCap,
   getTokenProgramId,
   getDecimalAdjustedPrice,
+  getInitializePositionAccounts,
   NATIVE_MINT_STR,
   METEORA_RENT_RESERVE_SOL,
   MARKET_LP_SOL_PER_POSITION,
@@ -582,14 +583,14 @@ export async function openPosition(
         console.log(`${label} [TRACE] [SCAFFOLD-INIT] phase 1b (early): initializePosition (lower=${lowerBinId}, width=${width})`);
         const initializePositionIx = await dlmmPool.program.methods
           .initializePosition(lowerBinId, width)
-          .accounts({
-            payer: wallet.publicKey,
-            position: positionKeypair.publicKey,
-            lbPair: dlmmPool.pubkey,
-            owner: wallet.publicKey,
-            rent: SYSVAR_RENT_PUBKEY,
-            program: dlmmPool.program.programId,
-          })
+          .accounts(
+            getInitializePositionAccounts(
+              dlmmPool,
+              wallet.publicKey,
+              positionKeypair.publicKey,
+              dlmmPool.pubkey
+            )
+          )
           .instruction();
         scaffoldIxs.push(initializePositionIx);
       } else {
@@ -1244,14 +1245,14 @@ async function openPositionDirect(
       console.log(`${label} [TRACE] [DIRECT-INIT] phase 1b: initializePosition (lower=${lowerBinId}, width=${width})`);
       const initializePositionIx = await dlmmPool.program.methods
         .initializePosition(lowerBinId, width)
-        .accounts({
-          payer: wallet.publicKey,
-          position: positionKeypair.publicKey,
-          lbPair: dlmmPool.pubkey,
-          owner: wallet.publicKey,
-          rent: SYSVAR_RENT_PUBKEY,
-          program: dlmmPool.program.programId,
-        })
+        .accounts(
+          getInitializePositionAccounts(
+            dlmmPool,
+            wallet.publicKey,
+            positionKeypair.publicKey,
+            dlmmPool.pubkey
+          )
+        )
         .instruction();
       directScaffoldIxs.push(initializePositionIx);
     } else {

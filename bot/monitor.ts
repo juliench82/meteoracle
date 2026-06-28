@@ -5,7 +5,12 @@ import { getOpenLpPositions, saveOpenLpPositions, type OpenLpPosition } from '@/
 import { closePosition } from '@/bot/executor/close'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
 import { getConnection, getWallet } from '@/lib/solana'
-import { getDLMM, getDecimalAdjustedPrice, getClaimableFeesUsd } from '@/bot/executor/utils'
+import {
+  getDLMM,
+  getDecimalAdjustedPrice,
+  getClaimableFeesUsd,
+  getInitializePositionAccounts,
+} from '@/bot/executor/utils'
 import { tryCloseEmptyPosition } from '@/bot/executor/open'
 import {
   getCurrentPoolFeeTvl24h,
@@ -14,7 +19,7 @@ import {
   getTvlChange24h,
   getTotalLps,
 } from '@/bot/scanner/pool-fetcher'
-import { PublicKey, Keypair, Transaction, SYSVAR_RENT_PUBKEY } from '@solana/web3.js'
+import { PublicKey, Keypair, Transaction } from '@solana/web3.js'
 import { ComputeBudgetProgram } from '@solana/web3.js'
 import { sendLegacyTx } from '@/lib/solana-tx'
 import {
@@ -430,14 +435,9 @@ export async function retryStrandedPositionRents() {
 
           const initIx = await dlmmPool.program.methods
             .initializePosition(lower, width)
-            .accounts({
-              payer: wallet.publicKey,
-              position: pub,
-              lbPair: dlmmPool.pubkey,
-              owner: wallet.publicKey,
-              rent: SYSVAR_RENT_PUBKEY,
-              program: dlmmPool.program.programId,
-            })
+            .accounts(
+              getInitializePositionAccounts(dlmmPool, wallet.publicKey, pub, dlmmPool.pubkey)
+            )
             .instruction();
 
           const initTx = new Transaction();

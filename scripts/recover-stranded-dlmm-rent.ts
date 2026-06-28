@@ -41,10 +41,10 @@ dotenv.config({
 })
 
 import { getConnection, getWallet } from '@/lib/solana';
-import { getDLMM } from '@/bot/executor/utils';
+import { getDLMM, getInitializePositionAccounts } from '@/bot/executor/utils';
 import { tryCloseEmptyPosition } from '@/bot/executor/open';
 import { getPendingScaffolds, removePendingScaffold } from '@/bot/executor/persistence';
-import { Keypair, Transaction, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { Keypair, Transaction } from '@solana/web3.js';
 import { ComputeBudgetProgram } from '@solana/web3.js';
 import {
   PublicKey,
@@ -254,6 +254,7 @@ async function closeGhostPositionRaw(
 
   // === PRIMARY: let the installed SDK build the close ix (with full accounts) ===
   // Supplying the complete accounts map prevents "Account `xxx` not provided" from the builder.
+  // We include rentReceiver (newer DLMM versions require it for the rent from the closed position account).
   // The emitted ix will have the exact disc + ordering the current @meteora-ag/dlmm expects.
   if (dlmmPool && dlmmPool.program && typeof dlmmPool.program.methods?.closePosition === 'function') {
     try {
@@ -276,11 +277,16 @@ async function closeGhostPositionRaw(
         tokenYProgram,
         eventAuthority,
         program: DLMM_PROGRAM_ID,
+        rentReceiver: wallet.publicKey,  // required in current DLMM closePosition (receives closed rent)
+        owner: wallet.publicKey,
       };
 
-      const builtIx = await closeMethod()
-        .accounts(accounts)
-        .instruction();
+      // Use accountsPartial if available (more lenient for ghost/uninitialized positions)
+      const builder = closeMethod();
+      const builtIx = await (typeof builder.accountsPartial === 'function'
+        ? builder.accountsPartial(accounts)
+        : builder.accounts(accounts)
+      ).instruction();
 
       const emittedDisc = [...builtIx.data.slice(0, 8)];
       console.log(`  [SDK-BUILD] closePosition ix built. emitted disc=[${emittedDisc.join(', ')}] (range=${hasRange})`);
@@ -393,14 +399,9 @@ async function tryInitializeGhost(
     // Build the ix first
     let initIx = await dlmmPool.program.methods
       .initializePosition(lower, width)
-      .accounts({
-        payer: wallet.publicKey,
-        position: positionPubKey,
-        lbPair: dlmmPool.pubkey,
-        owner: wallet.publicKey,
-        rent: SYSVAR_RENT_PUBKEY,
-        program: dlmmPool.program.programId,
-      })
+      .accounts(
+        getInitializePositionAccounts(dlmmPool, wallet.publicKey, positionPubKey, dlmmPool.pubkey)
+      )
       .instruction();
 
     // Patch for pre-created ghost: force the position to NOT be a signer.
@@ -495,14 +496,9 @@ We use SDK builder first (full accounts) + known close disc. No v2 guessing.
         console.log(`  [recovery] pending secret found — initializing with signer lower=${lower} width=${w}`);
         const initIx = await dlmmPool.program.methods
           .initializePosition(lower, w)
-          .accounts({
-            payer: wallet.publicKey,
-            position: pub,
-            lbPair,
-            owner: wallet.publicKey,
-            rent: SYSVAR_RENT_PUBKEY,
-            program: dlmmPool.program.programId,
-          })
+          .accounts(
+            getInitializePositionAccounts(dlmmPool, wallet.publicKey, pub, lbPair)
+          )
           .instruction();
         const tx = new Transaction();
         tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
