@@ -680,13 +680,16 @@ export async function openPosition(
         const txs = Array.isArray(simAddResult) ? simAddResult : [simAddResult];
         for (const t of txs) {
           if (!t) continue;
-          if ((maxBinId - minBinId + 1) > 100) {
-            t.instructions = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
-          }
           const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
-          t.recentBlockhash = bh;
-          t.feePayer = wallet.publicKey;
-          const prepared = applyPriorityFee(t, priorityFee, preSimAddCu);
+          let txToUse = t;
+          if ((maxBinId - minBinId + 1) > 100) {
+            const filteredIxs = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+            txToUse = new Transaction();
+            filteredIxs.forEach((ix: any) => txToUse.add(ix));
+          }
+          txToUse.recentBlockhash = bh;
+          txToUse.feePayer = wallet.publicKey;
+          const prepared = applyPriorityFee(txToUse, priorityFee, preSimAddCu);
           prepared.recentBlockhash = bh;
           prepared.feePayer = wallet.publicKey;
           console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] running simulateAndCheck on one of the returned txs...`);
@@ -1328,13 +1331,16 @@ async function openPositionDirect(
         const txs = Array.isArray(simAddResult) ? simAddResult : [simAddResult];
         for (const t of txs) {
           if (!t) continue;
-          if (numBins > 100) {
-            t.instructions = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
-          }
           const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
-          t.recentBlockhash = bh;
-          t.feePayer = wallet.publicKey;
-          const prepared = applyPriorityFee(t, priorityFee, addCuForSim);
+          let txToUse = t;
+          if (numBins > 100) {
+            const filteredIxs = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+            txToUse = new Transaction();
+            filteredIxs.forEach((ix: any) => txToUse.add(ix));
+          }
+          txToUse.recentBlockhash = bh;
+          txToUse.feePayer = wallet.publicKey;
+          const prepared = applyPriorityFee(txToUse, priorityFee, addCuForSim);
           prepared.recentBlockhash = bh;
           prepared.feePayer = wallet.publicKey;
           actualAddSimOk = await simulateAndCheck(prepared, `${label} [post-swap-add-sim-tx]`);
@@ -1397,11 +1403,13 @@ async function openPositionDirect(
       const txsToSend = Array.isArray(addResult) ? addResult : [addResult];
       for (const t of txsToSend) {
         if (!t) continue;
-        // strip on full tx too for wide
+        let txToUse = t;
         if (numBins > 100) {
-          t.instructions = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+          const filteredIxs = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+          txToUse = new Transaction();
+          filteredIxs.forEach((ix: any) => txToUse.add(ix));
         }
-        const preparedTx = applyPriorityFee(t, priorityFee, addCu);
+        const preparedTx = applyPriorityFee(txToUse, priorityFee, addCu);
         console.log(`${label} [TRACE] [DIRECT-ADD-SEND] sending one of the full txs from SDK...`);
         const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);
         console.log(`${label} [TRACE] [DIRECT-ADD-OK] add liquidity confirmed ✔ sig: ${sig}`);
