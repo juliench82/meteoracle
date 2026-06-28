@@ -66,6 +66,7 @@ import {
   getTokenProgramId,
   getDecimalAdjustedPrice,
   getInitializePositionAccounts,
+  ADD_LIQUIDITY_FALLBACK_CU,
   NATIVE_MINT_STR,
   METEORA_RENT_RESERVE_SOL,
   MARKET_LP_SOL_PER_POSITION,
@@ -663,7 +664,8 @@ export async function openPosition(
         const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
         simAddTx.recentBlockhash = bh;
         simAddTx.feePayer = wallet.publicKey;
-        const simAddPrep = applyPriorityFee(simAddTx, priorityFee);
+        const preSimAddCu = ((maxBinId || 0) - (minBinId || 0) + 1) > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
+        const simAddPrep = applyPriorityFee(simAddTx, priorityFee, preSimAddCu);
         simAddPrep.recentBlockhash = bh;
         simAddPrep.feePayer = wallet.publicKey;
         console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] running simulateAndCheck on add sim tx...`);
@@ -675,7 +677,7 @@ export async function openPosition(
           const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
           t.recentBlockhash = bh;
           t.feePayer = wallet.publicKey;
-          const prepared = applyPriorityFee(t, priorityFee);
+          const prepared = applyPriorityFee(t, priorityFee, preSimAddCu);
           prepared.recentBlockhash = bh;
           prepared.feePayer = wallet.publicKey;
           console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] running simulateAndCheck on one of the returned txs...`);
@@ -1177,6 +1179,9 @@ async function openPositionDirect(
     const StrategyTypeEnum = await getStrategyType()
     const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
 
+    const numBins = maxBinId - minBinId + 1
+    console.log(`${label} [TRACE] numBins=${numBins} for CU / sim decisions`)
+
     console.log(
       `${label} [TRACE] [DIRECT-TOTALS] add (scaffolding done pre-swap if needed) — totals from actual post-swap (range ${minBinId} → ${maxBinId}, strategyType=${strategyType})`
     );
@@ -1277,6 +1282,63 @@ async function openPositionDirect(
       }
     }
 
+    // NEW: Post-swap add pre-sim using *actual* received amounts (addresses planned-vs-actual mismatch).
+    // This is a read-only simulation after the irreversible pre-swap but before the real add.
+    // If it fails with the actual amounts, abort the add (caller will handle rollback sell).
+    console.log(`${label} [TRACE] [DIRECT-POST-SWAP-ADD-SIM] re-simulating addLiquidityByStrategy with actual post-swap amounts (numBins=${numBins})...`);
+    let actualAddSimOk = false;
+    try {
+      const simAddResult: any = await dlmmPool.addLiquidityByStrategy({
+        positionPubKey: positionKeypair.publicKey,
+        user: wallet.publicKey,
+        totalXAmount: totalX,
+        totalYAmount: totalY,
+        strategy: {
+          minBinId,
+          maxBinId,
+          strategyType,
+        },
+      });
+      const simIxs = simAddResult?.instructions || (Array.isArray(simAddResult) ? simAddResult : []);
+      if (simIxs.length > 0) {
+        const simAddTx = new Transaction();
+        simIxs.forEach((ix: any) => simAddTx.add(ix));
+        const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
+        simAddTx.recentBlockhash = bh;
+        simAddTx.feePayer = wallet.publicKey;
+        const addCuForSim = numBins > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
+        const simAddPrep = applyPriorityFee(simAddTx, priorityFee, addCuForSim);
+        simAddPrep.recentBlockhash = bh;
+        simAddPrep.feePayer = wallet.publicKey;
+        actualAddSimOk = await simulateAndCheck(simAddPrep, `${label} [post-swap-add-sim]`);
+      } else if (simAddResult) {
+        const txs = Array.isArray(simAddResult) ? simAddResult : [simAddResult];
+        for (const t of txs) {
+          if (!t) continue;
+          const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
+          t.recentBlockhash = bh;
+          t.feePayer = wallet.publicKey;
+          const addCuForSim = numBins > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
+          const prepared = applyPriorityFee(t, priorityFee, addCuForSim);
+          prepared.recentBlockhash = bh;
+          prepared.feePayer = wallet.publicKey;
+          actualAddSimOk = await simulateAndCheck(prepared, `${label} [post-swap-add-sim-tx]`);
+          if (!actualAddSimOk) break;
+        }
+      } else {
+        console.warn(`${label} [TRACE] [DIRECT-POST-SWAP-ADD-SIM-FAIL] no ixs from SDK for actual sim`);
+        actualAddSimOk = false;
+      }
+    } catch (e) {
+      console.error(`${label} [TRACE] [DIRECT-POST-SWAP-ADD-SIM-THROW] ${e}`);
+      actualAddSimOk = false;
+    }
+    console.log(`${label} [TRACE] [DIRECT-POST-SWAP-ADD-SIM-RESULT] actualAddSimOk=${actualAddSimOk}`);
+    if (!actualAddSimOk) {
+      console.error(`${label} post-swap add pre-sim with ACTUAL amounts failed — returning null so caller rolls back instead of adding.`);
+      return null;
+    }
+
     // Final belt-and-suspenders verification right before actually adding liquidity.
     console.log(`${label} [TRACE] [DIRECT-VERIFY] final assertNoNewBinArraysForRange before funding...`);
     await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
@@ -1299,12 +1361,13 @@ async function openPositionDirect(
     });
 
     const ixs = addResult?.instructions || (Array.isArray(addResult) ? addResult : []);
+    const addCu = numBins > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
     let liqSig = '';
-    console.log(`${label} [TRACE] [DIRECT-ADD-SEND] addResult has ${ixs.length} instructions (or full tx objects)`);
+    console.log(`${label} [TRACE] [DIRECT-ADD-SEND] addResult has ${ixs.length} instructions (or full tx objects), CU floor=${addCu}`);
     if (ixs.length > 0) {
       const tx = new Transaction();
       ixs.forEach((ix: any) => tx.add(ix));
-      const preparedTx = applyPriorityFee(tx, priorityFee);
+      const preparedTx = applyPriorityFee(tx, priorityFee, addCu);
       console.log(`${label} [TRACE] [DIRECT-ADD-SEND] sending add-liquidity tx...`);
       const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);
       console.log(`${label} [TRACE] [DIRECT-ADD-OK] add liquidity confirmed ✔ sig: ${sig}`);
@@ -1315,7 +1378,7 @@ async function openPositionDirect(
       const txsToSend = Array.isArray(addResult) ? addResult : [addResult];
       for (const t of txsToSend) {
         if (!t) continue;
-        const preparedTx = applyPriorityFee(t, priorityFee);
+        const preparedTx = applyPriorityFee(t, priorityFee, addCu);
         console.log(`${label} [TRACE] [DIRECT-ADD-SEND] sending one of the full txs from SDK...`);
         const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);
         console.log(`${label} [TRACE] [DIRECT-ADD-OK] add liquidity confirmed ✔ sig: ${sig}`);
