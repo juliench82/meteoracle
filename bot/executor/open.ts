@@ -93,6 +93,8 @@ import {
   sendLegacyTx,
   applyPriorityFee,
   addPriorityFeeAndPreserveComputeLimit,
+  computeBudgetKind,
+  COMPUTE_BUDGET_SET_UNIT_LIMIT,
 } from '@/lib/solana-tx'
 
 import {
@@ -658,13 +660,17 @@ export async function openPosition(
       });
       const simIxs = simAddResult?.instructions || (Array.isArray(simAddResult) ? simAddResult : []);
       console.log(`${label} [TRACE] [POST-SCAFFOLD-PRE-SIM] sim returned ${simIxs.length} instructions (or full txs)`);
+      const preSimAddCu = ((maxBinId || 0) - (minBinId || 0) + 1) > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
       if (simIxs.length > 0) {
+        let cleaned = simIxs;
+        if ((maxBinId - minBinId + 1) > 100) {
+          cleaned = simIxs.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+        }
         const simAddTx = new Transaction();
-        simIxs.forEach((ix: any) => simAddTx.add(ix));
+        cleaned.forEach((ix: any) => simAddTx.add(ix));
         const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
         simAddTx.recentBlockhash = bh;
         simAddTx.feePayer = wallet.publicKey;
-        const preSimAddCu = ((maxBinId || 0) - (minBinId || 0) + 1) > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
         const simAddPrep = applyPriorityFee(simAddTx, priorityFee, preSimAddCu);
         simAddPrep.recentBlockhash = bh;
         simAddPrep.feePayer = wallet.publicKey;
@@ -674,6 +680,9 @@ export async function openPosition(
         const txs = Array.isArray(simAddResult) ? simAddResult : [simAddResult];
         for (const t of txs) {
           if (!t) continue;
+          if ((maxBinId - minBinId + 1) > 100) {
+            t.instructions = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+          }
           const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
           t.recentBlockhash = bh;
           t.feePayer = wallet.publicKey;
@@ -1300,13 +1309,17 @@ async function openPositionDirect(
         },
       });
       const simIxs = simAddResult?.instructions || (Array.isArray(simAddResult) ? simAddResult : []);
+      const addCuForSim = numBins > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
       if (simIxs.length > 0) {
+        let cleaned = simIxs;
+        if (numBins > 100) {
+          cleaned = simIxs.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+        }
         const simAddTx = new Transaction();
-        simIxs.forEach((ix: any) => simAddTx.add(ix));
+        cleaned.forEach((ix: any) => simAddTx.add(ix));
         const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
         simAddTx.recentBlockhash = bh;
         simAddTx.feePayer = wallet.publicKey;
-        const addCuForSim = numBins > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
         const simAddPrep = applyPriorityFee(simAddTx, priorityFee, addCuForSim);
         simAddPrep.recentBlockhash = bh;
         simAddPrep.feePayer = wallet.publicKey;
@@ -1315,10 +1328,12 @@ async function openPositionDirect(
         const txs = Array.isArray(simAddResult) ? simAddResult : [simAddResult];
         for (const t of txs) {
           if (!t) continue;
+          if (numBins > 100) {
+            t.instructions = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+          }
           const { blockhash: bh } = await connection.getLatestBlockhash('confirmed');
           t.recentBlockhash = bh;
           t.feePayer = wallet.publicKey;
-          const addCuForSim = numBins > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
           const prepared = applyPriorityFee(t, priorityFee, addCuForSim);
           prepared.recentBlockhash = bh;
           prepared.feePayer = wallet.publicKey;
@@ -1364,9 +1379,13 @@ async function openPositionDirect(
     const addCu = numBins > 100 ? 2_000_000 : ADD_LIQUIDITY_FALLBACK_CU;
     let liqSig = '';
     console.log(`${label} [TRACE] [DIRECT-ADD-SEND] addResult has ${ixs.length} instructions (or full tx objects), CU floor=${addCu}`);
-    if (ixs.length > 0) {
+    // To ensure our high CU for wide ranges takes effect, strip any existing setComputeUnitLimit from the SDK result
+    const cleanedIxs = numBins > 100 
+      ? ixs.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT)
+      : ixs;
+    if (cleanedIxs.length > 0) {
       const tx = new Transaction();
-      ixs.forEach((ix: any) => tx.add(ix));
+      cleanedIxs.forEach((ix: any) => tx.add(ix));
       const preparedTx = applyPriorityFee(tx, priorityFee, addCu);
       console.log(`${label} [TRACE] [DIRECT-ADD-SEND] sending add-liquidity tx...`);
       const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);
@@ -1378,6 +1397,10 @@ async function openPositionDirect(
       const txsToSend = Array.isArray(addResult) ? addResult : [addResult];
       for (const t of txsToSend) {
         if (!t) continue;
+        // strip on full tx too for wide
+        if (numBins > 100) {
+          t.instructions = t.instructions.filter((ix: any) => computeBudgetKind(ix) !== COMPUTE_BUDGET_SET_UNIT_LIMIT);
+        }
         const preparedTx = applyPriorityFee(t, priorityFee, addCu);
         console.log(`${label} [TRACE] [DIRECT-ADD-SEND] sending one of the full txs from SDK...`);
         const sig = await sendLegacyTx(preparedTx, [wallet], `${label} add-liquidity`);

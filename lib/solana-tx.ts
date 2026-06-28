@@ -19,7 +19,7 @@ import { getConnection } from './solana'
 import { logError } from './log'
 
 const COMPUTE_BUDGET_PROGRAM_ID = ComputeBudgetProgram.programId.toBase58()
-const COMPUTE_BUDGET_SET_UNIT_LIMIT = 2
+export const COMPUTE_BUDGET_SET_UNIT_LIMIT = 2
 const COMPUTE_BUDGET_SET_UNIT_PRICE = 3
 
 export function computeBudgetKind(ix: TransactionInstruction): number | null {
@@ -47,6 +47,9 @@ export function applyPriorityFee(
   priorityFee: number,
   fallbackUnits: number = 1_400_000,
 ): Transaction {
+  // fallbackUnits is used as the compute unit limit when no setComputeUnitLimit ix is present.
+  // Callers that want to force a specific (higher) limit for wide-range adds should first strip
+  // any existing COMPUTE_BUDGET_SET_UNIT_LIMIT instructions.
   tx.instructions = addPriorityFeeAndPreserveComputeLimit(tx.instructions, priorityFee, fallbackUnits)
   return tx
 }
