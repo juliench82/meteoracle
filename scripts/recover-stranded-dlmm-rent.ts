@@ -522,7 +522,7 @@ We use SDK builder first (full accounts) + known close disc. No v2 guessing.
     if (dlmmPool && typeof dlmmPool.closePosition === 'function' && hasRange) {
       try {
         console.log(`  Trying SDK path via tryCloseEmptyPosition (dlmmPool.closePosition) ...`);
-        await tryCloseEmptyPosition(
+        const sdkCloseOk = await tryCloseEmptyPosition(
           dlmmPool,
           pub,
           wallet,
@@ -531,6 +531,7 @@ We use SDK builder first (full accounts) + known close disc. No v2 guessing.
           `[recover-${s.pubkey.slice(0,8)}]`,
           300000 // high prio
         );
+        console.log(`  SDK tryClose returned success=${sdkCloseOk}`);
         const after = await connection.getAccountInfo(pub).catch(() => null);
         if (!after || after.lamports === 0 || (after.data && after.data.length < 100)) {
           console.log(`  ✔ Appears reclaimed (account gone or zeroed).`);

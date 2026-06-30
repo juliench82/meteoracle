@@ -996,8 +996,8 @@ export async function openPosition(
           }
         }
         try {
-          await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, wallet, minBinId, maxBinId, label, priorityFee);
-          console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed.`);
+          const closeOk = await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, wallet, minBinId, maxBinId, label, priorityFee);
+          console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed. success=${closeOk}`);
         } catch (closeErr) {
           console.warn(`${label} [TRACE] [FINALLY-CLOSE-ERR] Finally close attempt threw (non-fatal).`);
           console.warn(`${label} finally close failed: ${closeErr}`);
@@ -1492,6 +1492,15 @@ async function openPositionDirect(
  * paid during createAccount. Called on failure paths after scaffolding.
  * This is the main defense against orphaned position account rent losses.
  */
+/**
+ * Attempt to close an empty (or zero-liquidity) position to reclaim the rent
+ * paid during createAccount. Called on failure paths after scaffolding.
+ * This is the main defense against orphaned position account rent losses.
+ *
+ * Returns true if a close succeeded (account likely gone or rent reclaimed).
+ * Returns false if all attempts exhausted (may need manual or monitor retry).
+ * Errors are caught internally; callers should check return or on-chain state.
+ */
 async function tryCloseEmptyPosition(
   dlmmPool: any,
   positionPubKey: PublicKey,
@@ -1500,7 +1509,7 @@ async function tryCloseEmptyPosition(
   maxBinId?: number,
   label: string = '[recover]',
   priorityFee: number = 100000
-) {
+): Promise<boolean> {
   const hasRange = typeof minBinId === 'number' && typeof maxBinId === 'number';
   console.log(`${label} [TRACE] [CLOSE-ENTRY] Entering tryCloseEmptyPosition for key=${positionPubKey.toBase58().slice(0,8)} ${hasRange ? `(range ${minBinId}→${maxBinId})` : '(no range - using closePosition only)'}. This is the rent-reclaim attempt.`);
   console.log(`${label} [TRACE] [CLOSE-ENTRY] Using priority ${Math.max(priorityFee, 100000)} for close.`);
@@ -1533,7 +1542,7 @@ async function tryCloseEmptyPosition(
         const sig = await sendLegacyTx(applyPriorityFee(tx, closePriority), [wallet], `${label} close-empty-for-rent`);
         console.log(`${label} [TRACE] [CLOSE-REMOVE-SUCCESS] removeLiquidity close succeeded.`);
         console.log(`${label} closed empty position to reclaim rent ✔ sig: ${sig}`);
-        return; // success
+        return true; // success
       }
     } catch (closeErr) {
       const msg = closeErr instanceof Error ? closeErr.message : String(closeErr);
@@ -1560,7 +1569,7 @@ async function tryCloseEmptyPosition(
         console.log(`${label} [TRACE] [CLOSE-FALLBACK-SUCCESS] closePosition succeeded.`);
         console.log(`${label} closed empty/stranded position via direct close ✔ sig: ${sig}`);
       }
-      return;
+      return true;
     } else {
       console.log(`${label} [TRACE] [CLOSE-FALLBACK-NOOP] dlmmPool has no closePosition() method.`);
     }
@@ -1573,6 +1582,7 @@ async function tryCloseEmptyPosition(
   console.warn(`${label} [TRACE] [CLOSE-EXHAUSTED] All rent-reclaim attempts exhausted.`);
   console.warn(`${label} [TRACE] All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
   console.warn(`${label} All close attempts failed — position rent may be locked (manual recovery needed via key ${positionPubKey.toBase58()})`);
+  return false;
 }
 
 // Also export for potential use in monitor or recovery if needed
