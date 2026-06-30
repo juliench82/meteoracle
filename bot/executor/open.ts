@@ -998,6 +998,12 @@ export async function openPosition(
         try {
           const closeOk = await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, wallet, minBinId, maxBinId, label, priorityFee);
           console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed. success=${closeOk}`);
+          if (!closeOk) {
+            sendAlert({
+              type: 'warning',
+              message: `⚠️ Rent reclaim failed for ${positionKeypair.publicKey.toBase58()} — manual recovery needed (marker persisted for monitor)`,
+            }).catch(() => {})
+          }
         } catch (closeErr) {
           console.warn(`${label} [TRACE] [FINALLY-CLOSE-ERR] Finally close attempt threw (non-fatal).`);
           console.warn(`${label} finally close failed: ${closeErr}`);

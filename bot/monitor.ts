@@ -11,6 +11,7 @@ import {
   getClaimableFeesUsd,
   getInitializePositionAccounts,
 } from '@/bot/executor/utils'
+import { sendAlert } from '@/bot/alerter'
 import { tryCloseEmptyPosition } from '@/bot/executor/open'
 import {
   getCurrentPoolFeeTvl24h,
@@ -459,6 +460,13 @@ export async function retryStrandedPositionRents() {
       // Use the exported tryClose (it now supports optional bins and will prefer closePosition for uninit ghosts)
       const closeOk = await tryCloseEmptyPosition(dlmmPool, pub, wallet, minB, maxB, `[monitor-stranded-rent-${s.position_pubkey.slice(0,8)}]`, 200000);
       console.log(`[monitor] tryCloseEmptyPosition returned success=${closeOk} for ${s.position_pubkey.slice(0,8)}`);
+
+      if (!closeOk) {
+        sendAlert({
+          type: 'warning',
+          message: `⚠️ Monitor rent reclaim failed for ${s.position_pubkey} — will retry next tick`,
+        }).catch(() => {});
+      }
 
       // If we reached here without throwing, consider it done or remove the marker.
       // For safety, only remove if the account no longer exists or data is small.
