@@ -5,7 +5,7 @@
  * used across open.ts, close.ts, and add-liquidity.ts.
  */
 
-import { PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
+import { PublicKey, SYSVAR_RENT_PUBKEY } from '@solana/web3.js';
 import BN from 'bn.js';
 import {
   TOKEN_PROGRAM_ID,
@@ -203,8 +203,8 @@ export function getInitializePositionAccounts(
     lbPair: lbPairPubkey,
     owner: walletPubkey,
     rent: SYSVAR_RENT_PUBKEY,
-    // The account name in the IDL for initializePosition is "systemProgram".
-    // (Some older client generations used "program"; we standardize on systemProgram here.)
-    systemProgram: SystemProgram.programId,
+    // The IDL for initializePosition requires "program" (the LB program itself for events/CPI).
+    // systemProgram (System) is handled implicitly (never in the resolved type).
+    program: dlmmPool.program.programId,
   };
 }

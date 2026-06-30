@@ -1234,7 +1234,6 @@ async function openPositionDirect(
 
     const lowerBinId = minBinId;
     const width = maxBinId - minBinId;
-    const numBins = width + 1;
     const POSITION_HEADER = 256;
     const BYTES_PER_BIN = 128;
     const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
