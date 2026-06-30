@@ -407,6 +407,26 @@ function toNumber(v: any): number {
 export async function retryStrandedPositionRents() {
   const positions = getOpenLpPositions() as any[];
   const stranded = positions.filter((p: any) => p.status === 'stranded_rent' || (p.close_reason || '').includes('stranded_rent'));
+
+  // Cleanup stale pending scaffolds (no matching stranded marker after 24h).
+  // Prevents accumulation if process killed between persistPendingScaffold and persistStranded.
+  try {
+    const MAX_PENDING_AGE_MS = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const strandedPubs = new Set(stranded.map((s: any) => s.position_pubkey));
+    const pendings = getPendingScaffolds();
+    for (const p of pendings) {
+      if (strandedPubs.has(p.pubkey)) continue;
+      const age = now - new Date(p.createdAt).getTime();
+      if (age > MAX_PENDING_AGE_MS) {
+        removePendingScaffold(p.pubkey);
+        console.log(`[monitor] cleaned stale pending scaffold (no marker, ${Math.round(age / 3600000)}h old): ${p.pubkey.slice(0, 8)}`);
+      }
+    }
+  } catch (e) {
+    console.warn('[monitor] pending scaffold cleanup failed:', e);
+  }
+
   if (stranded.length === 0) return;
 
   console.log(`[monitor] checking ${stranded.length} stranded position rent accounts for reclaim...`);
