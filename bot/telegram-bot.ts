@@ -19,7 +19,7 @@ import { getOpenLpPositions } from '@/lib/local-state'
 import { getTelegramAllowedUsers, isTelegramCommandAllowed } from '@/lib/telegram-auth'
 
 const execAsync = promisify(exec)
-const PM2 = '/usr/local/bin/pm2'
+const PM2 = process.env.PM2_BIN || '/usr/local/bin/pm2'
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? ''
@@ -45,10 +45,9 @@ async function sendMessage(text: string, chatId = CHAT_ID) {
   }
 }
 
-async function reply(text: string) {
-  // In the polling handler we have the actual chatId from the update.
-  // For simplicity in stubs we use the default CHAT_ID.
-  await sendMessage(text)
+async function reply(text: string, chatIdOverride?: string) {
+  // Use actual chatId from the message when available; fall back to default only for broadcasts.
+  await sendMessage(text, chatIdOverride || CHAT_ID)
 }
 
 async function handleUpdate(update: any) {
@@ -200,8 +199,8 @@ async function handleUpdate(update: any) {
     return
   }
 
-  if (cmd.startsWith('/close ')) {
-    const id = text.split(' ', 2)[1]?.trim()
+  if (cmd === '/close') {
+    const id = args[0]?.trim()
     if (!id) {
       await sendMessage('Usage: /close <id>', chatId)
       return

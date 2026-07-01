@@ -393,3 +393,12 @@ export function removePendingScaffold(pubkey: string) {
     atomicWriteJson(PENDING_SCAFFOLDS_FILE, list)
   } catch {}
 }
+
+export async function updatePositionClaimTime(positionId: string): Promise<void> {
+  const positions = getOpenLpPositions()
+  const idx = positions.findIndex((p: any) => p.id === positionId)
+  if (idx !== -1) {
+    positions[idx].last_claim_at = new Date().toISOString()
+    saveOpenLpPositions(positions)
+  }
+}

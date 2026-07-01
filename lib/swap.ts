@@ -1,8 +1,11 @@
 import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js'
 import BN from 'bn.js'
+import * as fs from 'fs'
+import * as path from 'path'
 import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
+import { atomicWriteJson } from './atomic-write'
 
 export const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
 export const JUPITER_QUOTE_API = process.env.JUPITER_QUOTE_API_URL ?? 'https://public.jupiterapi.com'
@@ -13,6 +16,35 @@ const SWAP_RETRY_DELAY_MS = 3_000
 // Note: main paths now use direct Meteora DLMM (see swapSolToTokenDirectOnDlmm in open.ts).
 // The Jupiter-based helpers below are legacy (only for tests now).
 const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000];
+
+const STATE_DIR = path.join(process.cwd(), 'state')
+const STRANDED_BACKOFF_FILE = path.join(STATE_DIR, 'stranded-sell-backoff.json')
+
+function ensureStateDir() {
+  if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true })
+}
+
+function loadStrandedBackoff(): Map<string, number> {
+  try {
+    ensureStateDir()
+    if (fs.existsSync(STRANDED_BACKOFF_FILE)) {
+      const data = JSON.parse(fs.readFileSync(STRANDED_BACKOFF_FILE, 'utf8'))
+      if (data && typeof data === 'object') {
+        return new Map(Object.entries(data).map(([k, v]) => [k, Number(v) || 0]))
+      }
+    }
+  } catch {}
+  return new Map()
+}
+
+function saveStrandedBackoff(map: Map<string, number>) {
+  try {
+    ensureStateDir()
+    const obj: Record<string, number> = {}
+    for (const [k, v] of map) obj[k] = v
+    atomicWriteJson(STRANDED_BACKOFF_FILE, obj)
+  } catch {}
+}
 
 // Fresh-quote retry config for the pre-quoted path (Claude's fix).
 // Each attempt fetches a *fresh* quote at an escalating slippage level before
@@ -374,20 +406,34 @@ export async function swapSolToToken(
  * records recovered timestamp/sig). Failures are left for the next tick.
  */
 export async function retryStrandedSells(): Promise<{ retried: number; recovered: number }> {
-  const positions = getOpenLpPositions()
+  let positions = getOpenLpPositions()
   const now = Date.now()
   const recentMs = 7 * 24 * 3600 * 1000
+  const pruneMs = 90 * 24 * 3600 * 1000 // prune very old closed to keep state file small
 
-  // Simple in-memory backoff for tokens that are consistently failing with liquidity issues.
-  // Prevents hammering the chain (and paying priority fees on any marginal sends) every single monitor tick.
-  if (!(globalThis as any).__strandedBackoff) {
-    (globalThis as any).__strandedBackoff = new Map<string, number>()
+  // Light prune of ancient closed records (prevents unbounded growth)
+  const beforePrune = positions.length
+  positions = positions.filter((p: any) => {
+    if (p.status !== 'closed') return true
+    const closedTs = p.closed_at ? new Date(p.closed_at).getTime() : 0
+    return (now - closedTs) < pruneMs
+  })
+  if (positions.length !== beforePrune) {
+    saveOpenLpPositions(positions)
   }
-  const backoff: Map<string, number> = (globalThis as any).__strandedBackoff
+
+  // Persisted backoff (survives restart) for tokens failing liquidity.
+  const backoff: Map<string, number> = loadStrandedBackoff()
   const LIQUIDITY_BACKOFF_MS = 5 * 60 * 1000 // 5 minutes after a liquidity failure
+
+  if (!(globalThis as any).__strandedSellAlerted) {
+    (globalThis as any).__strandedSellAlerted = new Set<string>()
+  }
+  const alerted: Set<string> = (globalThis as any).__strandedSellAlerted
 
   let retried = 0
   let recovered = 0
+  let longStranded = 0
 
   for (const pos of positions) {
     const recoveryMint: string = (pos as any).stranded_token_mint || pos.mint || '';
@@ -404,6 +450,19 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     const isRecentClosed = pos.status === 'closed' && !(pos as any).stranded_recovered_at
 
     if (!isSellFailed && !isRecentClosed) continue
+
+    const sellFailedAt = (pos as any).sell_failed_at ? new Date((pos as any).sell_failed_at).getTime() : (ts ? new Date(tsStr).getTime() : now)
+    const strandedAgeMin = Math.max(0, (now - sellFailedAt) / 60000)
+    if (strandedAgeMin > 30 && !alerted.has(recoveryMint)) {
+      longStranded++
+      const sym = (pos as any).symbol || recoveryMint.slice(0, 6)
+      console.warn(`[swap] LONG STRANDED SELL: ${sym} mint=${recoveryMint} age=${Math.round(strandedAgeMin)}m — no max-retry cutoff; will keep trying with backoff.`)
+      sendAlert({
+        type: 'warning',
+        message: `⚠️ Stranded sell for ${sym} still holding token after ~${Math.round(strandedAgeMin)}m (may be illiquid). Monitor will keep retrying.`,
+      }).catch(() => {})
+      alerted.add(recoveryMint)
+    }
 
     // Backoff check
     const lastFail = backoff.get(recoveryMint) || 0
@@ -452,7 +511,9 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                   inAmount: inputAmountBN,
                   lbPair: dlmmPool.pubkey,
                   user: wallet.publicKey,
-                  minOutAmount: new BN(0),  // recovery mode — land the unwind
+                  // Use quote's minOut (already toleranced at 10000bps in quote) or very loose 25% of expected.
+                  // Avoids total drain via zero protection while still allowing recovery on thin pools.
+                  minOutAmount: (q.minOutAmount && !q.minOutAmount.isZero()) ? q.minOutAmount : q.outAmount.div(new BN(4)),
                   outToken,
                 })
                 const { sendLegacyTx, applyPriorityFee } = await import('@/lib/solana-tx')
@@ -475,6 +536,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                 }
                 // clear backoff on success
                 backoff.delete(recoveryMint)
+                saveStrandedBackoff(backoff)
               }
             }
           }
@@ -483,6 +545,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
           console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${msg}`)
           if (msg.includes('Insufficient liquidity') || msg.includes('SWAP_QUOTE_INSUFFICIENT')) {
             backoff.set(recoveryMint, now)
+            saveStrandedBackoff(backoff)
           }
         }
       }
@@ -493,8 +556,8 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     }
   }
 
-  if (retried > 0) {
-    console.log(`[swap] stranded sells tick summary: retried=${retried} recovered=${recovered}`)
+  if (retried > 0 || longStranded > 0) {
+    console.log(`[swap] stranded sells tick summary: retried=${retried} recovered=${recovered} longStrandedWarned=${longStranded}`)
   }
   return { retried, recovered }
 }

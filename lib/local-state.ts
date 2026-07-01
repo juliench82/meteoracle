@@ -61,3 +61,24 @@ export function getOpenLpPositions(): OpenLpPosition[] {
 export function saveOpenLpPositions(positions: OpenLpPosition[]) {
   atomicWriteJson(OPEN_POSITIONS_FILE, positions)
 }
+
+/**
+ * Safe merge for batched monitor updates.
+ * Always reloads latest list (captures any concurrent adds from scanner) then overlays patches by id.
+ * Prevents the classic "snapshot at tick start + batch write at end" clobbering new records.
+ */
+export function applyMonitorUpdates(updates: Array<{ id: string; patch: Partial<OpenLpPosition> }>): void {
+  if (!updates || updates.length === 0) return
+  const all = getOpenLpPositions()
+  let changed = false
+  for (const { id, patch } of updates) {
+    const idx = all.findIndex((p: OpenLpPosition) => p.id === id)
+    if (idx !== -1 && patch && Object.keys(patch).length > 0) {
+      Object.assign(all[idx], patch)
+      changed = true
+    }
+  }
+  if (changed) {
+    saveOpenLpPositions(all)
+  }
+}

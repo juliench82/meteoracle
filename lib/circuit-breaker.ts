@@ -16,24 +16,29 @@ export async function isDailyLossLimitHit(): Promise<boolean> {
     const oneDayMs = 24 * 60 * 60 * 1000
 
     let lossCount = 0
-    let totalLossPct = 0
+    let weightedLossSum = 0
+    let totalSolDeposited = 0
 
     for (const p of positions) {
       if (p.status !== 'closed' || !p.closed_at) continue
       const closedTs = new Date(p.closed_at).getTime()
+      // closed_at is written by markPositionClosed / markPositionSellFailed in persistence.ts (confirmed)
       if (now - closedTs > oneDayMs) continue
 
-      const pnl = (p as any).last_net_pnl_pct ?? 0
-      if (pnl < 0) {
+      const pnl = Number((p as any).last_net_pnl_pct ?? 0)
+      const solDep = Number((p as any).sol_deposited ?? 0)
+      if (pnl < 0 && solDep > 0) {
         lossCount++
-        totalLossPct += pnl
+        weightedLossSum += (pnl / 100) * solDep   // fractional loss in SOL terms
+        totalSolDeposited += solDep
       }
     }
 
-    const hit = lossCount >= 3 || totalLossPct <= -30
+    const avgLossPct = totalSolDeposited > 0 ? (weightedLossSum / totalSolDeposited) * 100 : 0
+    const hit = lossCount >= 3 || avgLossPct <= -30
     if (hit) {
       console.log(
-        `[circuit-breaker] daily loss limit hit: ${lossCount} losses, cumulative ${totalLossPct.toFixed(1)}% over last 24h`
+        `[circuit-breaker] daily loss limit hit: ${lossCount} losses, weighted avg ${avgLossPct.toFixed(1)}% over last 24h (unweighted would be wrong on unequal sizes)`
       )
     }
     return hit

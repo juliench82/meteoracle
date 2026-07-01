@@ -6,6 +6,6 @@
  */
 
 export { openPosition } from './executor/open';
-export { closePosition } from './executor/close';
+export { closePosition, claimFeesForPosition } from './executor/close';
 export { addLiquidityToPosition } from './executor/add-liquidity';
 

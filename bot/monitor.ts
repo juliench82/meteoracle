@@ -1,8 +1,9 @@
 import { retryStrandedSells } from '@/lib/swap'
 import { getBotState } from '@/lib/botState'
 import axios from 'axios'
-import { getOpenLpPositions, saveOpenLpPositions, type OpenLpPosition } from '@/lib/local-state'
+import { getOpenLpPositions, saveOpenLpPositions, type OpenLpPosition, applyMonitorUpdates } from '@/lib/local-state'
 import { closePosition } from '@/bot/executor/close'
+import { claimFeesForPosition } from '@/bot/executor/close'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
 import { getConnection, getWallet } from '@/lib/solana'
 import {
@@ -23,6 +24,7 @@ import {
 import { PublicKey, Keypair, Transaction } from '@solana/web3.js'
 import { ComputeBudgetProgram } from '@solana/web3.js'
 import { sendLegacyTx } from '@/lib/solana-tx'
+import BN from 'bn.js'
 import {
   getPendingScaffolds,
   removePendingScaffold,
@@ -59,16 +61,8 @@ let tickCount = 0
 const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1000
 const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
 
-// Per-position exit params (read for backward compat with older opens).
-// The 4-rule model uses the global LP_* constants in strategy-config.
-function getPositionExitRules(pos: OpenLpPosition) {
-  return {
-    outOfRangeMinutes: (pos as any).out_of_range_minutes ?? (pos as any).metadata?.out_of_range_minutes ?? LP_OOR_EXIT_MINUTES,
-    maxDurationHours:  (pos as any).max_duration_hours  ?? (pos as any).metadata?.maxDurationHours  ?? LP_MAX_DURATION_HOURS,
-    claimFeesBeforeClose: (pos as any).claim_fees_before_close ?? (pos as any).metadata?.claimFeesBeforeClose ?? true,
-    minFeesToClaim:       (pos as any).min_fees_to_claim       ?? (pos as any).metadata?.minFeesToClaim       ?? 0.001,
-  }
-}
+// Per-position exit overrides are not used in the current 4-rule global model.
+// Left as comment for future if per-position config is re-introduced.
 
 export async function monitorPositions() {
   return runTick()
@@ -82,8 +76,15 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
     console.log('[lp-monitor] bot is paused — skipping tick')
     return stats
   }
+  if (botState.enabled === false) {
+    console.log('[lp-monitor] botState.enabled=false — skipping tick')
+    return stats
+  }
 
-  tickCount++ // incremented for potential future use / debugging
+  tickCount++
+  if (tickCount % 10 === 0) {
+    console.log(`[lp-monitor] tick #${tickCount}`)
+  }
 
   await retryStrandedSells().catch(err => console.error('[monitor] stranded sells failed:', err))
   await retryStrandedPositionRents().catch(err => console.error('[monitor] stranded position rents failed:', err))
@@ -107,6 +108,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
     let drySimSolPriceUsd: number | null = null
 
     let positionsMutated = false
+    const monitorPatches: Array<{ id: string; patch: Partial<OpenLpPosition> }> = []
 
     for (const pos of positions) {
       try {
@@ -168,20 +170,20 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
               pos.fee_tvl_samples = pruned
             }
 
-            // Persist samples using pre-loaded master list (avoids per-pos re-fetch race)
-            const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
-            if (idx !== -1) {
-              allPositions[idx].fee_tvl_samples = pos.fee_tvl_samples
-              allPositions[idx].last_fee_tvl_4h_avg = pos.last_fee_tvl_4h_avg
-              positionsMutated = true
-            }
+            monitorPatches.push({
+              id: pos.id,
+              patch: { fee_tvl_samples: pos.fee_tvl_samples, last_fee_tvl_4h_avg: pos.last_fee_tvl_4h_avg }
+            })
+            positionsMutated = true
           }
         } catch (e) {
           // Non-fatal — we still evaluate other rules
           console.warn(`[monitor] Fee/TVL sample failed for ${pos.symbol}:`, e instanceof Error ? e.message : e)
         }
 
-        if (feeTvl4hAvg != null && feeTvl4hAvg < feeTvlThreshold && (pos.fee_tvl_samples?.length ?? 0) >= 3) {
+        if (feeTvl4hAvg != null && feeTvl4hAvg < feeTvlThreshold && (pos.fee_tvl_samples?.length ?? 0) >= 10) {
+          // Require >=10 samples (~10 min at 60s ticks) to avoid exiting on transient 3-min API blips.
+          // The 4h window average still applies; this just gates the decision.
           // Exit decision uses the *rolling 4h window average* of 24h Fee/TVL samples (not a single-tick value).
           const reason = `fee_tvl_yield_low_4havg_${feeTvl4hAvg.toFixed(2)}pct`
           console.log(`[monitor] FEE/TVL EXIT → ${pos.symbol} (4h avg ${feeTvl4hAvg.toFixed(2)}% < ${feeTvlThreshold}%, samples=${pos.fee_tvl_samples?.length ?? 0})`)
@@ -214,11 +216,8 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
                   roughPnl += (claimable / (pos.sol_deposited * drySimSolPriceUsd)) * 100
                 }
                 pos.last_net_pnl_pct = Math.round(roughPnl * 100) / 100
-                const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
-                if (idx !== -1) {
-                  allPositions[idx].last_net_pnl_pct = pos.last_net_pnl_pct
-                  positionsMutated = true
-                }
+                monitorPatches.push({ id: pos.id, patch: { last_net_pnl_pct: pos.last_net_pnl_pct } })
+                positionsMutated = true
               }
             }
           } catch (e) {
@@ -234,8 +233,9 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
             if (!oorSince) {
               oorSince = now
               pos.oor_since = new Date(oorSince).toISOString()
-              const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
-              if (idx !== -1) { allPositions[idx].oor_since = pos.oor_since; positionsMutated = true }
+              // Immediate targeted write for OOR timer (crash safety)
+              applyMonitorUpdates([{ id: pos.id, patch: { oor_since: pos.oor_since } }])
+              positionsMutated = true
             }
 
             const oorMin = (now - oorSince) / 1000 / 60
@@ -249,8 +249,8 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           } else if (oorSince) {
             // Back in range — clear the timer
             delete pos.oor_since
-            const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
-            if (idx !== -1) { delete allPositions[idx].oor_since; positionsMutated = true }
+            applyMonitorUpdates([{ id: pos.id, patch: { oor_since: null as any } }])
+            positionsMutated = true
           }
         }
 
@@ -263,9 +263,8 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
               const netPnl = computeNetPnlApprox(pos, onChainPos, activeBin, dlmmPool)
               if (netPnl != null) {
                 pos.last_net_pnl_pct = Math.round(netPnl * 100) / 100
-                // Persist for alert richness (batched)
-                const idx = allPositions.findIndex((p: OpenLpPosition) => p.id === pos.id)
-                if (idx !== -1) { allPositions[idx].last_net_pnl_pct = pos.last_net_pnl_pct; positionsMutated = true }
+                monitorPatches.push({ id: pos.id, patch: { last_net_pnl_pct: pos.last_net_pnl_pct } })
+                positionsMutated = true
 
                 if (netPnl <= netLossThreshold) {
                   const reason = `net_pnl_sl_${netPnl.toFixed(1)}pct`
@@ -295,8 +294,10 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         const lastClaim = pos.last_claim_at ? new Date(pos.last_claim_at).getTime() : (openedAt ? new Date(openedAt).getTime() : now)
         const minutesSinceClaim = (now - lastClaim) / 1000 / 60
         if (minutesSinceClaim >= 30) {
-          console.log(`[monitor] ${pos.symbol} — time for fee claim (≥30m since last claim/open; call claim manually or extend executor to auto-claim here)`)
-          // TODO: wire non-exit claim (e.g. via a claimFeesForPosition helper) when available in executor
+          console.log(`[monitor] ${pos.symbol} — time for fee claim (≥30m) — attempting auto-claim`)
+          claimFeesForPosition(pos.id).then((claimed) => {
+            if (claimed) console.log(`[monitor] auto-claimed fees for ${pos.symbol}`)
+          }).catch(() => {})
         }
 
         // Tick heartbeat for open positions (useful in dry-run logs)
@@ -334,9 +335,9 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
       }
     }
 
-    // Single batched save at end of positions processing (prevents per-pos re-fetch/save races under load)
+    // Apply via reload+merge (prevents monitor snapshot clobbering concurrent scanner opens / other writers)
     if (positionsMutated) {
-      saveOpenLpPositions(allPositions)
+      applyMonitorUpdates(monitorPatches)
     }
   }
 
@@ -346,10 +347,11 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 // ── Helpers for the 4-rule exit engine ──────────────────────────────────────────
 
 /**
- * Rough net PnL approximation for LP exit decisions during dry-run observation.
- * This is intentionally heuristic (active bin price + crude side valuation + pending fees).
- * It is NOT a full on-chain position valuation (token amounts × prices + all claimed + unclaimed fees).
- * Good enough to start collecting data on the -30% rule; can be improved later with better valuation.
+ * Rough net PnL approximation for LP exit decisions.
+ * Heuristic only: uses *active bin price* for the entire position liquidity.
+ * For wide ranges that are partially OOR this can over/under-estimate value significantly.
+ * It is intentionally approximate — NOT for precise accounting.
+ * Full bin-by-bin valuation would be more accurate but heavier.
  */
 function computeNetPnlApprox(
   pos: OpenLpPosition,
@@ -381,9 +383,11 @@ function computeNetPnlApprox(
 
     const feeX = toNumber(pd.feeX ?? pd.fee_x)
     const feeY = toNumber(pd.feeY ?? pd.fee_y)
-    // feeX is token lamports; feeY is SOL lamports (for SOL-paired).
-    const feeXWhole = feeX / Math.pow(10, tokenDecimals);
-    const pendingFeeSolApprox = (feeXWhole * priceSolPerToken) + (feeY / 1e9);
+    // Mirror isXSol for fees: fee on SOL side vs token side (fixes incorrect pending SOL fee value when SOL is tokenY)
+    const feeSolLamports = isXSol ? feeX : feeY
+    const feeTokenLamports = isXSol ? feeY : feeX
+    const feeTokenWhole = feeTokenLamports / Math.pow(10, tokenDecimals)
+    const pendingFeeSolApprox = (feeSolLamports / 1e9) + (feeTokenWhole * priceSolPerToken)
 
     const netSol = currentLiqValueSol + pendingFeeSolApprox - solDeposited
     return (netSol / solDeposited) * 100
@@ -394,7 +398,16 @@ function computeNetPnlApprox(
 
 function toNumber(v: any): number {
   if (!v) return 0
-  if (typeof v === 'object' && typeof v.toNumber === 'function') return v.toNumber()
+  // Safe path for BN (and similar) to avoid silent overflow on >2^53 values (large meme token amounts)
+  if (BN.isBN(v) || (v && typeof v.toNumber === 'function')) {
+    try {
+      return v.toNumber()
+    } catch {
+      const s = typeof v.toString === 'function' ? v.toString(10) : String(v)
+      const n = Number(s)
+      return Number.isFinite(n) ? n : (parseFloat(s) || 0)
+    }
+  }
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
 }

@@ -13,6 +13,7 @@ import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions } from '@/lib/local-state'
 import { logWarn, logInfo } from '@/lib/log'
+import { resolveSolPriceUsd } from '@/lib/sol-price'
 
 import {
   simulateAndCheck,
@@ -24,6 +25,7 @@ import {
   markPositionClosed,
   markPositionSellFailed,
   sendCloseAlert,
+  updatePositionClaimTime,
 } from './persistence'
 
 import {
@@ -31,12 +33,17 @@ import {
   getTokenProgramId,
   getPositionWithRetry,
   getClaimableFeesUsd,
+  getDecimalAdjustedPrice,
   NATIVE_MINT_STR,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from './utils'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
+
+// In-memory mutex to prevent concurrent close attempts on the same positionId
+// (monitor tick + manual /close + overrun can race otherwise).
+const closingInProgress = new Set<string>()
 
 export async function closePosition(
   positionId: string,
@@ -51,6 +58,12 @@ export async function closePosition(
     return false
   }
 
+  if (closingInProgress.has(positionId)) {
+    console.log(`[executor][close] close already in flight for ${positionId} — skipping duplicate to avoid double-removeLiquidity`)
+    return false
+  }
+  closingInProgress.add(positionId)
+
   const label = `[executor][close][${position.symbol}]`
   console.log(`${label} closing — reason: ${reason}`)
 
@@ -59,6 +72,7 @@ export async function closePosition(
     const claimableFeesUsd = getClaimableFeesUsd(position) ?? 0
     await markPositionClosed(positionId, claimableFeesUsd, reason)
     await sendCloseAlert(position, claimableFeesUsd, reason)
+    closingInProgress.delete(positionId)
     return true
   }
 
@@ -69,12 +83,14 @@ export async function closePosition(
       event: 'close_position_skipped_env_dry_run',
       payload: { positionId, reason },
     })
+    closingInProgress.delete(positionId)
     return false
   }
 
   if (!position.position_pubkey) {
     console.error(`${label} position_pubkey is null — cannot close on-chain, marking closed in DB`)
     await markPositionClosed(positionId, getClaimableFeesUsd(position) ?? 0, `${reason}_no_pubkey`)
+    closingInProgress.delete(positionId)
     return false
   }
 
@@ -101,8 +117,23 @@ export async function closePosition(
       const pd = userPosition.positionData;
       const feeX = Number(pd.feeX ?? pd.fee_x ?? 0);
       const feeY = Number(pd.feeY ?? pd.fee_y ?? 0);
-      // Rough USD proxy (token fees ~small; real conversion would use live price).
-      claimableFeesUsd = (feeY / 1e9) + (feeX / 1e6 * 0.001);
+
+      // Proper calc: mirror the isXSol orientation + live price (fixes hardcoded 0.001 proxy)
+      const xPub = dlmmPool.tokenX?.publicKey?.toBase58?.() ?? ''
+      const isXSol = xPub === 'So11111111111111111111111111111111111111112'
+      const feeSolLamports = isXSol ? feeX : feeY
+      const feeTokenLamports = isXSol ? feeY : feeX
+      const tokenDecimals = (isXSol ? dlmmPool.tokenY?.decimals : dlmmPool.tokenX?.decimals) ?? 6
+      const priceSolPerToken = getDecimalAdjustedPrice(dlmmPool, await dlmmPool.getActiveBin().catch(() => null)) || 0
+      const feeTokenWhole = feeTokenLamports / Math.pow(10, tokenDecimals)
+      const feesInSol = (feeSolLamports / 1e9) + (feeTokenWhole * priceSolPerToken)
+
+      try {
+        const solUsd = await resolveSolPriceUsd().catch(() => 150)
+        claimableFeesUsd = Math.max(0, feesInSol * solUsd)
+      } catch {
+        claimableFeesUsd = feesInSol * 150 // fallback
+      }
     }
 
     // NOTE: explicit claimAllRewards removed — removeLiquidity with shouldClaimAndClose:true already claims fees + closes in one tx.
@@ -205,10 +236,12 @@ export async function closePosition(
           const swapTx = await dlmmPool.swap({
             inToken,
             binArraysPubkey: binArrayKeysForSwap,
-            inAmount: inputAmountBN,  // known input we quoted (reliable; q.inAmount can be missing/undefined on some DLMM responses)
+            inAmount: inputAmountBN,
             lbPair: dlmmPool.pubkey,
             user: wallet.publicKey,
-            minOutAmount: q.minOutAmount,
+            // Slightly defensive vs pure quote (blocks can pass); still respects the quoted slippage.
+            // If this fails it will correctly fall to sell_failed + recovery loop.
+            minOutAmount: q.minOutAmount && !q.minOutAmount.isZero() ? q.minOutAmount : new BN(0),
             outToken,
           })
           const sig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], label)
@@ -241,6 +274,88 @@ export async function closePosition(
       level: 'error', event: 'close_position_failed',
       payload: { positionId, reason, error: message },
     })
+    return false
+  } finally {
+    closingInProgress.delete(positionId)
+  }
+}
+
+/**
+ * Claim accumulated swap fees for an open position WITHOUT closing or removing liquidity.
+ * Uses DLMM SDK claimSwapFee when available (preferred). Falls back to tiny bps remove+claim if needed.
+ * Updates last_claim_at in state for the 30min cadence.
+ */
+export async function claimFeesForPosition(positionId: string): Promise<boolean> {
+  const positions = getOpenLpPositions() as any[]
+  const position = positions.find((p: any) => p.id === positionId)
+  if (!position || !position.position_pubkey || position.dry_run) {
+    return false
+  }
+
+  const label = `[executor][claim][${position.symbol}]`
+  const connection = getConnection()
+  const wallet = getWallet()
+
+  try {
+    const DLMM = await getDLMM()
+    const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
+    const posKey = new PublicKey(position.position_pubkey)
+
+    const userPos = await getPositionWithRetry(dlmmPool, wallet.publicKey, posKey.toBase58(), label).catch(() => null)
+    if (!userPos?.positionData) {
+      console.warn(`${label} no on-chain position data for claim`)
+      return false
+    }
+
+    const { lowerBinId, upperBinId } = userPos.positionData
+
+    // Preferred: dedicated claim (no liquidity change)
+    try {
+      const claimRes: any = await (dlmmPool as any).claimSwapFee?.({
+        owner: wallet.publicKey,
+        position: posKey,
+        fromBinId: lowerBinId,
+        toBinId: upperBinId,
+      })
+      const txs = Array.isArray(claimRes) ? claimRes : (claimRes ? [claimRes] : [])
+      for (const tx of txs) {
+        const sig = await sendLegacyTx(applyPriorityFee(tx, 50000), [wallet], `${label}-claim`)
+        console.log(`${label} fees claimed ✔ sig: ${sig}`)
+      }
+      if (txs.length > 0) {
+        await updatePositionClaimTime(positionId).catch(() => {})
+        return true
+      }
+    } catch (claimErr) {
+      console.warn(`${label} claimSwapFee not available or failed, trying remove 0-bps claim path:`, claimErr)
+    }
+
+    // Fallback: remove 0 bps (still claims fees per some SDK paths) without closing
+    try {
+      const removeRes: any = await dlmmPool.removeLiquidity({
+        position: posKey,
+        user: wallet.publicKey,
+        fromBinId: lowerBinId,
+        toBinId: upperBinId,
+        bps: new BN(0),
+        shouldClaimAndClose: false,
+      })
+      const txs = Array.isArray(removeRes) ? removeRes : (removeRes ? [removeRes] : [])
+      for (const tx of txs) {
+        if (tx) {
+          const sig = await sendLegacyTx(applyPriorityFee(tx, 50000), [wallet], `${label}-claim-fallback`)
+          console.log(`${label} fees claimed (fallback) ✔ sig: ${sig}`)
+        }
+      }
+      await updatePositionClaimTime(positionId).catch(() => {})
+      return txs.length > 0
+    } catch (e) {
+      console.warn(`${label} fallback claim also failed:`, e)
+    }
+
+    return false
+  } catch (e) {
+    console.warn(`${label} claim failed:`, e)
     return false
   }
 }

@@ -99,6 +99,24 @@ const DEXSCREENER = 'https://api.dexscreener.com/latest/dex/tokens'
 
 const METEORA_FETCH_TIMEOUT_MS = 45_000
 const EXTERNAL_CALL_TIMEOUT_MS = 8_000
+
+// Shared DexScreener response cache (per mint) to eliminate duplicate calls in the same tick.
+// fetchMcFromDexScreener + getPoolVsMarketPriceDeviation were hitting the same endpoint independently.
+const dexScreenerCache = new Map<string, { pairs: any[]; ts: number }>()
+const DEX_CACHE_TTL_MS = 15_000
+
+async function getDexScreenerPairs(mint: string): Promise<any[]> {
+  const hit = dexScreenerCache.get(mint)
+  if (hit && (Date.now() - hit.ts) < DEX_CACHE_TTL_MS) return hit.pairs
+  try {
+    const res = await axios.get(`${DEXSCREENER}/${mint}`, { timeout: 6_000 })
+    const pairs: any[] = res.data?.pairs ?? []
+    dexScreenerCache.set(mint, { pairs, ts: Date.now() })
+    return pairs
+  } catch {
+    return []
+  }
+}
 const USE_HELIUS               = process.env.HELIUS_ENABLED === 'true'
 
 // Re-export values needed by bot/scanner.ts
@@ -357,8 +375,8 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   const limitState = await withTimeout(
     getOpenLpLimitState('market'),
-    METEORA_FETCH_TIMEOUT_MS,
-    'live Meteora position limit state',
+    EXTERNAL_CALL_TIMEOUT_MS,
+    'open LP limit state (local)',
   )
   let openCount: number | undefined
   let availableOpenSlots = 0
@@ -511,14 +529,9 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 }
 
 async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Promise<number> {
-  try {
-    const res = await axios.get(`${DEXSCREENER}/${mint}`, { timeout: 6_000 })
-    const pairs: Array<{ fdv?: number; marketCap?: number }> = res.data?.pairs ?? []
-    if (pairs.length === 0) return 0
-    return pairs[0].marketCap ?? pairs[0].fdv ?? 0
-  } catch {
-    return 0
-  }
+  const pairs = await getDexScreenerPairs(mint)
+  if (pairs.length === 0) return 0
+  return pairs[0].marketCap ?? pairs[0].fdv ?? 0
 }
 
 /**
@@ -527,27 +540,22 @@ async function fetchMcFromDexScreener(mint: string, fallbackPrice: number): Prom
  * This catches cases where the DLMM pool price is misaligned with broader market (common on very new/thin pools).
  */
 async function getPoolVsMarketPriceDeviation(pool: any, mint: string): Promise<number | null> {
-  try {
-    const res = await axios.get(`${DEXSCREENER}/${mint}`, { timeout: 6_000 })
-    const pairs: any[] = res.data?.pairs ?? []
-    if (pairs.length === 0) return null
+  const pairs = await getDexScreenerPairs(mint)
+  if (pairs.length === 0) return null
 
-    // Prefer a SOL-quoted pair for direct comparison with Meteora current_price (which is typically in SOL)
-    const solPair = pairs.find((p: any) => 
-      (p.quoteToken?.symbol === 'SOL' || p.quoteToken?.address === 'So11111111111111111111111111111111111111112')
-    ) || pairs[0]
+  // Prefer a SOL-quoted pair for direct comparison with Meteora current_price (which is typically in SOL)
+  const solPair = pairs.find((p: any) => 
+    (p.quoteToken?.symbol === 'SOL' || p.quoteToken?.address === 'So11111111111111111111111111111111111111112')
+  ) || pairs[0]
 
-    const externalPriceInSol = parseFloat(solPair?.priceNative || solPair?.priceUsd || '0')
-    if (!externalPriceInSol || externalPriceInSol <= 0) return null
+  const externalPriceInSol = parseFloat(solPair?.priceNative || solPair?.priceUsd || '0')
+  if (!externalPriceInSol || externalPriceInSol <= 0) return null
 
-    const poolPriceInSol = pool.current_price
-    if (!poolPriceInSol || poolPriceInSol <= 0) return null
+  const poolPriceInSol = pool.current_price
+  if (!poolPriceInSol || poolPriceInSol <= 0) return null
 
-    const deviation = Math.abs(poolPriceInSol - externalPriceInSol) / externalPriceInSol
-    return deviation
-  } catch {
-    return null
-  }
+  const deviation = Math.abs(poolPriceInSol - externalPriceInSol) / externalPriceInSol
+  return deviation
 }
 
 type ActivityCandidateProcessResult = {

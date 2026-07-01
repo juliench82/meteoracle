@@ -12,9 +12,10 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import { monitorPositions } from './bot/monitor'
 import { runScanner } from './bot/scanner'
 import { getBotState } from './lib/botState'
+import { validateStartup } from './lib/startup-validation'
 
-const MONITOR_INTERVAL_MS = parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') * 1_000
-const SCANNER_INTERVAL_MS = parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') * 1_000
+const MONITOR_INTERVAL_MS = (parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') || 60) * 1_000
+const SCANNER_INTERVAL_MS = (parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') || 900) * 1_000
 
 const BOT_ENABLED = process.env.BOT_ENABLED === 'true'
 const DRY_RUN     = process.env.BOT_DRY_RUN === 'true'
@@ -29,6 +30,10 @@ function log(msg: string) {
 async function tickMonitor() {
   if (!BOT_ENABLED) { log('monitor skipped — BOT_ENABLED=false'); return }
   if (!LP_MONITOR_ENABLED) { log('monitor skipped — LP_MONITOR_ENABLED=false'); return }
+  if (inFlightMonitor) {
+    log('monitor tick skipped — previous tick still in flight (overlap protection)')
+    return
+  }
   inFlightMonitor = true
   try {
     log('monitor tick start')
@@ -80,7 +85,12 @@ async function main() {
   }
   log(`────────────────────────────────────────`)
 
-  // Run both immediately on startup
+  // Light startup validation (wallet + RPC reachability)
+  validateStartup('worker').catch(() => {}).then((passed) => {
+    if (passed === false) log('startup validation had warnings (see above)')
+  })
+
+  // Run both immediately on startup (serialized)
   inFlightMonitor = true
   inFlightScanner = true
   try {
@@ -91,9 +101,23 @@ async function main() {
     inFlightScanner = false
   }
 
-  // Then on independent intervals
-  setInterval(tickMonitor, MONITOR_INTERVAL_MS)
-  setInterval(tickScanner, SCANNER_INTERVAL_MS)
+  // Recursive setTimeout schedule: next tick only starts AFTER previous completes.
+  // Stronger than setInterval + guard against overlap under slow RPC / long ticks.
+  function scheduleMonitor() {
+    monitorIntervalHandle = setTimeout(async () => {
+      await tickMonitor().catch(e => console.error('[worker] monitor schedule error', e))
+      if (!isShuttingDown) scheduleMonitor()
+    }, MONITOR_INTERVAL_MS) as any
+  }
+  function scheduleScanner() {
+    scannerIntervalHandle = setTimeout(async () => {
+      await tickScanner().catch(e => console.error('[worker] scanner schedule error', e))
+      if (!isShuttingDown) scheduleScanner()
+    }, SCANNER_INTERVAL_MS) as any
+  }
+
+  scheduleMonitor()
+  scheduleScanner()
 }
 
 let isShuttingDown = false
@@ -101,6 +125,10 @@ let isShuttingDown = false
 // Simple in-flight tracking for diagnostics
 let inFlightMonitor = false
 let inFlightScanner = false
+
+// Stored to allow clean shutdown (clearInterval)
+let monitorIntervalHandle: ReturnType<typeof setInterval> | null = null
+let scannerIntervalHandle: ReturnType<typeof setInterval> | null = null
 
 function gracefulShutdown(signal: string) {
   if (isShuttingDown) return
@@ -130,9 +158,10 @@ function gracefulShutdown(signal: string) {
   log(`received ${signal} — starting graceful shutdown`)
 
   // Stop scheduling new ticks
-  // Note: current in-flight ticks will finish naturally
+  if (monitorIntervalHandle) { clearTimeout(monitorIntervalHandle as any); monitorIntervalHandle = null }
+  if (scannerIntervalHandle) { clearTimeout(scannerIntervalHandle as any); scannerIntervalHandle = null }
 
-  // Give in-flight work a chance to complete
+  // Give in-flight work a chance to complete (up to 5s)
   setTimeout(() => {
     log('graceful shutdown complete')
     process.exit(0)
