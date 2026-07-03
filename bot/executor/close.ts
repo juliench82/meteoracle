@@ -42,6 +42,8 @@ import {
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
+const CLOSE_SELL_SLIPPAGE_BPS = 500  // 5% for post-close sells (price can move on exit paths)
+
 // In-memory mutex to prevent concurrent close attempts on the same positionId
 // (monitor tick + manual /close + overrun can race otherwise).
 const closingInProgress = new Set<string>()
@@ -228,7 +230,7 @@ export async function closePosition(
           const swapQuote = await dlmmPool.swapQuote(
             inputAmountBN,
             swapYtoX,
-            new BN(1),
+            new BN(CLOSE_SELL_SLIPPAGE_BPS),
             binArrays
           )
           const q = swapQuote as any;
@@ -340,6 +342,7 @@ export async function claimFeesForPosition(positionId: string): Promise<boolean>
       }
     } catch (claimErr) {
       console.warn(`${label} claimSwapFee not available or failed — skipping mid-position claim (fees will be collected on full close via shouldClaimAndClose)`, claimErr)
+      sendAlert({ type: 'warning', message: `Claim fees failed for ${position.symbol} (${positionId}) — will retry or collect on close` }).catch(() => {})
     }
 
     return false

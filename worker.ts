@@ -50,6 +50,10 @@ async function tickMonitor() {
 async function tickScanner() {
   if (!BOT_ENABLED) { log('scanner skipped — BOT_ENABLED=false'); return }
   if (!LP_SCANNER_ENABLED) { log('scanner skipped — LP_SCANNER_ENABLED=false'); return }
+  if (inFlightScanner) {
+    log('scanner tick skipped — previous tick still in flight')
+    return
+  }
   inFlightScanner = true
   try {
     log('scanner tick start')
@@ -180,7 +184,7 @@ function gracefulShutdown(signal: string) {
 
   // Give in-flight work a chance to complete (longer for opens)
   const waitForOpens = async () => {
-    const deadline = Date.now() + 25_000
+    const deadline = Date.now() + 90_000  // full open can take 60-90s on congestion
     const isOpen = () => (globalThis as any).__openInProgress === true || openInProgress
     while (isOpen() && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 300))
