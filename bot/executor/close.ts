@@ -8,7 +8,7 @@ import { PublicKey, Transaction } from '@solana/web3.js'
 import { getAssociatedTokenAddressSync, NATIVE_MINT } from '@solana/spl-token'
 import BN from 'bn.js'
 
-import { getConnection, getWallet } from '@/lib/solana'
+import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 // Jupiter swap removed - using direct Meteora DLMM swap for sell too
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions } from '@/lib/local-state'
@@ -176,8 +176,9 @@ export async function closePosition(
         // Pass transfer hook remaining accounts for Token-2022 (populated above if needed)
         ...(hookRemainingAccounts.length > 0 ? { remainingAccounts: hookRemainingAccounts } : {}),
       })
+      const closePriorityFee = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()]).catch(() => 100000)
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
-        const sig = await sendLegacyTx(applyPriorityFee(tx, 100000), [wallet], label)
+        const sig = await sendLegacyTx(applyPriorityFee(tx, closePriorityFee), [wallet], label)
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
       }
     } else {
@@ -252,7 +253,8 @@ export async function closePosition(
             minOutAmount: q.minOutAmount && !q.minOutAmount.isZero() ? q.minOutAmount : new BN(0),
             outToken,
           })
-          const sig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], label)
+          const sellPriorityFee = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()]).catch(() => 100000)
+          const sig = await sendLegacyTx(applyPriorityFee(swapTx, sellPriorityFee), [wallet], label)
           console.log(`${label} direct DLMM sell confirmed ✔ sig: ${sig}`);
 
           // Post-sell balance debug
@@ -282,6 +284,8 @@ export async function closePosition(
       level: 'error', event: 'close_position_failed',
       payload: { positionId, reason, error: message },
     })
+    // Clear persisted flag on failure so monitor can retry later
+    applyMonitorUpdates([{ id: positionId, patch: { close_in_progress: false as any } }])
     return false
   } finally {
     closingInProgress.delete(positionId)
