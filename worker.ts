@@ -13,6 +13,7 @@ import { monitorPositions } from './bot/monitor'
 import { runScanner } from './bot/scanner'
 import { getBotState } from './lib/botState'
 import { validateStartup } from './lib/startup-validation'
+import { retryStrandedSells } from './lib/swap'
 
 const MONITOR_INTERVAL_MS = (parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') || 60) * 1_000
 const SCANNER_INTERVAL_MS = (parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') || 900) * 1_000
@@ -118,6 +119,18 @@ async function main() {
 
   scheduleMonitor()
   scheduleScanner()
+
+  // Independent schedule for stranded sell recovery so it doesn't block monitor tick (which does PnL/OOR/SL checks)
+  // Runs every 90s independently
+  function scheduleStrandedSells() {
+    setTimeout(async () => {
+      await retryStrandedSells().catch(e => console.error('[worker] stranded sells schedule error', e))
+      if (!isShuttingDown) scheduleStrandedSells()
+    }, 90_000).unref()
+  }
+  // fire first one after a short delay
+  setTimeout(() => { if (!isShuttingDown) void retryStrandedSells().catch(() => {}) }, 15_000).unref()
+  scheduleStrandedSells()
 }
 
 let isShuttingDown = false
@@ -125,6 +138,10 @@ let isShuttingDown = false
 // Simple in-flight tracking for diagnostics
 let inFlightMonitor = false
 let inFlightScanner = false
+
+// Track if an open is in progress so graceful shutdown can wait
+export let openInProgress = false
+export function setOpenInProgress(v: boolean) { openInProgress = v }
 
 // Stored to allow clean shutdown (clearInterval)
 let monitorIntervalHandle: ReturnType<typeof setInterval> | null = null
@@ -161,11 +178,18 @@ function gracefulShutdown(signal: string) {
   if (monitorIntervalHandle) { clearTimeout(monitorIntervalHandle as any); monitorIntervalHandle = null }
   if (scannerIntervalHandle) { clearTimeout(scannerIntervalHandle as any); scannerIntervalHandle = null }
 
-  // Give in-flight work a chance to complete (up to 5s)
-  setTimeout(() => {
+  // Give in-flight work a chance to complete (longer for opens)
+  const waitForOpens = async () => {
+    const deadline = Date.now() + 25_000
+    const isOpen = () => (globalThis as any).__openInProgress === true || openInProgress
+    while (isOpen() && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 300))
+    }
+  }
+  waitForOpens().then(() => {
     log('graceful shutdown complete')
     process.exit(0)
-  }, 5000).unref()
+  }).catch(() => process.exit(0))
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

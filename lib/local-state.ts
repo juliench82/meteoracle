@@ -58,8 +58,19 @@ export function getOpenLpPositions(): OpenLpPosition[] {
   }
 }
 
+let writeQueue = Promise.resolve()
+
 export function saveOpenLpPositions(positions: OpenLpPosition[]) {
-  atomicWriteJson(OPEN_POSITIONS_FILE, positions)
+  // Serialize all writes to prevent lost updates from concurrent forks during awaits
+  writeQueue = writeQueue.then(() => {
+    atomicWriteJson(OPEN_POSITIONS_FILE, positions)
+  }).catch(err => {
+    console.error('[local-state] save failed:', err)
+  })
+}
+
+export async function flushStateWrites(): Promise<void> {
+  try { await writeQueue } catch {}
 }
 
 /**

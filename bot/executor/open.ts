@@ -133,6 +133,9 @@ export async function openPosition(
   const label = `[executor][${strategy.id}][${metrics.symbol}]`
   console.log(`${label} opening position`)
 
+  // Mark for graceful shutdown waiter
+  ;(globalThis as any).__openInProgress = true
+
   const botState = await getBotState()
   const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
 
@@ -176,6 +179,7 @@ export async function openPosition(
 
     const eligibility = await validateOpenEligibility(label, metrics, strategy, solAmount, connection, wallet);
     if (!eligibility.ok) {
+      ;(globalThis as any).__openInProgress = false;
       return null;
     }
 
@@ -894,6 +898,7 @@ export async function openPosition(
 
     } finally {
       console.log(`${label} [TRACE] [FINALLY-ENTER] entered finally | positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
+      ;(globalThis as any).__openInProgress = false;
       if (!successfullyOpened) {
         // Always attempt reclaim for the keypair we considered in this attempt.
         // With bundling, rent is only paid on full scaffold success; this covers any

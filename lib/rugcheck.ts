@@ -64,10 +64,9 @@ export async function checkRugscore(mintAddress: string): Promise<number> {
     } else if (typeof raw === 'number') {
       score = raw > 10_000 ? 0 : Math.round(Math.max(0, 100 - (raw / 100)))
     } else {
-      console.warn(`[rugcheck] ${mintAddress} — unexpected response shape, defaulting to 70`)
-      score = 70
-      _cache.set(mintAddress, { score, ts: now, isError: true })
-      return score
+      console.warn(`[rugcheck] ${mintAddress} — unexpected response shape`)
+      _cache.set(mintAddress, { score: -1, ts: now, isError: true })
+      return -1
     }
 
     _cache.set(mintAddress, { score, ts: now, isError: false })
@@ -76,13 +75,12 @@ export async function checkRugscore(mintAddress: string): Promise<number> {
   } catch (err: unknown) {
     const status = (err as { response?: { status?: number } })?.response?.status
     if (status === 429) {
-      console.warn(`[rugcheck] ${mintAddress} — rate limited (429), defaulting to 70`)
+      console.warn(`[rugcheck] ${mintAddress} — rate limited (429)`)
     } else {
-      console.warn(`[rugcheck] ${mintAddress} — fetch failed, defaulting to 70`)
+      console.warn(`[rugcheck] ${mintAddress} — fetch failed`)
     }
-    const score = 70
-    _cache.set(mintAddress, { score, ts: now, isError: true })
-    return score
+    _cache.set(mintAddress, { score: -1, ts: now, isError: true })
+    return -1 // sentinel: unavailable, caller must reject
   }
 }
 

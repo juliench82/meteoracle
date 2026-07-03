@@ -789,7 +789,8 @@ async function processActivityCandidate(
     holderCount = token.holders ?? 0;
   }
 
-  const rugScore = await withTimeout(getRugscore(tokenAddress, symbol), EXTERNAL_CALL_TIMEOUT_MS, `getRugscore ${symbol}`).then(v => v ?? 0);
+  const rugScoreRaw = await withTimeout(getRugscore(tokenAddress, symbol), EXTERNAL_CALL_TIMEOUT_MS, `getRugscore ${symbol}`).then(v => v ?? -1);
+  const rugScore = rugScoreRaw < 0 ? 0 : rugScoreRaw; // treat API failure as reject (0 < threshold)
   const rugcheckUrl = `https://rugcheck.xyz/tokens/${tokenAddress}`;
 
   // Tiered rug floor: low-TVL pools must be cleaner (use local token mc as proxy before full resolvedMc)

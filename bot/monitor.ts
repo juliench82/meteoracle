@@ -1,4 +1,3 @@
-import { retryStrandedSells } from '@/lib/swap'
 import { getBotState } from '@/lib/botState'
 import axios from 'axios'
 import { getOpenLpPositions, saveOpenLpPositions, type OpenLpPosition, applyMonitorUpdates } from '@/lib/local-state'
@@ -86,7 +85,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
     console.log(`[lp-monitor] tick #${tickCount}`)
   }
 
-  await retryStrandedSells().catch(err => console.error('[monitor] stranded sells failed:', err))
+  // Stranded sells are now on independent schedule in worker.ts to avoid blocking monitor tick
   await retryStrandedPositionRents().catch(err => console.error('[monitor] stranded position rents failed:', err))
 
   if (!LP_MONITOR_ENABLED) {

@@ -177,7 +177,9 @@ export async function getPriorityFee(accountKeys: string[]): Promise<number> {
       }),
     })
     const data = await res.json()
-    return data?.result?.priorityFeeEstimate ?? 50_000
+    const raw = data?.result?.priorityFeeEstimate ?? 50_000
+    const MAX_PRIORITY = 2_000_000 // cap to prevent excessive fees during congestion spikes (~0.002 SOL per tx)
+    return Math.min(raw, MAX_PRIORITY)
   } catch {
     return 50_000
   }

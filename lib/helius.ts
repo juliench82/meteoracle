@@ -23,6 +23,18 @@ export interface HolderData {
   reliable:     boolean
 }
 
+const SECRETS = ['API_KEY', 'SECRET', 'PRIVATE_KEY', 'TOKEN', 'WEBHOOK', 'HELIUS']
+
+export function redactSecrets(obj: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(obj).map(([k, v]) => {
+      const upper = k.toUpperCase()
+      const isSecret = SECRETS.some(s => upper.includes(s))
+      return [k, isSecret ? '***' : v]
+    })
+  )
+}
+
 type JsonRpcResponse<T> = {
   result?: T
 }

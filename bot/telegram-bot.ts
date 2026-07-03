@@ -26,6 +26,20 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? ''
 const ALLOWED_USER_IDS = getTelegramAllowedUsers()
 const POLL_MS = 2000
 
+// Simple per-command debounce to prevent double-tap races on /close, /pause etc.
+const lastCmdAt: Record<string, number> = {}
+const CMD_DEBOUNCE_MS = 4000
+
+function shouldProcessCommand(cmd: string): boolean {
+  const now = Date.now()
+  if (now - (lastCmdAt[cmd] || 0) < CMD_DEBOUNCE_MS) {
+    console.log(`[telegram] ignoring rapid repeat of ${cmd}`)
+    return false
+  }
+  lastCmdAt[cmd] = now
+  return true
+}
+
 if (!BOT_TOKEN || !CHAT_ID) {
   console.error('[telegram-bot] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing')
   process.exit(1)
@@ -168,6 +182,7 @@ async function handleUpdate(update: any) {
   }
 
   if (cmd === '/stop') {
+    if (!shouldProcessCommand('/stop')) return
     await setBotState({ enabled: false, paused: true })
     try {
       await execAsync(`${PM2} stop meteoracle-worker meteoracle-telegram`)
@@ -189,6 +204,7 @@ async function handleUpdate(update: any) {
   }
 
   if (cmd === '/reload') {
+    if (!shouldProcessCommand('/reload')) return
     await setBotState({ enabled: true, paused: false })
     try {
       await execAsync(`${PM2} restart meteoracle-worker meteoracle-telegram`)
@@ -200,6 +216,7 @@ async function handleUpdate(update: any) {
   }
 
   if (cmd === '/close') {
+    if (!shouldProcessCommand('/close')) return
     const id = args[0]?.trim()
     if (!id) {
       await sendMessage('Usage: /close <id>', chatId)
