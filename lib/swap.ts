@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
-import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
+import { getOpenLpPositions, saveOpenLpPositions, applyMonitorUpdates } from '@/lib/local-state'
 import { atomicWriteJson } from './atomic-write'
 
 export const NATIVE_MINT = 'So11111111111111111111111111111111111111112'
@@ -464,8 +464,9 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
     if (skipList.has(recoveryMint)) continue // permanently abandoned
 
     const tsStr = (pos as any).closed_at || (pos as any).opened_at
+    let ts: number | undefined
     if (tsStr) {
-      const ts = new Date(tsStr).getTime()
+      ts = new Date(tsStr).getTime()
       if (now - ts > recentMs) continue
     }
     if (pos.status === 'active' || pos.status === 'open') continue
@@ -535,14 +536,16 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
             const currentBal = await getWalletTokenBalance(recoveryMint)
             if (currentBal > 0n) {
               const inputAmountBN = new BN(currentBal.toString())
-              // Very loose slippage for stranded recovery sells (same large-raw microcap legs as open rollback).
-              const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(10000), binArrays)
+              // For recovery, use moderately loose 20% for quote to get a sensible minOut, then use it (or div4 fallback).
+              const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(2000), binArrays)
               const q = swapQuote as any
               if (!q.outAmount.isZero()) {
                 const quotedIn = q.inAmount ?? inputAmountBN;
                 console.log(`${label} [direct-dlmm-recovery] quote: in=${quotedIn} out=${q.outAmount}`);
-                const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
-                console.log(`${label} [direct-dlmm-recovery] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys (not q.binArraysPubkey) to prevent AccountNotEnoughKeys`);
+                const binArrayKeysForSwap = (q.binArraysPubkey && q.binArraysPubkey.length > 0)
+                  ? q.binArraysPubkey
+                  : binArrays.slice(0, 3).map((ba: any) => ba.publicKey);
+                console.log(`${label} [direct-dlmm-recovery] calling swap with limited ${binArrayKeysForSwap.length} bin array pubkeys`);
                 const swapTx = await dlmmPool.swap({
                   inToken,
                   binArraysPubkey: binArrayKeysForSwap,
@@ -560,18 +563,16 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                 console.log(`${label} direct DLMM stranded sell confirmed ✔ sig: ${recoveredSig}`)
                 recovered++
                 console.log(`${label} recovered ✔ sig=${recoveredSig}`)
-                // update state
-                const all = getOpenLpPositions()
-                const idx = all.findIndex((p: any) => p.id === pos.id)
-                if (idx !== -1) {
-                  const nowIso = new Date().toISOString()
-                  all[idx].stranded_recovered_at = nowIso
-                  all[idx].stranded_recovered_sig = recoveredSig
-                  if (all[idx].status === 'sell_failed') {
-                    all[idx].status = 'closed'
+                // update state via safe merge to avoid race with monitor's applyMonitorUpdates
+                const nowIso = new Date().toISOString()
+                applyMonitorUpdates([{
+                  id: pos.id,
+                  patch: {
+                    stranded_recovered_at: nowIso,
+                    stranded_recovered_sig: recoveredSig,
+                    ...(pos.status === 'sell_failed' ? { status: 'closed' } : {})
                   }
-                  saveOpenLpPositions(all)
-                }
+                }])
                 // clear backoff on success
                 backoff.delete(recoveryMint)
                 saveStrandedBackoff(backoff)

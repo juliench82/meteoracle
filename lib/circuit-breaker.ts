@@ -55,10 +55,16 @@ export async function isDailyLossLimitHit(): Promise<boolean> {
     }
 
     const avgLossPct = totalSolDeposited > 0 ? (weightedLossSum / totalSolDeposited) * 100 : 0
-    const hit = lossCount >= 3 || avgLossPct <= -30
+    // Hybrid to prevent large winner diluting small losers: also trigger on any >50% loss + 2+ other losers
+    const hasLargeLoser = positions.some(p => {
+      if (!['closed', 'sell_failed'].includes(p.status || '') || !p.closed_at) return false
+      const pnl = Number((p as any).last_net_pnl_pct ?? 0)
+      return pnl <= -50
+    })
+    const hit = lossCount >= 3 || avgLossPct <= -30 || (hasLargeLoser && lossCount >= 2)
     if (hit) {
       console.log(
-        `[circuit-breaker] daily loss limit hit: ${lossCount} losses, weighted avg ${avgLossPct.toFixed(1)}% over last 24h (unweighted would be wrong on unequal sizes)`
+        `[circuit-breaker] daily loss limit hit: ${lossCount} losses, weighted avg ${avgLossPct.toFixed(1)}% over last 24h`
       )
     }
     return hit

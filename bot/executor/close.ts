@@ -27,6 +27,7 @@ import {
   sendCloseAlert,
   updatePositionClaimTime,
 } from './persistence'
+import { applyMonitorUpdates } from '@/lib/local-state'
 
 import {
   getDLMM,
@@ -97,6 +98,9 @@ export async function closePosition(
   const connection = getConnection()
   const wallet = getWallet()
 
+  // Persist flag before tx for restart safety (in-memory mutex not enough across PM2 restart)
+  applyMonitorUpdates([{ id: positionId, patch: { close_in_progress: true as any } }])
+
   try {
     const DLMM = await getDLMM()
     const dlmmPool = await DLMM.create(connection, new PublicKey(position.pool_address))
@@ -129,10 +133,12 @@ export async function closePosition(
       const feesInSol = (feeSolLamports / 1e9) + (feeTokenWhole * priceSolPerToken)
 
       try {
-        const solUsd = await resolveSolPriceUsd().catch(() => 150)
+        // Use last known from previous resolve if fresh fails (avoid stale magic 150)
+        const solUsd = await resolveSolPriceUsd().catch(() => (globalThis as any).__lastSolPriceUsd ?? 150)
+        ;(globalThis as any).__lastSolPriceUsd = solUsd
         claimableFeesUsd = Math.max(0, feesInSol * solUsd)
       } catch {
-        claimableFeesUsd = feesInSol * 150 // fallback
+        claimableFeesUsd = feesInSol * ((globalThis as any).__lastSolPriceUsd ?? 150)
       }
     }
 
@@ -231,8 +237,10 @@ export async function closePosition(
           const quotedIn = q.inAmount ?? inputAmountBN;
           console.log(`${label} [direct-dlmm-sell] quote: in=${quotedIn} out=${q.outAmount} fee=${q.fee}`);
 
-          const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
-          console.log(`${label} [direct-dlmm-sell] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys (not q.binArraysPubkey)`);
+          const binArrayKeysForSwap = (q.binArraysPubkey && q.binArraysPubkey.length > 0)
+            ? q.binArraysPubkey
+            : binArrays.slice(0, 3).map((ba: any) => ba.publicKey);
+          console.log(`${label} [direct-dlmm-sell] calling swap with limited ${binArrayKeysForSwap.length} bin array pubkeys`);
           const swapTx = await dlmmPool.swap({
             inToken,
             binArraysPubkey: binArrayKeysForSwap,
@@ -327,30 +335,7 @@ export async function claimFeesForPosition(positionId: string): Promise<boolean>
         return true
       }
     } catch (claimErr) {
-      console.warn(`${label} claimSwapFee not available or failed, trying remove 0-bps claim path:`, claimErr)
-    }
-
-    // Fallback: remove 0 bps (still claims fees per some SDK paths) without closing
-    try {
-      const removeRes: any = await dlmmPool.removeLiquidity({
-        position: posKey,
-        user: wallet.publicKey,
-        fromBinId: lowerBinId,
-        toBinId: upperBinId,
-        bps: new BN(0),
-        shouldClaimAndClose: false,
-      })
-      const txs = Array.isArray(removeRes) ? removeRes : (removeRes ? [removeRes] : [])
-      for (const tx of txs) {
-        if (tx) {
-          const sig = await sendLegacyTx(applyPriorityFee(tx, 50000), [wallet], `${label}-claim-fallback`)
-          console.log(`${label} fees claimed (fallback) ✔ sig: ${sig}`)
-        }
-      }
-      await updatePositionClaimTime(positionId).catch(() => {})
-      return txs.length > 0
-    } catch (e) {
-      console.warn(`${label} fallback claim also failed:`, e)
+      console.warn(`${label} claimSwapFee not available or failed — skipping mid-position claim (fees will be collected on full close via shouldClaimAndClose)`, claimErr)
     }
 
     return false
