@@ -75,6 +75,7 @@ const cooldowns: Record<RpcProvider, CooldownState> = {
 }
 
 const buckets: Partial<Record<RpcProvider, TokenBucket>> = {}
+const highPriorityBuckets: Partial<Record<RpcProvider, TokenBucket>> = {}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -175,7 +176,7 @@ export async function recordRpcProvider429(provider: RpcProvider, error?: unknow
   console.warn(`[rpc-rate-limit] ${provider} 429 cooldown until ${new Date(state.untilMs).toISOString()} (in-memory)`)
 }
 
-export async function awaitRpcProviderSlot(provider: RpcProvider, context: string): Promise<void> {
+export async function awaitRpcProviderSlot(provider: RpcProvider, context: string, priority: 'high' | 'low' = 'low'): Promise<void> {
   const waitMs = cooldowns[provider].untilMs - Date.now()
   if (waitMs > 0) {
     if (cooldowns[provider].lastLoggedUntilMs !== cooldowns[provider].untilMs) {
@@ -185,7 +186,8 @@ export async function awaitRpcProviderSlot(provider: RpcProvider, context: strin
     throw new RpcProviderCooldownError(provider, waitMs)
   }
 
-  await getBucket(provider).take()
+  const bucket = priority === 'high' ? getHighPriorityBucket(provider) : getBucket(provider)
+  await bucket.take()
 
   const postWaitMs = cooldowns[provider].untilMs - Date.now()
   if (postWaitMs > 0) {
@@ -193,13 +195,31 @@ export async function awaitRpcProviderSlot(provider: RpcProvider, context: strin
   }
 }
 
+function getHighPriorityBucket(provider: RpcProvider): TokenBucket {
+  const existing = highPriorityBuckets[provider]
+  if (existing) return existing
+
+  if (provider === PROVIDER_HELIUS) {
+    // Smaller burst for high priority but faster refill to prefer executor
+    const bucket = new TokenBucket(
+      intEnv('HELIUS_RATE_LIMIT_HIGH_BURST', 3, 1, 5),
+      intEnv('HELIUS_RATE_LIMIT_HIGH_MIN_INTERVAL_MS', 200, 50),
+    )
+    highPriorityBuckets[provider] = bucket
+    return bucket
+  }
+
+  throw new Error(`[rpc-rate-limit] unsupported provider ${provider}`)
+}
+
 export async function heliusAxiosPost<T = unknown>(
   rpcUrl: string,
   payload: unknown,
   config: AxiosRequestConfig = {},
   context = 'helius-rpc',
+  priority: 'high' | 'low' = 'low',
 ): Promise<AxiosResponse<T>> {
-  await awaitRpcProviderSlot(PROVIDER_HELIUS, context)
+  await awaitRpcProviderSlot(PROVIDER_HELIUS, context, priority)
 
   try {
     return await axios.post<T>(rpcUrl, payload, config)

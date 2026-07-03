@@ -146,6 +146,8 @@ async function fetchDasHolderCount(
             params: { mint, limit: pageSize, page, options: { showZeroBalance: false } },
           },
           { timeout: 12_000 },
+          'helius-das',
+          'high',  // executor critical for open flow
         )
         break
       } catch (err: unknown) {
