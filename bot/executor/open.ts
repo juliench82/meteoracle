@@ -152,7 +152,12 @@ export async function openPosition(
     // Idempotency guard: prevent duplicate inserts into lp_positions during long dry-run observation.
     // Dry-run rows live only in local state, so the scanner guards
     // can be bypassed on later ticks → we must defend here too.
-    const existing = await findExistingActivePosition(metrics.address)
+    let existing = null;
+    try {
+      existing = await findExistingActivePosition(metrics.address);
+    } catch (e) {
+      console.warn(`${label} DRY RUN — findExistingActivePosition failed (safe to continue without dedup)`);
+    }
     if (existing) {
       console.log(`${label} DRY RUN — ${metrics.symbol} already has active simulation row (id=${existing.id}). Skipping duplicate persist to avoid lp_positions_mint_open_unique violation.`)
       return existing.id
@@ -412,8 +417,13 @@ export async function openPosition(
       console.warn(`${label} position address ${positionKeypair.publicKey.toBase58().slice(0,8)} occupied by non-DLMM owner (${existing.owner.toBase58().slice(0,8)}) — regenerating fresh keypair`);
       positionKeypair = new Keypair();
     }
-    // CRITICAL PREVENTION (ghosts): persist the secret for the FINAL keypair only, after the regeneration loop settles.
-    // Stale keypairs from earlier iterations are not persisted.
+    const finalCheck = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
+    if (finalCheck && finalCheck.lamports > 0 && finalCheck.owner.toBase58() !== DLMM_PROGRAM_ID) {
+      console.error(`${label} could not obtain a clean DLMM-writable position keypair after 3 attempts — skipping to avoid pre-swap followed by unrecoverable collision`);
+      return null;
+    }
+
+    // Persist only after final usable keypair confirmed (avoids stale entries for keypairs that failed finalCheck).
     persistPendingScaffold(
       positionKeypair.publicKey.toBase58(),
       positionKeypair.secretKey,
@@ -421,11 +431,6 @@ export async function openPosition(
       typeof minBinId === 'number' ? minBinId : undefined,
       typeof maxBinId === 'number' ? maxBinId : undefined
     );
-    const finalCheck = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
-    if (finalCheck && finalCheck.lamports > 0 && finalCheck.owner.toBase58() !== DLMM_PROGRAM_ID) {
-      console.error(`${label} could not obtain a clean DLMM-writable position keypair after 3 attempts — skipping to avoid pre-swap followed by unrecoverable collision`);
-      return null;
-    }
 
     console.log(`${label} [TRACE] Entering pre-scaffold phase: will compute planned swap amounts and run full tx simulation before any rent is paid.`);
     console.log(`${label} [TRACE] [PRE-SCAFFOLD-STATE] about to quote/swap-sim | solToSwapLamports=${solToSwapLamports} remainingSolLamports=${remainingSolLamports} | positionScaffolded=false`);
@@ -651,13 +656,15 @@ export async function openPosition(
     try {
       const currentActive = await dlmmPool.getActiveBin();
       const binDrift = Math.abs(currentActive.binId - initialActiveBinId);
-      console.log(`${label} [TRACE] [DRIFT-CHECK] re-fetched activeBin=${currentActive.binId} drift=${binDrift}`);
-      if (binDrift > 3) {
+      const binStep = dlmmPool.lbPair.binStep;
+      const driftThreshold = Math.max(3, Math.ceil(50 / binStep)); // ~0.5% price drift tolerance; scale for high binStep pools
+      console.log(`${label} [TRACE] [DRIFT-CHECK] re-fetched activeBin=${currentActive.binId} drift=${binDrift} (threshold=${driftThreshold} for binStep=${binStep})`);
+      if (binDrift > driftThreshold) {
         console.warn(`${label} [TRACE] [DRIFT-ABORT] DRIFT DETECTED — aborting before pre-swap. positionScaffolded=${positionScaffolded} will trigger finally close.`);
-        console.warn(`${label} active bin drifted significantly (initial=${initialActiveBinId}, now=${currentActive.binId}, drift=${binDrift}) — aborting before pre-swap to avoid out-of-range position`);
+        console.warn(`${label} active bin drifted significantly (initial=${initialActiveBinId}, now=${currentActive.binId}, drift=${binDrift}, threshold=${driftThreshold}) — aborting before pre-swap to avoid out-of-range position`);
         return null;
       }
-      console.log(`${label} [TRACE] [DRIFT-OK] Active bin drift OK (drift=${binDrift} bins). Safe to continue.`);
+      console.log(`${label} [TRACE] [DRIFT-OK] Active bin drift OK (drift=${binDrift} <= ${driftThreshold}). Safe to continue.`);
     } catch (driftErr) {
       console.warn(`${label} [TRACE] [DRIFT-WARN] failed to re-check active bin before swap (proceeding with caution): ${driftErr}`);
       console.warn(`${label} failed to re-check active bin before swap (proceeding with caution): ${driftErr}`);
@@ -742,6 +749,12 @@ export async function openPosition(
       console.log(`${label} [TRACE] [PRE-SWAP-SKIP] solToSwapLamports=0 — no pre-swap executed (pure SOL leg)`);
     }
 
+    const MIN_REMAINING_SOL_FOR_ADD = 10_000n; // dust guard to avoid adding near-zero after rent paid
+    if (remainingSolLamports < MIN_REMAINING_SOL_FOR_ADD && actualTokenLamports < 1_000_000n) {
+      console.warn(`${label} [TRACE] [ADD-GUARD] remainingSol + token too small for add after scaffold — aborting`);
+      return null;
+    }
+
     if (solToSwapLamports > 0n && actualTokenLamports === 0n) {
       console.error(`${label} [TRACE] [PRE-SWAP-ZERO] Pre-swap returned 0 tokens — will trigger finally close. positionScaffolded=${positionScaffolded}`);
       console.error(`${label} [TRACE] Pre-swap returned 0 tokens — will trigger finally close.`);
@@ -788,7 +801,8 @@ export async function openPosition(
       DRY_RUN,
       positionKeypair,
       remainingSolLamports,
-      actualTokenLamports
+      actualTokenLamports,
+      positionScaffolded // skip inner scaffold if early one succeeded
     );
     if (directResult) {
       successfullyOpened = true;
@@ -806,6 +820,8 @@ export async function openPosition(
     // may be stale/huge/wrong due to prior bugs or the failed open attempt). Use looser slippage
     // for the emergency sell so we don't strand on 0x1773 like before.
     console.error(`${label} position open failed after successful pre-swap — attempting DIRECT DLMM rollback sell to SOL`);
+    // Refresh priority for time-critical rollback (may be stale from initial capture)
+    const rollbackPriority = Math.max(priorityFee, await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]).catch(() => 200000));
     let rollbackSucceeded = false;
     try {
       const isTokenX = dlmmPool.tokenX.publicKey.toBase58() === outputMint.toBase58();
@@ -848,18 +864,20 @@ export async function openPosition(
             }
             const quotedIn = q.inAmount ?? inputAmountBN;
             console.log(`${label} [direct-dlmm-rollback] quote: in=${quotedIn} out=${q.outAmount}`);
-            const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
-            console.log(`${label} [direct-dlmm-rollback] calling swap with FULL ${binArrayKeysForSwap.length} bin array pubkeys`);
+            const binArrayKeysForSwap = (q.binArraysPubkey && q.binArraysPubkey.length > 0)
+              ? q.binArraysPubkey
+              : binArrays.slice(0, 3).map((ba: any) => ba.publicKey);
+            console.log(`${label} [direct-dlmm-rollback] calling swap with limited ${binArrayKeysForSwap.length} bin array pubkeys`);
             const swapTx = await dlmmPool.swap({
               inToken,
               binArraysPubkey: binArrayKeysForSwap,
               inAmount: inputAmountBN,
               lbPair: dlmmPool.pubkey,
               user: wallet.publicKey,
-              minOutAmount: new BN(0),
+              minOutAmount: q.minOutAmount || new BN(0),
               outToken,
             });
-            const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, 100000), [wallet], `${label} direct-dlmm-rollback`);
+            const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, rollbackPriority), [wallet], `${label} direct-dlmm-rollback`);
             console.log(`${label} DIRECT DLMM rollback sell to SOL succeeded ✔ sig: ${rbSig}`);
             rollbackSucceeded = true;
           } catch (rbQuoteErr) {
@@ -1091,7 +1109,8 @@ async function openPositionDirect(
   DRY_RUN: boolean,
   positionKeypair: Keypair,
   remainingSolLamports: bigint = 0n,
-  actualTokenLamports: bigint = 0n
+  actualTokenLamports: bigint = 0n,
+  skipScaffold = false // if early scaffold succeeded, force skip inner to avoid races/lag false-negatives on looksInitialized
 ): Promise<string | null> {
   const label = `${attemptLabel}[direct-primary]`
 
@@ -1159,18 +1178,21 @@ async function openPositionDirect(
     const lowerBinId = minBinId;
     const width = maxBinId - minBinId;
     const POSITION_HEADER = 256;
-    const BYTES_PER_BIN = 128;
+    const BYTES_PER_BIN = 128; // NOTE: must match current Meteora DLMM Position layout; re-validate if SDK upgrades (was source of realloc issues)
     const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
     const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
 
-    console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-CHECK] isDlmmOwned=${isDlmmOwned} looksInitialized=${looksInitialized}`);
+    console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-CHECK] isDlmmOwned=${isDlmmOwned} looksInitialized=${looksInitialized} skipScaffold=${skipScaffold}`);
+
+    if (skipScaffold) {
+      console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-SKIP] skipScaffold=true from caller — skipping all inner scaffold`);
+    }
 
     // Bundle create + init (same atomicity reason as early scaffold).
-    // If early scaffold already ran successfully, isDlmmOwned + looksInitialized will both be true and we skip.
-    // If we reach here needing work, bundle so a failure doesn't leave rent paid without init.
+    // If early scaffold already ran successfully or skipScaffold, we skip inner entirely.
     const directScaffoldIxs: TransactionInstruction[] = [];
 
-    if (!isDlmmOwned) {
+    if (!skipScaffold && !isDlmmOwned) {
       console.log(
         `${label} [TRACE] [DIRECT-CREATE] phase 1a: creating position account (space=${positionAccountSize} bytes, rent≈${(positionRentLamports / 1e9).toFixed(9)} SOL) for ${numBins} bins`
       );
@@ -1187,7 +1209,7 @@ async function openPositionDirect(
       console.log(`${label} phase 1a: position already DLMM-owned — skipping create`);
     }
 
-    if (!looksInitialized) {
+    if (!skipScaffold && !looksInitialized) {
       console.log(`${label} [TRACE] [DIRECT-INIT] phase 1b: initializePosition (lower=${lowerBinId}, width=${width})`);
       const initializePositionIx = await dlmmPool.program.methods
         .initializePosition(lowerBinId, width)
@@ -1206,7 +1228,7 @@ async function openPositionDirect(
       console.log(`${label} phase 1b: position already initialized — skipping init`);
     }
 
-    if (directScaffoldIxs.length > 0) {
+    if (!skipScaffold && directScaffoldIxs.length > 0) {
       // Last-second defensive check in direct path too.
       const preBundleCheck = await connection.getAccountInfo(positionKeypair.publicKey).catch(() => null);
       if (preBundleCheck && preBundleCheck.lamports > 0) {
@@ -1611,11 +1633,8 @@ async function swapSolToTokenDirectOnDlmm(
   console.log(`${label} [direct-dlmm] swap confirmed ✔ sig: ${sig}`);
 
   // Read actual received (delta) + post balance for debug.
-  // Token-2022 + hooks can have visibility lag. We always prefer the SDK's quotedOut for the
-  // amount passed to the position initializer (this is the "value matched" leg from the split
-  // calculation at the entry price). The on-chain delta can be much larger (good execution or
-  // raw unit scale on cheap tokens); we log it for visibility but use the quoted for totals
-  // so the 151-bin position account stays a reasonable size for the DLMM initializer.
+  // Prefer actual delta. QuotedOut is only fallback if delta==0 after polls (rare lag).
+  // This prevents requesting more tokens in add than actually held.
   let postBal = 0n;
   try {
     for (let i = 0; i < 4; i++) {
@@ -1628,7 +1647,9 @@ async function swapSolToTokenDirectOnDlmm(
   const delta = postBal >= preBalForDelta ? postBal - preBalForDelta : 0n;
 
   const quotedOut = q?.outAmount && !q.outAmount.isZero() ? BigInt(q.outAmount.toString()) : 0n;
-  const amountForPosition = quotedOut > 0n ? quotedOut : delta;
+  // Prefer actual received delta over quotedOut. Only fall back to quoted if delta is 0 after polling (visibility lag).
+  // Using quoted when actual is lower can cause addLiquidity to request more tokens than the wallet holds.
+  const amountForPosition = delta > 0n ? delta : quotedOut;
 
   try {
     console.log(`${label} [TRACE] [SWAP-RESULT] post-swap ${outToken.toBase58().slice(0,8)} balance: ${postBal} (delta=${delta}, usedForLp=${amountForPosition}, quotedOut=${quotedOut || 'n/a'})`);
@@ -1754,10 +1775,9 @@ export async function checkFullEvilPandaRangeFeasibility(
     dlmmPool.program.programId
   );
 
-  let newBinArrayCount = 0;
-  for (const ba of requiredBinArrays) {
-    if (!(await connection.getAccountInfo(ba.key))) newBinArrayCount++;
-  }
+  const keys = requiredBinArrays.map((ba: any) => ba.key);
+  const infos = await connection.getMultipleAccountsInfo(keys);
+  const newBinArrayCount = infos.filter((i: any) => !i).length;
 
   const feasible = newBinArrayCount === 0;
 
