@@ -4,6 +4,10 @@
  * Position opening for Meteora DLMM (evil-panda: Bid-Ask, explicit pre-swap for
  * the token leg so we can do true one-sided-SOL economics on a Bid-Ask shape).
  *
+ * NOTE: This file is intentionally large (~1.8k LOC) as it orchestrates the full
+ * open path (pre-swap, scaffold, init, add-liquidity, rollback, dry-run).
+ * Future split into submodules (pre-swap.ts, scaffold.ts, etc.) is recommended for maintainability.
+ *
  * Core workflow (per design):
  *   X SOL budget → calculate TOKEN amount needed for value match → target full
  *   desired -50% / +100% range → hard gate: must cost zero new bin arrays →

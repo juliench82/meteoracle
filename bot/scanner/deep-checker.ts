@@ -791,6 +791,13 @@ async function processActivityCandidate(
 
   const rugScore = await withTimeout(getRugscore(tokenAddress, symbol), EXTERNAL_CALL_TIMEOUT_MS, `getRugscore ${symbol}`).then(v => v ?? 0);
   const rugcheckUrl = `https://rugcheck.xyz/tokens/${tokenAddress}`;
+
+  // Tiered rug floor: low-TVL pools must be cleaner (use local token mc as proxy before full resolvedMc)
+  const earlyMc = resolvedMc || token.market_cap || 0;
+  if (earlyMc > 0 && earlyMc < 2000 && rugScore < 70) {
+    console.log(`${label} skip: rugScore=${rugScore} <70 for low-MC pool (<$2000)`);
+    return { wasCandidate: false, wasOpened: false, wasSkipped: true };
+  }
   const holderCountForFilter = holderCount || (token.holders ?? 0);
 
   const bondingCurvePct: number | undefined =

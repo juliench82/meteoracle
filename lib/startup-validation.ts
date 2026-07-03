@@ -33,6 +33,11 @@ export async function validateStartup(label = 'worker'): Promise<boolean> {
     } catch (e) {
       console.warn(`${logPfx} balance check failed (non-fatal):`, e instanceof Error ? e.message : e)
     }
+
+    // Jupiter public endpoint warning (can cause stranded sells under load)
+    if (!process.env.JUPITER_QUOTE_API_URL) {
+      console.warn(`${logPfx} JUPITER_QUOTE_API_URL not set — using public endpoint (rate limits may cause stranded sells on close cascades). Consider a private Jupiter RPC.`)
+    }
   } catch (e) {
     console.warn(`${logPfx} startup validation error (continuing):`, e instanceof Error ? e.message : e)
     ok = false

@@ -181,10 +181,12 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           console.warn(`[monitor] Fee/TVL sample failed for ${pos.symbol}:`, e instanceof Error ? e.message : e)
         }
 
-        if (feeTvl4hAvg != null && feeTvl4hAvg < feeTvlThreshold && (pos.fee_tvl_samples?.length ?? 0) >= 10) {
-          // Require >=10 samples (~10 min at 60s ticks) to avoid exiting on transient 3-min API blips.
-          // The 4h window average still applies; this just gates the decision.
-          // Exit decision uses the *rolling 4h window average* of 24h Fee/TVL samples (not a single-tick value).
+        // Decouple min sample requirement from wall clock: on restart or skipped ticks, pruned list can shrink.
+        // Use position age to relax the gate for positions that have had time to accumulate data.
+        const positionAgeH = openedAt ? (now - new Date(openedAt).getTime()) / 3600000 : 0
+        const minSamplesRequired = positionAgeH > 1 ? 5 : 10
+        if (feeTvl4hAvg != null && feeTvl4hAvg < feeTvlThreshold && (pos.fee_tvl_samples?.length ?? 0) >= minSamplesRequired) {
+          // Require >=10 samples (~10 min) for young positions; relax to 5 for older ones.
           const reason = `fee_tvl_yield_low_4havg_${feeTvl4hAvg.toFixed(2)}pct`
           console.log(`[monitor] FEE/TVL EXIT → ${pos.symbol} (4h avg ${feeTvl4hAvg.toFixed(2)}% < ${feeTvlThreshold}%, samples=${pos.fee_tvl_samples?.length ?? 0})`)
           const ok = await closePosition(pos.id, reason).catch(() => false)
@@ -208,12 +210,24 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
                   // Use live SOL price (via shared resolver) instead of hardcoded 150.
                   // Fees contribution is usually tiny for dry sims but now accurate when present.
                   if (drySimSolPriceUsd == null) {
-                    drySimSolPriceUsd = await resolveSolPriceUsd().catch(() => 170) // reasonable current-ish fallback; log if hit
-                    if (drySimSolPriceUsd === 170) {
-                      console.warn(`[monitor] using fallback SOL price 170 for dry-sim PnL of ${pos.symbol}`)
+                    drySimSolPriceUsd = await resolveSolPriceUsd().catch(async () => {
+                      // Secondary fallback: CoinGecko (avoids stale 170)
+                      try {
+                        const r = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', { timeout: 3000 })
+                        const price = r.data?.solana?.usd
+                        if (price) return price
+                      } catch {}
+                      return null
+                    })
+                    if (drySimSolPriceUsd === null) {
+                      console.warn(`[monitor] no SOL price available for dry-sim PnL of ${pos.symbol} — skipping fee contribution`)
+                    } else if (drySimSolPriceUsd < 100 || drySimSolPriceUsd > 300) {
+                      console.warn(`[monitor] using unusual SOL price ${drySimSolPriceUsd} for dry-sim PnL of ${pos.symbol}`)
                     }
                   }
-                  roughPnl += (claimable / (pos.sol_deposited * drySimSolPriceUsd)) * 100
+                  if (drySimSolPriceUsd != null) {
+                    roughPnl += (claimable / (pos.sol_deposited * drySimSolPriceUsd)) * 100
+                  }
                 }
                 pos.last_net_pnl_pct = Math.round(roughPnl * 100) / 100
                 monitorPatches.push({ id: pos.id, patch: { last_net_pnl_pct: pos.last_net_pnl_pct } })
@@ -390,7 +404,22 @@ function computeNetPnlApprox(
     const pendingFeeSolApprox = (feeSolLamports / 1e9) + (feeTokenWhole * priceSolPerToken)
 
     const netSol = currentLiqValueSol + pendingFeeSolApprox - solDeposited
-    return (netSol / solDeposited) * 100
+    const netPct = (netSol / solDeposited) * 100
+
+    // Bias correction for wide ranges: if active bin far from range center, the active price is a bad proxy for whole position value.
+    // Skip PnL-based SL (OOR and other rules can still fire).
+    const { lowerBinId, upperBinId } = onChainPos.positionData || {}
+    if (lowerBinId != null && upperBinId != null) {
+      const rangeMidBin = (lowerBinId + upperBinId) / 2
+      const rangeHalf = Math.max(1, (upperBinId - lowerBinId) / 2)
+      const binDistFraction = Math.abs(activeBin.binId - rangeMidBin) / rangeHalf
+      if (binDistFraction > 0.6) {
+        console.warn(`[monitor] computeNetPnlApprox: low confidence for ${pos.symbol} (active bin ${binDistFraction.toFixed(2)} off range center) — skipping PnL SL`)
+        return null
+      }
+    }
+
+    return netPct
   } catch {
     return null
   }
@@ -458,33 +487,40 @@ export async function retryStrandedPositionRents() {
 
       // If we persisted the secret early (before createAccount), use it now to initialize the ghost.
       // This writes the Anchor discriminator so that closePosition can succeed.
+      // Idempotency: check account data length first (initialized DLMM positions are >>100 bytes).
       try {
-        const pendings = getPendingScaffolds();
-        const match = pendings.find((p: any) => p.pubkey === s.position_pubkey);
-        if (match && Array.isArray(match.secret) && match.secret.length > 0) {
-          const kp = Keypair.fromSecretKey(Uint8Array.from(match.secret));
-          const lower = typeof minB === 'number' ? minB : 0;
-          const width = (typeof maxB === 'number' && typeof minB === 'number') ? (maxB - minB) : 140;
-          console.log(`[monitor] persisted secret found — initializing ${s.position_pubkey.slice(0,8)} lower=${lower} width=${width}`);
+        const accountInfo = await connection.getAccountInfo(pub).catch(() => null);
+        const isAlreadyInitialized = accountInfo && accountInfo.data && accountInfo.data.length >= 100;
+        if (isAlreadyInitialized) {
+          console.log(`[monitor] ${s.position_pubkey.slice(0,8)} already initialized — skipping init, proceeding to close`);
+        } else {
+          const pendings = getPendingScaffolds();
+          const match = pendings.find((p: any) => p.pubkey === s.position_pubkey);
+          if (match && Array.isArray(match.secret) && match.secret.length > 0) {
+            const kp = Keypair.fromSecretKey(Uint8Array.from(match.secret));
+            const lower = typeof minB === 'number' ? minB : 0;
+            const width = (typeof maxB === 'number' && typeof minB === 'number') ? (maxB - minB) : 140;
+            console.log(`[monitor] persisted secret found — initializing ${s.position_pubkey.slice(0,8)} lower=${lower} width=${width}`);
 
-          const initIx = await dlmmPool.program.methods
-            .initializePosition(lower, width)
-            .accounts(
-              getInitializePositionAccounts(dlmmPool, wallet.publicKey, pub, dlmmPool.pubkey)
-            )
-            .instruction();
+            const initIx = await dlmmPool.program.methods
+              .initializePosition(lower, width)
+              .accounts(
+                getInitializePositionAccounts(dlmmPool, wallet.publicKey, pub, dlmmPool.pubkey)
+              )
+              .instruction();
 
-          const initTx = new Transaction();
-          initTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
-          initTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200_000 }));
-          initTx.add(initIx);
-          const { blockhash } = await connection.getLatestBlockhash('confirmed');
-          initTx.recentBlockhash = blockhash;
-          initTx.feePayer = wallet.publicKey;
+            const initTx = new Transaction();
+            initTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
+            initTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200_000 }));
+            initTx.add(initIx);
+            const { blockhash } = await connection.getLatestBlockhash('confirmed');
+            initTx.recentBlockhash = blockhash;
+            initTx.feePayer = wallet.publicKey;
 
-          const initSig = await sendLegacyTx(initTx, [wallet, kp], `[monitor-stray-init-${s.position_pubkey.slice(0,8)}]`);
-          console.log(`[monitor] ghost initialized via persisted secret ✔ ${initSig}`);
-          removePendingScaffold(s.position_pubkey);
+            const initSig = await sendLegacyTx(initTx, [wallet, kp], `[monitor-stray-init-${s.position_pubkey.slice(0,8)}]`);
+            console.log(`[monitor] ghost initialized via persisted secret ✔ ${initSig}`);
+            removePendingScaffold(s.position_pubkey);
+          }
         }
       } catch (initErr: any) {
         console.warn(`[monitor] secret init attempt failed for ${s.position_pubkey.slice(0,8)} (will try close anyway): ${initErr?.message || initErr}`);

@@ -25,8 +25,24 @@ export async function isDailyLossLimitHit(): Promise<boolean> {
       // closed_at is written by markPositionClosed / markPositionSellFailed in persistence.ts (confirmed)
       if (now - closedTs > oneDayMs) continue
 
-      const pnl = Number((p as any).last_net_pnl_pct ?? 0)
+      let pnl = Number((p as any).last_net_pnl_pct ?? NaN)
       const solDep = Number((p as any).sol_deposited ?? 0)
+      const closeReason: string = (p as any).close_reason ?? ''
+
+      // Infer conservative loss when last_net_pnl_pct was never set (e.g. max-duration close before grace period)
+      if (!Number.isFinite(pnl) || pnl === 0) {
+        if (closeReason.includes('net_pnl_sl')) {
+          const m = closeReason.match(/-?\d+\.?\d*/)
+          pnl = m ? parseFloat(m[0]) : -30
+        } else if (closeReason.includes('oor')) {
+          pnl = -5 // conservative for OOR exits
+        } else if (closeReason.includes('max_duration')) {
+          pnl = -3
+        } else {
+          pnl = 0
+        }
+      }
+
       if (pnl < 0 && solDep > 0) {
         lossCount++
         weightedLossSum += (pnl / 100) * solDep   // fractional loss in SOL terms

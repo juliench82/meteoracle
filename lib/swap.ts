@@ -19,6 +19,7 @@ const SWAP_SLIPPAGE_LADDER = [500, 1000, 2000];
 
 const STATE_DIR = path.join(process.cwd(), 'state')
 const STRANDED_BACKOFF_FILE = path.join(STATE_DIR, 'stranded-sell-backoff.json')
+const STRANDED_SKIP_FILE = path.join(STATE_DIR, 'stranded-skip.json')
 
 function ensureStateDir() {
   if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true })
@@ -43,6 +44,24 @@ function saveStrandedBackoff(map: Map<string, number>) {
     const obj: Record<string, number> = {}
     for (const [k, v] of map) obj[k] = v
     atomicWriteJson(STRANDED_BACKOFF_FILE, obj)
+  } catch {}
+}
+
+function loadStrandedSkipList(): Set<string> {
+  try {
+    ensureStateDir()
+    if (fs.existsSync(STRANDED_SKIP_FILE)) {
+      const data = JSON.parse(fs.readFileSync(STRANDED_SKIP_FILE, 'utf8'))
+      return new Set(Array.isArray(data) ? data : [])
+    }
+  } catch {}
+  return new Set()
+}
+
+function saveStrandedSkipList(set: Set<string>) {
+  try {
+    ensureStateDir()
+    atomicWriteJson(STRANDED_SKIP_FILE, Array.from(set))
   } catch {}
 }
 
@@ -424,7 +443,10 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
 
   // Persisted backoff (survives restart) for tokens failing liquidity.
   const backoff: Map<string, number> = loadStrandedBackoff()
+  const skipList: Set<string> = loadStrandedSkipList()
   const LIQUIDITY_BACKOFF_MS = 5 * 60 * 1000 // 5 minutes after a liquidity failure
+  const MAX_STRANDED_AGE_DAYS = 2
+  const MAX_STRANDED_AGE_MIN = MAX_STRANDED_AGE_DAYS * 24 * 60
 
   if (!(globalThis as any).__strandedSellAlerted) {
     (globalThis as any).__strandedSellAlerted = new Set<string>()
@@ -438,6 +460,8 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   for (const pos of positions) {
     const recoveryMint: string = (pos as any).stranded_token_mint || pos.mint || '';
     if (!recoveryMint) continue;
+
+    if (skipList.has(recoveryMint)) continue // permanently abandoned
 
     const tsStr = (pos as any).closed_at || (pos as any).opened_at
     if (tsStr) {
@@ -453,6 +477,20 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
 
     const sellFailedAt = (pos as any).sell_failed_at ? new Date((pos as any).sell_failed_at).getTime() : (ts ? new Date(tsStr).getTime() : now)
     const strandedAgeMin = Math.max(0, (now - sellFailedAt) / 60000)
+
+    if (strandedAgeMin > MAX_STRANDED_AGE_MIN) {
+      // Hard cutoff: give up after 2 days, persist skip list
+      skipList.add(recoveryMint)
+      saveStrandedSkipList(skipList)
+      const sym = (pos as any).symbol || recoveryMint.slice(0, 6)
+      console.warn(`[swap] ABANDONING stranded sell for ${sym} after ${MAX_STRANDED_AGE_DAYS}d — token likely illiquid.`)
+      sendAlert({
+        type: 'warning',
+        message: `⚠️ Abandoning stranded sell for ${sym} after ${MAX_STRANDED_AGE_DAYS}d — token likely illiquid. Manual recovery needed.`,
+      }).catch(() => {})
+      continue
+    }
+
     if (strandedAgeMin > 30 && !alerted.has(recoveryMint)) {
       longStranded++
       const sym = (pos as any).symbol || recoveryMint.slice(0, 6)
