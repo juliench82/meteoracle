@@ -20,7 +20,8 @@ export async function isDailyLossLimitHit(): Promise<boolean> {
     let totalSolDeposited = 0
 
     for (const p of positions) {
-      if (p.status !== 'closed' || !p.closed_at) continue
+      const status = p.status || ''
+      if (!['closed', 'sell_failed'].includes(status) || !p.closed_at) continue
       const closedTs = new Date(p.closed_at).getTime()
       // closed_at is written by markPositionClosed / markPositionSellFailed in persistence.ts (confirmed)
       if (now - closedTs > oneDayMs) continue
@@ -29,8 +30,11 @@ export async function isDailyLossLimitHit(): Promise<boolean> {
       const solDep = Number((p as any).sol_deposited ?? 0)
       const closeReason: string = (p as any).close_reason ?? ''
 
-      // Infer conservative loss when last_net_pnl_pct was never set (e.g. max-duration close before grace period)
-      if (!Number.isFinite(pnl) || pnl === 0) {
+      if (status === 'sell_failed') {
+        // Stranded token = full loss of the deposited SOL (we swapped it away and couldn't recover)
+        pnl = -100
+      } else if (!Number.isFinite(pnl) || pnl === 0) {
+        // Infer conservative loss when last_net_pnl_pct was never set
         if (closeReason.includes('net_pnl_sl')) {
           const m = closeReason.match(/-?\d+\.?\d*/)
           pnl = m ? parseFloat(m[0]) : -30
