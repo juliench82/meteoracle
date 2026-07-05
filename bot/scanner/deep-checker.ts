@@ -44,7 +44,7 @@ import { getHeliusRpcEndpoint } from '@/lib/solana'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import { logInfo } from '@/lib/log'
-import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
+import { getOpenLpPositions } from '@/lib/local-state'
 // Jupiter preflight removed - direct Meteora DLMM swap used for pre-swap now
 import { resolveSolPriceUsd } from '@/lib/sol-price'
 import { computePoolScore } from './pool-metrics'
