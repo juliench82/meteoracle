@@ -229,15 +229,37 @@ export async function buildAndSendTx(
   const tx = new VersionedTransaction(message)
   tx.sign([wallet, ...signers])
 
+  // Sim gate for v0 (basic; full simulateAndCheck is legacy-oriented)
+  try {
+    const sim = await connection.simulateTransaction(tx)
+    if (sim.value.err) {
+      console.error('[buildAndSendTx] simulation FAILED', sim.value.err)
+      throw new Error('buildAndSendTx v0 sim error')
+    }
+  } catch (simErr) {
+    console.warn('[buildAndSendTx] sim warning (proceeding with caution):', simErr)
+  }
+
   const sig = await connection.sendTransaction(tx, {
     skipPreflight: false,
     maxRetries: 3,
   })
 
-  await connection.confirmTransaction(
-    { signature: sig, blockhash, lastValidBlockHeight },
-    'confirmed'
-  )
+  try {
+    await connection.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      'confirmed'
+    )
+  } catch (confirmErr) {
+    await new Promise(r => setTimeout(r, 3000))
+    const statusResp = await connection.getSignatureStatus(sig, { searchTransactionHistory: true })
+    const status = statusResp.value
+    if (status && !status.err && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
+      console.log('[buildAndSendTx] confirmed via status fallback')
+      return sig
+    }
+    throw confirmErr
+  }
 
   return sig
 }
