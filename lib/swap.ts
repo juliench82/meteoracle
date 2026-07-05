@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
-import { getOpenLpPositions, saveOpenLpPositions, applyMonitorUpdates } from '@/lib/local-state'
+import { getOpenLpPositions, withQueuedUpdate, applyMonitorUpdates } from '@/lib/local-state'
 import { atomicWriteJson } from './atomic-write'
 import { envNumber } from '@/lib/strategy-config'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
@@ -100,15 +100,21 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   const pruneMs = 90 * 24 * 3600 * 1000 // prune very old closed to keep state file small
 
   // Light prune of ancient closed records (prevents unbounded growth)
+  // Do the filter + write inside queued RMW to avoid races with concurrent writers
   const beforePrune = positions.length
-  positions = positions.filter((p: any) => {
-    if (p.status !== 'closed') return true
-    const closedTs = p.closed_at ? new Date(p.closed_at).getTime() : 0
-    return (now - closedTs) < pruneMs
+  await withQueuedUpdate((all) => {
+    const pruned = all.filter((p: any) => {
+      if (p.status !== 'closed') return true
+      const closedTs = p.closed_at ? new Date(p.closed_at).getTime() : 0
+      return (now - closedTs) < pruneMs
+    })
+    if (pruned.length !== all.length) {
+      all.length = 0
+      all.push(...pruned)
+    }
   })
-  if (positions.length !== beforePrune) {
-    saveOpenLpPositions(positions)
-  }
+  // reload after possible prune write (small cost, ensures latest for skip/loop)
+  positions = getOpenLpPositions()
 
   // Persisted backoff (survives restart) for tokens failing liquidity.
   const backoff: Map<string, number> = loadStrandedBackoff()
