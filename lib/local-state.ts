@@ -123,3 +123,34 @@ export async function applyMonitorUpdates(updates: Array<{ id: string; patch: Pa
   writeQueue = thisWork
   return thisWork
 }
+
+/**
+ * General safe RMW helper for position state.
+ * The mutator receives the latest array (reloaded inside the queue) and can mutate it in place.
+ * Write happens atomically inside the serialized writeQueue.
+ * Prevents lost updates from concurrent get-modify-save across monitor, scanner, executor, swap, etc.
+ * Callers should await when possible.
+ */
+export async function withQueuedUpdate(
+  mutator: (positions: OpenLpPosition[]) => void
+): Promise<void> {
+  if (typeof mutator !== 'function') return
+  const thisWork = writeQueue.then(() => {
+    const all = getOpenLpPositions()
+    mutator(all)
+    atomicWriteJson(OPEN_POSITIONS_FILE, all)
+    consecutiveWriteFailures = 0
+  }).catch(err => {
+    console.error('[local-state] withQueuedUpdate failed:', err)
+    console.error('[local-state] write failed — possible disk/permissions issue:', err)
+    consecutiveWriteFailures++
+    if (consecutiveWriteFailures >= 3) {
+      console.error('[local-state] 3+ consecutive write failures — pausing bot')
+      sendAlert({ type: 'error', message: '[local-state] state write failed 3+ times — pausing trading until resolved' }).catch(() => {})
+      import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
+      consecutiveWriteFailures = 0 // reset AFTER sendAlert
+    }
+  })
+  writeQueue = thisWork
+  return thisWork
+}
