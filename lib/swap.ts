@@ -113,6 +113,21 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
   // Persisted backoff (survives restart) for tokens failing liquidity.
   const backoff: Map<string, number> = loadStrandedBackoff()
   const skipList: Set<string> = loadStrandedSkipList()
+  // Prune skipList: remove entries for sell_failed positions older than 7 days
+  let prunedSkip = false
+  for (const mint of Array.from(skipList)) {
+    const pos = positions.find((p: any) => ((p as any).stranded_token_mint || p.mint) === mint)
+    if (pos && pos.sell_failed_at) {
+      const age = now - new Date(pos.sell_failed_at).getTime()
+      if (age > 7 * 24 * 3600 * 1000) {
+        skipList.delete(mint)
+        prunedSkip = true
+      }
+    }
+  }
+  if (prunedSkip) {
+    saveStrandedSkipList(skipList)
+  }
   const LIQUIDITY_BACKOFF_MS = 5 * 60 * 1000 // 5 minutes after a liquidity failure
   const MAX_STRANDED_AGE_DAYS = 2
   const MAX_STRANDED_AGE_MIN = MAX_STRANDED_AGE_DAYS * 24 * 60
