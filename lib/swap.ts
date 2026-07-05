@@ -2,7 +2,7 @@ import { Connection, PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
 import * as fs from 'fs'
 import * as path from 'path'
-import { getConnection, getWallet } from '@/lib/solana'
+import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions, withQueuedUpdate, applyMonitorUpdates } from '@/lib/local-state'
 import { atomicWriteJson } from './atomic-write'
@@ -267,7 +267,8 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                   minOutAmount: minOutBN,
                   outToken,
                 })
-                const prepared = applyPriorityFee(swapTx, 100000)
+                const recPrio = await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]).catch(() => 50_000)
+                const prepared = applyPriorityFee(swapTx, recPrio)
                 recoveredSig = await sendLegacyTx(prepared, [wallet], label)
                 console.log(`${label} direct DLMM stranded sell confirmed ✔ sig: ${recoveredSig}`)
                 recovered++
