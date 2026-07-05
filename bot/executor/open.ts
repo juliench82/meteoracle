@@ -105,6 +105,7 @@ export async function openPosition(
   // Mark for graceful shutdown waiter (dynamic to avoid cycles; no globalThis mirror)
   import('../../worker').then((m: any) => m.setOpenInProgress?.(true)).catch(() => {})
 
+  try {
   const botState = await getBotState()
   const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
 
@@ -964,6 +965,9 @@ export async function openPosition(
     // Ensure flag cleared even on throws before the scaffold try/finally (e.g. eligibility, pre-scaffold)
     import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
   }
+} finally {
+  // Top level try/finally guarantee for ALL exit paths including dry-run (fix 4)
+  import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
 }
 
 async function validateOpenEligibility(
