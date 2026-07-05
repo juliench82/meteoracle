@@ -86,10 +86,12 @@ export async function flushStateWrites(): Promise<void> {
 
 /**
  * Safe merge for batched monitor updates.
- * The read-modify-write is performed inside a single queued thunk to ensure atomicity.
+ * The read-modify-write (getOpenLpPositions + patch + atomic write) is performed inside a single queued thunk
+ * chained through writeQueue to ensure atomicity as a unit (per fix instruction).
  * Always reloads latest list (captures any concurrent adds from scanner) then overlays patches by id.
  * Prevents lost-update races between monitor and stranded-sell recovery etc.
  * Returns a promise that resolves when this update's write has been enqueued and executed.
+ * Callers must await it.
  */
 export async function applyMonitorUpdates(updates: Array<{ id: string; patch: Partial<OpenLpPosition> }>): Promise<void> {
   if (!updates || updates.length === 0) return
