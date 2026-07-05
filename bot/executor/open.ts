@@ -1,44 +1,14 @@
 /**
- * bot/executor/open.ts
+ * bot/executor/open.ts (thin orchestrator after split)
  *
- * Position opening for Meteora DLMM (evil-panda: Bid-Ask, explicit pre-swap for
- * the token leg so we can do true one-sided-SOL economics on a Bid-Ask shape).
+ * Delegates to:
+ *  - ./open/bin-calc.ts   (range feasibility, discrete bin math, no-rent gate)
+ *  - ./open/pre-swap.ts   (direct DLMM SOL->token for bid-ask leg, actual delta)
+ *  - lp-init / scaffold logic remains here for this pass (further extraction follows pattern)
+ *  - persistence.ts (extended) for post-open recording
  *
- * NOTE: This file is intentionally large (~1.8k LOC) as it orchestrates the full
- * open path (pre-swap, scaffold, init, add-liquidity, rollback, dry-run).
- * Future split into submodules (pre-swap.ts, scaffold.ts, etc.) is recommended for maintainability.
- *
- * Core workflow (per design):
- *   X SOL budget → calculate TOKEN amount needed for value match → target full
- *   desired -50% / +100% range → hard gate: must cost zero new bin arrays →
- *   SWAP for the TOKEN leg (using actual received amount after slippage) →
- *   openPositionDirect with (remaining SOL + actual TOKEN).
- *
- * The range is the *closest discrete bins* Meteora will actually give you.
- * We never enforce literal -50.00% / +100.00%. We use Math.round() on the
- * percentage-to-bin math and only proceed if the resulting range has all its
- * bin arrays already on-chain (the free-range / zero-rent gate).
- *
- * No artificial width cap (the old 70-bin / Zap limits are gone).
- * The only limit is economic: if the desired range would require new bin arrays,
- * we skip cleanly and wait for other LPs to populate them.
- *
- * Position account sizing note: We correctly compute numBins = (maxBinId - minBinId) + 1
- * when pre-allocating via top-level createAccount so the subsequent initializePosition
- * does not trigger an inner-CPI realloc (which is capped at 10,240 bytes).
- *
- * CRITICAL SUCCESS CRITERIA (user directive):
- *   - No ZAP code path is used for opening. Entire bot purpose depends on reliably
- *     opening the full desired discrete range (-50% down / +100% up via round() bin math)
- *     using direct DLMM SDK + pre-swap (Meteora native) for value match + zero new bin array gate.
- *   - Pre-sim gate (create + initializePosition + add sims) MUST abort before any pre-swap
- *     on candidates that will fail create/init/add. Pre-swap is irreversible; rollback only
- *     mitigates (fees + slippage loss possible).
- *   - If we cannot open such positions the bot has no purpose at all.
- *   - Pre-swap for the token leg (and post-close sells) now uses direct Meteora DLMM swaps
- *     via the SDK (swapQuote + swap on the target pool). Jupiter completely removed from
- *     opening pre-swaps, closing sells, and rollback. See swapSolToTokenDirectOnDlmm and
- *     the direct sell logic in close.ts. Detailed [direct-dlmm] logs for debugging.
+ * External API (openPosition) and all behavior unchanged.
+ * open.ts target <15KB via extraction.
  */
 
 import {
