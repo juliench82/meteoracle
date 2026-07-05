@@ -105,7 +105,6 @@ export async function openPosition(
   // Mark for graceful shutdown waiter (dynamic to avoid cycles; no globalThis mirror)
   import('../../worker').then((m: any) => m.setOpenInProgress?.(true)).catch(() => {})
 
-  try {
   const botState = await getBotState()
   const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
 
@@ -130,6 +129,7 @@ export async function openPosition(
     }
     if (existing) {
       console.log(`${label} DRY RUN — ${metrics.symbol} already has active simulation row (id=${existing.id}). Skipping duplicate persist to avoid lp_positions_mint_open_unique violation.`)
+      import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
       return existing.id
     }
 
@@ -140,6 +140,7 @@ export async function openPosition(
     console.log(`${label} DRY RUN — creating new simulation row for ${metrics.symbol} (first time this tick/scan)`)
     const positionId = await persistPosition(metrics, strategy, 'dry-run-sig', metrics.priceUsd ?? 0, 0, dryRunSolAmount, undefined, 0, DRY_RUN)
     await sendOpenAlert(metrics, strategy, positionId, dryRunSolAmount, 0)
+    import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
     return positionId
   }
 
@@ -963,9 +964,6 @@ export async function openPosition(
     // Ensure flag cleared even on throws before the scaffold try/finally (e.g. eligibility, pre-scaffold)
     import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
   }
-} finally {
-  // Top-level guarantee for all exit paths (dry, eligibility, throws, success)
-  import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
 }
 
 async function validateOpenEligibility(
