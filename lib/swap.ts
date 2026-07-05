@@ -232,7 +232,8 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
 
                 const minOutBN = (q.minOutAmount && !q.minOutAmount.isZero()) ? q.minOutAmount : q.outAmount.div(new BN(4))
 
-                // USD floor check to avoid burning capital on illiquid pools at low recovery (e.g. 25%)
+                // USD floor check using sol_deposited * solPrice * STRANDED_MIN_RECOVERY_PCT/100 (fix 3)
+                // If below, skip and alert instead of low recovery.
                 try {
                   const solPrice = await resolveSolPriceUsd().catch(() => 150)
                   const minOutSol = Number(minOutBN.toString()) / 1e9
