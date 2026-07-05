@@ -10,7 +10,7 @@ import {
 } from '@solana/web3.js'
 import bs58 from 'bs58'
 import { sendAlert } from '@/bot/alerter'
-import { heliusRpcFetch, isHeliusRpcEndpoint } from '@/lib/rpc-rate-limit'
+import { heliusRpcFetch, isHeliusRpcEndpoint, heliusAxiosPost } from '@/lib/rpc-rate-limit'
 
 // ---------------------------------------------------------------------------
 // Connection
@@ -168,18 +168,30 @@ export function getWalletPublicKey(): PublicKey {
 export async function getPriorityFee(accountKeys: string[]): Promise<number> {
   try {
     const connection = getConnection()
-    const rpcFetch = isHeliusRpcEndpoint(connection.rpcEndpoint) ? heliusRpcFetch : fetch
-    const res = await rpcFetch(connection.rpcEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const isHelius = isHeliusRpcEndpoint(connection.rpcEndpoint)
+    let data: any
+    if (isHelius) {
+      // Use high priority lane for fee estimates (executor critical path)
+      const res = await heliusAxiosPost<any>(connection.rpcEndpoint, {
         jsonrpc: '2.0',
         id: 1,
         method: 'getPriorityFeeEstimate',
         params: [{ accountKeys, options: { priorityLevel: 'High' } }],
-      }),
-    })
-    const data = await res.json()
+      }, { timeout: 5000 }, 'priority-fee', 'high')
+      data = res.data
+    } else {
+      const res = await fetch(connection.rpcEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getPriorityFeeEstimate',
+          params: [{ accountKeys, options: { priorityLevel: 'High' } }],
+        }),
+      })
+      data = await res.json()
+    }
     const raw = data?.result?.priorityFeeEstimate ?? 50_000
     const MAX_PRIORITY = 2_000_000 // cap to prevent excessive fees during congestion spikes (~0.002 SOL per tx)
     return Math.min(raw, MAX_PRIORITY)
