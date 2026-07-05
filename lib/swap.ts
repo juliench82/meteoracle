@@ -8,6 +8,8 @@ import { getOpenLpPositions, saveOpenLpPositions, applyMonitorUpdates } from '@/
 import { atomicWriteJson } from './atomic-write'
 import { envNumber } from '@/lib/strategy-config'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
+import MeteoraDlmm from '@meteora-ag/dlmm'
+import { sendLegacyTx, applyPriorityFee } from '@/lib/solana-tx'
 
 // Note: main paths use direct Meteora DLMM swaps (see swapSolToTokenDirectOnDlmm in open.ts and retryStrandedSells here).
 // Legacy Jupiter helpers have been removed. Only retryStrandedSells + getWalletTokenBalance remain.
@@ -187,8 +189,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         // Direct DLMM sell for stranded recovery (no fallbacks)
         let recoveredSig: string | undefined
         try {
-          const mod = await import('@meteora-ag/dlmm')
-          const DLMM = mod.default as any
+          const DLMM = MeteoraDlmm as any
           const poolAddr = (pos as any).pool_address || (pos as any).metadata?.pool_address
           if (poolAddr) {
             const connection = getConnection()
@@ -244,7 +245,6 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                   minOutAmount: minOutBN,
                   outToken,
                 })
-                const { sendLegacyTx, applyPriorityFee } = await import('@/lib/solana-tx')
                 const prepared = applyPriorityFee(swapTx, 100000)
                 recoveredSig = await sendLegacyTx(prepared, [wallet], label)
                 console.log(`${label} direct DLMM stranded sell confirmed ✔ sig: ${recoveredSig}`)
