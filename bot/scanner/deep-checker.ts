@@ -28,7 +28,8 @@
 import axios from 'axios'
 // Local state only (JSON files in state/ + targeted on-chain reads)
 import { getBotState } from '@/lib/botState'
-import { getStrategyForToken, explainNoStrategy } from '@/strategies'
+import { explainNoStrategy } from '@/strategies'
+import { evilPandaStrategy } from '@/strategies/evil-panda'
 import { openPosition } from '../executor'
 import { sendAlert } from '../alerter'
 import { checkHolders } from '@/lib/helius'
@@ -959,7 +960,8 @@ async function evaluateCandidate(
   metrics: TokenMetrics,
   symbol: string
 ) {
-  const strategy = getStrategyForToken(metrics, 'evil-panda');
+  // Direct evil-panda only (no registry/lookup). forced id path previously only checked .enabled.
+  const strategy = evilPandaStrategy.enabled ? evilPandaStrategy : null;
 
   if (!strategy) {
     const rejectionReason = explainNoStrategy(metrics);
