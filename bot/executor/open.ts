@@ -950,6 +950,9 @@ export async function openPosition(
     const message = err instanceof Error ? err.message : String(err)
     console.log(`${label} [TRACE] [TOP-CATCH] Top-level catch in openPosition — if we scaffolded, finally SHOULD have run the close attempt.`);
     console.log(`${label} [TRACE] [TOP-CATCH] positionScaffolded state is only visible inside the try; finally is guaranteed to have executed on throw.`);
+    if (message.includes('ECONNREFUSED') || message.includes('ETIMEDOUT') || message.includes('429') || message.includes('socket')) {
+      getConnection(true)
+    }
     console.error(`${label} failed:`, message)
     if (err instanceof Error && err.stack) {
       console.error(err.stack)
