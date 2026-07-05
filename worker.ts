@@ -14,6 +14,7 @@ import { runScanner } from './bot/scanner'
 import { getBotState } from './lib/botState'
 import { validateStartup } from './lib/startup-validation'
 import { retryStrandedSells } from './lib/swap'
+import { getConnection } from './lib/solana'
 
 const MONITOR_INTERVAL_MS = (parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') || 60) * 1_000
 const SCANNER_INTERVAL_MS = (parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') || 900) * 1_000
@@ -42,6 +43,11 @@ async function tickMonitor() {
     log(`monitor tick done — checked=${stats.checked} closed=${stats.closed}`)
   } catch (err) {
     console.error('[worker] monitor tick error:', err)
+    const msg = String(err)
+    if (msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('429') || msg.includes('socket hang up')) {
+      getConnection(true)
+      log('[worker] RPC reset triggered')
+    }
   } finally {
     inFlightMonitor = false
   }
@@ -67,6 +73,11 @@ async function tickScanner() {
     )
   } catch (err) {
     console.error('[worker] scanner tick error:', err)
+    const msg = String(err)
+    if (msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('429') || msg.includes('socket hang up')) {
+      getConnection(true)
+      log('[worker] RPC reset triggered')
+    }
   } finally {
     inFlightScanner = false
   }

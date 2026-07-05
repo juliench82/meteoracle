@@ -114,7 +114,10 @@ export function createConnection(rpcUrl: string): Connection {
   return new Connection(rpcUrl, config)
 }
 
-export function getConnection(): Connection {
+export function getConnection(forceRefresh = false): Connection {
+  if (forceRefresh) {
+    _connection = null
+  }
   if (!_connection) {
     warnIfPublicFallbackActive()
     const url = getRpcEndpointCandidates()[0]
