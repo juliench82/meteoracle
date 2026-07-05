@@ -292,6 +292,9 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)
           console.warn(`${label} direct DLMM stranded sell failed, will retry next monitor tick: ${msg}`)
+          if (msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('429') || msg.includes('socket')) {
+            getConnection(true)
+          }
           if (msg.includes('Insufficient liquidity') || msg.includes('SWAP_QUOTE_INSUFFICIENT')) {
             backoff.set(recoveryMint, now)
             saveStrandedBackoff(backoff)
@@ -302,6 +305,9 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
       const msg = err instanceof Error ? err.message : String(err)
       const sym = (pos as any).symbol || pos.mint.slice(0, 6)
       console.warn(`[swap] stranded retry failed for ${sym}: ${msg}`)
+      if (msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('429') || msg.includes('socket')) {
+        getConnection(true)
+      }
     }
   }
 
