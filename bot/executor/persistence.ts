@@ -8,7 +8,7 @@
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 import { OPEN_LP_STATUSES } from '@/lib/position-limits'
-import { getOpenLpPositions, saveOpenLpPositions } from '@/lib/local-state'
+import { getOpenLpPositions, withQueuedUpdate } from '@/lib/local-state'
 import * as fs from 'fs'
 import * as path from 'path'
 import { atomicWriteJson } from '@/lib/atomic-write'
@@ -92,9 +92,13 @@ export async function persistPosition(
     },
   }
 
-  const allPositions = getOpenLpPositions()
-  allPositions.push(newPosition)
-  saveOpenLpPositions(allPositions)
+  await withQueuedUpdate((positions) => {
+    // Double-check inside queued RMW (latest view) to avoid dup even under race
+    const exists = positions.some((p: any) => p.mint === newPosition.mint && (p.status === 'active' || p.status === 'pending_retry' || OPEN_LP_STATUSES.includes(p.status)));
+    if (!exists) {
+      positions.push(newPosition)
+    }
+  })
 
   return newPosition.id
 }
@@ -104,19 +108,19 @@ export async function markPositionClosed(
   claimableFeesUsd: number | null,
   reason: string
 ): Promise<void> {
-  const positions = getOpenLpPositions()
-  const idx = positions.findIndex((p: any) => p.id === positionId)
-  if (idx !== -1) {
-    positions[idx] = {
-      ...positions[idx],
-      status: 'closed',
-      closed_at: new Date().toISOString(),
-      oor_since_at: null,
-      close_reason: reason,
-      ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
+  await withQueuedUpdate((positions) => {
+    const idx = positions.findIndex((p: any) => p.id === positionId)
+    if (idx !== -1) {
+      positions[idx] = {
+        ...positions[idx],
+        status: 'closed',
+        closed_at: new Date().toISOString(),
+        oor_since_at: null,
+        close_reason: reason,
+        ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
+      }
     }
-    saveOpenLpPositions(positions)
-  }
+  })
 }
 
 export async function markPositionSellFailed(
@@ -124,20 +128,20 @@ export async function markPositionSellFailed(
   claimableFeesUsd: number | null,
   reason: string
 ): Promise<void> {
-  const positions = getOpenLpPositions()
-  const idx = positions.findIndex((p: any) => p.id === positionId)
-  if (idx !== -1) {
-    positions[idx] = {
-      ...positions[idx],
-      status: 'sell_failed',
-      closed_at: new Date().toISOString(),
-      oor_since_at: null,
-      close_reason: reason,
-      ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
-      sell_failed_at: new Date().toISOString(),
+  await withQueuedUpdate((positions) => {
+    const idx = positions.findIndex((p: any) => p.id === positionId)
+    if (idx !== -1) {
+      positions[idx] = {
+        ...positions[idx],
+        status: 'sell_failed',
+        closed_at: new Date().toISOString(),
+        oor_since_at: null,
+        close_reason: reason,
+        ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
+        sell_failed_at: new Date().toISOString(),
+      }
     }
-    saveOpenLpPositions(positions)
-  }
+  })
 }
 
 export async function sendOpenAlert(
@@ -237,41 +241,41 @@ export async function persistStrandedTokenAfterFailedOpen(
   tokenAmountLamports: bigint,
 ): Promise<void> {
   try {
-    const positions = getOpenLpPositions();
-    // Avoid creating duplicate stranded rows for the same recovery mint (the token we actually hold)
     const recoveryMint = tokenMint || metrics.address;
-    const existing = positions.find((p: any) =>
-      ((p as any).stranded_token_mint === recoveryMint || p.mint === recoveryMint) &&
-      (p.status === 'sell_failed' || OPEN_LP_STATUSES.includes(p.status))
-    );
-    if (existing) return;
+    await withQueuedUpdate((positions) => {
+      // Check + push inside queued for atomicity (latest view)
+      const existing = positions.find((p: any) =>
+        ((p as any).stranded_token_mint === recoveryMint || p.mint === recoveryMint) &&
+        (p.status === 'sell_failed' || OPEN_LP_STATUSES.includes(p.status))
+      );
+      if (existing) return;
 
-    const stranded = {
-      id: (crypto as any).randomUUID ? (crypto as any).randomUUID() : String(Date.now()),
-      mint: recoveryMint,                    // explicitly the token we hold and will sell back (for retryStrandedSells)
-      symbol: metrics.symbol || recoveryMint.slice(0, 6),
-      pool_address: metrics.poolAddress || '',
-      position_pubkey: '',                   // never created
-      strategy_id: 'evil-panda',
-      sol_deposited: 0,
-      status: 'sell_failed',
-      dry_run: false,
-      opened_at: new Date().toISOString(),
-      closed_at: new Date().toISOString(),
-      close_reason: 'open_failed_after_pre_swap',
-      sell_failed_at: new Date().toISOString(),
-      stranded_token_mint: recoveryMint,
-      stranded_token_amount: tokenAmountLamports.toString(),
-      metadata: {
-        stranded_from_open_failure: true,
-        original_metrics: { mcUsd: metrics.mcUsd, volume24h: metrics.volume24h },
-        pool_token_mint: metrics.address,
-      },
-    } as any;
+      const stranded = {
+        id: (crypto as any).randomUUID ? (crypto as any).randomUUID() : String(Date.now()),
+        mint: recoveryMint,
+        symbol: metrics.symbol || recoveryMint.slice(0, 6),
+        pool_address: metrics.poolAddress || '',
+        position_pubkey: '',
+        strategy_id: 'evil-panda',
+        sol_deposited: 0,
+        status: 'sell_failed',
+        dry_run: false,
+        opened_at: new Date().toISOString(),
+        closed_at: new Date().toISOString(),
+        close_reason: 'open_failed_after_pre_swap',
+        sell_failed_at: new Date().toISOString(),
+        stranded_token_mint: recoveryMint,
+        stranded_token_amount: tokenAmountLamports.toString(),
+        metadata: {
+          stranded_from_open_failure: true,
+          original_metrics: { mcUsd: metrics.mcUsd, volume24h: metrics.volume24h },
+          pool_token_mint: metrics.address,
+        },
+      } as any;
 
-    positions.push(stranded);
-    saveOpenLpPositions(positions);
-    console.log(`[executor] persisted stranded token marker for recovery (mint=${recoveryMint}, token=${recoveryMint.slice(0,8)})`);
+      positions.push(stranded);
+      console.log(`[executor] persisted stranded token marker for recovery (mint=${recoveryMint}, token=${recoveryMint.slice(0,8)})`);
+    });
   } catch (e) {
     console.warn('[executor] failed to persist stranded token marker:', e);
   }
@@ -291,37 +295,37 @@ export async function persistStrandedPositionRent(
   symbol?: string
 ) {
   try {
-    const positions = getOpenLpPositions();
-    // Avoid duplicates
-    const exists = positions.some((p: any) => p.position_pubkey === positionPubkey && (p.status === 'stranded_rent' || p.close_reason?.includes('stranded_rent')));
-    if (exists) return;
+    await withQueuedUpdate((positions) => {
+      // Avoid duplicates inside queued RMW
+      const exists = positions.some((p: any) => p.position_pubkey === positionPubkey && (p.status === 'stranded_rent' || p.close_reason?.includes('stranded_rent')));
+      if (exists) return;
 
-    const marker = {
-      id: `stranded-rent-${positionPubkey.slice(0, 8)}-${Date.now()}`,
-      mint: symbol || 'unknown',
-      symbol: symbol || 'stranded-rent',
-      pool_address: poolAddress,
-      position_pubkey: positionPubkey,
-      strategy_id: 'evil-panda',
-      position_type: 'dlmm',
-      status: 'stranded_rent',
-      sol_deposited: 0,
-      token_amount: 0,
-      entry_price_sol: 0,
-      entry_price_usd: 0,
-      opened_at: new Date().toISOString(),
-      close_reason: 'stranded_rent_from_failed_open',
-      metadata: {
-        min_bin_id: minBinId,
-        max_bin_id: maxBinId,
-        stranded_from_scaffold: true,
-        note: 'Position account created but open aborted before liquidity. Attempt rent reclaim via close.',
-      },
-    } as any;
+      const marker = {
+        id: `stranded-rent-${positionPubkey.slice(0, 8)}-${Date.now()}`,
+        mint: symbol || 'unknown',
+        symbol: symbol || 'stranded-rent',
+        pool_address: poolAddress,
+        position_pubkey: positionPubkey,
+        strategy_id: 'evil-panda',
+        position_type: 'dlmm',
+        status: 'stranded_rent',
+        sol_deposited: 0,
+        token_amount: 0,
+        entry_price_sol: 0,
+        entry_price_usd: 0,
+        opened_at: new Date().toISOString(),
+        close_reason: 'stranded_rent_from_failed_open',
+        metadata: {
+          min_bin_id: minBinId,
+          max_bin_id: maxBinId,
+          stranded_from_scaffold: true,
+          note: 'Position account created but open aborted before liquidity. Attempt rent reclaim via close.',
+        },
+      } as any;
 
-    positions.push(marker);
-    saveOpenLpPositions(positions);
-    console.log(`[executor] persisted stranded position rent marker for recovery (pubkey=${positionPubkey.slice(0,8)}, pool=${poolAddress.slice(0,8)})`);
+      positions.push(marker);
+      console.log(`[executor] persisted stranded position rent marker for recovery (pubkey=${positionPubkey.slice(0,8)}, pool=${poolAddress.slice(0,8)})`);
+    });
   } catch (e) {
     console.warn('[executor] failed to persist stranded position rent marker:', e);
   }
@@ -396,12 +400,12 @@ export function removePendingScaffold(pubkey: string) {
 }
 
 export async function updatePositionClaimTime(positionId: string): Promise<void> {
-  const positions = getOpenLpPositions()
-  const idx = positions.findIndex((p: any) => p.id === positionId)
-  if (idx !== -1) {
-    positions[idx].last_claim_at = new Date().toISOString()
-    saveOpenLpPositions(positions)
-  }
+  await withQueuedUpdate((positions) => {
+    const idx = positions.findIndex((p: any) => p.id === positionId)
+    if (idx !== -1) {
+      positions[idx].last_claim_at = new Date().toISOString()
+    }
+  })
 }
 
 // === OPEN SPLIT NOTE (persistence responsibility) ===
