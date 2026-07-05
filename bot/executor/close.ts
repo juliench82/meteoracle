@@ -101,7 +101,7 @@ export async function closePosition(
   const wallet = getWallet()
 
   // Persist flag before tx for restart safety (in-memory mutex not enough across PM2 restart)
-  applyMonitorUpdates([{ id: positionId, patch: { close_in_progress: true as any } }])
+  await applyMonitorUpdates([{ id: positionId, patch: { close_in_progress: true as any } }])
 
   try {
     const DLMM = await getDLMM()
@@ -287,7 +287,7 @@ export async function closePosition(
       payload: { positionId, reason, error: message },
     })
     // Clear persisted flag on failure so monitor can retry later
-    applyMonitorUpdates([{ id: positionId, patch: { close_in_progress: false as any } }])
+    await applyMonitorUpdates([{ id: positionId, patch: { close_in_progress: false as any } }])
     return false
   } finally {
     closingInProgress.delete(positionId)
