@@ -6,6 +6,8 @@ import { getConnection, getWallet } from '@/lib/solana'
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions, saveOpenLpPositions, applyMonitorUpdates } from '@/lib/local-state'
 import { atomicWriteJson } from './atomic-write'
+import { envNumber } from '@/lib/strategy-config'
+import { resolveSolPriceUsd } from '@/lib/sol-price'
 
 // Note: main paths use direct Meteora DLMM swaps (see swapSolToTokenDirectOnDlmm in open.ts and retryStrandedSells here).
 // Legacy Jupiter helpers have been removed. Only retryStrandedSells + getWalletTokenBalance remain.
@@ -211,15 +213,35 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                   ? q.binArraysPubkey
                   : binArrays.slice(0, 3).map((ba: any) => ba.publicKey);
                 console.log(`${label} [direct-dlmm-recovery] calling swap with limited ${binArrayKeysForSwap.length} bin array pubkeys`);
+
+                const minOutBN = (q.minOutAmount && !q.minOutAmount.isZero()) ? q.minOutAmount : q.outAmount.div(new BN(4))
+
+                // USD floor check to avoid burning capital on illiquid pools at low recovery (e.g. 25%)
+                try {
+                  const solPrice = await resolveSolPriceUsd().catch(() => 150)
+                  const minOutSol = Number(minOutBN.toString()) / 1e9
+                  const recoveryUsd = minOutSol * solPrice
+                  const origSol = Number((pos as any).sol_deposited || 0)
+                  const minRecoveryPct = envNumber('STRANDED_MIN_RECOVERY_PCT', 50)
+                  const floorUsd = origSol * solPrice * (minRecoveryPct / 100)
+                  if (recoveryUsd < floorUsd && origSol > 0) {
+                    console.warn(`${label} recovery below floor ${minRecoveryPct}% (est $${recoveryUsd.toFixed(2)} < $${floorUsd.toFixed(2)}) — skipping this tick, backoff set`)
+                    sendAlert({ type: 'warning', message: `⚠️ Stranded sell for ${sym} est recovery $${recoveryUsd.toFixed(2)} below ${minRecoveryPct}% floor (orig $${(origSol * solPrice).toFixed(2)}) — skipping` }).catch(() => {})
+                    backoff.set(recoveryMint, now)
+                    saveStrandedBackoff(backoff)
+                    continue
+                  }
+                } catch (floorErr) {
+                  console.warn(`${label} floor check error (proceeding):`, floorErr)
+                }
+
                 const swapTx = await dlmmPool.swap({
                   inToken,
                   binArraysPubkey: binArrayKeysForSwap,
                   inAmount: inputAmountBN,
                   lbPair: dlmmPool.pubkey,
                   user: wallet.publicKey,
-                  // Use quote's minOut (already toleranced at 10000bps in quote) or very loose 25% of expected.
-                  // Avoids total drain via zero protection while still allowing recovery on thin pools.
-                  minOutAmount: (q.minOutAmount && !q.minOutAmount.isZero()) ? q.minOutAmount : q.outAmount.div(new BN(4)),
+                  minOutAmount: minOutBN,
                   outToken,
                 })
                 const { sendLegacyTx, applyPriorityFee } = await import('@/lib/solana-tx')
@@ -230,7 +252,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                 console.log(`${label} recovered ✔ sig=${recoveredSig}`)
                 // update state via safe merge to avoid race with monitor's applyMonitorUpdates
                 const nowIso = new Date().toISOString()
-                applyMonitorUpdates([{
+                await applyMonitorUpdates([{
                   id: pos.id,
                   patch: {
                     stranded_recovered_at: nowIso,
