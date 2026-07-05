@@ -4,7 +4,7 @@ import { getOpenLpPositions, withQueuedUpdate, type OpenLpPosition, applyMonitor
 import { closePosition } from '@/bot/executor/close'
 import { claimFeesForPosition } from '@/bot/executor/close'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
-import { getConnection, getWallet } from '@/lib/solana'
+import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import {
   getDLMM,
   getDecimalAdjustedPrice,
@@ -566,9 +566,10 @@ export async function retryStrandedPositionRents() {
               )
               .instruction();
 
+            const prio = await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]).catch(() => 50_000);
             const initTx = new Transaction();
             initTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }));
-            initTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 200_000 }));
+            initTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: prio }));
             initTx.add(initIx);
             const { blockhash } = await connection.getLatestBlockhash('confirmed');
             initTx.recentBlockhash = blockhash;
@@ -584,7 +585,8 @@ export async function retryStrandedPositionRents() {
       }
 
       // Use the exported tryClose (it now supports optional bins and will prefer closePosition for uninit ghosts)
-      const closeOk = await tryCloseEmptyPosition(dlmmPool, pub, wallet, minB, maxB, `[monitor-stranded-rent-${s.position_pubkey.slice(0,8)}]`, 200000);
+      const closePrio = await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]).catch(() => 50_000);
+      const closeOk = await tryCloseEmptyPosition(dlmmPool, pub, wallet, minB, maxB, `[monitor-stranded-rent-${s.position_pubkey.slice(0,8)}]`, closePrio);
       console.log(`[monitor] tryCloseEmptyPosition returned success=${closeOk} for ${s.position_pubkey.slice(0,8)}`);
 
       if (!closeOk) {
