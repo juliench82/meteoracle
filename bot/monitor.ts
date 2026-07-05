@@ -159,12 +159,17 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         try {
           currentFeeTvl = await getCurrentPoolFeeTvl24h(pos.pool_address)
           if (currentFeeTvl != null && Number.isFinite(currentFeeTvl)) {
-            const samples: Array<{ ts: number; fee_tvl_24h: number }> = Array.isArray(pos.fee_tvl_samples) ? pos.fee_tvl_samples : []
+            let samples: Array<{ ts: number; fee_tvl_24h: number }> = Array.isArray(pos.fee_tvl_samples) ? pos.fee_tvl_samples : []
             samples.push({ ts: now, fee_tvl_24h: currentFeeTvl })
 
-            // Prune to window
+            // Cap raw array at 500 before pruning (prevent blowup from restarts/clock skew)
+            if (samples.length > 500) {
+              samples = samples.slice(-500)
+            }
+
+            // Prune to window + upper clock-skew bound
             const windowMs = sampleWindowH * 3600 * 1000
-            const pruned = samples.filter((s) => now - s.ts <= windowMs)
+            const pruned = samples.filter((s) => s.ts <= now + 60_000 && now - s.ts <= windowMs)
 
             if (pruned.length > 0) {
               const avg = pruned.reduce((sum, s) => sum + s.fee_tvl_24h, 0) / pruned.length
