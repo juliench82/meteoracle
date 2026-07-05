@@ -157,6 +157,7 @@ let inFlightMonitor = false
 let inFlightScanner = false
 
 // Track if an open is in progress so graceful shutdown can wait
+// (globalThis mirror removed per fix 4; only this exported var now)
 export let openInProgress = false
 export function setOpenInProgress(v: boolean) {
   openInProgress = !!v
