@@ -75,21 +75,29 @@ export async function flushStateWrites(): Promise<void> {
 
 /**
  * Safe merge for batched monitor updates.
+ * The read-modify-write is performed inside a single queued thunk to ensure atomicity.
  * Always reloads latest list (captures any concurrent adds from scanner) then overlays patches by id.
- * Prevents the classic "snapshot at tick start + batch write at end" clobbering new records.
+ * Prevents lost-update races between monitor and stranded-sell recovery etc.
+ * Returns a promise that resolves when this update's write has been enqueued and executed.
  */
-export function applyMonitorUpdates(updates: Array<{ id: string; patch: Partial<OpenLpPosition> }>): void {
+export async function applyMonitorUpdates(updates: Array<{ id: string; patch: Partial<OpenLpPosition> }>): Promise<void> {
   if (!updates || updates.length === 0) return
-  const all = getOpenLpPositions()
-  let changed = false
-  for (const { id, patch } of updates) {
-    const idx = all.findIndex((p: OpenLpPosition) => p.id === id)
-    if (idx !== -1 && patch && Object.keys(patch).length > 0) {
-      Object.assign(all[idx], patch)
-      changed = true
+  const thisWork = writeQueue.then(() => {
+    const all = getOpenLpPositions()
+    let changed = false
+    for (const { id, patch } of updates) {
+      const idx = all.findIndex((p: OpenLpPosition) => p.id === id)
+      if (idx !== -1 && patch && Object.keys(patch).length > 0) {
+        Object.assign(all[idx], patch)
+        changed = true
+      }
     }
-  }
-  if (changed) {
-    saveOpenLpPositions(all)
-  }
+    if (changed) {
+      atomicWriteJson(OPEN_POSITIONS_FILE, all)
+    }
+  }).catch(err => {
+    console.error('[local-state] applyMonitorUpdates failed:', err)
+  })
+  writeQueue = thisWork
+  return thisWork
 }
