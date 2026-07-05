@@ -158,6 +158,21 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         let currentFeeTvl: number | null = null
         try {
           currentFeeTvl = await getCurrentPoolFeeTvl24h(pos.pool_address)
+          if (currentFeeTvl == null || !Number.isFinite(currentFeeTvl)) {
+            pos.fee_tvl_miss_count = (Number(pos.fee_tvl_miss_count) || 0) + 1
+            if (pos.fee_tvl_miss_count >= 5) {
+              console.warn(`[monitor] ${pos.symbol} fee_tvl_miss_count=${pos.fee_tvl_miss_count} — fee/TVL exit rule #1 disabled due to sampling failures`)
+              sendAlert({ type: 'warning', message: `fee/TVL exit rule #1 is disabled for ${pos.symbol} due to 5+ sampling failures` }).catch(() => {})
+            }
+            monitorPatches.push({ id: pos.id, patch: { fee_tvl_miss_count: pos.fee_tvl_miss_count } })
+            positionsMutated = true
+          } else {
+            if (Number(pos.fee_tvl_miss_count) > 0) {
+              pos.fee_tvl_miss_count = 0
+              monitorPatches.push({ id: pos.id, patch: { fee_tvl_miss_count: 0 } })
+              positionsMutated = true
+            }
+          }
           if (currentFeeTvl != null && Number.isFinite(currentFeeTvl)) {
             let samples: Array<{ ts: number; fee_tvl_24h: number }> = Array.isArray(pos.fee_tvl_samples) ? pos.fee_tvl_samples : []
             samples.push({ ts: now, fee_tvl_24h: currentFeeTvl })
