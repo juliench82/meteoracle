@@ -6,8 +6,8 @@ export function getRugcheckCacheSize() { return 0; }
 export async function getRugscore(tokenAddress: string, _symbol?: string): Promise<number> {
   try {
     const score = await checkRugscore(tokenAddress)
-    return score < 0 ? 50 : score // last-resort default only on hard failure
+    return score < 0 ? 0 : score // failure sentinel -> treat as reject (0 < min score e.g. 60)
   } catch {
-    return 50
+    return 0
   }
 }
