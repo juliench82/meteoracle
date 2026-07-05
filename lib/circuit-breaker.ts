@@ -21,9 +21,10 @@ export async function isDailyLossLimitHit(): Promise<boolean> {
 
     for (const p of positions) {
       const status = p.status || ''
-      if (!['closed', 'sell_failed'].includes(status) || !p.closed_at) continue
-      const closedTs = new Date(p.closed_at).getTime()
-      // closed_at is written by markPositionClosed / markPositionSellFailed in persistence.ts (confirmed)
+      const relevantTs = p.closed_at || p.sell_failed_at || p.opened_at
+      if (!['closed', 'sell_failed'].includes(status) || !relevantTs) continue
+      const closedTs = new Date(relevantTs).getTime()
+      // Use relevantTs (closed_at or sell_failed_at or opened_at) for time window to include sell_failed
       if (now - closedTs > oneDayMs) continue
 
       let pnl = Number((p as any).last_net_pnl_pct ?? NaN)
@@ -57,7 +58,8 @@ export async function isDailyLossLimitHit(): Promise<boolean> {
     const avgLossPct = totalSolDeposited > 0 ? (weightedLossSum / totalSolDeposited) * 100 : 0
     // Hybrid to prevent large winner diluting small losers: also trigger on any >50% loss + 2+ other losers
     const hasLargeLoser = positions.some(p => {
-      if (!['closed', 'sell_failed'].includes(p.status || '') || !p.closed_at) return false
+      const relevantTs = p.closed_at || p.sell_failed_at || p.opened_at
+      if (!['closed', 'sell_failed'].includes(p.status || '') || !relevantTs) return false
       const pnl = Number((p as any).last_net_pnl_pct ?? 0)
       return pnl <= -50
     })
