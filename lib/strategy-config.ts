@@ -102,9 +102,9 @@ export const MAX_POOL_PRICE_DEVIATION = envNumber('MAX_POOL_PRICE_DEVIATION', 0.
 // ── Deep survivor scoring (post-gate ranking for open priority) ──
 // Weights and cap are env-overridable for tuning.
 // feeTvlRatio_1h gets the highest weight because recent fee velocity is the strongest signal for fresh hot pools.
-export const LP_SCORE_FEE_TVL_1H_WEIGHT = 0.5
-export const LP_SCORE_FEE_TVL_24H_WEIGHT = 0.3
-export const LP_SCORE_LP_COUNT_WEIGHT  = 0.2
+export const LP_SCORE_FEE_TVL_1H_WEIGHT = envNumber('LP_SCORE_FEE_TVL_1H_WEIGHT', 0.5)
+export const LP_SCORE_FEE_TVL_24H_WEIGHT = envNumber('LP_SCORE_FEE_TVL_24H_WEIGHT', 0.3)
+export const LP_SCORE_LP_COUNT_WEIGHT  = envNumber('LP_SCORE_LP_COUNT_WEIGHT', 0.2)
 export const LP_SCORE_LP_CAP           = envNumber('LP_SCORE_LP_CAP', 20)
 
 // Primary logic uses real /pools fields + derivations (see README).
