@@ -20,12 +20,6 @@ import {
   getTvlChange24h,
   getTotalLps,
 } from '@/bot/scanner/pool-fetcher'
-
-// Module-level cache for dry-sim token prices (DexScreener) to avoid hammering external APIs
-// on every 60s tick for multiple positions. TTL 60s as per audit.
-const priceCache = new Map<string, { price: number; fetchedAt: number }>()
-const PRICE_CACHE_TTL_MS = 60_000
-
 import { PublicKey, Keypair, Transaction } from '@solana/web3.js'
 import { ComputeBudgetProgram } from '@solana/web3.js'
 import { sendLegacyTx } from '@/lib/solana-tx'
@@ -42,6 +36,11 @@ import {
   LP_MAX_DURATION_HOURS,
   LP_FEE_TVL_SAMPLE_WINDOW_H,
 } from '@/lib/strategy-config'
+
+// Module-level cache for dry-sim token prices (DexScreener) to avoid hammering external APIs
+// on every 60s tick for multiple positions. TTL 60s as per audit.
+const priceCache = new Map<string, { price: number; fetchedAt: number }>()
+const PRICE_CACHE_TTL_MS = 60_000
 
 /**
  * Ultra-minimal LP monitor (local-state + on-chain only).
