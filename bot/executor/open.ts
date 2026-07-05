@@ -965,9 +965,6 @@ export async function openPosition(
     // Ensure flag cleared even on throws before the scaffold try/finally (e.g. eligibility, pre-scaffold)
     import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
   }
-} finally {
-  // Top level try/finally guarantee for ALL exit paths including dry-run (fix 4)
-  import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
 }
 
 async function validateOpenEligibility(
