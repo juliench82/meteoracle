@@ -61,6 +61,7 @@ async function tickScanner() {
     return
   }
   inFlightScanner = true
+  setOpenInProgress(true)
   try {
     log('scanner tick start')
     const stats = await runScanner()
@@ -79,6 +80,7 @@ async function tickScanner() {
       log('[worker] RPC reset triggered')
     }
   } finally {
+    setOpenInProgress(false)
     inFlightScanner = false
   }
 }
