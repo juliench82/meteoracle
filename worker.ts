@@ -15,6 +15,7 @@ import { getBotState } from './lib/botState'
 import { validateStartup } from './lib/startup-validation'
 import { retryStrandedSells } from './lib/swap'
 import { getConnection } from './lib/solana'
+import { summarizeError } from './lib/logging'
 
 const MONITOR_INTERVAL_MS = (parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') || 60) * 1_000
 const SCANNER_INTERVAL_MS = (parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') || 900) * 1_000
@@ -42,7 +43,7 @@ async function tickMonitor() {
     const stats = await monitorPositions()
     log(`monitor tick done — checked=${stats.checked} closed=${stats.closed}`)
   } catch (err) {
-    console.error('[worker] monitor tick error:', err)
+    console.error('[worker] monitor tick error:', summarizeError(err))
     const msg = String(err)
     if (msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('429') || msg.includes('socket hang up')) {
       getConnection(true)
@@ -73,7 +74,7 @@ async function tickScanner() {
       `openSkipped=${stats.openSkipped}${blocked}${api}`,
     )
   } catch (err) {
-    console.error('[worker] scanner tick error:', err)
+    console.error('[worker] scanner tick error:', summarizeError(err))
     const msg = String(err)
     if (msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('429') || msg.includes('socket hang up')) {
       getConnection(true)
