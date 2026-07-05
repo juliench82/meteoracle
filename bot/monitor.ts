@@ -221,6 +221,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
         // For dry sim rows, compute a rough net PnL from entry price vs current market price
         // so that close alerts (e.g. on max_duration) can include Net PnL even without on-chain data.
+        // Uses module-level priceCache (TTL 60s) to avoid repeated external calls per tick (per fix 2).
         if (isDrySim && pos.entry_price_usd && pos.entry_price_usd > 0) {
           try {
             const mintForPrice = pos.mint || (pos.metadata && pos.metadata.mint)
