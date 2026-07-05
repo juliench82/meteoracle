@@ -52,6 +52,7 @@ export async function persistPosition(
     strategy_id:     strategy.id,
     position_type:   'dlmm',
     token_amount:    tokenAmount,
+    // sol_deposited MUST be in the INITIAL persistPosition object (not patched later)
     sol_deposited:   solDeposited,
     entry_price_usd: entryPriceUsd,
     entry_price_sol: entryPriceSol,

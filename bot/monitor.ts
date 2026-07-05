@@ -398,7 +398,10 @@ function computeNetPnlApprox(
 ): number | null {
   try {
     const solDeposited = Number(pos.sol_deposited ?? 0)
-    if (!solDeposited || solDeposited <= 0) return null
+    if (!solDeposited || solDeposited <= 0) {
+      console.warn(`[monitor] computeNetPnlApprox: sol_deposited missing or 0 for ${pos.symbol} — returning null`)
+      return null
+    }
 
     const pd = onChainPos.positionData || {}
     const priceSolPerToken = getDecimalAdjustedPrice(dlmmPool, activeBin) || 0
