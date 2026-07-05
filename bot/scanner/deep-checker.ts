@@ -112,6 +112,10 @@ async function getDexScreenerPairs(mint: string): Promise<any[]> {
     const res = await axios.get(`${DEXSCREENER}/${mint}`, { timeout: 6_000 })
     const pairs: any[] = res.data?.pairs ?? []
     dexScreenerCache.set(mint, { pairs, ts: Date.now() })
+    if (dexScreenerCache.size > 200) {
+      const oldest = dexScreenerCache.keys().next().value
+      if (oldest) dexScreenerCache.delete(oldest)
+    }
     return pairs
   } catch {
     return []
@@ -232,7 +236,27 @@ function getDisabledStrategyReason(strategyId: string): string | null {
 // If OOR_RECHECK_HOURS > 0 in future, a real impl can scan recent closed positions in local state.
 async function fetchRecentlyClosedOorMints(): Promise<Set<string>> {
   if (OOR_RECHECK_HOURS <= 0) return new Set()
-  return new Set()
+  try {
+    const positions = getOpenLpPositions()
+    const cutoff = Date.now() - (OOR_RECHECK_HOURS * 3600 * 1000)
+    const mints = new Set<string>()
+    for (const p of positions) {
+      if (
+        p.status === 'closed' &&
+        ((p.close_reason || '').toLowerCase().includes('oor')) &&
+        p.closed_at
+      ) {
+        const ts = new Date(p.closed_at).getTime()
+        if (ts >= cutoff) {
+          const m = p.mint || (p as any).metadata?.pool_token_mint || ''
+          if (m) mints.add(m)
+        }
+      }
+    }
+    return mints
+  } catch {
+    return new Set()
+  }
 }
 
 
