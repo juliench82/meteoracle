@@ -24,7 +24,7 @@ import { getConnection } from '@/lib/solana';
 import type { Strategy } from '@/lib/types';
 import { OPEN_LP_STATUSES, type OpenLpLimitState } from '@/lib/position-limits';
 import { getOpenLpPositions } from '@/lib/local-state';
-import { STRATEGIES } from '@/strategies';
+import { evilPandaStrategy } from '@/strategies/evil-panda';
 import {
   MARKET_LP_SOL_PER_POSITION,
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
@@ -60,7 +60,11 @@ export function strategyTypeForDistribution(
 
 export function findStrategyForPosition(position: Record<string, any>): Strategy | null {
   const strategyId = position.strategy_id ?? position.metadata?.strategy_id;
-  return STRATEGIES.find((s) => s.id === strategyId) ?? null;
+  // Only evil-panda is active; direct reference removes multi-strategy registry indirection.
+  if (!strategyId || strategyId === evilPandaStrategy.id) {
+    return evilPandaStrategy;
+  }
+  return null;
 }
 
 export async function getTotalDeployedSolForCap(
