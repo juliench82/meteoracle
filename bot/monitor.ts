@@ -1,6 +1,6 @@
 import { getBotState } from '@/lib/botState'
 import axios from 'axios'
-import { getOpenLpPositions, saveOpenLpPositions, type OpenLpPosition, applyMonitorUpdates } from '@/lib/local-state'
+import { getOpenLpPositions, withQueuedUpdate, type OpenLpPosition, applyMonitorUpdates } from '@/lib/local-state'
 import { closePosition } from '@/bot/executor/close'
 import { claimFeesForPosition } from '@/bot/executor/close'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
@@ -598,11 +598,20 @@ export async function retryStrandedPositionRents() {
       // For safety, only remove if the account no longer exists or data is small.
       const info = await connection.getAccountInfo(pub).catch(() => null);
       if (!info || info.lamports === 0 || (info.data && info.data.length < 100)) {
-        const all = getOpenLpPositions();
-        const filtered = all.filter((p: any) => p.position_pubkey !== s.position_pubkey || p.status !== 'stranded_rent');
-        saveOpenLpPositions(filtered);
-        removePendingScaffold(s.position_pubkey);
-        console.log(`[monitor] reclaimed/removed stranded rent marker for ${s.position_pubkey.slice(0,8)}`);
+        await withQueuedUpdate((positions) => {
+          const before = positions.length;
+          // mutate in place for the queued write
+          for (let i = positions.length - 1; i >= 0; i--) {
+            const p = positions[i];
+            if (p.position_pubkey === s.position_pubkey && p.status === 'stranded_rent') {
+              positions.splice(i, 1);
+            }
+          }
+          if (positions.length !== before) {
+            removePendingScaffold(s.position_pubkey);
+            console.log(`[monitor] reclaimed/removed stranded rent marker for ${s.position_pubkey.slice(0,8)}`);
+          }
+        });
       }
     } catch (e) {
       console.warn(`[monitor] stranded rent reclaim attempt for ${s.position_pubkey.slice(0,8)} failed (will retry next tick): ${e}`);
