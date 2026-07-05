@@ -12,7 +12,6 @@ import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 import { getBotState } from '@/lib/botState'
 import type { Strategy } from '@/lib/types'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
-import { STRATEGIES } from '@/strategies'
 
 import {
   simulateAndCheck,
