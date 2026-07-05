@@ -69,12 +69,13 @@ export function saveOpenLpPositions(positions: OpenLpPosition[]) {
     consecutiveWriteFailures = 0
   }).catch(err => {
     console.error('[local-state] save failed:', err)
+    console.error('[local-state] write failed — possible disk/permissions issue:', err)
     consecutiveWriteFailures++
     if (consecutiveWriteFailures >= 3) {
       console.error('[local-state] 3+ consecutive write failures — pausing bot')
       sendAlert({ type: 'error', message: '[local-state] state write failed 3+ times — pausing trading until resolved' }).catch(() => {})
       import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
-      consecutiveWriteFailures = 0 // reset after action
+      consecutiveWriteFailures = 0 // reset AFTER sendAlert
     }
   })
 }
@@ -108,12 +109,13 @@ export async function applyMonitorUpdates(updates: Array<{ id: string; patch: Pa
     consecutiveWriteFailures = 0
   }).catch(err => {
     console.error('[local-state] applyMonitorUpdates failed:', err)
+    console.error('[local-state] write failed — possible disk/permissions issue:', err)
     consecutiveWriteFailures++
     if (consecutiveWriteFailures >= 3) {
       console.error('[local-state] 3+ consecutive write failures — pausing bot')
       sendAlert({ type: 'error', message: '[local-state] state write failed 3+ times — pausing trading until resolved' }).catch(() => {})
       import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
-      consecutiveWriteFailures = 0
+      consecutiveWriteFailures = 0 // reset AFTER sendAlert
     }
   })
   writeQueue = thisWork
