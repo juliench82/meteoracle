@@ -18,6 +18,12 @@ import {
   getFeesActiveTvl24hPct,
   getFeesChange24h,
   getTvlChange24h,
+}
+
+// Module-level cache for dry-sim token prices (DexScreener) to avoid hammering external APIs
+// on every 60s tick for multiple positions. TTL 60s as per audit.
+const priceCache = new Map<string, { price: number; fetchedAt: number }>()
+const PRICE_CACHE_TTL_MS = 60_000
   getTotalLps,
 } from '@/bot/scanner/pool-fetcher'
 import { PublicKey, Keypair, Transaction } from '@solana/web3.js'
@@ -199,9 +205,19 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           try {
             const mintForPrice = pos.mint || (pos.metadata && pos.metadata.mint)
             if (mintForPrice) {
-              const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintForPrice}`, { timeout: 5000 })
-              const pair = res.data?.pairs?.[0]
-              const currentPrice = pair?.priceUsd ? parseFloat(pair.priceUsd) : null
+              let currentPrice: number | null = null
+              const cached = priceCache.get(mintForPrice)
+              const nowTs = Date.now()
+              if (cached && (nowTs - cached.fetchedAt < PRICE_CACHE_TTL_MS)) {
+                currentPrice = cached.price
+              } else {
+                const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintForPrice}`, { timeout: 5000 })
+                const pair = res.data?.pairs?.[0]
+                currentPrice = pair?.priceUsd ? parseFloat(pair.priceUsd) : null
+                if (currentPrice) {
+                  priceCache.set(mintForPrice, { price: currentPrice, fetchedAt: nowTs })
+                }
+              }
               if (currentPrice) {
                 let roughPnl = ((currentPrice - pos.entry_price_usd) / pos.entry_price_usd) * 100
                 const claimable = getClaimableFeesUsd(pos) ?? 0
@@ -247,7 +263,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
               oorSince = now
               pos.oor_since = new Date(oorSince).toISOString()
               // Immediate targeted write for OOR timer (crash safety)
-              applyMonitorUpdates([{ id: pos.id, patch: { oor_since: pos.oor_since } }])
+              await applyMonitorUpdates([{ id: pos.id, patch: { oor_since: pos.oor_since } }])
               positionsMutated = true
             }
 
@@ -262,7 +278,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           } else if (oorSince) {
             // Back in range — clear the timer
             delete pos.oor_since
-            applyMonitorUpdates([{ id: pos.id, patch: { oor_since: null as any } }])
+            await applyMonitorUpdates([{ id: pos.id, patch: { oor_since: null as any } }])
             positionsMutated = true
           }
         }
@@ -352,7 +368,7 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
     // Apply via reload+merge (prevents monitor snapshot clobbering concurrent scanner opens / other writers)
     if (positionsMutated) {
-      applyMonitorUpdates(monitorPatches)
+      await applyMonitorUpdates(monitorPatches)
     }
   }
 
@@ -363,8 +379,9 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
 /**
  * Rough net PnL approximation for LP exit decisions.
- * Heuristic only: uses *active bin price* for the entire position liquidity.
+ * Heuristic only: uses *active bin price* (or conservative edge bin price for wide OOR).
  * For wide ranges that are partially OOR this can over/under-estimate value significantly.
+ * When dist >0.6 from center, uses worst-case edge price instead of skipping SL.
  * It is intentionally approximate — NOT for precise accounting.
  * Full bin-by-bin valuation would be more accurate but heavier.
  */
@@ -408,15 +425,27 @@ function computeNetPnlApprox(
     const netPct = (netSol / solDeposited) * 100
 
     // Bias correction for wide ranges: if active bin far from range center, the active price is a bad proxy for whole position value.
-    // Skip PnL-based SL (OOR and other rules can still fire).
+    // Use conservative worst-case estimate using edge bin prices instead of skipping (OOR and other rules still apply).
+    // Lower bin price used for token-heavy positions (undervalues the token leg).
+    // This ensures PnL SL can still fire for distressed wide-range positions.
     const { lowerBinId, upperBinId } = onChainPos.positionData || {}
     if (lowerBinId != null && upperBinId != null) {
       const rangeMidBin = (lowerBinId + upperBinId) / 2
       const rangeHalf = Math.max(1, (upperBinId - lowerBinId) / 2)
       const binDistFraction = Math.abs(activeBin.binId - rangeMidBin) / rangeHalf
       if (binDistFraction > 0.6) {
-        console.warn(`[monitor] computeNetPnlApprox: low confidence for ${pos.symbol} (active bin ${binDistFraction.toFixed(2)} off range center) — skipping PnL SL`)
-        return null
+        const binStep = (dlmmPool.lbPair && dlmmPool.lbPair.binStep / 10000) || 0.01
+        const priceAtLower = priceSolPerToken * Math.pow(1 + binStep, lowerBinId - activeBin.binId)
+        const priceAtUpper = priceSolPerToken * Math.pow(1 + binStep, upperBinId - activeBin.binId)
+        // Conservative (lowest) price for token valuation to make net look as bad as possible for SL decision
+        const consPrice = Math.min(priceAtLower, priceAtUpper, priceSolPerToken)
+        const solValueOfTokensCons = tokenSideWhole * consPrice
+        const currentLiqValueSolCons = (solSideLamports / 1e9) + solValueOfTokensCons
+        const pendingFeeSolApproxCons = (feeSolLamports / 1e9) + (feeTokenWhole * consPrice)
+        const netSolCons = currentLiqValueSolCons + pendingFeeSolApproxCons - solDeposited
+        const netPctCons = (netSolCons / solDeposited) * 100
+        console.warn(`[monitor] computeNetPnlApprox: using conservative edge price for ${pos.symbol} (dist=${binDistFraction.toFixed(2)}) — netPct approx ${netPctCons.toFixed(1)}%`)
+        return netPctCons
       }
     }
 
