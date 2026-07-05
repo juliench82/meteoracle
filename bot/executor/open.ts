@@ -135,6 +135,8 @@ export async function openPosition(
 
   // Mark for graceful shutdown waiter
   ;(globalThis as any).__openInProgress = true
+  // Also update the exported tracker (dynamic to avoid import cycles with worker)
+  import('../../worker').then((m: any) => m.setOpenInProgress?.(true)).catch(() => {})
 
   const botState = await getBotState()
   const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
@@ -160,6 +162,8 @@ export async function openPosition(
     }
     if (existing) {
       console.log(`${label} DRY RUN — ${metrics.symbol} already has active simulation row (id=${existing.id}). Skipping duplicate persist to avoid lp_positions_mint_open_unique violation.`)
+      ;(globalThis as any).__openInProgress = false
+      import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
       return existing.id
     }
 
@@ -170,6 +174,8 @@ export async function openPosition(
     console.log(`${label} DRY RUN — creating new simulation row for ${metrics.symbol} (first time this tick/scan)`)
     const positionId = await persistPosition(metrics, strategy, 'dry-run-sig', metrics.priceUsd ?? 0, 0, dryRunSolAmount, undefined, 0, DRY_RUN)
     await sendOpenAlert(metrics, strategy, positionId, dryRunSolAmount, 0)
+    ;(globalThis as any).__openInProgress = false
+    import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
     return positionId
   }
 
@@ -185,6 +191,7 @@ export async function openPosition(
     const eligibility = await validateOpenEligibility(label, metrics, strategy, solAmount, connection, wallet);
     if (!eligibility.ok) {
       ;(globalThis as any).__openInProgress = false;
+      import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
       return null;
     }
 
@@ -743,6 +750,17 @@ export async function openPosition(
         console.error(`${label} [TRACE] Pre-swap FAILED — will trigger finally close to reclaim rent.`);
         console.error(`${label} direct DLMM swap for token leg FAILED: ${directErr instanceof Error ? directErr.message : directErr}`);
         console.error(`${label} (Jupiter completely ditched per user request — no fallback; skipping pool)`);
+        // Pre-swap tx may have confirmed on-chain (sendLegacyTx throws on confirm/status fallback fail even if landed).
+        // Query fresh balance and persist stranded token marker for monitor recovery (sell back) if we hold any.
+        try {
+          const fresh = await getWalletTokenBalance(outputMint.toBase58()).catch(() => 0n)
+          if (fresh > 0n) {
+            await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), fresh)
+            console.warn(`${label} persisted stranded marker for ${fresh} after pre-swap throw (tx likely landed)`)
+          }
+        } catch (pErr) {
+          console.warn(`${label} could not persist stranded after pre-swap throw:`, pErr)
+        }
         return null;
       }
     } else if (solToSwapLamports === 0n) {
@@ -752,6 +770,13 @@ export async function openPosition(
     const MIN_REMAINING_SOL_FOR_ADD = 10_000n; // dust guard to avoid adding near-zero after rent paid
     if (remainingSolLamports < MIN_REMAINING_SOL_FOR_ADD && actualTokenLamports < 1_000_000n) {
       console.warn(`${label} [TRACE] [ADD-GUARD] remainingSol + token too small for add after scaffold — aborting`);
+      // If we acquired tokens via pre-swap before this guard, ensure stranded marker
+      if (actualTokenLamports > 0n) {
+        try {
+          const fresh = await getWalletTokenBalance(outputMint.toBase58()).catch(() => actualTokenLamports)
+          if (fresh > 0n) await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), fresh)
+        } catch {}
+      }
       return null;
     }
 
@@ -917,6 +942,7 @@ export async function openPosition(
     } finally {
       console.log(`${label} [TRACE] [FINALLY-ENTER] entered finally | positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
       ;(globalThis as any).__openInProgress = false;
+      import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
       if (!successfullyOpened) {
         // Always attempt reclaim for the keypair we considered in this attempt.
         // With bundling, rent is only paid on full scaffold success; this covers any
@@ -972,6 +998,10 @@ export async function openPosition(
       stack: err instanceof Error ? err.stack : undefined,
     })
     return null
+  } finally {
+    // Ensure flag cleared even on throws before the scaffold try/finally (e.g. eligibility, pre-scaffold)
+    ;(globalThis as any).__openInProgress = false
+    import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
   }
 }
 

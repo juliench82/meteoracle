@@ -343,11 +343,14 @@ export async function claimFeesForPosition(positionId: string): Promise<boolean>
     } catch (claimErr) {
       console.warn(`${label} claimSwapFee not available or failed — skipping mid-position claim (fees will be collected on full close via shouldClaimAndClose)`, claimErr)
       sendAlert({ type: 'warning', message: `Claim fees failed for ${position.symbol} (${positionId}) — will retry or collect on close` }).catch(() => {})
+      // Record persistent marker so cadence/monitor sees the failure (no silent skip); enables future backoff or alerts
+      applyMonitorUpdates([{ id: positionId, patch: { last_claim_attempt_at: new Date().toISOString(), last_claim_error: String(claimErr).slice(0, 300) } as any }]).catch(() => {})
     }
 
     return false
   } catch (e) {
     console.warn(`${label} claim failed:`, e)
+    applyMonitorUpdates([{ id: positionId, patch: { last_claim_attempt_at: new Date().toISOString(), last_claim_error: String(e).slice(0, 300) } as any }]).catch(() => {})
     return false
   }
 }

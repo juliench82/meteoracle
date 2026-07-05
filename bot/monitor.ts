@@ -306,7 +306,9 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
         // Claim cadence reminder (criteria: CLAIM every 30 min minimum)
         const lastClaim = pos.last_claim_at ? new Date(pos.last_claim_at).getTime() : (openedAt ? new Date(openedAt).getTime() : now)
         const minutesSinceClaim = (now - lastClaim) / 1000 / 60
-        if (minutesSinceClaim >= 30) {
+        const lastAttempt = pos.last_claim_attempt_at ? new Date(pos.last_claim_attempt_at).getTime() : 0
+        const minutesSinceAttempt = lastAttempt ? (now - lastAttempt) / 1000 / 60 : 999
+        if (minutesSinceClaim >= 30 && minutesSinceAttempt >= 10) {
           console.log(`[monitor] ${pos.symbol} — time for fee claim (≥30m) — attempting auto-claim`)
           claimFeesForPosition(pos.id).then((claimed) => {
             if (claimed) console.log(`[monitor] auto-claimed fees for ${pos.symbol}`)

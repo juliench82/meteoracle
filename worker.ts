@@ -145,7 +145,10 @@ let inFlightScanner = false
 
 // Track if an open is in progress so graceful shutdown can wait
 export let openInProgress = false
-export function setOpenInProgress(v: boolean) { openInProgress = v }
+export function setOpenInProgress(v: boolean) {
+  openInProgress = !!v
+  ;(globalThis as any).__openInProgress = !!v
+}
 
 // Stored to allow clean shutdown (clearInterval)
 let monitorIntervalHandle: ReturnType<typeof setInterval> | null = null
