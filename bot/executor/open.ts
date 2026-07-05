@@ -89,9 +89,6 @@ import {
   getOpenLpLimitState,
   type OpenLpLimitState,
 } from '@/lib/position-limits'
-import { STRATEGIES } from '@/strategies'
-
-
 import {
   simulateAndCheck,
   sendLegacyTx,
