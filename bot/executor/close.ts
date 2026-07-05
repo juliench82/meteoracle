@@ -252,7 +252,7 @@ export async function closePosition(
             user: wallet.publicKey,
             // Slightly defensive vs pure quote (blocks can pass); still respects the quoted slippage.
             // If this fails it will correctly fall to sell_failed + recovery loop.
-            minOutAmount: q.minOutAmount && !q.minOutAmount.isZero() ? q.minOutAmount : new BN(0),
+            minOutAmount: q.minOutAmount && !q.minOutAmount.isZero() ? q.minOutAmount : q.outAmount.div(new BN(2)), // avoid total 0; conservative vs pure quote fail
             outToken,
           })
           const sellPriorityFee = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()]).catch(() => 50_000)
@@ -282,6 +282,9 @@ export async function closePosition(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`${label} close failed:`, message)
+    if (message.includes('ECONNREFUSED') || message.includes('ETIMEDOUT') || message.includes('429') || message.includes('socket hang up')) {
+      getConnection(true)
+    }
     logWarn('legacy_bot_log', {
       level: 'error', event: 'close_position_failed',
       payload: { positionId, reason, error: message },
