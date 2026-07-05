@@ -28,7 +28,6 @@
 import axios from 'axios'
 // Local state only (JSON files in state/ + targeted on-chain reads)
 import { getBotState } from '@/lib/botState'
-import { explainNoStrategy } from '@/strategies'
 import { evilPandaStrategy } from '@/strategies/evil-panda'
 import { openPosition } from '../executor'
 import { sendAlert } from '../alerter'
@@ -964,7 +963,15 @@ async function evaluateCandidate(
   const strategy = evilPandaStrategy.enabled ? evilPandaStrategy : null;
 
   if (!strategy) {
-    const rejectionReason = explainNoStrategy(metrics);
+    // Inline rejection reason (no registry/lookup). Mirrors previous explainNoStrategy for evil-panda.
+    const f = evilPandaStrategy.filters;
+    const reasons: string[] = [];
+    if (metrics.ageHours > f.maxAgeHours) reasons.push(`age=${metrics.ageHours.toFixed(1)}h > ${f.maxAgeHours}h`);
+    if (metrics.liquidityUsd < f.minLiquidityUsd) reasons.push('liquidity too low');
+    if ((metrics.rugcheckScore ?? 0) < f.minRugcheckScore) reasons.push('rugcheck too low');
+    if ((metrics.topHolderPct ?? 0) > f.maxTopHolderPct) reasons.push('top holder too high');
+    if ((metrics.holderCount ?? 0) < f.minHolderCount) reasons.push('not enough holders');
+    const rejectionReason = reasons.length ? reasons.join(', ') : 'did not pass evil-panda filters';
     console.log(`[scanner][decision] ${symbol} — REJECTED (no strategy): ${rejectionReason}`);
     return { strategy: null, decision: 'REJECTED', rejectionReason, finalScore: 0 };
   }
