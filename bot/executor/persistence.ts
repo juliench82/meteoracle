@@ -402,3 +402,7 @@ export async function updatePositionClaimTime(positionId: string): Promise<void>
     saveOpenLpPositions(positions)
   }
 }
+
+// === OPEN SPLIT NOTE (persistence responsibility) ===
+// Post-open state recording (after successful lp-init / add) uses the persist* functions
+// in this file. Extended for the open.ts split per requirements. No logic change.
