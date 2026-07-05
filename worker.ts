@@ -147,7 +147,6 @@ let inFlightScanner = false
 export let openInProgress = false
 export function setOpenInProgress(v: boolean) {
   openInProgress = !!v
-  ;(globalThis as any).__openInProgress = !!v
 }
 
 // Stored to allow clean shutdown (clearInterval)
@@ -188,8 +187,7 @@ function gracefulShutdown(signal: string) {
   // Give in-flight work a chance to complete (longer for opens)
   const waitForOpens = async () => {
     const deadline = Date.now() + 90_000  // full open can take 60-90s on congestion
-    const isOpen = () => (globalThis as any).__openInProgress === true || openInProgress
-    while (isOpen() && Date.now() < deadline) {
+    while (openInProgress && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 300))
     }
   }
