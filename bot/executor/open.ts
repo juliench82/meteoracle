@@ -810,7 +810,7 @@ export async function openPosition(
     // for the emergency sell so we don't strand on 0x1773 like before.
     console.error(`${label} position open failed after successful pre-swap — attempting DIRECT DLMM rollback sell to SOL`);
     // Refresh priority for time-critical rollback (may be stale from initial capture)
-    const rollbackPriority = Math.max(priorityFee, await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]).catch(() => 200000));
+    const rollbackPriority = Math.max(priorityFee, await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]).catch(() => 50_000));
     let rollbackSucceeded = false;
     try {
       const isTokenX = dlmmPool.tokenX.publicKey.toBase58() === outputMint.toBase58();
@@ -1451,14 +1451,14 @@ async function tryCloseEmptyPosition(
   minBinId?: number,
   maxBinId?: number,
   label: string = '[recover]',
-  priorityFee: number = 100000
+  priorityFee: number = 50_000
 ): Promise<boolean> {
   const hasRange = typeof minBinId === 'number' && typeof maxBinId === 'number';
   console.log(`${label} [TRACE] [CLOSE-ENTRY] Entering tryCloseEmptyPosition for key=${positionPubKey.toBase58().slice(0,8)} ${hasRange ? `(range ${minBinId}→${maxBinId})` : '(no range - using closePosition only)'}. This is the rent-reclaim attempt.`);
-  console.log(`${label} [TRACE] [CLOSE-ENTRY] Using priority ${Math.max(priorityFee, 100000)} for close.`);
+  console.log(`${label} [TRACE] [CLOSE-ENTRY] Using priority ${Math.max(priorityFee, 50_000)} for close.`);
 
   // Use higher priority for recovery closes to increase chance of landing
-  const closePriority = Math.max(priorityFee, 100000);
+  const closePriority = Math.max(priorityFee, 50_000);
 
   // Snapshot on-chain state before attempting close (best effort)
   try {
