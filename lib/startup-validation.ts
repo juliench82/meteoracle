@@ -1,6 +1,7 @@
 // Startup validation — light non-fatal checks to catch misconfig before capital at risk.
 // Does not throw on failure (logs + returns false); heavy calls are best-effort.
 import { getConnection, getWallet } from './solana'
+import { LP_FEE_TVL_EXIT_THRESHOLD, MIN_FEE_TVL_RATIO_24H } from './strategy-config'
 
 export async function validateStartup(label = 'worker'): Promise<boolean> {
   const logPfx = `[startup][${label}]`
@@ -37,6 +38,15 @@ export async function validateStartup(label = 'worker'): Promise<boolean> {
     // Jupiter public endpoint warning (can cause stranded sells under load)
     if (!process.env.JUPITER_QUOTE_API_URL) {
       console.warn(`${logPfx} JUPITER_QUOTE_API_URL not set — using public endpoint (rate limits may cause stranded sells on close cascades). Consider a private Jupiter RPC.`)
+    }
+
+    // Fee/TVL exit vs entry sanity: exit threshold must be *below* entry to avoid open→close churn on fresh positions.
+    const entryPct = MIN_FEE_TVL_RATIO_24H * 100
+    if (LP_FEE_TVL_EXIT_THRESHOLD >= entryPct) {
+      console.warn(`${logPfx} !!! CONFIG WARNING: LP_FEE_TVL_EXIT_THRESHOLD (${LP_FEE_TVL_EXIT_THRESHOLD}%) >= MIN_FEE_TVL_RATIO_24H*100 (${entryPct}%) — this mismatch causes immediate open→close churn and fee burn. Set e.g. LP_FEE_TVL_EXIT_THRESHOLD=0.3`)
+      ok = false
+    } else {
+      console.log(`${logPfx} fee/tvl exit ${LP_FEE_TVL_EXIT_THRESHOLD}% < entry ${entryPct}% (ok)`)
     }
   } catch (e) {
     console.warn(`${logPfx} startup validation error (continuing):`, e instanceof Error ? e.message : e)
