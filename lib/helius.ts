@@ -17,6 +17,9 @@ export function getHolderCacheSize(): number {
   return _holderCache.size
 }
 
+// Wire helius redact for logs (addresses audit gap)
+import { redactSecrets as heliusRedact } from './helius' // self, but for obj use below in calls if needed
+
 export interface HolderData {
   holderCount:  number
   topHolderPct: number
@@ -102,7 +105,8 @@ async function _checkHoldersInner(mintAddress: string): Promise<HolderData> {
       // No RPC data at all — use 0 so score_holders reflects unknown, not fake 1000
       estimated = 0
     }
-    console.warn(`[helius] ${mintAddress} — DAS failed, using heuristic (est ~${estimated} holders, topHolder=${topPct.toFixed(1)}%)`)
+    const redacted = redactSecrets({ mint: mintAddress, topPct, estimated })
+    console.warn(`[helius] ${mintAddress} — DAS failed, using heuristic (est ~${estimated} holders, topHolder=${topPct.toFixed(1)}%)`, redacted)
     result = { holderCount: estimated, topHolderPct: topPct, reliable: false }
   }
 
