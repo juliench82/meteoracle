@@ -10,6 +10,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { atomicWriteJson } from './atomic-write'
+import { sendAlert } from '@/bot/alerter'
 
 const STATE_DIR = path.join(process.cwd(), 'state')
 const OPEN_POSITIONS_FILE = path.join(STATE_DIR, 'open-lp-positions.json')
@@ -59,13 +60,22 @@ export function getOpenLpPositions(): OpenLpPosition[] {
 }
 
 let writeQueue = Promise.resolve()
+let consecutiveWriteFailures = 0
 
 export function saveOpenLpPositions(positions: OpenLpPosition[]) {
   // Serialize all writes to prevent lost updates from concurrent forks during awaits
   writeQueue = writeQueue.then(() => {
     atomicWriteJson(OPEN_POSITIONS_FILE, positions)
+    consecutiveWriteFailures = 0
   }).catch(err => {
     console.error('[local-state] save failed:', err)
+    consecutiveWriteFailures++
+    if (consecutiveWriteFailures >= 3) {
+      console.error('[local-state] 3+ consecutive write failures — pausing bot')
+      sendAlert({ type: 'error', message: '[local-state] state write failed 3+ times — pausing trading until resolved' }).catch(() => {})
+      import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
+      consecutiveWriteFailures = 0 // reset after action
+    }
   })
 }
 
@@ -95,8 +105,16 @@ export async function applyMonitorUpdates(updates: Array<{ id: string; patch: Pa
     if (changed) {
       atomicWriteJson(OPEN_POSITIONS_FILE, all)
     }
+    consecutiveWriteFailures = 0
   }).catch(err => {
     console.error('[local-state] applyMonitorUpdates failed:', err)
+    consecutiveWriteFailures++
+    if (consecutiveWriteFailures >= 3) {
+      console.error('[local-state] 3+ consecutive write failures — pausing bot')
+      sendAlert({ type: 'error', message: '[local-state] state write failed 3+ times — pausing trading until resolved' }).catch(() => {})
+      import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
+      consecutiveWriteFailures = 0
+    }
   })
   writeQueue = thisWork
   return thisWork
