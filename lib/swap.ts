@@ -236,7 +236,7 @@ export async function retryStrandedSells(): Promise<{ retried: number; recovered
                   : binArrays.slice(0, 3).map((ba: any) => ba.publicKey);
                 console.log(`${label} [direct-dlmm-recovery] calling swap with limited ${binArrayKeysForSwap.length} bin array pubkeys`);
 
-                const minOutBN = (q.minOutAmount && !q.minOutAmount.isZero()) ? q.minOutAmount : q.outAmount.div(new BN(4))
+                const minOutBN = (q.minOutAmount && !q.minOutAmount.isZero()) ? q.minOutAmount : q.outAmount.div(new BN(2)) // tighten vs /4; USD floor still guards low recovery
 
                 // USD floor check using sol_deposited * solPrice * STRANDED_MIN_RECOVERY_PCT/100 (fix 3)
                 // If below, skip and alert instead of low recovery.
