@@ -178,7 +178,7 @@ export async function closePosition(
         // Pass transfer hook remaining accounts for Token-2022 (populated above if needed)
         ...(hookRemainingAccounts.length > 0 ? { remainingAccounts: hookRemainingAccounts } : {}),
       })
-      const closePriorityFee = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()]).catch(() => 100000)
+      const closePriorityFee = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()]).catch(() => 50_000)
       for (const tx of Array.isArray(removeTx) ? removeTx : [removeTx]) {
         const sig = await sendLegacyTx(applyPriorityFee(tx, closePriorityFee), [wallet], label)
         console.log(`${label} liquidity removed ✔ sig: ${sig}`)
@@ -255,7 +255,7 @@ export async function closePosition(
             minOutAmount: q.minOutAmount && !q.minOutAmount.isZero() ? q.minOutAmount : new BN(0),
             outToken,
           })
-          const sellPriorityFee = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()]).catch(() => 100000)
+          const sellPriorityFee = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()]).catch(() => 50_000)
           const sig = await sendLegacyTx(applyPriorityFee(swapTx, sellPriorityFee), [wallet], label)
           console.log(`${label} direct DLMM sell confirmed ✔ sig: ${sig}`);
 
@@ -333,7 +333,8 @@ export async function claimFeesForPosition(positionId: string): Promise<boolean>
       })
       const txs = Array.isArray(claimRes) ? claimRes : (claimRes ? [claimRes] : [])
       for (const tx of txs) {
-        const sig = await sendLegacyTx(applyPriorityFee(tx, 50000), [wallet], `${label}-claim`)
+        const claimPrio = await getPriorityFee([position.pool_address, wallet.publicKey.toBase58()]).catch(() => 50_000)
+        const sig = await sendLegacyTx(applyPriorityFee(tx, claimPrio), [wallet], `${label}-claim`)
         console.log(`${label} fees claimed ✔ sig: ${sig}`)
       }
       if (txs.length > 0) {
