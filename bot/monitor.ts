@@ -221,6 +221,10 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
                 currentPrice = pair?.priceUsd ? parseFloat(pair.priceUsd) : null
                 if (currentPrice) {
                   priceCache.set(mintForPrice, { price: currentPrice, fetchedAt: nowTs })
+                  if (priceCache.size > 100) {
+                    const oldestKey = priceCache.keys().next().value
+                    if (oldestKey) priceCache.delete(oldestKey)
+                  }
                 }
               }
               if (currentPrice) {
