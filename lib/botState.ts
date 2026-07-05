@@ -59,7 +59,17 @@ function readState(): BotState {
   try {
     const raw = fs.readFileSync(STATE_FILE, 'utf8')
     const parsed = JSON.parse(raw)
-    return { ...DEFAULT_STATE, ...parsed }
+    let state = { ...DEFAULT_STATE, ...parsed }
+    // Env override wins on restart when operator sets BOT_ENABLED=true but persisted file has false (e.g. from prior run)
+    if (process.env.BOT_ENABLED === 'true' && state.enabled === false) {
+      console.warn('[botState] ENV BOT_ENABLED=true overrides persisted enabled=false — operator intent')
+      state.enabled = true
+    }
+    if (process.env.BOT_DRY_RUN === 'true' && state.dry_run === false) {
+      console.warn('[botState] ENV BOT_DRY_RUN=true overrides persisted dry_run=false')
+      state.dry_run = true
+    }
+    return state
   } catch {
     return { ...DEFAULT_STATE }
   }
