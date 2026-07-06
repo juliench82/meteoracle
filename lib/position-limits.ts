@@ -30,7 +30,7 @@ export async function getOpenLpLimitState(..._args: any[]): Promise<OpenLpLimitS
       countSource: 'local-state',
       liveFetchOk: true,
       dlmmOk: true,
-      livePositions: [],
+      livePositions: openOnes,  // provide for getTotalDeployedSolForCap sum (no real on-chain list fetch)
     }
   } catch {
     return {
