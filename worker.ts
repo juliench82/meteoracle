@@ -16,6 +16,7 @@ import { validateStartup } from './lib/startup-validation'
 import { retryStrandedSells } from './lib/swap'
 import { getConnection } from './lib/solana'
 import { summarizeError } from './lib/logging'
+import { flushStateWrites } from './lib/local-state'
 
 const MONITOR_INTERVAL_MS = (parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') || 60) * 1_000
 const SCANNER_INTERVAL_MS = (parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') || 900) * 1_000
@@ -213,7 +214,9 @@ function gracefulShutdown(signal: string) {
       await new Promise(r => setTimeout(r, 300))
     }
   }
-  waitForOpens().then(() => {
+  waitForOpens().then(async () => {
+    // Drain any pending state writes to avoid losing position updates on restart
+    await flushStateWrites().catch(() => {})
     log('graceful shutdown complete')
     process.exit(0)
   }).catch(() => process.exit(0))
