@@ -115,7 +115,6 @@ export async function openPosition(
   // Mark for graceful shutdown waiter (dynamic to avoid cycles; no globalThis mirror)
   import('../../worker').then((m: any) => m.setOpenInProgress?.(true)).catch(() => {})
 
-  try {
   const botState = await getBotState()
   const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
 
@@ -161,11 +160,10 @@ export async function openPosition(
   const connection = getConnection()
   wallet = getWallet()
 
-  try {
-    const envCap = MARKET_LP_SOL_PER_POSITION
-    const solAmount = strategy.position.maxSolPerPosition
-      ? Math.min(strategy.position.maxSolPerPosition, envCap)
-      : envCap
+  const envCap = MARKET_LP_SOL_PER_POSITION
+  const solAmount = strategy.position.maxSolPerPosition
+    ? Math.min(strategy.position.maxSolPerPosition, envCap)
+    : envCap
 
     const eligibility = await validateOpenEligibility(label, metrics, strategy, solAmount, connection, wallet);
     if (!eligibility.ok) {
@@ -811,6 +809,7 @@ export async function openPosition(
       console.log(`${label} [TRACE] [SUCCESS] directResult=${directResult} successfullyOpened=true`);
       console.log(`${label} [TRACE] FULL SUCCESS — position opened and persisted. No close needed in finally.`);
       console.log(`${label} position opened successfully via direct SDK ✔`);
+      import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
       return directResult;
     }
 
@@ -914,38 +913,10 @@ export async function openPosition(
         }
       } catch {}
     }
-    return null;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.log(`${label} [TRACE] [TOP-CATCH] Top-level catch in openPosition — if we scaffolded, finally SHOULD have run the close attempt.`);
-    console.log(`${label} [TRACE] [TOP-CATCH] positionScaffolded state is only visible inside the try; finally is guaranteed to have executed on throw.`);
-    if (message.includes('ECONNREFUSED') || message.includes('ETIMEDOUT') || message.includes('429') || message.includes('socket')) {
-      getConnection(true)
-    }
-    console.error(`${label} failed:`, message)
-    if (err instanceof Error && err.stack) {
-      console.error(err.stack)
-    }
-    logError('open_position_failed', {
-      symbol: metrics.symbol,
-      strategy: strategy.id,
-      error: message,
-      stack: err instanceof Error ? err.stack : undefined,
-    })
-    return null
-  } finally {
-    // Reclaim rent if we didn't fully succeed (runs even on early returns thanks to hoisted vars + guards).
-    // Also clears the graceful shutdown flag.
-    console.log(`${label} [TRACE] [FINALLY-ENTER] entered finally | positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
-    import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
+    // Reclaim on this failure path
     if (!successfullyOpened) {
-      // Always attempt reclaim for the keypair we considered in this attempt.
-      // With bundling, rent is only paid on full scaffold success; this covers any
-      // partials, prior-run orphans for this key, or edge cases. If account doesn't exist
-      // or isn't closable this way, the close logs the error and we move on (no extra loss).
       console.log(`${label} [TRACE] [FINALLY-CLOSE] !successfullyOpened — ATTEMPTING rent reclaim close (covers scaffolded or partial-create cases).`);
       if (positionScaffolded && positionKeypair && dlmmPool) {
-        // Persist for background recovery in case this immediate close fails or bot restarts.
         try {
           await persistStrandedPositionRent(
             positionKeypair.publicKey.toBase58(),
@@ -980,6 +951,8 @@ export async function openPosition(
       }
     }
     console.log(`${label} [TRACE] [FINALLY-EXIT] leaving finally block`);
+    import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
+    return null;
   }
 }
 
