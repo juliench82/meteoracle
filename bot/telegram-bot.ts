@@ -15,7 +15,7 @@ import { getBotState, setBotState } from '@/lib/botState'
 import { closePosition } from '@/bot/executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
-import { getOpenLpPositions } from '@/lib/local-state'
+import { getOpenLpPositions, flushStateWrites } from '@/lib/local-state'
 import { getTelegramAllowedUsers, isTelegramCommandAllowed } from '@/lib/telegram-auth'
 
 const execAsync = promisify(exec)
@@ -166,6 +166,9 @@ async function handleUpdate(update: any) {
     const monitorLine = monitorResult.status === 'fulfilled' ? monitorResult.value : `❌ monitor error`
 
     await sendMessage([scanLine, monitorLine].join('\n'), chatId)
+
+    // Ensure any state changes from forced tick are written before responding
+    await flushStateWrites().catch(() => {})
     return
   }
 
