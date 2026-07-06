@@ -152,14 +152,19 @@ export async function addLiquidityToPosition(
 
     const sig = await sendLegacyTx(tx, [wallet], label)
 
-    // Update sol_deposited in state so PnL, circuit breaker weighting, and exposure caps stay accurate
-    await withQueuedUpdate((positions) => {
-      const idx = positions.findIndex((p: any) => p.id === positionId)
-      if (idx !== -1) {
-        const current = Number(positions[idx].sol_deposited ?? 0)
-        positions[idx].sol_deposited = current + solAmount
-      }
-    })
+    // Update sol_deposited in state so PnL, circuit breaker weighting, and exposure caps stay accurate.
+    // Wrap to not fail the reported success if state write has transient issue (tx already landed).
+    try {
+      await withQueuedUpdate((positions) => {
+        const idx = positions.findIndex((p: any) => p.id === positionId)
+        if (idx !== -1) {
+          const current = Number(positions[idx].sol_deposited ?? 0)
+          positions[idx].sol_deposited = current + solAmount
+        }
+      })
+    } catch (updateErr) {
+      console.warn(`${label} state update for added SOL failed (on-chain succeeded):`, updateErr)
+    }
 
     logInfo('add_liquidity_success', { positionId, symbol, solAmount, strategy: strategy.id, txSignature: sig })
 
