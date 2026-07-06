@@ -57,6 +57,13 @@ async function tickMonitor() {
 async function tickScanner() {
   if (!BOT_ENABLED) { log('scanner skipped — BOT_ENABLED=false'); return }
   if (!LP_SCANNER_ENABLED) { log('scanner skipped — LP_SCANNER_ENABLED=false'); return }
+
+  const bs = await getBotState().catch(() => ({ enabled: true, paused: false }))
+  if (bs.paused || bs.enabled === false) {
+    log('scanner skipped — bot paused or disabled via state')
+    return
+  }
+
   if (inFlightScanner) {
     log('scanner tick skipped — previous tick still in flight')
     return
