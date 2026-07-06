@@ -119,6 +119,7 @@ export async function applyMonitorUpdates(updates: Array<{ id: string; patch: Pa
       import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
       consecutiveWriteFailures = 0 // reset AFTER sendAlert
     }
+    throw err
   })
   writeQueue = thisWork
   return thisWork
@@ -150,6 +151,7 @@ export async function withQueuedUpdate(
       import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
       consecutiveWriteFailures = 0 // reset AFTER sendAlert
     }
+    throw err
   })
   writeQueue = thisWork
   return thisWork
