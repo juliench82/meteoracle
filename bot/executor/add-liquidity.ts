@@ -20,9 +20,9 @@ import {
   addPriorityFeeAndPreserveComputeLimit,
 } from '@/lib/solana-tx'
 
-import { persistPosition } from './persistence'
 import { logInfo, logError } from '@/lib/log'
-import { getOpenLpPositions } from '@/lib/local-state'
+import { getOpenLpPositions, withQueuedUpdate } from '@/lib/local-state'
+import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import {
   getDLMM,
   getStrategyType,
@@ -79,6 +79,15 @@ export async function addLiquidityToPosition(
 
   const botState = await getBotState()
   const dryRun = ENV_DRY_RUN_FORCED || botState.dry_run
+
+  if (botState.paused) {
+    return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'bot is paused' }
+  }
+
+  const lossHit = await isDailyLossLimitHit().catch(() => false)
+  if (lossHit) {
+    return { success: false, dryRun: false, txSignature: '', symbol, solAdded: solAmount, error: 'daily loss circuit breaker hit' }
+  }
 
   if (dryRun) {
     logInfo('add_liquidity_dry_run', { positionId, symbol, solAmount, strategy: strategy.id })
@@ -143,8 +152,14 @@ export async function addLiquidityToPosition(
 
     const sig = await sendLegacyTx(tx, [wallet], label)
 
-    // TODO: persist updated sol_deposited via local state once the refactor lands
-    // local-state only
+    // Update sol_deposited in state so PnL, circuit breaker weighting, and exposure caps stay accurate
+    await withQueuedUpdate((positions) => {
+      const idx = positions.findIndex((p: any) => p.id === positionId)
+      if (idx !== -1) {
+        const current = Number(positions[idx].sol_deposited ?? 0)
+        positions[idx].sol_deposited = current + solAmount
+      }
+    })
 
     logInfo('add_liquidity_success', { positionId, symbol, solAmount, strategy: strategy.id, txSignature: sig })
 
