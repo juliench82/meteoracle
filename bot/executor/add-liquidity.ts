@@ -143,7 +143,7 @@ export async function addLiquidityToPosition(
       totalYAmount,
       strategy: { minBinId: Number(livePosition.positionData.lowerBinId), maxBinId: Number(livePosition.positionData.upperBinId), strategyType },
       user: wallet.publicKey,
-      slippage: 1,
+      slippage: 0.01, // 1% max slippage for add to existing (tighter than 100% to avoid bad fills)
     })
 
     const tx = new Transaction().add(
