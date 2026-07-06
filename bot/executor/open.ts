@@ -109,6 +109,11 @@ export async function openPosition(
   const botState = await getBotState()
   const DRY_RUN = ENV_DRY_RUN_FORCED || botState.dry_run
 
+  if (botState.paused || botState.enabled === false) {
+    console.log(`${label} bot is paused or disabled — skipping open`)
+    return null
+  }
+
   // Very loud early visibility for dry-run state (helps debug VPS env loading issues)
   console.log(
     `${label} DRY_RUN effective value: ${DRY_RUN} ` +
