@@ -102,6 +102,16 @@ export async function openPosition(
   const label = `[executor][${strategy.id}][${metrics.symbol}]`
   console.log(`${label} opening position`)
 
+  // Hoisted for finally block (reclaim rent on failure paths, including early aborts)
+  let positionKeypair: any = null;
+  let dlmmPool: any = null;
+  let minBinId = 0;
+  let maxBinId = 0;
+  let priorityFee = 0;
+  let successfullyOpened = false;
+  let positionScaffolded = false;
+  let wallet: any = null;
+
   // Mark for graceful shutdown waiter (dynamic to avoid cycles; no globalThis mirror)
   import('../../worker').then((m: any) => m.setOpenInProgress?.(true)).catch(() => {})
 
@@ -149,7 +159,7 @@ export async function openPosition(
   }
 
   const connection = getConnection()
-  const wallet = getWallet()
+  wallet = getWallet()
 
   try {
     const envCap = MARKET_LP_SOL_PER_POSITION
@@ -178,7 +188,7 @@ export async function openPosition(
     } catch (e) { console.log(`${label} [TRACE] [BAL-SNAPSHOT] entry balance read failed: ${e}`); }
 
     const DLMM = await getDLMM()
-    const dlmmPool = await DLMM.create(connection, poolPubkey)
+    dlmmPool = await DLMM.create(connection, poolPubkey)
     const activeBin = await dlmmPool.getActiveBin()
     const initialActiveBinId = activeBin.binId
 
@@ -198,7 +208,7 @@ export async function openPosition(
     console.log(`${label} Token program resolved for output mint ${outputMint.toBase58().slice(0, 8)} → ${isToken2022 ? 'Token-2022' : 'Legacy Token'}`)
 
     // Compute priority fee early so it is available for pre-scaffold simulations and early aborts.
-    const priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
+    priorityFee = await getPriorityFee([metrics.poolAddress, wallet.publicKey.toBase58()])
     console.log(`${label} priority fee: ${priorityFee} microlamports`)
 
     // =============================================================================
@@ -264,8 +274,8 @@ export async function openPosition(
     }
 
     // Use values from the centralized feasibility check (full range with 0 new bin arrays guaranteed here)
-    const minBinId = feasibility.minBinId;
-    const maxBinId = feasibility.maxBinId;
+    minBinId = feasibility.minBinId;
+    maxBinId = feasibility.maxBinId;
     const binRange = feasibility.totalBins;
     const fullBinsDown = feasibility.fullBinsDown;
     const fullBinsUp = feasibility.fullBinsUp;
@@ -368,7 +378,7 @@ export async function openPosition(
     // - If exists but other owner: collision, regenerate.
     // - After 3 fails to find usable: skip before swap.
     const DLMM_PROGRAM_ID = dlmmPool.program.programId.toBase58();
-    let positionKeypair = new Keypair();
+    positionKeypair = new Keypair();
     let needsCreate = true;
     let needsInitialize = true;
     for (let i = 0; i < 3; i++) {
@@ -509,8 +519,8 @@ export async function openPosition(
     console.log(`${label} [TRACE] [VERIFIED-NO-NONREFUNDABLE] ✅✅✅ FINAL assert PASSED — range ${minBinId}→${maxBinId} has 0 new bin arrays. WE ARE NOT BUYING INTO NONE-REFUNDABLE BIN STEPS.`);
     console.log(`${label} [TRACE] [VERIFIED-NO-NONREFUNDABLE] About to set positionScaffolded=true and pay rent.`);
 
-    let positionScaffolded = false;
-    let successfullyOpened = false;
+    positionScaffolded = false;
+    successfullyOpened = false;
 
     try {
       console.log(`${label} [TRACE] [SCAFFOLD-START] Entering scaffold block NOW — next logs will show rent being spent. positionScaffolded will flip to true.`);
@@ -905,50 +915,6 @@ export async function openPosition(
       } catch {}
     }
     return null;
-
-    } finally {
-      console.log(`${label} [TRACE] [FINALLY-ENTER] entered finally | positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
-      import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
-      if (!successfullyOpened) {
-        // Always attempt reclaim for the keypair we considered in this attempt.
-        // With bundling, rent is only paid on full scaffold success; this covers any
-        // partials, prior-run orphans for this key, or edge cases. If account doesn't exist
-        // or isn't closable this way, the close logs the error and we move on (no extra loss).
-        console.log(`${label} [TRACE] [FINALLY-CLOSE] !successfullyOpened — ATTEMPTING rent reclaim close (covers scaffolded or partial-create cases).`);
-        if (positionScaffolded) {
-          // Persist for background recovery in case this immediate close fails or bot restarts.
-          try {
-            await persistStrandedPositionRent(
-              positionKeypair.publicKey.toBase58(),
-              dlmmPool.pubkey.toBase58(),
-              minBinId,
-              maxBinId,
-              metrics.symbol
-            );
-          } catch (pErr) {
-            console.warn(`${label} [TRACE] failed to persist stranded rent marker: ${pErr}`);
-          }
-        }
-        try {
-          const closeOk = await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, wallet, minBinId, maxBinId, label, priorityFee);
-          console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed. success=${closeOk}`);
-          if (!closeOk) {
-            sendAlert({
-              type: 'warning',
-              message: `⚠️ Rent reclaim failed for ${positionKeypair.publicKey.toBase58()} — manual recovery needed (marker persisted for monitor)`,
-            }).catch(() => {})
-          }
-        } catch (closeErr) {
-          console.warn(`${label} [TRACE] [FINALLY-CLOSE-ERR] Finally close attempt threw (non-fatal).`);
-          console.warn(`${label} finally close failed: ${closeErr}`);
-        }
-      } else {
-        console.log(`${label} [TRACE] [FINALLY-SUCCESS] success path — position fully opened, no rent reclaim needed.`);
-        removePendingScaffold(positionKeypair?.publicKey?.toBase58?.());
-      }
-      console.log(`${label} [TRACE] [FINALLY-EXIT] leaving finally block`);
-    }
-
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.log(`${label} [TRACE] [TOP-CATCH] Top-level catch in openPosition — if we scaffolded, finally SHOULD have run the close attempt.`);
@@ -968,8 +934,52 @@ export async function openPosition(
     })
     return null
   } finally {
-    // Ensure flag cleared even on throws before the scaffold try/finally (e.g. eligibility, pre-scaffold)
+    // Reclaim rent if we didn't fully succeed (runs even on early returns thanks to hoisted vars + guards).
+    // Also clears the graceful shutdown flag.
+    console.log(`${label} [TRACE] [FINALLY-ENTER] entered finally | positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
     import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
+    if (!successfullyOpened) {
+      // Always attempt reclaim for the keypair we considered in this attempt.
+      // With bundling, rent is only paid on full scaffold success; this covers any
+      // partials, prior-run orphans for this key, or edge cases. If account doesn't exist
+      // or isn't closable this way, the close logs the error and we move on (no extra loss).
+      console.log(`${label} [TRACE] [FINALLY-CLOSE] !successfullyOpened — ATTEMPTING rent reclaim close (covers scaffolded or partial-create cases).`);
+      if (positionScaffolded && positionKeypair && dlmmPool) {
+        // Persist for background recovery in case this immediate close fails or bot restarts.
+        try {
+          await persistStrandedPositionRent(
+            positionKeypair.publicKey.toBase58(),
+            dlmmPool.pubkey.toBase58(),
+            minBinId,
+            maxBinId,
+            metrics.symbol
+          );
+        } catch (pErr) {
+          console.warn(`${label} [TRACE] failed to persist stranded rent marker: ${pErr}`);
+        }
+      }
+      if (positionKeypair && dlmmPool && wallet) {
+        try {
+          const closeOk = await tryCloseEmptyPosition(dlmmPool, positionKeypair.publicKey, wallet, minBinId, maxBinId, label, priorityFee);
+          console.log(`${label} [TRACE] [FINALLY-CLOSE] tryCloseEmptyPosition call completed. success=${closeOk}`);
+          if (!closeOk) {
+            sendAlert({
+              type: 'warning',
+              message: `⚠️ Rent reclaim failed for ${positionKeypair.publicKey.toBase58()} — manual recovery needed (marker persisted for monitor)`,
+            }).catch(() => {})
+          }
+        } catch (closeErr) {
+          console.warn(`${label} [TRACE] [FINALLY-CLOSE-ERR] Finally close attempt threw (non-fatal).`);
+          console.warn(`${label} finally close failed: ${closeErr}`);
+        }
+      }
+    } else {
+      console.log(`${label} [TRACE] [FINALLY-SUCCESS] success path — position fully opened, no rent reclaim needed.`);
+      if (positionKeypair) {
+        removePendingScaffold(positionKeypair?.publicKey?.toBase58?.());
+      }
+    }
+    console.log(`${label} [TRACE] [FINALLY-EXIT] leaving finally block`);
   }
 }
 
