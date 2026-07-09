@@ -625,6 +625,7 @@ export async function openPosition(
 
       console.log(`${label} [TRACE] [POST-SCAFFOLD] Starting post-scaffold add pre-sim gate on *LIVE* initialized account (using planned amounts). positionScaffolded=${positionScaffolded}`);
 
+    }
     // Post-scaffold add pre-sim using *planned* amounts REMOVED.
     // The accurate sim (with actual post-swap amounts) runs inside openPositionDirect.
     // Pre-scaffold swap sim remains the early gate before rent is paid.
