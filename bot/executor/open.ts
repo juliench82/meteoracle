@@ -520,9 +520,8 @@ export async function openPosition(
     positionScaffolded = false;
     successfullyOpened = false;
 
-    try {
-      console.log(`${label} [TRACE] [SCAFFOLD-START] Entering scaffold block NOW — next logs will show rent being spent. positionScaffolded will flip to true.`);
-      console.log(`${label} [TRACE] [SCAFFOLD-STATE] positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
+    console.log(`${label} [TRACE] [SCAFFOLD-START] Entering scaffold block NOW — next logs will show rent being spent. positionScaffolded will flip to true.`);
+    console.log(`${label} [TRACE] [SCAFFOLD-STATE] positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
       // =============================================================================
       // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
       // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
@@ -625,7 +624,6 @@ export async function openPosition(
 
       console.log(`${label} [TRACE] [POST-SCAFFOLD] Starting post-scaffold add pre-sim gate on *LIVE* initialized account (using planned amounts). positionScaffolded=${positionScaffolded}`);
 
-    }
     // Post-scaffold add pre-sim using *planned* amounts REMOVED.
     // The accurate sim (with actual post-swap amounts) runs inside openPositionDirect.
     // Pre-scaffold swap sim remains the early gate before rent is paid.
@@ -954,7 +952,6 @@ export async function openPosition(
     console.log(`${label} [TRACE] [FINALLY-EXIT] leaving finally block`);
     import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
     return null;
-  }
 }
 
 async function validateOpenEligibility(
