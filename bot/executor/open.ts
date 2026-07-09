@@ -120,6 +120,7 @@ export async function openPosition(
 
   if (botState.paused || botState.enabled === false) {
     console.log(`${label} bot is paused or disabled — skipping open`)
+    import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
     return null
   }
 
@@ -167,6 +168,7 @@ export async function openPosition(
 
     const eligibility = await validateOpenEligibility(label, metrics, strategy, solAmount, connection, wallet);
     if (!eligibility.ok) {
+      import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
       return null;
     }
 
