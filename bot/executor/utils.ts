@@ -39,7 +39,7 @@ export const METEORA_RENT_RESERVE_SOL = 0.07;
 export const ADD_LIQUIDITY_FALLBACK_CU = 1_400_000;
 
 // Consolidated: imported from strategy-config.ts (single source of env parsing with safe defaults)
-export { MARKET_LP_SOL_PER_POSITION, MAX_CONCURRENT_MARKET_LP_POSITIONS, MAX_MARKET_LP_SOL_DEPLOYED } from '@/lib/strategy-config';
+export { MARKET_LP_SOL_PER_POSITION, MAX_CONCURRENT_MARKET_LP_POSITIONS, MAX_MARKET_LP_SOL_DEPLOYED, SWAP_BUY_SOL_AMOUNT } from '@/lib/strategy-config';
 
 export const WALLET_MIN_SOL_RESERVE = parseFloat(process.env.WALLET_MIN_SOL_RESERVE ?? '0.1');
 

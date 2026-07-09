@@ -1,14 +1,20 @@
 /**
- * bot/executor/open.ts (thin orchestrator after split)
+ * bot/executor/open.ts
+ *
+ * Simple model (as originally intended):
+ * - When a pool is "good", swap a fixed "X $ worth of SOL" for the token (simple buy, get whatever tokens that buys).
+ * - Then open the LP position using ALL the tokens acquired + the SOL amount the Evil Panda range/position sizing
+ *   calculates at the time of opening.
+ *
+ * The swap is a straightforward acquisition step (no range bin math to size the exact leg).
+ * The range math (in bin-calc) is used for choosing the wide bin range only.
  *
  * Delegates to:
- *  - ./open/bin-calc.ts   (range feasibility, discrete bin math, no-rent gate)
- *  - ./open/pre-swap.ts   (direct DLMM SOL->token for bid-ask leg, actual delta)
- *  - lp-init / scaffold logic remains here for this pass (further extraction follows pattern)
- *  - persistence.ts (extended) for post-open recording
+ *  - ./open/bin-calc.ts   (range feasibility + discrete bin math for the Evil Panda width)
+ *  - ./open/pre-swap.ts   (simple direct DLMM swap of fixed SOL budget for the token)
+ *  - scaffold + add here
  *
- * External API (openPosition) and all behavior unchanged.
- * open.ts target <15KB via extraction.
+ * External API (openPosition) behavior is now aligned with the simple separate-swap + use-all-tokens model.
  */
 
 import {
@@ -60,7 +66,7 @@ import {
   type OpenLpLimitState,
 } from '@/lib/position-limits'
 import { checkFullEvilPandaRangeFeasibility, assertNoNewBinArraysForRange } from './open/bin-calc'
-import { swapSolToTokenDirectOnDlmm } from './open/pre-swap'
+// swap now standalone via acquireTokensWithFixedSol (called before openPosition)
 import {
   simulateAndCheck,
   sendLegacyTx,
@@ -320,45 +326,23 @@ export async function openPosition(
     const strategyType = strategyTypeForDistribution(StrategyTypeEnum, strategy.position.distributionType)
 
     const totalSolLamports = BigInt(Math.floor(solAmount * 1e9))
-    const binsTotal = fullBinsDown + fullBinsUp + 1  // +1 for the active bin
 
     // Safety guard: even with the split-tx pre-size + init, extremely wide position accounts can hit
-    // other limits (program max bins per position, CU, or future on-chain changes). If the discrete
-    // range math produced something absurd, skip *before* the pre-swap to avoid stranding tokens.
+    // other limits (program max bins per position, CU, or future on-chain changes).
     const MAX_SAFE_NUM_BINS = 220; // ~28KB worst-case at our conservative 128B/bin estimate; well under account size limits
     const numBinsForGuard = (maxBinId - minBinId) + 1;
     if (numBinsForGuard > MAX_SAFE_NUM_BINS) {
-      console.warn(`${label} SKIPPING: computed position spans ${numBinsForGuard} bins (range ${minBinId}→${maxBinId}) exceeds safe max ${MAX_SAFE_NUM_BINS}. Avoiding potential init or CU issues and pre-swap stranding.`);
+      console.warn(`${label} SKIPPING: computed position spans ${numBinsForGuard} bins (range ${minBinId}→${maxBinId}) exceeds safe max ${MAX_SAFE_NUM_BINS}. Avoiding potential init or CU issues.`);
       return null;
     }
 
-    // Base allocation for the token leg is bin-proportional for value-matching the Bid-Ask range.
-    // solBias (from strategy, default 1) allows tilting the split:
-    //   - solBias = 1 : use exact bin proportion (current default behavior)
-    //   - solBias > 1 : more SOL-heavy (swap less for token leg)
-    //   - solBias < 1 : more token-heavy (swap more for token leg)
-    // This makes the previously-unused solBias field actually control the economics.
-    let swapFraction = fullBinsDown / binsTotal
-    const solBias = Math.max(0.1, strategy.position.solBias ?? 1)
-    swapFraction = swapFraction / solBias
-    swapFraction = Math.max(0, Math.min(1, swapFraction))
+    // Swap is now performed *separately* by scanner via acquireTokensWithFixedSol (using SWAP_BUY_SOL_AMOUNT)
+    // *before* this openPosition call.
+    // Here we simply use:
+    //   - solAmount as the SOL leg (whatever the range/position calc says at open time)
+    //   - ALL current token balance in wallet as the token leg (acquired by the prior standalone swap)
 
-    let solToSwapLamports = BigInt(Math.floor(Number(totalSolLamports) * swapFraction))
-    if (solToSwapLamports < 0n) solToSwapLamports = 0n
-    const remainingSolLamports = totalSolLamports - solToSwapLamports
-
-    console.log(`${label} one-sided split for Bid-Ask: swap ${solToSwapLamports} lamports SOL for token side (fraction=${swapFraction.toFixed(4)}, solBias=${solBias}), keep ${remainingSolLamports} as SOL side`)
-
-    // Guard against dust token leg (tiny positive amounts that would fail or be useless).
-    // If solBias made it exactly 0 we allow pure-SOL leg (proceed without pre-swap).
-    const MIN_SWAP_LAMPORTS = 10_000n;
-    if (solToSwapLamports > 0n && solToSwapLamports < MIN_SWAP_LAMPORTS) {
-      console.warn(`${label} token swap leg would be dust (${solToSwapLamports} lamports) — skipping pool to avoid stranded dust or SDK failure`);
-      return null;
-    }
-
-    // Lightweight re-check of wallet balance immediately before the irreversible swap (protects against races
-    // with other activity, prior failed txs, or balance changes since the earlier eligibility check).
+    console.log(`${label} [TRACE] swap was done separately (fixed SWAP_BUY_SOL_AMOUNT). Using solAmount=${solAmount} for SOL leg + current wallet token balance (ALL) for token leg.`)
     try {
       const currentBalLamports = await connection.getBalance(wallet.publicKey);
       const currentBalSol = currentBalLamports / 1e9;
@@ -416,96 +400,12 @@ export async function openPosition(
       typeof maxBinId === 'number' ? maxBinId : undefined
     );
 
-    console.log(`${label} [TRACE] Entering pre-scaffold phase: will compute planned swap amounts and run full tx simulation before any rent is paid.`);
-    console.log(`${label} [TRACE] [PRE-SCAFFOLD-STATE] about to quote/swap-sim | solToSwapLamports=${solToSwapLamports} remainingSolLamports=${remainingSolLamports} | positionScaffolded=false`);
-    try {
-      const balPre = await connection.getBalance(wallet.publicKey);
-      console.log(`${label} [TRACE] [BAL-SNAPSHOT] pre-quote wallet SOL=${(balPre / 1e9).toFixed(9)} — still no rent paid`);
-    } catch {}
+    // Swap is performed separately by the caller (scanner) via acquireTokensWithFixedSol BEFORE openPosition.
+    // No pre-swap sim/quote/execution inside openPosition anymore.
+    console.log(`${label} [TRACE] [PRE-SCAFFOLD] swap handled separately upstream — proceeding to range + scaffold.`);
 
-    // Pre-swap quote for planned token leg amount (used for add sim + split).
-    // Done early, before any on-chain spend (scaffold rent), so we can abort without paying rent
-    // if the swap quote itself looks bad (0 out or throws). This prevents paying the position rent
-    // on cases where the pre-swap would fail.
-    let plannedTokenLamportsForSim = 0n;
-    if (solToSwapLamports > 0n) {
-      try {
-        console.log(`${label} [TRACE] [PRE-SCAFFOLD-QUOTE] calling dlmmPool.swapQuote for ${solToSwapLamports} lamports (slippage 500bps)`);
-        const binArrays = await dlmmPool.getBinArrays();
-        const swapYtoX = !solIsTokenX;
-        const inputAmountBN = new BN(solToSwapLamports.toString());
-        const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(500), binArrays);
-        const q = swapQuote as any;
-        plannedTokenLamportsForSim = BigInt(q.outAmount.toString());
-        console.log(`${label} [TRACE] [PRE-SCAFFOLD-QUOTE] Planned quote OK: outAmount=${plannedTokenLamportsForSim}, minOut=${(q.minOutAmount?.toString?.() ?? 'n/a')}`);
-      } catch (qErr) {
-        console.error(`${label} [TRACE] [PRE-SCAFFOLD-QUOTE-FAIL] pre-swap quote for sim failed (ABORT, NO RENT): ${qErr}`);
-        console.error(`${label} pre-swap quote for sim failed: ${qErr}`);
-        return null;
-      }
-    } else {
-      console.log(`${label} [TRACE] [PRE-SCAFFOLD-QUOTE] solToSwapLamports=0 — skipping quote (pure SOL leg)`);
-    }
-
-    // Pre-scaffold swap quote viability gate (Claude recommendation).
-    // If the planned swap would give zero tokens, abort *before* paying any position rent.
-    // This is a pure read (no on-chain cost) and catches the main failure mode seen in production logs.
-    if (solToSwapLamports > 0n && plannedTokenLamportsForSim === 0n) {
-      console.log(`${label} [TRACE] [PRE-SCAFFOLD-ZERO] ZERO output from planned quote — ABORTING BEFORE scaffold. positionScaffolded=false successfullyOpened=false`);
-      console.log(`${label} [TRACE] [NO-RENT-YET][VERIFIED] pre-swap quote gave zero output — skipping entire open (including scaffold rent) before any money is spent`);
-      console.log(`${label} pre-swap quote gave zero output — skipping entire open (including scaffold rent) before any money is spent`);
-      return null;
-    }
-
-    console.log(`${label} [TRACE] About to run full swap TX simulation (pre-scaffold). This is the critical gate that protects us from paying rent on bad candidates.`);
-
-    // Pre-scaffold swap tx simulation (full tx sim, not just quote).
-    // Builds the swap tx (using planned amounts) and runs simulateAndCheck before paying any position rent.
-    // This catches more realistic failures (account setup, CU limits, program errors, bin array issues)
-    // that a pure quote might miss. Zero on-chain cost.
-    if (solToSwapLamports > 0n && plannedTokenLamportsForSim > 0n) {
-      try {
-        console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM] fetching binArrays + building full swap tx for simulateAndCheck`);
-        const binArrays = await dlmmPool.getBinArrays();
-        const swapYtoX = !solIsTokenX;
-        const inputAmountBN = new BN(solToSwapLamports.toString());
-        const swapQuote = await dlmmPool.swapQuote(inputAmountBN, swapYtoX, new BN(500), binArrays);
-        const q = swapQuote as any;
-        const binArrayKeysForSwap = binArrays.map((ba: any) => ba.publicKey);
-        const inToken = solIsTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
-        const outToken = solIsTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
-        const swapTx = await dlmmPool.swap({
-          inToken,
-          binArraysPubkey: binArrayKeysForSwap,
-          inAmount: inputAmountBN,
-          lbPair: dlmmPool.pubkey,
-          user: wallet.publicKey,
-          minOutAmount: q.minOutAmount,
-          outToken,
-        });
-        const prepared = applyPriorityFee(swapTx, priorityFee);
-        console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM] swap tx constructed, calling simulateAndCheck now (pre-rent)`);
-        const simOk = await simulateAndCheck(prepared, `${label} [pre-scaffold-swap-tx-sim]`);
-        if (!simOk) {
-          console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM-FAIL] Swap TX sim FAILED — ABORT before scaffold. positionScaffolded=false NO RENT PAID`);
-          console.log(`${label} [TRACE] [NO-RENT-YET] pre-scaffold swap tx simulation failed — aborting before paying position rent`);
-          console.log(`${label} pre-scaffold swap tx simulation failed — aborting before paying position rent`);
-          return null;
-        }
-        console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM-OK] Swap TX simulation PASSED ✔ Safe to proceed to scaffold rent (still zero rent paid at this point).`);
-        console.log(`${label} [pre-scaffold] swap tx simulation OK`);
-      } catch (simErr) {
-        console.error(`${label} [TRACE] [PRE-SCAFFOLD-SIM-THROW] Swap TX sim threw — ABORT before scaffold. positionScaffolded=false`);
-        console.error(`${label} [TRACE] [NO-RENT-YET] pre-scaffold swap tx sim threw: ${simErr}`);
-        console.error(`${label} pre-scaffold swap tx sim threw: ${simErr}`);
-        return null;
-      }
-    } else {
-      console.log(`${label} [TRACE] [PRE-SCAFFOLD-SIM-SKIP] skipping full tx sim (no swap leg or zero planned output)`);
-    }
-
-    const plannedTotalX = solIsTokenX ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
-    const plannedTotalY = solIsTokenY ? new BN(remainingSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
+    const plannedTotalX = solIsTokenX ? new BN(totalSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
+    const plannedTotalY = solIsTokenY ? new BN(totalSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
 
     // Final hard verification right before we pay any position rent.
     // This is the critical "no non-refundable bin arrays" guard.
@@ -519,6 +419,16 @@ export async function openPosition(
     console.log(`${label} [TRACE] [VERIFIED-NO-NONREFUNDABLE] ✅✅✅ FINAL assert PASSED — range ${minBinId}→${maxBinId} has 0 new bin arrays. WE ARE NOT BUYING INTO NONE-REFUNDABLE BIN STEPS.`);
     console.log(`${label} [TRACE] [VERIFIED-NO-NONREFUNDABLE] About to set positionScaffolded=true and pay rent.`);
 
+    // Swap was performed separately (via acquireTokensWithFixedSol using SWAP_BUY_SOL_AMOUNT) *before* calling openPosition.
+    // Query ALL current token balance now for the token leg. No swap here.
+    let actualTokenLamports = 0n;
+    try {
+      actualTokenLamports = await getWalletTokenBalance(outputMint.toBase58());
+    } catch (e) {
+      console.warn(`${label} failed to read token balance for position, using 0: ${e}`);
+    }
+    console.log(`${label} [TRACE] using ALL wallet tokens for position: ${actualTokenLamports}`);
+
     positionScaffolded = false;
     successfullyOpened = false;
 
@@ -527,7 +437,7 @@ export async function openPosition(
 
     try {
       // =============================================================================
-      // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
+      // REAL SCAFFOLDING (create + initialize) — swap already done (separate). Now pay rent for position.
       // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
       // exist on-chain. This makes the subsequent add pre-sim *meaningful*.
       // Only after this + passing add sim do we do the irreversible token pre-swap.
@@ -692,110 +602,30 @@ export async function openPosition(
       console.log(`${label} [TRACE] [LATE-ATA-SKIP] Output side is SOL — no ATA needed.`);
     }
 
-    console.log(`${label} [TRACE] [ALL-GATES-PASSED] All pre-swap gates passed (sim, drift, ATA). About to do the real (irreversible) pre-swap.`);
-    console.log(`${label} [TRACE] [PRE-SWAP-STATE] positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
-    try {
-      const balPreSwap = await connection.getBalance(wallet.publicKey);
-      console.log(`${label} [TRACE] [BAL-SNAPSHOT] pre-swap (post-scaffold+pre-sim) wallet SOL=${(balPreSwap / 1e9).toFixed(9)}`);
-    } catch {}
+    // Swap already completed pre-scaffold with fixed amount. Proceeding to add with acquired tokens.
 
-    let actualTokenLamports = 0n
-    if (solToSwapLamports > 0n) {
-      // Prefer direct swap on the DLMM pool itself using Meteora SDK (native swap, no Jupiter).
-      // Meteora UI exposes swap on DLMM pools; the SDK has swapQuote + swap for exactly this.
-      // Since the pool already passed the full evil-panda range gate (bin arrays exist and populated),
-      // direct swap on this pool is the natural way to acquire the token leg for the Bid-Ask.
-      // This completely bypasses Jupiter 0x177e issues for these specific pools.
-      // Last-chance verification before the irreversible pre-swap.
-      await assertNoNewBinArraysForRange(dlmmPool, minBinId, maxBinId, label);
+    // actualTokenLamports already set pre-scaffold (fixed swap). Old proportional code removed.
 
-      console.log(`${label} [TRACE] [PRE-SWAP-EXEC] attempting direct DLMM swap for token leg (Meteora SDK native, bypassing Jupiter)`);
-      console.log(`${label} [TRACE] [PRE-SWAP-EXEC] solToSwapLamports=${solToSwapLamports} outputMint=${outputMint.toBase58().slice(0,8)}`);
-      try {
-        actualTokenLamports = await swapSolToTokenDirectOnDlmm(
-          dlmmPool,
-          solToSwapLamports,
-          outputMint,
-          solIsTokenX,
-          label
-        );
-        console.log(`${label} [TRACE] [PRE-SWAP-EXEC] swapSolToTokenDirectOnDlmm returned ${actualTokenLamports}`);
-        if (actualTokenLamports > 0n) {
-          console.log(`${label} [TRACE] [PRE-SWAP-OK] Pre-swap swap completed successfully. Received ${actualTokenLamports} tokens.`);
-        }
-      } catch (directErr) {
-        console.error(`${label} [TRACE] [PRE-SWAP-FAIL] Pre-swap FAILED — will trigger finally close to reclaim rent. positionScaffolded=${positionScaffolded}`);
-        console.error(`${label} [TRACE] Pre-swap FAILED — will trigger finally close to reclaim rent.`);
-        console.error(`${label} direct DLMM swap for token leg FAILED: ${directErr instanceof Error ? directErr.message : directErr}`);
-        console.error(`${label} (Jupiter completely ditched per user request — no fallback; skipping pool)`);
-        // Pre-swap tx may have confirmed on-chain (sendLegacyTx throws on confirm/status fallback fail even if landed).
-        // Query fresh balance and persist stranded token marker for monitor recovery (sell back) if we hold any.
-        try {
-          const fresh = await getWalletTokenBalance(outputMint.toBase58()).catch(() => 0n)
-          if (fresh > 0n) {
-            await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), fresh)
-            console.warn(`${label} persisted stranded marker for ${fresh} after pre-swap throw (tx likely landed)`)
-          }
-        } catch (pErr) {
-          console.warn(`${label} could not persist stranded after pre-swap throw:`, pErr)
-        }
-        return null;
-      }
-    } else if (solToSwapLamports === 0n) {
-      console.log(`${label} [TRACE] [PRE-SWAP-SKIP] solToSwapLamports=0 — no pre-swap executed (pure SOL leg)`);
-    }
+    // Guards and logs for old proportional swap removed.
+    // Using tokens from early fixed swap + solAmount for SOL leg.
 
-    const MIN_REMAINING_SOL_FOR_ADD = 10_000n; // dust guard to avoid adding near-zero after rent paid
-    if (remainingSolLamports < MIN_REMAINING_SOL_FOR_ADD && actualTokenLamports < 1_000_000n) {
-      console.warn(`${label} [TRACE] [ADD-GUARD] remainingSol + token too small for add after scaffold — aborting`);
-      // If we acquired tokens via pre-swap before this guard, ensure stranded marker
-      if (actualTokenLamports > 0n) {
-        try {
-          const fresh = await getWalletTokenBalance(outputMint.toBase58()).catch(() => actualTokenLamports)
-          if (fresh > 0n) await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), fresh)
-        } catch {}
-      }
-      return null;
-    }
+    console.log(`${label} [TRACE] Using tokens from early swap: ${actualTokenLamports} (ALL). Preparing direct add.`);
 
-    if (solToSwapLamports > 0n && actualTokenLamports === 0n) {
-      console.error(`${label} [TRACE] [PRE-SWAP-ZERO] Pre-swap returned 0 tokens — will trigger finally close. positionScaffolded=${positionScaffolded}`);
-      console.error(`${label} [TRACE] Pre-swap returned 0 tokens — will trigger finally close.`);
-      console.error(`${label} direct DLMM swap returned 0 tokens for full-range pool (Jupiter completely ditched) — skipping pool`);
-      // The pre-swap tx may still have landed (e.g. PARQ case: sig confirmed but post-swap balance query saw 0 due to
-      // Token-2022/hook visibility). Persist a stranded marker using a fresh query so the monitor recovery can clean it.
-      try {
-        const fresh = await getWalletTokenBalance(outputMint.toBase58());
-        if (fresh > 0n) {
-          await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), fresh);
-          console.warn(`${label} persisted stranded marker for ${fresh} raw units of ${outputMint.toBase58().slice(0,8)} (pre-swap landed but reported 0)`);
-        }
-      } catch (e) {
-        console.warn(`${label} could not persist stranded for 0-reported pre-swap:`, e);
-      }
-      return null;
-    }
+    // (positionKeypair generated earlier)
 
-    if (solToSwapLamports > 0n) {
-      console.log(`${label} [TRACE] Pre-swap done. Received ${actualTokenLamports} tokens. About to call openPositionDirect for the add.`);
-      console.log(`${label} swap done: received ${actualTokenLamports} token lamports`);
-    }
+    const solLegLamports = BigInt(Math.floor(solAmount * 1e9)); // SOL leg per the range/position at open time (can differ from swap budget)
+    const tokenLegLamports = actualTokenLamports; // ALL tokens from the fixed swap
 
-    // (positionKeypair was already generated + pre-flight checked earlier, before the pre-swap)
+    console.log(`${label} [TRACE] [ADD-STEP] About to call openPositionDirect.`);
+    console.log(`${label} [TRACE] [ADD-STEP] sol leg=${solAmount} token leg=${tokenLegLamports} (ALL tokens + range SOL)`);
 
-    console.log(`${label} [TRACE] [ADD-STEP] About to call openPositionDirect (the actual add/fund step).`);
-    console.log(`${label} [TRACE] [ADD-STEP] remainingSolLamports=${remainingSolLamports} actualTokenLamports=${actualTokenLamports}`);
-
-    // === DIRECT (using remaining SOL + actual received token from any pre-swap) ===
-    console.log(`${label} [TRACE] [ADD-STEP] attempting direct (Bid-Ask range) with computed legs`);
-    console.log(`${label} attempting direct (Bid-Ask range) with computed legs`);
     const directResult = await openPositionDirect(
       metrics,
       strategy,
       dlmmPool,
       poolPubkey,
       outputMint,
-      solAmount,  // budgeted target; effectiveDeployedSol is computed inside from actual post-swap lamports + entry price
+      solAmount,  // the "X amount of SOL" the range/strategy tells us at open time
       minBinId,
       maxBinId,
       solIsTokenX,
@@ -803,8 +633,8 @@ export async function openPosition(
       priorityFee,
       DRY_RUN,
       positionKeypair,
-      remainingSolLamports,
-      actualTokenLamports,
+      solLegLamports,
+      tokenLegLamports,
       positionScaffolded // skip inner scaffold if early one succeeded
     );
     if (directResult) {
@@ -816,106 +646,19 @@ export async function openPosition(
       return directResult;
     }
 
-    console.log(`${label} [TRACE] [ADD-FAILED] openPositionDirect returned null — will enter rollback then finally close. positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
+    console.log(`${label} [TRACE] [ADD-FAILED] openPositionDirect returned null — will reclaim rent in finally. Swap was the separate "buy X$ of token" step (simple fixed), so we hold ALL the tokens acquired and let stranded/monitor handle sell later if wanted. No forced rollback sell inside open.`);
 
-    // Rollback path: position creation failed after successful direct DLMM pre-swap.
-    // Use direct DLMM sell (Meteora native) to return tokens to SOL. (Jupiter fully ditched.)
-    // IMPORTANT: re-query the *current* token balance right now (the pre-swap "actualTokenLamports"
-    // may be stale/huge/wrong due to prior bugs or the failed open attempt). Use looser slippage
-    // for the emergency sell so we don't strand on 0x1773 like before.
-    console.error(`${label} position open failed after successful pre-swap — attempting DIRECT DLMM rollback sell to SOL`);
-    // Refresh priority for time-critical rollback (may be stale from initial capture)
-    const rollbackPriority = Math.max(priorityFee, await getPriorityFee([dlmmPool.pubkey.toBase58(), wallet.publicKey.toBase58()]).catch(() => 50_000));
-    let rollbackSucceeded = false;
+    // With the simple separate-buy model, we do not auto-rollback sell here.
+    // The tokens from the X$ swap are in the wallet (use ALL of them was the intent for the position).
+    // If the LP open failed, we simply don't open — the tokens stay as a position in the token.
+    // Persist a marker so monitor can optionally sell them later.
     try {
-      const isTokenX = dlmmPool.tokenX.publicKey.toBase58() === outputMint.toBase58();
-      const inToken = isTokenX ? dlmmPool.tokenX.publicKey : dlmmPool.tokenY.publicKey;
-      const outToken = isTokenX ? dlmmPool.tokenY.publicKey : dlmmPool.tokenX.publicKey;
-      const swapYtoX = (inToken.toBase58() === dlmmPool.tokenY.publicKey.toBase58());
-
-      // Re-fetch what we actually still hold (Token-2022/hook visibility lag is common).
-      let tokenBal = 0n;
-      try {
-        tokenBal = await getWalletTokenBalance(outputMint.toBase58());
-      } catch {}
-      if (tokenBal === 0n && actualTokenLamports > 0n) {
-        tokenBal = actualTokenLamports;
+      const freshBal = await getWalletTokenBalance(outputMint.toBase58()).catch(() => actualTokenLamports);
+      if (freshBal > 0n) {
+        await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), freshBal);
+        console.log(`${label} persisted stranded token marker for the acquired tokens (swap was separate from LP open).`);
       }
-      if (tokenBal > 0n) {
-        const inputAmountBN = new BN(tokenBal.toString());
-
-        // Retry the quote + swap a few times with *fresh* binArrays each attempt.
-        // "Insufficient liquidity in binArrays for swapQuote" is common on the reverse leg right after
-        // the pre-swap (thin microcap depth + active bin moved by our own buy). A later monitor
-        // recovery tick with new on-chain state often succeeds.
-        const MAX_ROLLBACK_ATTEMPTS = 3;
-        for (let attempt = 1; attempt <= MAX_ROLLBACK_ATTEMPTS && !rollbackSucceeded; attempt++) {
-          try {
-            // Fresh snapshot every attempt — critical for thin pools.
-            const binArrays = await dlmmPool.getBinArrays();
-            console.log(`${label} [direct-dlmm-rollback] attempt ${attempt}/${MAX_ROLLBACK_ATTEMPTS} — fetched ${binArrays.length} bin arrays (full list for swap)`);
-
-            // Extremely loose for emergency unwind (100% slippage, minOut=0).
-            const swapQuote = await dlmmPool.swapQuote(
-              inputAmountBN,
-              swapYtoX,
-              new BN(10000),
-              binArrays
-            );
-            const q = swapQuote as any;
-            if (q.outAmount.isZero()) {
-              throw new Error('Direct DLMM rollback quote gave 0 SOL output');
-            }
-            const quotedIn = q.inAmount ?? inputAmountBN;
-            console.log(`${label} [direct-dlmm-rollback] quote: in=${quotedIn} out=${q.outAmount}`);
-            const binArrayKeysForSwap = (q.binArraysPubkey && q.binArraysPubkey.length > 0)
-              ? q.binArraysPubkey
-              : binArrays.slice(0, 3).map((ba: any) => ba.publicKey);
-            console.log(`${label} [direct-dlmm-rollback] calling swap with limited ${binArrayKeysForSwap.length} bin array pubkeys`);
-            const swapTx = await dlmmPool.swap({
-              inToken,
-              binArraysPubkey: binArrayKeysForSwap,
-              inAmount: inputAmountBN,
-              lbPair: dlmmPool.pubkey,
-              user: wallet.publicKey,
-              minOutAmount: q.minOutAmount || new BN(0),
-              outToken,
-            });
-            const rbSig = await sendLegacyTx(applyPriorityFee(swapTx, rollbackPriority), [wallet], `${label} direct-dlmm-rollback`);
-            console.log(`${label} DIRECT DLMM rollback sell to SOL succeeded ✔ sig: ${rbSig}`);
-            rollbackSucceeded = true;
-          } catch (rbQuoteErr) {
-            const msg = rbQuoteErr instanceof Error ? rbQuoteErr.message : String(rbQuoteErr);
-            console.warn(`${label} [direct-dlmm-rollback] attempt ${attempt} failed: ${msg}`);
-            if (attempt < MAX_ROLLBACK_ATTEMPTS) {
-              await new Promise(r => setTimeout(r, 600));
-            }
-          }
-        }
-
-        if (!rollbackSucceeded) {
-          console.warn(`${label} direct DLMM rollback quote/swap failed after ${MAX_ROLLBACK_ATTEMPTS} attempts (insufficient liquidity or other) — persisting stranded for monitor retry`);
-        }
-      }
-    } catch (rbErr) {
-      console.error(`${label} direct DLMM rollback sell ALSO failed — persisting stranded token marker for monitor recovery`, rbErr);
-      try {
-        const freshBal = await getWalletTokenBalance(outputMint.toBase58()).catch(() => actualTokenLamports);
-        await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), freshBal || actualTokenLamports);
-      } catch (persistErr) {
-        console.error(`${label} failed to persist stranded marker:`, persistErr);
-      }
-    }
-
-    if (!rollbackSucceeded) {
-      // Ensure a stranded marker exists even if the outer try didn't reach the persist (e.g. early throws before balance check).
-      try {
-        const freshBal = await getWalletTokenBalance(outputMint.toBase58()).catch(() => actualTokenLamports);
-        if (freshBal > 0n) {
-          await persistStrandedTokenAfterFailedOpen(metrics, outputMint.toBase58(), freshBal);
-        }
-      } catch {}
-    }
+    } catch {}
   } finally {
     // Reclaim + flag clear in finally: covers ALL exits after scaffold (early returns for drift/ATA/pre-swap/direct-fail + fallthrough)
     if (!successfullyOpened) {
@@ -1118,7 +861,8 @@ async function openPositionDirect(
     const isTokenXSol = dlmmPool.tokenX.publicKey.toBase58() === NATIVE_MINT_STR
     const isTokenYSol = dlmmPool.tokenY.publicKey.toBase58() === NATIVE_MINT_STR
 
-    // After direct Meteora DLMM pre-swap for the token leg (Bid-Ask one-sided).
+    // Use remaining SOL leg (per simple split) + ALL tokens acquired from the fixed swap.
+    // The Evil Panda range (bins) was already chosen; we dump all tokens + the calculated SOL side.
     const totalX = isTokenXSol ? new BN(remainingSolLamports.toString()) : new BN(actualTokenLamports.toString())
     const totalY = isTokenYSol ? new BN(remainingSolLamports.toString()) : new BN(actualTokenLamports.toString())
 
@@ -1374,9 +1118,8 @@ async function openPositionDirect(
 
     const openSig = liqSig
 
-    // Compute actual capital deployed using the post-swap received amounts + entry price.
-    // This replaces the budgeted solAmount so that persisted sol_deposited, exposure caps,
-    // and records reflect reality (slippage, actual token received) rather than the pre-swap target.
+    // Compute actual capital deployed using the tokens we actually hold (ALL from the simple swap) + entry price.
+    // This reflects the "swap X$ then use ALL tokens + range SOL" model.
     const entryPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin);
     const tokenDecimals = isTokenXSol
       ? ((dlmmPool as any).tokenY?.decimals ?? 6)

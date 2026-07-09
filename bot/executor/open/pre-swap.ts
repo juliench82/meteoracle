@@ -1,11 +1,15 @@
 /**
  * bot/executor/open/pre-swap.ts
  *
- * Direct DLMM pre-swap (SOL → token leg) for Bid-Ask one-sided evil-panda positions.
- * Uses Meteora SDK swapQuote + swap on the target pool (no Jupiter).
- * Prefers actual on-chain delta over quoted for amountForPosition.
+ * Simple direct DLMM pre-swap (SOL → token) .
+ * When a pool is "good", we swap a fixed "X $ worth of SOL" for the token (simple buy).
+ * Later / separately, the position open uses ALL acquired tokens + the SOL amount
+ * the Evil Panda range math decides at open time.
  *
- * Extracted verbatim from open.ts (swapSolToTokenDirectOnDlmm). No behavior change.
+ * Uses Meteora SDK swapQuote + swap on the target pool (no Jupiter).
+ * Prefers actual on-chain delta.
+ *
+ * The swap amount is now a simple fixed budget (no complex range-proportional leg sizing).
  */
 
 import { PublicKey } from '@solana/web3.js'
@@ -17,6 +21,7 @@ import {
   applyPriorityFee,
 } from '@/lib/solana-tx'
 import { getWalletTokenBalance } from '@/lib/swap'
+import { getDLMM } from '../utils'
 
 /**
  * Direct SDK swap for the token leg (Bid-Ask pre-fund).
@@ -128,4 +133,54 @@ export async function swapSolToTokenDirectOnDlmm(
     console.log(`${label} [direct-dlmm] post-swap ${outToken.toBase58().slice(0,8)} balance: ${postBal} (delta=${delta}, usedForLp=${amountForPosition}, quotedOut=${quotedOut || 'n/a'})`);
   } catch {}
   return amountForPosition;
+}
+
+/**
+ * Standalone token acquisition using a *fixed* SOL amount (dedicated SWAP_BUY_SOL_AMOUNT env).
+ * Called by scanner/deep-checker *before* openPosition.
+ *
+ * Swaps the fixed amount of SOL for the token on the DLMM pool (direct, no Jupiter).
+ * Returns the actual tokens acquired (to be used in full for the subsequent position).
+ *
+ * This is deliberately separate from the position open / range calc / rent payment.
+ */
+export async function acquireTokensWithFixedSol(
+  metrics: any, // TokenMetrics
+  swapSolAmount: number,
+  label: string = ''
+): Promise<bigint> {
+  if (!swapSolAmount || swapSolAmount <= 0) {
+    console.log(`${label} [acquire] swapSolAmount <= 0, skipping swap`);
+    return 0n;
+  }
+
+  const connection = getConnection();
+  const wallet = getWallet();
+  const DLMM = await getDLMM();
+  const poolPubkey = new PublicKey(metrics.poolAddress || metrics.address);
+  const dlmmPool = await DLMM.create(connection, poolPubkey);
+
+  const mintX = dlmmPool.tokenX.publicKey;
+  const mintY = dlmmPool.tokenY.publicKey;
+  const solIsTokenX = mintX.toBase58() === 'So11111111111111111111111111111111111111112';
+  const outputMint = solIsTokenX ? mintY : mintX;
+
+  const swapLamports = BigInt(Math.floor(swapSolAmount * 1e9));
+
+  console.log(`${label} [acquire] swapping fixed ${swapSolAmount} SOL for ${metrics.symbol} (standalone, pre openPosition)`);
+
+  try {
+    const acquired = await swapSolToTokenDirectOnDlmm(
+      dlmmPool,
+      swapLamports,
+      outputMint,
+      solIsTokenX,
+      label || `[acquire][${metrics.symbol}]`
+    );
+    console.log(`${label} [acquire] acquired ${acquired} tokens with fixed ${swapSolAmount} SOL`);
+    return acquired;
+  } catch (err) {
+    console.error(`${label} [acquire] failed to swap fixed amount:`, err);
+    return 0n;
+  }
 }

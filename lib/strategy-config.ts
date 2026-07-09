@@ -34,6 +34,10 @@ export const MAX_CONCURRENT_MARKET_LP_POSITIONS = envNumber('MAX_CONCURRENT_MARK
 
 export const MAX_MARKET_LP_SOL_DEPLOYED = envNumber('MAX_MARKET_LP_SOL_DEPLOYED', 1)
 
+// Dedicated fixed SOL amount for the separate token acquisition swap (before opening position).
+// This can differ from the SOL leg used in the actual LP position.
+export const SWAP_BUY_SOL_AMOUNT = envNumber('SWAP_BUY_SOL_AMOUNT', MARKET_LP_SOL_PER_POSITION)
+
 // ── Scanner timing ──────────────────────────────────────────────
 export const LP_SCAN_INTERVAL_SEC = envNumber('LP_SCAN_INTERVAL_SEC', 900)
 export const SCAN_INTERVAL_MS = LP_SCAN_INTERVAL_SEC * 1000

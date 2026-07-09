@@ -8,4 +8,5 @@
 export { openPosition } from './executor/open';
 export { closePosition, claimFeesForPosition } from './executor/close';
 export { addLiquidityToPosition } from './executor/add-liquidity';
+export { acquireTokensWithFixedSol } from './executor/open/pre-swap';
 

@@ -29,7 +29,7 @@ import axios from 'axios'
 // Local state only (JSON files in state/ + targeted on-chain reads)
 import { getBotState } from '@/lib/botState'
 import { evilPandaStrategy } from '@/strategies/evil-panda'
-import { openPosition } from '../executor'
+import { openPosition, acquireTokensWithFixedSol } from '../executor'
 import { sendAlert } from '../alerter'
 import { checkHolders } from '@/lib/helius'
 import { getRugscore } from '../rugcheck-cache'
@@ -60,6 +60,7 @@ import {
   EVIL_PANDA_ENABLED,
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   MARKET_LP_SOL_PER_POSITION,
+  SWAP_BUY_SOL_AMOUNT,
   MAX_POOL_PRICE_DEVIATION,
   MIN_TVL_USD,
   MIN_POOL_AGE_HOURS,
@@ -952,6 +953,24 @@ async function attemptOpenAndNotify(params: {
       console.log(`${label} open skipped: daily loss circuit breaker`);
       return { wasCandidate: true, wasOpened: false, wasSkipped: true };
     }
+  }
+
+  // Separate token acquisition step (before openPosition / rent / scaffold).
+  // Uses dedicated fixed SWAP_BUY_SOL_AMOUNT (can differ from position SOL leg).
+  let acquiredTokens = 0n;
+  try {
+    acquiredTokens = await acquireTokensWithFixedSol(
+      metrics,
+      SWAP_BUY_SOL_AMOUNT,
+      `[scanner][${symbol}]`
+    );
+    if (acquiredTokens > 0n) {
+      console.log(`${label} [acquire] standalone swap succeeded, acquired ${acquiredTokens} tokens. Now opening position with ALL tokens + range SOL leg.`);
+    } else {
+      console.warn(`${label} [acquire] standalone swap returned 0 tokens — will still attempt openPosition (may use 0 token leg).`);
+    }
+  } catch (acqErr) {
+    console.error(`${label} [acquire] standalone token acquisition failed (will continue to openPosition):`, acqErr);
   }
 
   const positionId = await openPosition(metrics, strategy);
