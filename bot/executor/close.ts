@@ -129,8 +129,10 @@ export async function closePosition(
       const isXSol = xPub === 'So11111111111111111111111111111111111111112'
       const feeSolLamports = isXSol ? feeX : feeY
       const feeTokenLamports = isXSol ? feeY : feeX
-      const tokenDecimals = (isXSol ? dlmmPool.tokenY?.decimals : dlmmPool.tokenX?.decimals) ?? 6
-      const priceSolPerToken = getDecimalAdjustedPrice(dlmmPool, await dlmmPool.getActiveBin().catch(() => null)) || 0
+      const tokenDecimals = (isXSol ? (dlmmPool as any).tokenY?.decimals : (dlmmPool as any).tokenX?.decimals) ?? 6
+      let activeBin: any = null
+      try { activeBin = await dlmmPool.getActiveBin() } catch {}
+      const priceSolPerToken = getDecimalAdjustedPrice(dlmmPool, activeBin) || 0
       const feeTokenWhole = feeTokenLamports / Math.pow(10, tokenDecimals)
       const feesInSol = (feeSolLamports / 1e9) + (feeTokenWhole * priceSolPerToken)
 

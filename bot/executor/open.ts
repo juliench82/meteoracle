@@ -1379,8 +1379,8 @@ async function openPositionDirect(
     // and records reflect reality (slippage, actual token received) rather than the pre-swap target.
     const entryPriceSol = getDecimalAdjustedPrice(dlmmPool, activeBin);
     const tokenDecimals = isTokenXSol
-      ? (dlmmPool.tokenY?.decimals ?? 6)
-      : (dlmmPool.tokenX?.decimals ?? 6);
+      ? ((dlmmPool as any).tokenY?.decimals ?? 6)
+      : ((dlmmPool as any).tokenX?.decimals ?? 6);
     const actualTokenWhole = Number(actualTokenLamports) / Math.pow(10, tokenDecimals);
     const actualTokenValueSol = actualTokenWhole * entryPriceSol;
     const effectiveDeployedSol = (Number(remainingSolLamports) / 1e9) + actualTokenValueSol;
@@ -1534,5 +1534,8 @@ async function tryCloseEmptyPosition(
 
 // Also export for potential use in monitor or recovery if needed
 export { tryCloseEmptyPosition };
+
+// Re-export range feasibility helpers for scanner/deep-checker dynamic imports and other callers
+export { checkFullEvilPandaRangeFeasibility, assertNoNewBinArraysForRange } from './open/bin-calc';
 
 

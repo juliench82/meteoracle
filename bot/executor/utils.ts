@@ -145,13 +145,17 @@ export async function getTokenProgramId(mint: PublicKey | string): Promise<Publi
   return TOKEN_PROGRAM_ID;
 }
 
-export function getDecimalAdjustedPrice(dlmmPool: any, activeBin: { price: string; pricePerToken: string }): number {
+export function getDecimalAdjustedPrice(dlmmPool: any, activeBin: any): number {
+  if (!activeBin) return 0;
   try {
-    const adjusted = dlmmPool.fromPricePerLamport(Number(activeBin.price));
+    const priceVal = activeBin.price ?? activeBin.pricePerLamport ?? '0';
+    const adjusted = dlmmPool.fromPricePerLamport(Number(priceVal));
     const price = parseFloat(adjusted);
     if (isFinite(price) && price > 0) return price;
   } catch {}
-  return parseFloat(activeBin.pricePerToken);
+  const fallback = activeBin.pricePerToken ?? activeBin.price ?? '0';
+  const p = parseFloat(fallback);
+  return isFinite(p) ? p : 0;
 }
 
 export async function getPositionWithRetry(

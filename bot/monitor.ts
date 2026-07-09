@@ -435,7 +435,7 @@ function computeNetPnlApprox(
     const tokenSideLamports = isXSol ? totalY : totalX
 
     // Convert token lamports to whole units using the token's decimals (critical — priceSolPerToken is per whole token)
-    const tokenDecimals = (isXSol ? dlmmPool.tokenY?.decimals : dlmmPool.tokenX?.decimals) ?? 6;
+    const tokenDecimals = (isXSol ? (dlmmPool as any).tokenY?.decimals : (dlmmPool as any).tokenX?.decimals) ?? 6;
     const tokenSideWhole = tokenSideLamports / Math.pow(10, tokenDecimals);
     const solValueOfTokens = tokenSideWhole * priceSolPerToken;
     const currentLiqValueSol = (solSideLamports / 1e9) + solValueOfTokens;

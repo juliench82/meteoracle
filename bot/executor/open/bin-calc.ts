@@ -12,7 +12,7 @@
 
 import { Connection, PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
-import { getDLMM } from './utils'
+import { getDLMM } from '../utils'
 import { getConnection } from '@/lib/solana'
 
 /**
