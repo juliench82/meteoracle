@@ -522,6 +522,8 @@ export async function openPosition(
 
     console.log(`${label} [TRACE] [SCAFFOLD-START] Entering scaffold block NOW — next logs will show rent being spent. positionScaffolded will flip to true.`);
     console.log(`${label} [TRACE] [SCAFFOLD-STATE] positionScaffolded=${positionScaffolded} successfullyOpened=${successfullyOpened}`);
+
+    try {
       // =============================================================================
       // REAL SCAFFOLDING (create + initialize) — BEFORE pre-swap and before add pre-sim gate.
       // Per corrected flow: cheap fixed-cost steps first so the position account + discriminator
@@ -912,7 +914,8 @@ export async function openPosition(
         }
       } catch {}
     }
-    // Reclaim on this failure path
+  } finally {
+    // Reclaim + flag clear in finally: covers ALL exits after scaffold (early returns for drift/ATA/pre-swap/direct-fail + fallthrough)
     if (!successfullyOpened) {
       console.log(`${label} [TRACE] [FINALLY-CLOSE] !successfullyOpened — ATTEMPTING rent reclaim close (covers scaffolded or partial-create cases).`);
       if (positionScaffolded && positionKeypair && dlmmPool) {
@@ -951,7 +954,8 @@ export async function openPosition(
     }
     console.log(`${label} [TRACE] [FINALLY-EXIT] leaving finally block`);
     import('../../worker').then((m: any) => m.setOpenInProgress?.(false)).catch(() => {})
-    return null;
+  }
+  return null;
 }
 
 async function validateOpenEligibility(
