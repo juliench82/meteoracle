@@ -1,4 +1,4 @@
-# AGENTS.md - Grok Build (Solo Builder)
+# AGENTS.md
 
 ## Brevity Rule (overrides all else)
 - Default reply: ≤250 words / max 6 lines.  
