@@ -29,6 +29,14 @@ next-env.d.ts
 # docs
 *.md
 
+# Local runtime state — NEVER commit (real local financial data)
+state/
+
+# Published trade-log artifacts — safe to commit (redacted/synthetic only),
+# un-ignored despite the *.md rule above.
+!trades/
+!trades/README.md
+
 # Logs
 logs
 *.log

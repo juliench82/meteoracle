@@ -14,6 +14,7 @@ import { Connection, PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
 import { getDLMM } from '../utils'
 import { getConnection } from '@/lib/solana'
+import { computeBinDeltas } from '@/lib/bin-math'
 
 /**
  * Hard last-moment verification that the chosen discrete bin range has **zero** missing bin arrays.
@@ -110,16 +111,15 @@ export async function checkFullEvilPandaRangeFeasibility(
   const activeBin = await dlmmPool.getActiveBin();
   const activeBinId = activeBin.binId;
   const binStep = dlmmPool.lbPair.binStep;
-  const s = binStep / 10000;
-
-  // Use geometric (log) math to compute exact bin deltas for the target price changes.
-  // Linear (pct / s) overestimates for large % moves because price is multiplicative.
-  // This matches what the Meteora UI uses for -50% / +100% range selector (e.g. 140 bins vs 151 linear).
-  const fullBinsDown = Math.abs(Math.round(Math.log((100 + rangeDownPct) / 100) / Math.log(1 + s)));
-  const fullBinsUp = Math.round(Math.log((100 + rangeUpPct) / 100) / Math.log(1 + s));
-  const fullDesiredMin = activeBinId - fullBinsDown;
-  const fullDesiredMax = activeBinId + fullBinsUp;
-  const fullTotalBins = fullDesiredMax - fullDesiredMin + 1;
+  // Discrete log-math bin deltas — extracted to lib/bin-math.ts (computeBinDeltas,
+  // behavior byte-identical to the historical inline Math.round(log(...)) math).
+  const {
+    fullBinsDown,
+    fullBinsUp,
+    minBinId: fullDesiredMin,
+    maxBinId: fullDesiredMax,
+    totalBins: fullTotalBins,
+  } = computeBinDeltas({ activeBinId, binStep, rangeDownPct, rangeUpPct });
 
   const { getBinArraysRequiredByPositionRange } = await import('@meteora-ag/dlmm');
 

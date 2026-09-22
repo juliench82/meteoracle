@@ -130,6 +130,44 @@ npm run worker         # Run with tsx (dev)
 
 The production entrypoint is `dist/worker.js` (see `ecosystem.config.cjs` for PM2).
 
+## Tests & CI
+
+```bash
+npm ci                 # clean install (runs the dlmm postinstall patch)
+npm run type-check     # TypeScript check (exits 0)
+npm run build          # compile to dist/
+CI=true npm test       # hermetic vitest suite (no env vars, no network, no wallet)
+```
+
+The suite is hermetic by contract: it needs no `.env.local`, no RPC, no wallet,
+and makes no network calls. It covers the Telegram auth allowlist, pool
+ranking/filter math, the atomic state writer, the fee/TVL exit-vs-entry
+invariant, the bin-range log math, and the trade ledger.
+
+GitHub Actions CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm run
+type-check`, `npm run build`, and `npm test` on Node 20 for every push to
+`main` and every pull request — no secrets, no env, no network-dependent step.
+
+## Trade log
+
+Closed positions are appended to a local ledger at `state/trade-log.json`
+(atomic writes, deduped by id, gitignored). Safe, publishable artifacts are
+generated deterministically into `trades/`:
+
+```bash
+npm run trade-log:publish
+```
+
+- `trades/trade-log.json` — real structural fields, monetary fields redacted to
+  `null` + `redacted: true` (empty with a notice until positions close).
+- `trades/trade-log.synthetic.json` — fixed demo fixture (≥30 rows, all exit
+  rules, both modes).
+- `trades/README.md` — schema + redaction policy + regeneration instructions.
+
+The generator is fail-closed: it refuses to write if its own output contains a
+base58 address token or a non-null monetary value. Real (non-redacted) values
+are **never** published without the founder's explicit approval.
+
 ### Project Structure (key paths)
 
 - `worker.ts` — Main entry (scanner + monitor loops)

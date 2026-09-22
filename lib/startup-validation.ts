@@ -2,6 +2,7 @@
 // Does not throw on failure (logs + returns false); heavy calls are best-effort.
 import { getConnection, getWallet } from './solana'
 import { LP_FEE_TVL_EXIT_THRESHOLD, MIN_FEE_TVL_RATIO_24H } from './strategy-config'
+import { checkFeeTvlExitVsEntry } from './config-invariants'
 
 export async function validateStartup(label = 'worker'): Promise<boolean> {
   const logPfx = `[startup][${label}]`
@@ -41,8 +42,9 @@ export async function validateStartup(label = 'worker'): Promise<boolean> {
     }
 
     // Fee/TVL exit vs entry sanity: exit threshold must be *below* entry to avoid open→close churn on fresh positions.
+    // Pure predicate extracted to lib/config-invariants.ts (behavior byte-identical).
     const entryPct = MIN_FEE_TVL_RATIO_24H * 100
-    if (LP_FEE_TVL_EXIT_THRESHOLD >= entryPct) {
+    if (!checkFeeTvlExitVsEntry(LP_FEE_TVL_EXIT_THRESHOLD, entryPct)) {
       console.warn(`${logPfx} !!! CONFIG WARNING: LP_FEE_TVL_EXIT_THRESHOLD (${LP_FEE_TVL_EXIT_THRESHOLD}%) >= MIN_FEE_TVL_RATIO_24H*100 (${entryPct}%) — this mismatch causes immediate open→close churn and fee burn. Set e.g. LP_FEE_TVL_EXIT_THRESHOLD=0.3`)
       ok = false
     } else {

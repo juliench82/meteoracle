@@ -3,8 +3,12 @@
   "version": "0.2.0",
   "description": "Minimal Meteora DLMM LP bot — fully redesigned to latest Claude recs (real /pools fields + derivations only) with 4-rule exits.",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "build": "tsc --project tsconfig.worker.json && tsc-alias -p tsconfig.worker.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "trade-log:publish": "tsx scripts/publish-trade-log.ts",
     "worker": "tsx --tsconfig tsconfig.worker.json worker.ts",
     "worker:build": "tsc --project tsconfig.worker.json",
     "worker:start": "node dist/worker.js",
@@ -35,6 +39,7 @@
     "tsconfig-paths": "^4.2.0"
   },
   "devDependencies": {
+    "vitest": "4.1.11",
     "@types/bn.js": "^5.1.6",
     "@types/node": "^20",
     "tsc-alias": "^1.8.17",

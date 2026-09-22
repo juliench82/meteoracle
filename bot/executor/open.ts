@@ -404,13 +404,9 @@ export async function openPosition(
     // No pre-swap sim/quote/execution inside openPosition anymore.
     console.log(`${label} [TRACE] [PRE-SCAFFOLD] swap handled separately upstream — proceeding to range + scaffold.`);
 
-    const plannedTotalX = solIsTokenX ? new BN(totalSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
-    const plannedTotalY = solIsTokenY ? new BN(totalSolLamports.toString()) : new BN(plannedTokenLamportsForSim.toString());
-
     // Final hard verification right before we pay any position rent.
     // This is the critical "no non-refundable bin arrays" guard.
     console.log(`${label} [TRACE] [FINAL-PRE-RENT-VERIFY] About to assert no new bin arrays ONE FINAL TIME before paying ANY rent.`);
-    console.log(`${label} [TRACE] [FINAL-PRE-RENT-VERIFY] plannedTotalX=${plannedTotalX.toString()} plannedTotalY=${plannedTotalY.toString()}`);
     try {
       const balPreRent = await connection.getBalance(wallet.publicKey);
       console.log(`${label} [TRACE] [BAL-SNAPSHOT] immediately pre-rent wallet SOL=${(balPreRent / 1e9).toFixed(9)}`);

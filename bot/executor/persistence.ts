@@ -12,6 +12,7 @@ import { getOpenLpPositions, withQueuedUpdate } from '@/lib/local-state'
 import * as fs from 'fs'
 import * as path from 'path'
 import { atomicWriteJson } from '@/lib/atomic-write'
+import { appendTradeRecord, buildCloseTradeRecord, type TradeRecord } from '@/lib/trade-ledger'
 
 const ENV_DRY_RUN_FORCED = process.env.BOT_DRY_RUN === 'true'
 
@@ -108,19 +109,29 @@ export async function markPositionClosed(
   claimableFeesUsd: number | null,
   reason: string
 ): Promise<void> {
+  let closedRecord: TradeRecord | null = null
   await withQueuedUpdate((positions) => {
     const idx = positions.findIndex((p: any) => p.id === positionId)
     if (idx !== -1) {
-      positions[idx] = {
-        ...positions[idx],
+      const current = positions[idx]
+      const closed = {
+        ...current,
         status: 'closed',
         closed_at: new Date().toISOString(),
         oor_since_at: null,
         close_reason: reason,
         ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
       }
+      positions[idx] = closed
+      // Single close-persistence choke point: record the CLOSED position in the
+      // append-only trade ledger. Fire-and-forget — the ledger has its own queue
+      // and try/catch, so a ledger failure can never throw into or alter the close path.
+      closedRecord = buildCloseTradeRecord(current, reason, closed.closed_at)
     }
   })
+  if (closedRecord) {
+    void appendTradeRecord(closedRecord)
+  }
 }
 
 export async function markPositionSellFailed(

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "data_policy": {
+    "redaction_policy": "All monetary fields (sol_deposited, net_pnl_pct, last_fee_tvl_4h_avg, fees_sol, il_sol, gas_sol, rent_sol) are emitted as null with a per-row redacted:true flag. Only structural fields (id, symbol, opened_at, closed_at, mode, close_reason) are preserved.",
+    "never_published": [
+      "Wallet private keys or public keys",
+      "Position pubkeys",
+      "Pool addresses",
+      "Token mints (base58 addresses)",
+      "Real SOL amounts",
+      "Real fees / IL / gas / rent",
+      "Real net PnL",
+      "Real names, contact info, Telegram IDs, chat IDs"
+    ],
+    "note": "Synthetic/redacted artifacts only. Publishing real values requires the founder’s explicit approval."
+  },
+  "rows": [],
+  "notice": "state/trade-log.json not found — nothing to redact yet; the ledger starts accruing on the next closed position."
+}
