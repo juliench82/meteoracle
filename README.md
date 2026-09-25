@@ -12,7 +12,7 @@ It is deliberately scoped to **pure DLMM LP operations** on Meteora — no compa
   Server-side list: `sort_by=fee_tvl_ratio_1h:desc&filter_by=tvl>=500 && fee_24h>=5 && fee_tvl_ratio_24h>=0.005 && is_blacklisted=false` (bounded pages)
   Client derives on small result: implied active TVL = `fees_1h * 100 / fee_tvl_ratio_1h` (== the pool's real TVL in true USD; window 505–1,614,888), `fee_1h > (fee_2h / 2)` (accel), age > 2h, fee_tvl_24h >= 0.5%
   lp_count (via positions) only on final ~top-5 survivors
-  Take top performers, deep-check (price dev, Jupiter preflight, rug/holders + strategy filters, dedup, etc.), open the first viable.
+  Take top performers, deep-check (price dev, rug/holders + strategy filters, dedup, etc.), open the first viable.
   Kept improvements: early SOL-paired gate (one-sided strategy), rich per-pool rejection logs, 0-new-bin cost optimization on open, etc.
   Previous "very fresh 15m" / non-existent active_tvl models removed.
 - **4-Rule Exit Engine** (monitor every ~60s):
@@ -223,7 +223,7 @@ are **never** published without the founder's explicit approval.
 
 - `worker.ts` — Main entry (scanner + monitor loops)
 - `bot/scanner/` — Pool fetching, fresh filtering, decision logic
-- `bot/executor/` — Position open/close/add-liquidity (DLMM SDK + Jupiter for token side)
+- `bot/executor/` — Position open/close/add-liquidity (DLMM SDK)
 - `bot/monitor.ts` — 4-rule exit engine
 - `bot/telegram-bot.ts` — Operator interface
 - `lib/local-state.ts` — JSON persistence for LP positions

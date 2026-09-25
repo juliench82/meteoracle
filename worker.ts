@@ -17,9 +17,11 @@ import { retryStrandedSells } from './lib/swap'
 import { getConnection } from './lib/solana'
 import { summarizeError } from './lib/logging'
 import { flushStateWrites } from './lib/local-state'
+import { startStateBackupTimer } from './lib/backup'
 
 const MONITOR_INTERVAL_MS = (parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') || 60) * 1_000
 const SCANNER_INTERVAL_MS = (parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') || 900) * 1_000
+const STATE_BACKUP_INTERVAL_MS = (parseInt(process.env.STATE_BACKUP_INTERVAL_SEC ?? '900') || 900) * 1_000
 
 const BOT_ENABLED = process.env.BOT_ENABLED === 'true'
 const DRY_RUN     = process.env.BOT_DRY_RUN === 'true'
@@ -117,6 +119,9 @@ async function main() {
     if (passed === false) log('startup validation had warnings (see above)')
   })
 
+  // Off-host state/ backup (G5) — guarded internally (no-op under dry-run / unconfigured)
+  stateBackupHandle = startStateBackupTimer(STATE_BACKUP_INTERVAL_MS)
+
   // Run both immediately on startup (serialized)
   inFlightMonitor = true
   inFlightScanner = true
@@ -175,6 +180,7 @@ export function setOpenInProgress(v: boolean) {
 // Stored to allow clean shutdown (clearInterval)
 let monitorIntervalHandle: ReturnType<typeof setInterval> | null = null
 let scannerIntervalHandle: ReturnType<typeof setInterval> | null = null
+let stateBackupHandle: { stop: () => void } | null = null
 
 function gracefulShutdown(signal: string) {
   if (isShuttingDown) return
@@ -206,6 +212,7 @@ function gracefulShutdown(signal: string) {
   // Stop scheduling new ticks
   if (monitorIntervalHandle) { clearTimeout(monitorIntervalHandle as any); monitorIntervalHandle = null }
   if (scannerIntervalHandle) { clearTimeout(scannerIntervalHandle as any); scannerIntervalHandle = null }
+  if (stateBackupHandle) { stateBackupHandle.stop(); stateBackupHandle = null }
 
   // Give in-flight work a chance to complete (longer for opens)
   const waitForOpens = async () => {

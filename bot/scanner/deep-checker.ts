@@ -13,7 +13,7 @@
  *   (plus SOL-paired for this strategy)
  *
  * Expensive only on final ~top-5 survivors: lp_count (via getProgramAccounts / positions)
- * Then full deep gates (price deviation, Jupiter preflight, rug/holders, strategy filter, dedup, slots, etc.)
+ * Then full deep gates (price deviation, rug/holders, strategy filter, dedup, slots, etc.)
  * Score survivors (feeTvl 1h/24h + lpCountNorm) and open highest-scored first.
  * Ranking log now includes raw components (1h, 24h, lpNorm) for observability.
  *
@@ -21,7 +21,7 @@
  * See strategy-config.ts for details — active path uses real API fields + MIN_TVL_USD etc.
  *
  * Kept improvements beyond the minimal spec: rich per-pool rejection logging, early SOL gate,
- * price vs market check, Jupiter route preflight for new Token-2022, full deep quality gates,
+ * price vs market check, full deep quality gates,
  * 0-new-bin-array range optimization on open, etc.
  */
 
@@ -468,7 +468,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   // === Score deep-gate survivors and open in descending score order ===
   // All candidates have now passed (or failed) the full set of deep gates
-  // (SOL-paired, lp_count min, no conflicts, pool-vs-market price dev, Jupiter preflight,
+  // (SOL-paired, lp_count min, no conflicts, pool-vs-market price dev,
   // holders/rug, strategy match, etc.). We score only the survivors and re-sort so the
   // single best composite score always gets the first open slot (and subsequent slots
   // if available), instead of whichever one happened to appear first in the input order.
