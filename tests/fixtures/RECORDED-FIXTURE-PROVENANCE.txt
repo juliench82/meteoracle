@@ -1,0 +1,52 @@
+# tests/fixtures
+
+## `fee-tvl-selected-pools.json`
+
+Recorded live payload slice backing `getFeeTvlPct()` and the
+`LP_FEE_TVL_EXIT_THRESHOLD` derivation (audit finding **H1**).
+
+**Why a recorded fixture?** H1's root cause was an *invented* fixture
+(`fee_tvl_ratio: { '24h': 0.05 }` → expected `5`) that passed CI while
+enshrining a unit the real API never returns. This fixture is **recorded**, not
+authored.
+
+### How it was recorded
+
+- Endpoint: `https://dlmm.datapi.meteora.ag/pools`
+- Query (the activity scanner's own list call, from `bot/scanner/deep-checker.ts`):
+  `sort_by=fee_tvl_ratio_1h:desc`,
+  `filter_by=is_blacklisted=false && tvl>=500 && fee_24h>=5 && fee_tvl_ratio_24h>=0.005`,
+  `page_size=50`
+- Code path: the **real** `fetchMeteoraPools()` → `applyJsPreFilter()` (which is
+  every client-side gate the scanner applies), so the sample is exactly the
+  population the bot would open positions from — 200 raw pools → **22 selected**.
+- Recorder: `scripts/record-fee-tvl-distribution.ts`
+  (`npx tsx --tsconfig tsconfig.worker.json scripts/record-fee-tvl-distribution.ts <out>`).
+- Recorded: 2026-09-25.
+
+### Anonymisation rules
+
+- Pool `address` / `name` and the tradable token's mint/symbol are replaced with
+  `ANON_*` placeholders.
+- **Every numeric field is verbatim** from the API response — the numbers and
+  their relationships are the whole point.
+- The protocol SOL mint is kept: it is a public protocol constant already present
+  in the repo source (`WSOL` in `bot/scanner/pool-fetcher.ts`), not user data.
+- No wallet, key, position or personal data is present (there is none in this
+  endpoint's response).
+
+### Unit proof and derived threshold
+
+For **all 22** pools, `fee_tvl_ratio['24h'] == fees['24h'] / tvl * 100`
+(max abs diff `0.0000000000`) and it differs from the raw `fees['24h'] / tvl` —
+i.e. the API field is **already a percent**.
+
+Distribution of `fee_tvl_ratio['24h']` (percent) over those 22 pools:
+
+```
+min 0.5449   p5 1.0298   p10 5.5389   p25 9.4189   median 18.9664   p75 66.5012   max 354.8405
+```
+
+`LP_FEE_TVL_EXIT_THRESHOLD` default = **5.54** = the **p10** of that distribution.
+The threshold and its rationale are documented in `lib/strategy-config.ts` and
+`README.md`.
