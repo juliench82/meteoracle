@@ -62,6 +62,7 @@ import {
 
 import { getConnection, getWallet, getPriorityFee, getHeliusRpcEndpoint } from '@/lib/solana'
 import { getBotState } from '@/lib/botState'
+import { getPositionSolAmount } from '@/lib/strategy-config'
 import { sendAlert } from '@/bot/alerter'
 import type { Strategy, TokenMetrics } from '@/lib/types'
 import { getWalletTokenBalance } from '@/lib/swap'
@@ -159,10 +160,7 @@ export async function openPosition(
       return existing.id
     }
 
-    const envCap = MARKET_LP_SOL_PER_POSITION
-    const dryRunSolAmount = strategy.position.maxSolPerPosition
-      ? Math.min(strategy.position.maxSolPerPosition, envCap)
-      : envCap
+    const dryRunSolAmount = getPositionSolAmount()
     console.log(`${label} DRY RUN — creating new simulation row for ${metrics.symbol} (first time this tick/scan)`)
     const positionId = await persistPosition(metrics, strategy, 'dry-run-sig', metrics.priceUsd ?? 0, 0, dryRunSolAmount, undefined, 0, DRY_RUN)
     await sendOpenAlert(metrics, strategy, positionId, dryRunSolAmount, 0)
@@ -172,10 +170,7 @@ export async function openPosition(
   const connection = getConnection()
   wallet = getWallet()
 
-  const envCap = MARKET_LP_SOL_PER_POSITION
-  const solAmount = strategy.position.maxSolPerPosition
-    ? Math.min(strategy.position.maxSolPerPosition, envCap)
-    : envCap
+  const solAmount = getPositionSolAmount()
 
     const eligibility = await validateOpenEligibility(label, metrics, strategy, solAmount, connection, wallet);
     if (!eligibility.ok) {
