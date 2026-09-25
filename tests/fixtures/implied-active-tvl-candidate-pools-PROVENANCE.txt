@@ -1,0 +1,94 @@
+tests/fixtures — implied-active-TVL candidate set (audit finding M6 / batch B8)
+================================================================================
+
+File: implied-active-tvl-candidate-pools.json
+Captures: two live capture of the activity scanner's candidate set
+  C1  2026-09-25T11:37:57.266Z   (pre-fix capture: the buggy gate was still live)
+  C2  2026-09-25T11:46:32.850Z   (post-fix capture: verification re-run)
+Endpoint: https://dlmm.datapi.meteora.ag/pools
+Query (the activity scanner's own list call):
+  sort_by=fee_tvl_ratio_1h:desc
+  filter_by=is_blacklisted=false && tvl>=500 && fee_24h>=5 && fee_tvl_ratio_24h>=0.005
+  page_size=50 (4 bounded pages)
+
+HOW IT WAS RECORDED
+-------------------
+Recorder: scripts/record-implied-active-tvl-candidate-set.ts
+  npx tsx --tsconfig tsconfig.worker.json \
+      scripts/record-implied-active-tvl-candidate-set.ts <out>
+
+It records the REAL candidate set via the repo's OWN code path:
+  fetchMeteoraPools()      -> the server list pages, then the bot's own
+                              applyJsPreFilter (so `selected` IS the bot's own
+                              decision), and
+  getCachedMeteoraPools()  -> the module's in-process cache of the SAME
+                              snapshot, i.e. every pool the server list returned
+                              BEFORE the client JS pre-filter.
+Both come from ONE live fetch per capture, so `selected` is an exact subset of
+`pools`. The raw outputs (real names/mints) were written OUTSIDE the repo and
+never committed.
+
+Pool counts:
+  C1: 198 candidate pools,  29 selected, 169 rejected by the JS pre-filter
+  C2: 200 candidate pools,  37 selected, 163 rejected by the JS pre-filter
+  total 398 candidate pools
+
+WHY THE FULL SET (not just the survivors)
+-----------------------------------------
+Finding M6 is about pools being WRONGLY REJECTED by the implied-active-TVL gate,
+so the previously-rejected pools must be in the fixture — otherwise the AC-B8.3
+assertion ("pools previously rejected as 'too active' are no longer rejected")
+would be vacuous.
+
+WHY TWO CAPTURES
+----------------
+The candidate set is the top ~200 pools by 1h fee/TVL, so the size range of the
+candidate set moves between windows: C1 tops out at 339,001.97 USD real TVL, C2
+at 1,614,887.72 USD. A ceiling derived from a single capture would re-introduce
+M6-style false rejections whenever a wider window showed up, so the re-derived
+ceiling uses BOTH. C2 was captured with the fix in place, which is also the
+end-to-end evidence that the corrected funnel selects more pools (37 vs 29 in a
+comparable window) with zero "implied > MAX" rejections.
+
+ANONYMISATION RULES
+-------------------
+- Pool address / name and every NON-protocol token mint+symbol replaced
+  (ANON_POOL_Cn_nnn / TOKEN_Cn_nnn-<QUOTE> / ANON_MINT_Cn_nnn).
+- EVERY numeric field is VERBATIM from the API response — the numbers and their
+  relationships are the whole point (H1's root cause was an INVENTED fixture;
+  never hand-write a value the API returns).
+- Protocol mints (WSOL/USDC/USDT) are kept: public repo constants already in
+  bot/scanner/pool-fetcher.ts.
+- No wallet, key, position or personal data is present (none exists in this
+  endpoint's response).
+
+UNIT FACTS AND DISTRIBUTIONS (verbatim output of the analysis step)
+------------------------------------------------------------------
+Corrected derivation (fees_1h / (fee_tvl_ratio_1h / 100) == fees_1h*100/ratio):
+  matched the API's `tvl` within 1% for 398/398 pools; max abs diff 2.33e-10.
+
+Recorded candidate-set distributions in TRUE USD (corrected implied == real tvl):
+  C1 n=198: min 505.4404  p5 764.3702  p10 1089.2336  p25 2622.1252
+            median 7959.6411  p75 27991.6924  p90 73932.2822  max 339001.9743
+  C2 n=200: min 513.8400  p5 757.1600  p10 990.0100  p25 2548.7000
+            median 8042.5800  p75 28346.2500  p90 73506.5800  max 1614887.7180
+
+Old (buggy) gate: volume_1h / (base_fee_pct/100) — the unit scale of the
+historical 330..750000 window — exceeds 750000 for 40/198 (C1) and 43/200 (C2)
+recorded candidate pools; every one of them was rejected as "too active". The
+audit's worked example (a $15,541 SOL pool yielding 18,976,872 under the old
+formula) is the same failure mode. Their real TVL range under the corrected
+metric: 5025.39 .. 339001.97 (C1) and 4914.99 .. 1614887.72 (C2).
+
+WINDOW RE-DERIVED FROM THIS RECORDING (lib/strategy-config.ts)
+-------------------------------------------------------------
+  MIN_IMPLIED_ACTIVE_TVL = 505      = floor(recorded candidate minimum 505.4404)
+  MAX_IMPLIED_ACTIVE_TVL = 1614888  = ceil(recorded candidate maximum 1614887.7180)
+
+Both are in TRUE USD (the metric IS the pool's real tvl). With the corrected
+metric + this window the gate refuses 0/398 recorded candidate pools, i.e. none
+of the 83 pools the old proxy wrongly rejected as "too active" is rejected again.
+Override via env.
+
+The recorder script is NOT run by CI. The fixture IS read by hermetic unit tests
+(no network, no env).
