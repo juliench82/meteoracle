@@ -90,9 +90,25 @@ export const ACTIVITY_MAX_POOL_AGE_MINUTES = envNumber(
 export const MAX_POOL_AGE_MINUTES = ACTIVITY_MAX_POOL_AGE_MINUTES;
 
 // ── LP Position Exit Rules (ultra-minimal model) ──
-// 48h dry-run starting point (2026-06). Tune after observing real Fee/TVL decay curves + net PnL behavior.
-// Primary signal: pool-level 24h Fee/TVL efficiency sampled over rolling 4h window.
-export const LP_FEE_TVL_EXIT_THRESHOLD = envNumber('LP_FEE_TVL_EXIT_THRESHOLD', 0.75)     // last-4h avg 24h Fee/TVL % below this → exit (e.g. 0.75 = 0.75%)
+// Primary signal: pool-level 24h Fee/TVL efficiency sampled over a rolling 4h window.
+//
+// UNIT: percent, as returned by dlmm.datapi.meteora.ag (`fee_tvl_ratio` is already
+// fees/tvl*100 — see bot/scanner/pool-metrics.ts:getFeeTvlPct and the recorded fixture
+// tests/fixtures/fee-tvl-selected-pools.json).
+//
+// DEFAULT RE-TUNED 2026-09-25 (was 0.75, which had been chosen under the wrong unit and
+// therefore made rule #1 effectively dead — it only fired below 0.0075%). The new default is
+// the 10th percentile (p10) of the recorded live distribution of `fee_tvl_ratio_24h` for the
+// 22 pools the activity scanner actually selected on 2026-09-25 (real code path, anonymised
+// fixture committed at tests/fixtures/fee-tvl-selected-pools.json):
+//   n=22  min 0.5449  p5 1.0298  p10 5.5389  p25 9.4189  median 18.9664  p75 66.5012  max 354.8405
+// Rationale: exit when the position pool's 24h Fee/TVL has decayed into the bottom decile of
+// what the scanner would even consider — a genuine yield collapse, not noise. `p10 = 5.5389`
+// rounded to 5.54. Override with LP_FEE_TVL_EXIT_THRESHOLD.
+// NOTE for the entry-vs-exit invariant (lib/config-invariants.ts): this exit threshold is now
+// ABOVE the historical entry floor (MIN_FEE_TVL_RATIO_24H*100 = 0.5), so the entry floor must
+// be raised above it to keep the pair consistent (batch B5).
+export const LP_FEE_TVL_EXIT_THRESHOLD = envNumber('LP_FEE_TVL_EXIT_THRESHOLD', 5.54)     // last-4h avg 24h Fee/TVL % below this → exit (e.g. 5.54 = 5.54%)
 export const LP_OOR_EXIT_MINUTES       = envNumber('LP_OOR_EXIT_MINUTES', 45)             // minutes out of range before exit
 export const LP_NET_LOSS_SL_PCT        = envNumber('LP_NET_LOSS_SL_PCT', -30)             // net PnL % (price move + all fees) stop-loss
 export const LP_NET_LOSS_SL_MIN_AGE_MIN = envNumber('LP_NET_LOSS_SL_MIN_AGE_MIN', 20)     // minutes position must be open before net-PnL SL can fire
