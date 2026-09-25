@@ -59,25 +59,75 @@ export function getOpenLpPositions(): OpenLpPosition[] {
   }
 }
 
-let writeQueue = Promise.resolve()
+/**
+ * Serialized write queue for open-lp-positions.json.
+ *
+ * INVARIANT (H2): `writeQueue` is ALWAYS a promise that cannot reject.
+ * A failed write must never poison the queue. Every work item is chained on
+ * `writeQueue.catch(() => {})`, so an earlier rejection can never skip a later
+ * call's `.then()` mutator, and the promise stored back is a tail that cannot
+ * reject. (The previous implementation stored the *rejected* promise back into
+ * `writeQueue`, so every later call skipped its `.then()` mutator — the write
+ * was silently lost on a healthy disk — and re-ran the stale `.catch()`,
+ * bumping the failure counter once per subsequent call.)
+ */
+let writeQueue: Promise<void> = Promise.resolve()
 let consecutiveWriteFailures = 0
 
-export function saveOpenLpPositions(positions: OpenLpPosition[]) {
-  // Serialize all writes to prevent lost updates from concurrent forks during awaits
-  writeQueue = writeQueue.then(() => {
-    atomicWriteJson(OPEN_POSITIONS_FILE, positions)
-    consecutiveWriteFailures = 0
-  }).catch(err => {
-    console.error('[local-state] save failed:', err)
-    console.error('[local-state] write failed — possible disk/permissions issue:', err)
-    consecutiveWriteFailures++
-    if (consecutiveWriteFailures >= 3) {
-      console.error('[local-state] 3+ consecutive write failures — pausing bot')
+/**
+ * Account for exactly one genuinely failed write.
+ * Incremented once per failed write (never once per poisoned re-run), reset to
+ * 0 by the next successful write. Three genuinely consecutive failures pause
+ * the bot and alert once.
+ */
+function recordWriteFailure(err: unknown, context: string): void {
+  console.error(`[local-state] ${context} failed:`, err)
+  console.error('[local-state] write failed — possible disk/permissions issue:', err)
+  consecutiveWriteFailures++
+  if (consecutiveWriteFailures >= 3) {
+    console.error('[local-state] 3+ consecutive write failures — pausing bot')
+    try {
       sendAlert({ type: 'error', message: '[local-state] state write failed 3+ times — pausing trading until resolved' }).catch(() => {})
       import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
-      consecutiveWriteFailures = 0 // reset AFTER sendAlert
+    } catch (alertErr) {
+      console.error('[local-state] failed to emit write-failure alert:', alertErr)
     }
-  })
+    consecutiveWriteFailures = 0 // reset AFTER sendAlert
+  }
+}
+
+/**
+ * Run `mutator` inside the serialized write queue.
+ *
+ * - the chain head absorbs any earlier failure, so the mutator ALWAYS runs;
+ * - a successful run resets the consecutive-failure counter;
+ * - a failed run is accounted exactly once and feeds the 3-strike pause;
+ * - the promise stored back into `writeQueue` never rejects;
+ * - the returned promise resolves/rejects with THIS call's own outcome, so
+ *   callers that await it keep getting real signal.
+ */
+function enqueueWrite(mutator: () => void, context: string): Promise<void> {
+  const thisWork = writeQueue
+    .catch(() => {})
+    .then(() => {
+      mutator()
+      consecutiveWriteFailures = 0
+    })
+  // Terminal handler keeps the stored tail non-rejecting (the queue can no longer be poisoned).
+  writeQueue = thisWork.then(
+    () => undefined,
+    (err) => { recordWriteFailure(err, context) }
+  )
+  return thisWork
+}
+
+export function saveOpenLpPositions(positions: OpenLpPosition[]): Promise<void> {
+  // Serialize all writes to prevent lost updates from concurrent forks during awaits.
+  // No void-swallow: the returned promise rejects when THIS write genuinely failed
+  // so callers can observe it, while the shared queue stays healthy.
+  return enqueueWrite(() => {
+    atomicWriteJson(OPEN_POSITIONS_FILE, positions)
+  }, 'save')
 }
 
 export async function flushStateWrites(): Promise<void> {
@@ -90,12 +140,13 @@ export async function flushStateWrites(): Promise<void> {
  * chained through writeQueue to ensure atomicity as a unit (per fix instruction).
  * Always reloads latest list (captures any concurrent adds from scanner) then overlays patches by id.
  * Prevents lost-update races between monitor and stranded-sell recovery etc.
- * Returns a promise that resolves when this update's write has been enqueued and executed.
+ * Returns a promise that resolves when this update's write has been executed and
+ * rejects when this update's write genuinely failed.
  * Callers must await it.
  */
 export async function applyMonitorUpdates(updates: Array<{ id: string; patch: Partial<OpenLpPosition> }>): Promise<void> {
   if (!updates || updates.length === 0) return
-  const thisWork = writeQueue.then(() => {
+  return enqueueWrite(() => {
     const all = getOpenLpPositions()
     let changed = false
     for (const { id, patch } of updates) {
@@ -108,21 +159,7 @@ export async function applyMonitorUpdates(updates: Array<{ id: string; patch: Pa
     if (changed) {
       atomicWriteJson(OPEN_POSITIONS_FILE, all)
     }
-    consecutiveWriteFailures = 0
-  }).catch(err => {
-    console.error('[local-state] applyMonitorUpdates failed:', err)
-    console.error('[local-state] write failed — possible disk/permissions issue:', err)
-    consecutiveWriteFailures++
-    if (consecutiveWriteFailures >= 3) {
-      console.error('[local-state] 3+ consecutive write failures — pausing bot')
-      sendAlert({ type: 'error', message: '[local-state] state write failed 3+ times — pausing trading until resolved' }).catch(() => {})
-      import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
-      consecutiveWriteFailures = 0 // reset AFTER sendAlert
-    }
-    throw err
-  })
-  writeQueue = thisWork
-  return thisWork
+  }, 'applyMonitorUpdates')
 }
 
 /**
@@ -136,23 +173,9 @@ export async function withQueuedUpdate(
   mutator: (positions: OpenLpPosition[]) => void
 ): Promise<void> {
   if (typeof mutator !== 'function') return
-  const thisWork = writeQueue.then(() => {
+  return enqueueWrite(() => {
     const all = getOpenLpPositions()
     mutator(all)
     atomicWriteJson(OPEN_POSITIONS_FILE, all)
-    consecutiveWriteFailures = 0
-  }).catch(err => {
-    console.error('[local-state] withQueuedUpdate failed:', err)
-    console.error('[local-state] write failed — possible disk/permissions issue:', err)
-    consecutiveWriteFailures++
-    if (consecutiveWriteFailures >= 3) {
-      console.error('[local-state] 3+ consecutive write failures — pausing bot')
-      sendAlert({ type: 'error', message: '[local-state] state write failed 3+ times — pausing trading until resolved' }).catch(() => {})
-      import('@/lib/botState').then(m => (m as any).setBotState?.({ paused: true })).catch(() => {})
-      consecutiveWriteFailures = 0 // reset AFTER sendAlert
-    }
-    throw err
-  })
-  writeQueue = thisWork
-  return thisWork
+  }, 'withQueuedUpdate')
 }
