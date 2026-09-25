@@ -14,7 +14,7 @@ export const evilPandaStrategy: Strategy = {
   id: 'evil-panda',
   version: 'v1.3',
   name: 'Evil Panda',
-  description: 'Top-performer SOL-paired DLMM (per revised spec). Server: tvl>=500 && fee_24h>=5 && fee_tvl_ratio_24h>=0.005, sort_by=fee_tvl_ratio_1h:desc (bounded). Client derives on small result: impliedActiveTVL=volume_1h/fee_pct (330-750k), fee_1h>(fee_2h/2), age>2h. LP count (positions) only on ~top-5 survivors. Plus deep gates (price dev, Jupiter, rug/holders) + SOL-paired only. Bid-Ask, 1h hard max.',
+  description: 'Top-performer SOL-paired DLMM (per revised spec). Server: tvl>=500 && fee_24h>=5 && fee_tvl_ratio_24h>=0.005, sort_by=fee_tvl_ratio_1h:desc (bounded). Client derives on small result: impliedActiveTVL=fees_1h/fee_tvl_ratio_1h*100 (the pool\'s real tvl, 505-339002 USD), fee_1h>(fee_2h/2), age>2h. LP count (positions) only on ~top-5 survivors. Plus deep gates (price dev, Jupiter, rug/holders) + SOL-paired only. Bid-Ask, 1h hard max.',
   enabled: true,
   filters: {
     minMcUsd: 0,

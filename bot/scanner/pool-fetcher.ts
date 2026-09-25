@@ -511,20 +511,22 @@ function applyJsPreFilter(allPools: MeteoraPool[], config: PoolFetchConfig): Met
       return false
     }
 
-    // Derived: implied active from volume / fee rate (Claude's key proxy for real earning liquidity)
+    // Derived: implied active TVL = the pool's real tvl, derived from
+    // fees_1h / fee_tvl_ratio_1h * 100 (see getImpliedActiveTvl)
     const implied = getImpliedActiveTvl(pool)
     const vol1h = getPoolVolume(pool, '1h')
     if (implied === 0) {
-      // No usable implied active TVL (either no volume_1h or missing fee_pct in pool_config).
+      // No usable implied active TVL (no fees_1h / fee_tvl_ratio_1h to derive
+      // from AND no API tvl).
       // Dead/ghost pool for current activity; reject even if server had some fee_24h.
       const detail = vol1h > 0
-        ? `(missing fee_pct despite volume_1h=${vol1h.toFixed(2)})`
-        : `(no recent volume_1h or missing fee_pct)`
+        ? `(no 1h fee inputs to derive from and API tvl=0)`
+        : `(no recent volume_1h, no 1h fee inputs, and API tvl=0)`
       console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=0 ${detail}`)
       return false
     }
     if (implied > 0 && implied < MIN_IMPLIED_ACTIVE_TVL) {
-      console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=$${implied.toFixed(0)} < $${MIN_IMPLIED_ACTIVE_TVL} (volume/flow proxy)`)
+      console.log(`[scanner][filter] ${name} REJECT implied_active_tvl=$${implied.toFixed(0)} < $${MIN_IMPLIED_ACTIVE_TVL} (real tvl derived from fees_1h / fee_tvl_ratio_1h)`)
       return false
     }
     if (implied > MAX_IMPLIED_ACTIVE_TVL) {

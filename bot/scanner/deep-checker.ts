@@ -7,7 +7,7 @@
  *        &limit/page_size ~50 (small number of pages for bounded results)
  *
  * Client secondary derives (on the small result set):
- *   impliedActiveTVL = volume_1h / fee_pct   → 330..750000
+ *   impliedActiveTVL = fees_1h / fee_tvl_ratio_1h * 100 (the pool's real tvl)  → 505..339002 USD
  *   feeAccelerating = fee_1h > (fee_2h / 2)
  *   age > 2h (pool_created_at)
  *   (plus SOL-paired for this strategy)
@@ -359,7 +359,7 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
 
   // === Aligned flow (per revised spec: real fields + server sort/filter where supported) ===
   // 1. Cheap targeted list call: server filter_by (tvl + fee_24h + fee_tvl_ratio_24h) + sort_by=fee_tvl_ratio_1h:desc (bounded pages)
-  // 2. Client secondary derives on the (small) result: impliedActiveTVL (volume_1h/fee_pct), fee_1h > fee_2h/2, age>2h
+  // 2. Client secondary derives on the (small) result: impliedActiveTVL (fees_1h / fee_tvl_ratio_1h * 100 == real tvl), fee_1h > fee_2h/2, age>2h
   // 3. LP count (expensive) only on final ~top-5 survivors
   // 4. Deep quality gates on survivors, then score + rank by composite (feeTvl 1h/24h + lpCountNorm) before opening
 
@@ -622,7 +622,7 @@ async function selectEnrichAndPrepareCandidates(
   rawCount: number | undefined
 ): Promise<any[]> {
   // The updated applyJsPreFilter (called inside fetchMeteoraPools) already applied:
-  // server filters + age>2h + implied active (volume/flow) + fee acceleration + SOL
+  // server filters + age>2h + implied active (real tvl) + fee acceleration + SOL
   const { activityPools: qualified } = filterActivityPools(fetchedPools, activityConfig)
 
   console.log(`[scanner] ${qualified.length} pools passed real documented fields + derived proxies (implied_active, fee_accel, age>2h, fee_tvl_24h>=0.5%)`)
