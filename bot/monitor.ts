@@ -36,6 +36,7 @@ import {
   LP_MAX_DURATION_HOURS,
   LP_FEE_TVL_SAMPLE_WINDOW_H,
 } from '@/lib/strategy-config'
+import { evaluateFeeTvlCollapseRule } from '@/lib/fee-tvl-exit-rule'
 
 // Module-level cache for dry-sim token prices (DexScreener) to avoid hammering external APIs
 // on every 60s tick for multiple positions. TTL 60s as per audit.
@@ -207,12 +208,18 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
 
         // Decouple min sample requirement from wall clock: on restart or skipped ticks, pruned list can shrink.
         // Use position age to relax the gate for positions that have had time to accumulate data.
+        // Rule #1 predicate extracted to lib/fee-tvl-exit-rule.ts (pure, unit-tested, behaviour-identical).
         const positionAgeH = openedAt ? (now - new Date(openedAt).getTime()) / 3600000 : 0
-        const minSamplesRequired = positionAgeH > 1 ? 5 : 10
-        if (feeTvl4hAvg != null && feeTvl4hAvg < feeTvlThreshold && (pos.fee_tvl_samples?.length ?? 0) >= minSamplesRequired) {
+        const feeTvlRule = evaluateFeeTvlCollapseRule({
+          feeTvl4hAvg,
+          sampleCount: pos.fee_tvl_samples?.length ?? 0,
+          positionAgeHours: positionAgeH,
+          thresholdPct: feeTvlThreshold,
+        })
+        if (feeTvlRule.fire) {
           // Require >=10 samples (~10 min) for young positions; relax to 5 for older ones.
-          const reason = `fee_tvl_yield_low_4havg_${feeTvl4hAvg.toFixed(2)}pct`
-          console.log(`[monitor] FEE/TVL EXIT → ${pos.symbol} (4h avg ${feeTvl4hAvg.toFixed(2)}% < ${feeTvlThreshold}%, samples=${pos.fee_tvl_samples?.length ?? 0})`)
+          const reason = feeTvlRule.reason as string
+          console.log(`[monitor] FEE/TVL EXIT → ${pos.symbol} (4h avg ${(feeTvl4hAvg as number).toFixed(2)}% < ${feeTvlThreshold}%, samples=${pos.fee_tvl_samples?.length ?? 0})`)
           const ok = await closePosition(pos.id, reason).catch(() => false)
           if (ok) stats.closed++
           continue

@@ -96,9 +96,34 @@ Key environment variables (see `.env.local.example` for full list and comments):
 | `ACTIVITY_MAX_POOL_AGE_MINUTES`| 4320    | broad fetch window |
 
 | `MAX_CONCURRENT_MARKET_LP_POSITIONS` | 5 | Max concurrent LP positions |
-| `LP_FEE_TVL_EXIT_THRESHOLD`    | 0.75    | 4h avg Fee/TVL % below this → exit |
+| `LP_FEE_TVL_EXIT_THRESHOLD`    | 5.54    | 4h avg Fee/TVL % below this → exit (percent, API unit) |
 | `LP_NET_LOSS_SL_PCT`           | -30     | Net PnL stop-loss threshold |
 | `HELIUS_ENABLED`               | false   | Use Helius for holders/rugcheck/bonding curves |
+
+### Fee/TVL unit and the exit-threshold derivation (audit H1)
+
+`dlmm.datapi.meteora.ag` returns `fee_tvl_ratio` **already as a percent** (`fees[window] / tvl * 100`),
+not as a ratio. `getFeeTvlPct()` (`bot/scanner/pool-metrics.ts`) therefore returns the API value
+unchanged. Recorded proof, committed at `tests/fixtures/fee-tvl-selected-pools.json`: for all 22 pools
+the scanner actually selected on 2026-09-25, `fee_tvl_ratio['24h'] == fees['24h'] / tvl * 100`
+(max abs diff `0.0000000000`) and differs from the raw `fees/tvl`.
+
+`LP_FEE_TVL_EXIT_THRESHOLD` was re-tuned from `0.75` (chosen under the wrong unit) to `5.54` — the
+**10th percentile (p10 = 5.5389)** of the live `fee_tvl_ratio_24h` distribution of those 22
+scanner-selected pools:
+
+```
+n=22   min 0.5449   p5 1.0298   p10 5.5389   p25 9.4189   median 18.9664   p75 66.5012   max 354.8405
+```
+
+Rationale: exit rule #1 fires when a held pool's 24h Fee/TVL decays into the bottom decile of what the
+scanner would even consider opening — a genuine yield collapse rather than noise. Percentile, the
+recording query, the real code path used, and the anonymisation rules are recorded in the fixture's
+`provenance` block. Override with `LP_FEE_TVL_EXIT_THRESHOLD` (percent).
+
+Note this exit threshold now sits **above** the historical entry floor (`MIN_FEE_TVL_RATIO_24H * 100`
+= 0.5%), so the entry floor has to be raised to keep the entry-vs-exit invariant
+(`lib/config-invariants.ts`) satisfied.
 
 Runtime state and logs live under `state/`.
 

@@ -6,14 +6,19 @@
  * the suite stays hermetic (no network, no env, no RPC).
  */
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import {
   computePoolScore,
   getFeeTvlPct,
+  getFeeTvlRatio,
   getImpliedActiveTvl,
   getRecentVolumeGrowth,
   isFeeAccelerating,
 } from '@/bot/scanner/pool-metrics'
 import type { MeteoraPool } from '@/bot/scanner/pool-fetcher'
+import { LP_FEE_TVL_EXIT_THRESHOLD } from '@/lib/strategy-config'
 
 type Poolish = Record<string, any>
 
@@ -28,6 +33,29 @@ function makePool(fields: Poolish): MeteoraPool {
     is_blacklisted: false,
     ...fields,
   } as unknown as MeteoraPool
+}
+
+// ── Recorded live fixture (audit H1) ─────────────────────────────────────────
+// Anonymised slice of the pools the activity scanner ACTUALLY selected on
+// 2026-09-25 (real code path: fetchMeteoraPools -> applyJsPreFilter). Every
+// numeric field is verbatim from the API response; only pool names / addresses
+// / tradable mints were replaced. See the fixture's `provenance` block.
+// H1's root cause was an INVENTED fixture (0.05 -> expects 5); never hand-write
+// a value for fee_tvl_ratio — record it.
+const fixtureRaw = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fee-tvl-selected-pools.json'),
+  'utf8',
+)
+const recorded = JSON.parse(fixtureRaw) as { pools: Poolish[] }
+const recordedPools = recorded.pools as unknown as MeteoraPool[]
+
+/** Linear-interpolation percentile (same definition as in the README derivation). */
+function percentile(sortedAsc: number[], q: number): number {
+  const k = (sortedAsc.length - 1) * q
+  const lo = Math.floor(k)
+  const hi = Math.ceil(k)
+  if (lo === hi) return sortedAsc[lo]
+  return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * (k - lo)
 }
 
 describe('getImpliedActiveTvl', () => {
@@ -68,10 +96,58 @@ describe('isFeeAccelerating', () => {
   })
 })
 
-describe('getFeeTvlPct', () => {
-  it('returns the fee/tvl ratio expressed as a percentage', () => {
-    const pool = makePool({ fee_tvl_ratio: { '24h': 0.05 } })
-    expect(getFeeTvlPct(pool, '24h')).toBeCloseTo(5, 10)
+describe('getFeeTvlPct — recorded live payloads (AC-B4.1 / AC-B4.2 / AC-B4.4)', () => {
+  it('AC-B4.1: returns the API fee_tvl_ratio["24h"] verbatim, for every recorded scanner-selected pool', () => {
+    expect(recordedPools.length).toBeGreaterThanOrEqual(20)
+    for (const pool of recordedPools) {
+      const apiPct = Number(pool.fee_tvl_ratio!['24h'])
+      expect(apiPct).toBeGreaterThan(0)
+      expect(getFeeTvlPct(pool, '24h')).toBe(apiPct)
+    }
+  })
+
+  it('AC-B4.1: the recorded API field IS fees_24h / tvl * 100 (a percent), and is NOT fees_24h / tvl', () => {
+    for (const pool of recordedPools) {
+      const fees24 = Number(pool.fees!['24h'])
+      const tvl = Number(pool.tvl)
+      const pct = getFeeTvlPct(pool, '24h')
+      expect(pct).toBeCloseTo((fees24 / tvl) * 100, 6)
+      // If the API returned a raw ratio, dividing by tvl would reproduce it. It does not.
+      expect(Math.abs(pct - fees24 / tvl)).toBeGreaterThan(0.1)
+    }
+  })
+
+  it('AC-B4.1/AC-B4.2: is NOT getFeeTvlRatio * 100 — the ×100 contract is gone', () => {
+    for (const pool of recordedPools) {
+      const rawRatio = getFeeTvlRatio(pool, '24h')
+      expect(getFeeTvlPct(pool, '24h')).toBe(rawRatio)
+      expect(getFeeTvlPct(pool, '24h')).not.toBeCloseTo(rawRatio * 100, 6)
+    }
+  })
+
+  it('AC-B4.1: other windows too (1h) — pure passthrough', () => {
+    for (const pool of recordedPools) {
+      const apiPct = Number(pool.fee_tvl_ratio!['1h'])
+      expect(apiPct).toBeGreaterThan(0)
+      expect(getFeeTvlPct(pool, '1h')).toBe(apiPct)
+    }
+  })
+
+  it('AC-B4.4: the shipped LP_FEE_TVL_EXIT_THRESHOLD is the p10 of this recorded distribution', () => {
+    const values = recordedPools.map((p) => getFeeTvlPct(p, '24h')).sort((a, b) => a - b)
+    const p10 = percentile(values, 0.1)
+    // Documented in README + lib/strategy-config.ts: p10 = 5.5389 -> default 5.54
+    expect(p10).toBeCloseTo(5.5389, 3)
+    expect(LP_FEE_TVL_EXIT_THRESHOLD).toBeCloseTo(Math.round(p10 * 100) / 100, 10)
+    expect(values.length).toBeGreaterThanOrEqual(20)
+  })
+
+  it('AC-B4.2: no test asserts the old invented 0.05 -> 5 fixture', () => {
+    // The recorded payload never contains 0.05 for fee_tvl_ratio['24h']; guard against
+    // re-introducing the invented value that locked the bug.
+    for (const pool of recordedPools) {
+      expect(Number(pool.fee_tvl_ratio!['24h'])).not.toBe(0.05)
+    }
   })
 })
 

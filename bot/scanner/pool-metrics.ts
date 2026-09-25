@@ -58,8 +58,23 @@ export function getFeeTvlRatio(pool: MeteoraPool, window: string): number {
   return 0;
 }
 
+/**
+ * 24h/1h/… Fee/TVL ratio for a pool, ALREADY expressed as a percentage.
+ *
+ * `dlmm.datapi.meteora.ag` returns `fee_tvl_ratio` as a PERCENT — it is
+ * `fees[window] / tvl * 100`, not `fees[window] / tvl`. Proof (recorded live,
+ * 2026-09-25, 22/22 pools the scanner actually selected, committed as
+ * `tests/fixtures/fee-tvl-selected-pools.json`): for every pool
+ * `fee_tvl_ratio['24h'] == fees['24h'] / tvl * 100` to 10 decimal places,
+ * and it differs from the raw `fees/tvl` ratio. Same finding as audit §H1
+ * (8/8 live pools).
+ *
+ * Do NOT multiply by 100 here — that was the H1 defect (units wrong by 100×),
+ * which made the primary exit rule (bot/monitor.ts rule #1) compare a value
+ * 100× too large against the exit threshold and therefore never fire.
+ */
 export function getFeeTvlPct(pool: MeteoraPool, window: string): number {
-  return getFeeTvlRatio(pool, window) * 100;
+  return getFeeTvlRatio(pool, window);
 }
 
 export function getVolumeTvlRatio(pool: MeteoraPool, window: string): number {
