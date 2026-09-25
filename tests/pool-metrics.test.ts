@@ -58,19 +58,48 @@ function percentile(sortedAsc: number[], q: number): number {
   return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * (k - lo)
 }
 
-describe('getImpliedActiveTvl', () => {
-  it('derives volume_1h / (base_fee_pct / 100)', () => {
-    const pool = makePool({
-      volume: { '1h': 120 },
-      pool_config: { base_fee_pct: 0.3 },
-    })
-    expect(getImpliedActiveTvl(pool)).toBeCloseTo(40000, 5) // 120 / 0.003
+describe('getImpliedActiveTvl (audit M6: the pool\'s real tvl, not a fee-tier proxy)', () => {
+  it('derives fees_1h / (fee_tvl_ratio_1h / 100), i.e. the pool\'s real tvl', () => {
+    // fee_tvl_ratio_1h is ALREADY a percent (fees_1h/tvl*100), so the derivation
+    // reproduces tvl: 3495 * 100 / 22.49 = 15540.24...
+    const pool = makePool({ tvl: 15541, fees: { '1h': 3495 }, fee_tvl_ratio: { '1h': 22.49 } })
+    expect(getImpliedActiveTvl(pool)).toBeCloseTo(15540.24, 2)
   })
 
-  it('returns 0 when volume or fee rate is missing/zero', () => {
-    expect(getImpliedActiveTvl(makePool({ volume: { '1h': 120 } }))).toBe(0) // no fee_pct
-    expect(getImpliedActiveTvl(makePool({ pool_config: { base_fee_pct: 1 } }))).toBe(0) // no vol
-    expect(getImpliedActiveTvl(makePool({ volume: { '1h': 0 }, pool_config: { base_fee_pct: 1 } }))).toBe(0)
+  it('is NOT the old volume_1h / base_fee_pct proxy (the M6 defect)', () => {
+    // Audit §M6 worked example (⠁⠏⠑-SOL): tvl $15,541, base_fee_pct 1,
+    // volume_1h 189,768.72 -> the OLD formula produced 18,976,872 (~1000x off)
+    // and the pool was rejected as "too active". The corrected derivation must
+    // yield the real tvl instead.
+    const pool = makePool({
+      tvl: 15541,
+      pool_config: { base_fee_pct: 1 },
+      volume: { '1h': 189768.72 },
+      fees: { '1h': 3495 },
+      fee_tvl_ratio: { '1h': 22.49 },
+    })
+    const implied = getImpliedActiveTvl(pool)
+    expect(implied).toBeCloseTo(15540.24, 2) // the real tvl, not 18.9M
+    expect(implied).toBeLessThan(20000)
+  })
+
+  it('falls back to the API tvl when the derivation is unavailable', () => {
+    expect(getImpliedActiveTvl(makePool({ tvl: 1234 }))).toBe(1234) // nothing to derive from
+    expect(getImpliedActiveTvl(makePool({ tvl: 1234, fees: { '1h': 10 } }))).toBe(1234) // no ratio
+    expect(getImpliedActiveTvl(makePool({ tvl: 1234, fee_tvl_ratio: { '1h': 1 } }))).toBe(1234) // no fees
+    expect(
+      getImpliedActiveTvl(makePool({ tvl: 1234, fees: { '1h': 10 }, fee_tvl_ratio: { '1h': 0 } })),
+    ).toBe(1234) // zero ratio
+  })
+
+  it('falls back to the API tvl when the derivation disagrees beyond tolerance', () => {
+    // fees_1h/tvl*100 would be 1.00, but the payload says 90 -> inconsistent.
+    const pool = makePool({ tvl: 1000, fees: { '1h': 10 }, fee_tvl_ratio: { '1h': 90 } })
+    expect(getImpliedActiveTvl(pool)).toBe(1000)
+  })
+
+  it('returns 0 for a ghost pool with no fee inputs and no tvl', () => {
+    expect(getImpliedActiveTvl(makePool({}))).toBe(0)
   })
 })
 

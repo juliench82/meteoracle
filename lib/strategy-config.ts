@@ -84,9 +84,38 @@ export const MIN_FEE_TVL_RATIO_24H = envNumber('MIN_FEE_TVL_RATIO_24H', 0.005) /
 // Client-side (in applyJsPreFilter) after the server list + sort_by=fee_tvl_ratio_1h:desc
 export const MIN_POOL_AGE_HOURS = envNumber('MIN_POOL_AGE_HOURS', 2)
 
-// Derived proxies (client, on the small result set from the yield-sorted list)
-export const MIN_IMPLIED_ACTIVE_TVL = envNumber('MIN_IMPLIED_ACTIVE_TVL', 330) // volume_1h / fee_pct
-export const MAX_IMPLIED_ACTIVE_TVL = envNumber('MAX_IMPLIED_ACTIVE_TVL', 750000)
+// Derived proxies (client, on the small result set from the yield-sorted list).
+//
+// IMPLIED ACTIVE TVL is now the pool's REAL tvl in true USD, not a fee-tier
+// proxy: bot/scanner/pool-metrics.ts:getImpliedActiveTvl derives it as
+//   fees_1h / (fee_tvl_ratio_1h / 100)  ==  fees_1h * 100 / fee_tvl_ratio_1h
+// which reproduces the API's own `tvl` exactly (398/398 recorded candidate
+// pools over two live captures, max abs diff 2.3e-10).
+//
+// WINDOW RE-DERIVED 2026-09-25 (was 330 / 750000 — the unit scale of the old
+// `volume_1h / base_fee_pct` proxy, which was ~1000x off live and wrongly
+// rejected candidate pools as "too active": 40/198 and 43/200 on the two
+// recorded captures — audit finding M6).
+// Source: the recorded live distributions of the CANDIDATE SET (every pool the
+// server list call returned, before the client JS pre-filter), anonymised
+// fixture committed at tests/fixtures/implied-active-tvl-candidate-pools.json
+// (n=398, two captures, true USD):
+//   C1 n=198: min 505.44  p10 1089.23  median 7959.64  p90 73932.28  max 339001.97
+//   C2 n=200: min 513.84  p10  990.01  median 8042.58  p90 73506.58  max 1614887.72
+// MIN = floor of the recorded candidate minimum (505.44 -> 505): below the
+//   smallest real earning liquidity the scanner ever considered; it can only
+//   refuse pools the server-side tvl>=500 filter would already have excluded.
+// MAX = ceil of the recorded candidate maximum ACROSS BOTH CAPTURES
+//   (1614887.718 -> 1614888): the ceiling is deliberately taken from the widest
+//   recorded window, because the candidate set is the top ~200 pools by 1h
+//   fee/TVL and its size range moves between windows — a ceiling derived from
+//   one capture would re-introduce M6's false rejections in a wider one. With
+//   the corrected metric the gate now refuses 0/398 recorded candidate pools,
+//   so no pool the old proxy wrongly rejected as "too active" is rejected again.
+//   It remains a pure sanity ceiling (env-overridable), not a size preference:
+//   the scanner's size knobs are MIN_TVL_USD / maxLiquidityUsd.
+export const MIN_IMPLIED_ACTIVE_TVL = envNumber('MIN_IMPLIED_ACTIVE_TVL', 505) // true USD (real tvl)
+export const MAX_IMPLIED_ACTIVE_TVL = envNumber('MAX_IMPLIED_ACTIVE_TVL', 1614888) // true USD (real tvl)
 
 // LP count (expensive, via getProgramAccounts on survivors only)
 export const MIN_LP_COUNT = envNumber('MIN_LP_COUNT', 3)
