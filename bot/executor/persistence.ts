@@ -118,7 +118,7 @@ export async function markPositionClosed(
         ...current,
         status: 'closed',
         closed_at: new Date().toISOString(),
-        oor_since_at: null,
+        oor_since: null,
         close_reason: reason,
         ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
       }
@@ -146,7 +146,7 @@ export async function markPositionSellFailed(
         ...positions[idx],
         status: 'sell_failed',
         closed_at: new Date().toISOString(),
-        oor_since_at: null,
+        oor_since: null,
         close_reason: reason,
         ...(claimableFeesUsd !== null ? { claimable_fees_usd: Math.round(claimableFeesUsd * 100) / 100 } : {}),
         sell_failed_at: new Date().toISOString(),

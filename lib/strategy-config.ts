@@ -30,6 +30,18 @@ export const EVIL_PANDA_MIN_LIQUIDITY_USD = envNumber('EVIL_PANDA_MIN_LIQUIDITY_
 // Single preferred env var per setting. Legacy names (MARKET_*, MAX_*) removed.
 export const MARKET_LP_SOL_PER_POSITION = envNumber('MAX_MARKET_LP_SOL_PER_POSITION', 0.1)
 
+/**
+ * Effective SOL deployed per LP position — the single source of truth for position sizing.
+ *
+ * Always `MARKET_LP_SOL_PER_POSITION`. The former per-strategy override
+ * (`strategy.position.maxSolPerPosition`) was dead: strategies/evil-panda.ts never set it,
+ * so it was always `undefined` and always fell through to this cap. The branch (and the
+ * field) were removed in M5 — this helper is behaviour-identical and testable in isolation.
+ */
+export function getPositionSolAmount(): number {
+  return MARKET_LP_SOL_PER_POSITION
+}
+
 export const MAX_CONCURRENT_MARKET_LP_POSITIONS = envNumber('MAX_CONCURRENT_MARKET_LP_POSITIONS', 5) as number
 
 export const MAX_MARKET_LP_SOL_DEPLOYED = envNumber('MAX_MARKET_LP_SOL_DEPLOYED', 1)

@@ -12,6 +12,7 @@ import { getConnection, getWallet, getPriorityFee } from '@/lib/solana'
 // Jupiter swap removed - using direct Meteora DLMM swap for sell too
 import { sendAlert } from '@/bot/alerter'
 import { getOpenLpPositions } from '@/lib/local-state'
+import { isCloseInProgressFresh, getCloseInProgressStaleMs } from '@/lib/close-guard'
 import { logWarn, logInfo } from '@/lib/log'
 import { resolveSolPriceUsd } from '@/lib/sol-price'
 
@@ -100,8 +101,28 @@ export async function closePosition(
   const connection = getConnection()
   const wallet = getWallet()
 
-  // Persist flag before tx for restart safety (in-memory mutex not enough across PM2 restart)
-  await applyMonitorUpdates([{ id: positionId, patch: { close_in_progress: true as any } }])
+  // M4: honour the persisted close-in-progress marker across process restarts.
+  // The in-memory mutex above cannot survive a PM2 restart; the marker can.
+  // Re-read the LIVE position first — another process may have set the marker since
+  // this function entered. A fresh marker means a close is already in flight elsewhere,
+  // so skip without touching the chain.
+  const livePosition = (getOpenLpPositions() as any[]).find((p: any) => p.id === positionId) ?? position
+  const staleMs = getCloseInProgressStaleMs()
+  if (isCloseInProgressFresh(livePosition, Date.now(), staleMs)) {
+    console.warn(`${label} close already in progress (close_in_progress_at=${livePosition.close_in_progress_at}) — skipping duplicate close`)
+    logWarn('legacy_bot_log', {
+      level: 'warn',
+      event: 'close_position_skipped_in_progress',
+      payload: { positionId, reason, close_in_progress_at: livePosition.close_in_progress_at },
+    })
+    closingInProgress.delete(positionId)
+    return false
+  }
+
+  // Persist a timestamp marker before the tx for restart safety (in-memory mutex is not
+  // enough across a PM2 restart). Cleared in the finally path below on BOTH success and
+  // failure; a crashed close is un-wedged by the CLOSE_IN_PROGRESS_STALE_MIN window.
+  await applyMonitorUpdates([{ id: positionId, patch: { close_in_progress_at: new Date().toISOString() as any } }])
 
   try {
     const DLMM = await getDLMM()
@@ -291,10 +312,13 @@ export async function closePosition(
       level: 'error', event: 'close_position_failed',
       payload: { positionId, reason, error: message },
     })
-    // Clear persisted flag on failure so monitor can retry later
-    await applyMonitorUpdates([{ id: positionId, patch: { close_in_progress: false as any } }])
+    // The persisted close_in_progress_at marker is cleared in the finally block below
+    // (both success and failure) so the monitor can retry later.
     return false
   } finally {
+    // M4: clear the persisted close-in-progress marker on BOTH success and failure.
+    // Best-effort — marker cleanup must never throw out of the close path.
+    await applyMonitorUpdates([{ id: positionId, patch: { close_in_progress_at: null as any } }]).catch(() => {})
     closingInProgress.delete(positionId)
   }
 }
