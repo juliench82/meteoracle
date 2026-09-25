@@ -10,46 +10,6 @@ export type PositionStatus =
   | 'orphaned'
   | 'sell_failed'
 
-export interface Position {
-  id: string
-  tokenSymbol: string
-  tokenAddress: string
-  poolAddress: string
-  strategyId: string
-  binRangeLower: number
-  binRangeUpper: number
-  entryPrice: number
-  currentPrice?: number
-  solDeposited: number
-  /** Claimable fees in USD — live from Meteora API, mirrors Meteora UI. */
-  claimableFeesUsd?: number
-  /** Current position value in USD — live from Meteora API (token amounts × price). */
-  positionValueUsd?: number
-  /** Realised PnL in USD — snapshot captured from Meteora at close time only. */
-  realizedPnlUsd?: number
-  /** PnL as a percentage — written by monitor on every tick, drives SL/TP logic. */
-  pnlPct?: number
-  status: PositionStatus
-  inRange: boolean
-  openedAt: string
-  closedAt?: string
-  metadata?: Record<string, unknown>
-}
-
-export interface Candidate {
-  id: string
-  tokenAddress: string
-  symbol: string
-  score: number
-  strategyMatched: string
-  mcAtScan: number
-  volume24h: number
-  holderCount: number
-  rugcheckScore?: number
-  topHolderPct?: number
-  scannedAt: string
-}
-
 export interface TokenMetrics {
   address: string
   symbol: string
@@ -125,7 +85,6 @@ export interface PositionConfig {
   rangeUpPct: number
   distributionType: 'spot' | 'curve' | 'bid-ask'
   solBias: number
-  maxSolPerPosition?: number
 }
 
 export interface ExitRules {
@@ -156,14 +115,6 @@ export interface Strategy {
   position: PositionConfig
   exits: ExitRules
   enabled: boolean
-}
-
-export interface BotLog {
-  id: string
-  level: 'info' | 'warn' | 'error'
-  event: string
-  payload?: Record<string, unknown>
-  createdAt: string
 }
 
 export interface DexScreenerPair {
