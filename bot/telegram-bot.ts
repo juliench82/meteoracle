@@ -12,6 +12,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import { getBotState, setBotState } from '@/lib/botState'
+import { handleStartCommand, handleLiveCommand } from '@/bot/command-handlers'
 import { closePosition } from '@/bot/executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
@@ -98,14 +99,19 @@ async function handleUpdate(update: any) {
     return
   }
 
+  // Command-handler logic lives in bot/command-handlers.ts (unit-tested with a
+  // mocked send). Build the deps from the network layer here.
+  function commandDeps(chatId: string | number | undefined) {
+    return {
+      send: (text: string) => sendMessage(text, chatId === undefined ? undefined : String(chatId)),
+      getBotState,
+      setBotState,
+      env: process.env,
+    }
+  }
+
   if (cmd === '/start') {
-    await setBotState({ enabled: true, paused: false })
-    await sendMessage(
-      'Bot enabled (soft start).\n' +
-      'It will pick up work on the next scheduled tick (within ~60s).\n' +
-      'Use /tick to force an immediate cycle.',
-      chatId
-    )
+    await handleStartCommand(commandDeps(chatId))
     return
   }
 
@@ -179,8 +185,7 @@ async function handleUpdate(update: any) {
   }
 
   if (cmd === '/live') {
-    await setBotState({ dry_run: false })
-    await sendMessage('Live mode enabled (real money).', chatId)
+    await handleLiveCommand(commandDeps(chatId))
     return
   }
 
