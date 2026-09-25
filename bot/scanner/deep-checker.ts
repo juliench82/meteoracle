@@ -7,7 +7,7 @@
  *        &limit/page_size ~50 (small number of pages for bounded results)
  *
  * Client secondary derives (on the small result set):
- *   impliedActiveTVL = fees_1h / fee_tvl_ratio_1h * 100 (the pool's real tvl)  → 505..339002 USD
+ *   impliedActiveTVL = fees_1h / fee_tvl_ratio_1h * 100 (the pool's real tvl)  → 505..1,614,888 USD
  *   feeAccelerating = fee_1h > (fee_2h / 2)
  *   age > 2h (pool_created_at)
  *   (plus SOL-paired for this strategy)
