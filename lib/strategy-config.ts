@@ -153,6 +153,7 @@ export const LP_FEE_TVL_EXIT_THRESHOLD = envNumber('LP_FEE_TVL_EXIT_THRESHOLD', 
 export const LP_OOR_EXIT_MINUTES       = envNumber('LP_OOR_EXIT_MINUTES', 45)             // minutes out of range before exit
 export const LP_NET_LOSS_SL_PCT        = envNumber('LP_NET_LOSS_SL_PCT', -30)             // net PnL % (price move + all fees) stop-loss
 export const LP_NET_LOSS_SL_MIN_AGE_MIN = envNumber('LP_NET_LOSS_SL_MIN_AGE_MIN', 20)     // minutes position must be open before net-PnL SL can fire
+export const LP_NET_LOSS_SL_INTERIM_PCT  = envNumber('LP_NET_LOSS_SL_INTERIM_PCT', -15)    // tighter net-PnL SL active DURING the warm-up grace (before MIN_AGE_MIN); prevents >50% loss before the regular -30% SL may fire
 export const LP_MAX_DURATION_HOURS     = envNumber('LP_MAX_DURATION_HOURS', 1)           // hard safety cap regardless of other signals (1h for fresh volatile memes — out after 60m max, other exit rules can fire earlier)
 export const LP_FEE_TVL_SAMPLE_WINDOW_H = envNumber('LP_FEE_TVL_SAMPLE_WINDOW_H', 4)      // rolling window for avg calculation (hours)
 

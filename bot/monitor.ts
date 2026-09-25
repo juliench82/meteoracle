@@ -33,10 +33,12 @@ import {
   LP_OOR_EXIT_MINUTES,
   LP_NET_LOSS_SL_PCT,
   LP_NET_LOSS_SL_MIN_AGE_MIN,
+  LP_NET_LOSS_SL_INTERIM_PCT,
   LP_MAX_DURATION_HOURS,
   LP_FEE_TVL_SAMPLE_WINDOW_H,
 } from '@/lib/strategy-config'
 import { evaluateFeeTvlCollapseRule } from '@/lib/fee-tvl-exit-rule'
+import { evaluateNetPnLStopLoss } from '@/lib/stop-loss-rule'
 
 // Module-level cache for dry-sim token prices (DexScreener) to avoid hammering external APIs
 // on every 60s tick for multiple positions. TTL 60s as per audit.
@@ -314,25 +316,34 @@ async function runTick(): Promise<{ checked: number; closed: number }> {
           }
         }
 
-        // ── 3. Net PnL stop-loss (price move + fees, after grace) ─────────────────
-        // Only for real on-chain positions
+        // ── 3. Net PnL stop-loss (price move + fees) ──────────────────────────────
+        // Only for real on-chain positions. A tighter interim SL (LP_NET_LOSS_SL_INTERIM_PCT,
+        // default -15%) is active during the Fee/TVL warm-up grace window (before
+        // LP_NET_LOSS_SL_MIN_AGE_MIN), so a position can't lose >50% before the regular
+        // -30% SL may fire. Fee/TVL warm-up rule (rule #1, monitor.ts:207-235) untouched.
         if (!isDrySim) {
           if (openedAt) {
             const ageMin = (now - new Date(openedAt).getTime()) / 1000 / 60
-            if (ageMin >= netLossGraceMin) {
-              const netPnl = computeNetPnlApprox(pos, onChainPos, activeBin, dlmmPool)
-              if (netPnl != null) {
-                pos.last_net_pnl_pct = Math.round(netPnl * 100) / 100
-                monitorPatches.push({ id: pos.id, patch: { last_net_pnl_pct: pos.last_net_pnl_pct } })
-                positionsMutated = true
+            const netPnl = computeNetPnlApprox(pos, onChainPos, activeBin, dlmmPool)
+            if (netPnl != null) {
+              pos.last_net_pnl_pct = Math.round(netPnl * 100) / 100
+              monitorPatches.push({ id: pos.id, patch: { last_net_pnl_pct: pos.last_net_pnl_pct } })
+              positionsMutated = true
 
-                if (netPnl <= netLossThreshold) {
-                  const reason = `net_pnl_sl_${netPnl.toFixed(1)}pct`
-                  console.log(`[monitor] NET PNL SL EXIT → ${pos.symbol} (net ${netPnl.toFixed(1)}% <= ${netLossThreshold}% after ${Math.round(ageMin)}m grace)`)
-                  const ok = await closePosition(pos.id, reason).catch(() => false)
-                  if (ok) stats.closed++
-                  continue
-                }
+              const sl = evaluateNetPnLStopLoss({
+                ageMin,
+                netPnl,
+                graceMin: netLossGraceMin,
+                interimPct: LP_NET_LOSS_SL_INTERIM_PCT,
+                regularPct: netLossThreshold,
+              })
+              if (sl.fire) {
+                const thresholdPct = sl.rule === 'interim' ? LP_NET_LOSS_SL_INTERIM_PCT : netLossThreshold
+                const reason = sl.reason ?? `net_pnl_sl_${netPnl.toFixed(1)}pct`
+                console.log(`[monitor] NET PNL SL EXIT (${sl.rule}) → ${pos.symbol} (net ${netPnl.toFixed(1)}% <= ${thresholdPct}% after ${Math.round(ageMin)}m grace)`)
+                const ok = await closePosition(pos.id, reason).catch(() => false)
+                if (ok) stats.closed++
+                continue
               }
             }
           }
