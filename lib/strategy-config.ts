@@ -67,7 +67,26 @@ export const MAX_FRESH_DEEP_CHECKS = envNumber('MAX_FRESH_DEEP_CHECKS', 12)
 //   tvl >= MIN_TVL_USD && fee_24h >= MIN_FEE_24H && fee_tvl_ratio_24h >= MIN_FEE_TVL_RATIO_24H
 export const MIN_TVL_USD = envNumber('MIN_TVL_USD', 500)
 export const MIN_FEE_24H = envNumber('MIN_FEE_24H', 5)
-export const MIN_FEE_TVL_RATIO_24H = envNumber('MIN_FEE_TVL_RATIO_24H', 0.005) // 0.5%
+// ENTRY FLOOR — RAISED 2026-09-25 (batch B5) from 0.005 (0.5%) to 0.0942 (9.42%).
+//
+// This is the entry leg of the exit-vs-entry config invariant enforced by
+// lib/config-invariants.ts:checkFeeTvlExitVsEntry(exitPct, entryPct) === true, i.e. exit < entry
+// (checked at startup by lib/startup-validation.ts; a mismatch is the documented open→close churn
+// / fee-burn case). Batch B4 re-tuned the EXIT threshold to 5.54% (p10 of the recorded distribution
+// — see the LP_FEE_TVL_EXIT_THRESHOLD comment below). The historical 0.5% entry floor sat BELOW that
+// exit threshold, so a freshly opened position already satisfied its own exit condition.
+//
+// Chosen value: 9.42% = the p25 (9.4189, rounded to 9.42) of the SAME recorded distribution
+// (tests/fixtures/fee-tvl-selected-pools.json, n=22, scanner-selected pools, 2026-09-25). The pair is
+// therefore decided once, from one dataset, as a documented hysteresis band:
+//   entry floor 9.42% (p25)  >  exit threshold 5.54% (p10)
+// The bot only opens pools in the top three quarters of what the scanner selects, and only exits once
+// a held pool's 24h Fee/TVL decays into the bottom decile. Recorded distribution:
+//   n=22  min 0.5449  p5 1.0298  p10 5.5389  p25 9.4189  median 18.9664  p75 66.5012  max 354.8405
+//
+// Invariant: MIN_FEE_TVL_RATIO_24H * 100 must stay STRICTLY ABOVE LP_FEE_TVL_EXIT_THRESHOLD.
+// Override with MIN_FEE_TVL_RATIO_24H (ratio units, e.g. 0.0942 = 9.42%).
+export const MIN_FEE_TVL_RATIO_24H = envNumber('MIN_FEE_TVL_RATIO_24H', 0.0942) // 9.42% — entry floor (p25); must stay above LP_FEE_TVL_EXIT_THRESHOLD
 
 // Client-side (in applyJsPreFilter) after the server list + sort_by=fee_tvl_ratio_1h:desc
 export const MIN_POOL_AGE_HOURS = envNumber('MIN_POOL_AGE_HOURS', 2)
@@ -105,9 +124,11 @@ export const MAX_POOL_AGE_MINUTES = ACTIVITY_MAX_POOL_AGE_MINUTES;
 // Rationale: exit when the position pool's 24h Fee/TVL has decayed into the bottom decile of
 // what the scanner would even consider — a genuine yield collapse, not noise. `p10 = 5.5389`
 // rounded to 5.54. Override with LP_FEE_TVL_EXIT_THRESHOLD.
-// NOTE for the entry-vs-exit invariant (lib/config-invariants.ts): this exit threshold is now
-// ABOVE the historical entry floor (MIN_FEE_TVL_RATIO_24H*100 = 0.5), so the entry floor must
-// be raised above it to keep the pair consistent (batch B5).
+// SHIPPED PAIR (batch B5, decided together from the SAME recorded distribution above):
+//   exit  LP_FEE_TVL_EXIT_THRESHOLD       = 5.54%  (p10)
+//   entry MIN_FEE_TVL_RATIO_24H * 100     = 9.42%  (p25, see its comment above)
+// so checkFeeTvlExitVsEntry(5.54, 9.42) === true (exit < entry). Changing either value alone must
+// keep exit < entry, otherwise lib/startup-validation.ts warns and the open gate fails closed.
 export const LP_FEE_TVL_EXIT_THRESHOLD = envNumber('LP_FEE_TVL_EXIT_THRESHOLD', 5.54)     // last-4h avg 24h Fee/TVL % below this → exit (e.g. 5.54 = 5.54%)
 export const LP_OOR_EXIT_MINUTES       = envNumber('LP_OOR_EXIT_MINUTES', 45)             // minutes out of range before exit
 export const LP_NET_LOSS_SL_PCT        = envNumber('LP_NET_LOSS_SL_PCT', -30)             // net PnL % (price move + all fees) stop-loss
