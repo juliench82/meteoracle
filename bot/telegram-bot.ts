@@ -12,6 +12,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import { getBotState, setBotState } from '@/lib/botState'
+import { buildPm2Argv } from '@/lib/pm2-targets'
 import { closePosition } from '@/bot/executor'
 import { runScanner } from '@/bot/scanner'
 import { monitorPositions } from '@/bot/monitor'
@@ -187,9 +188,13 @@ async function handleUpdate(update: any) {
   if (cmd === '/stop') {
     if (!shouldProcessCommand('/stop')) return
     await setBotState({ enabled: false, paused: true })
+    const argv = buildPm2Argv('stop')
     try {
-      await execAsync(`${PM2} stop meteoracle-worker meteoracle-telegram`)
-      await sendMessage('Bot stopped.', chatId)
+      await execAsync(`${PM2} ${argv.join(' ')}`)
+      await sendMessage(
+        'Bot stopped (worker only; Telegram control channel kept alive). Use /start to re-enable without SSH.',
+        chatId
+      )
     } catch {
       await sendMessage('Stop command sent.', chatId)
     }
@@ -209,11 +214,17 @@ async function handleUpdate(update: any) {
   if (cmd === '/reload') {
     if (!shouldProcessCommand('/reload')) return
     await setBotState({ enabled: true, paused: false })
+    // Send the confirmation BEFORE restarting so the reply cannot race (and be lost to) the restart.
+    await sendMessage(
+      'Reload triggered (worker restarted; Telegram control channel kept alive).',
+      chatId
+    )
+    const argv = buildPm2Argv('restart')
     try {
-      await execAsync(`${PM2} restart meteoracle-worker meteoracle-telegram`)
-      await sendMessage('Full reload triggered (processes restarted).', chatId)
+      await execAsync(`${PM2} ${argv.join(' ')}`)
     } catch {
-      await sendMessage('Reload command sent.', chatId)
+      // Confirmation already sent; the reload may have just resumed polling for the next update.
+      void 0
     }
     return
   }
