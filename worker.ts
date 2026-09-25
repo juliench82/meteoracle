@@ -13,6 +13,7 @@ import { monitorPositions } from './bot/monitor'
 import { runScanner } from './bot/scanner'
 import { getBotState } from './lib/botState'
 import { validateStartup } from './lib/startup-validation'
+import { enforceConfigInvariantOpenGate } from './lib/config-invariant-gate'
 import { retryStrandedSells } from './lib/swap'
 import { getConnection } from './lib/solana'
 import { summarizeError } from './lib/logging'
@@ -112,10 +113,25 @@ async function main() {
   }
   log(`────────────────────────────────────────`)
 
-  // Light startup validation (wallet + RPC reachability)
-  validateStartup('worker').catch(() => {}).then((passed) => {
-    if (passed === false) log('startup validation had warnings (see above)')
-  })
+  // Startup validation — consumed, not fire-and-forget (H3).
+  // The boolean result remains non-fatal for RPC/balance warnings, but the
+  // fee/TVL config invariant is enforced fail-closed on the open path below.
+  const passed = await validateStartup('worker').catch(() => false)
+  if (passed === false) log('startup validation had warnings (see above)')
+
+  // H3: consult the fee/TVL exit-vs-entry invariant. On breach with
+  // ALLOW_CONFIG_INVARIANT_BREACH unset/'false' the scanner open gate refuses
+  // NEW opens and exactly ONE Telegram alert is emitted (alerter latched).
+  // Existing positions' exits are unaffected. With ALLOW_CONFIG_INVARIANT_BREACH=true
+  // we warn and proceed.
+  const { gate } = await enforceConfigInvariantOpenGate()
+  if (!gate.ok && gate.allowBreach) {
+    log('config invariant BREACHED — ALLOW_CONFIG_INVARIANT_BREACH=true, warn-and-proceed')
+  } else if (!gate.openAllowed) {
+    log(`config invariant BREACHED — NEW opens refused (${gate.reason}); existing exits unaffected`)
+  } else {
+    log(`config invariant ok — exit ${gate.exitPct}% < entry ${gate.entryPct}%`)
+  }
 
   // Run both immediately on startup (serialized)
   inFlightMonitor = true
