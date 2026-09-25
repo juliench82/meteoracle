@@ -49,6 +49,12 @@ import {
   ADD_LIQUIDITY_FALLBACK_CU,
   NATIVE_MINT_STR,
   METEORA_RENT_RESERVE_SOL,
+  ATA_RENT_SOL,
+  OPEN_FEE_HEADROOM_SOL,
+  computePositionAccountSize,
+  computeOpenSolRequirement,
+  computeOpenSolRequirementForBins,
+  MARKET_LP_SOL_PER_POSITION,
   MAX_CONCURRENT_MARKET_LP_POSITIONS,
   MAX_MARKET_LP_SOL_DEPLOYED,
   WALLET_MIN_SOL_RESERVE,
@@ -340,6 +346,10 @@ export async function openPosition(
     try {
       const currentBalLamports = await connection.getBalance(wallet.publicKey);
       const currentBalSol = currentBalLamports / 1e9;
+      // Pre-flight floor only (finding M1): the ACTUAL position size/rent is not
+      // computed until the pre-rent gate below. METEORA_RENT_RESERVE_SOL is the
+      // 220-bin worst case (>= 0.199) + ATA rent + fee headroom, so this check can
+      // never under-estimate what the open will need.
       const requiredNow = solAmount + METEORA_RENT_RESERVE_SOL + WALLET_MIN_SOL_RESERVE;
       if (currentBalSol < requiredNow) {
         console.warn(`${label} balance dropped below required before swap — have ${currentBalSol.toFixed(4)}, need ~${requiredNow.toFixed(3)} — skipping`);
@@ -440,11 +450,53 @@ export async function openPosition(
       // =============================================================================
       const lowerBinId = minBinId;
       const width = maxBinId - minBinId;
+
+      // ── Exact pre-rent SOL gate (finding M1) ────────────────────────────────
+      // Reordered so the ACTUAL position account size + rent are computed BEFORE
+      // the balance check. The pre-flight checks above use the conservative floor
+      // (220-bin worst case); here the range is fixed, so the requirement is
+      // derived from the real rent: solAmount + rent + ataCount*ATA + headroom.
       const numBins = width + 1;
-      const POSITION_HEADER = 256;
-      const BYTES_PER_BIN = 128;
-      const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
-      const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
+      const {
+        requiredSol: requiredPreRentSol,
+        positionRentSol,
+        positionRentLamports,
+        positionAccountSize,
+      } = await computeOpenSolRequirementForBins(connection, { solAmount, numBins });
+
+      let balPreRentSol = Infinity;
+      try {
+        balPreRentSol = (await connection.getBalance(wallet.publicKey)) / 1e9;
+      } catch (balGateErr) {
+        console.warn(`${label} pre-rent balance read failed (proceeding with caution): ${balGateErr}`);
+      }
+      console.log(
+        `${label} [TRACE] [PRE-RENT-GATE] ${numBins} bins → account ${positionAccountSize}B, rent ${positionRentSol.toFixed(4)} SOL; ` +
+        `have ${balPreRentSol.toFixed(4)}, need ${requiredPreRentSol.toFixed(4)} ` +
+        `(solAmount=${solAmount} + rent + ATA ${ATA_RENT_SOL} + headroom ${OPEN_FEE_HEADROOM_SOL})`
+      );
+      if (balPreRentSol < requiredPreRentSol) {
+        console.warn(
+          `${label} insufficient balance for position rent — need ${requiredPreRentSol.toFixed(4)} SOL ` +
+          `(${numBins} bins, rent ${positionRentSol.toFixed(4)}), have ${balPreRentSol.toFixed(4)} — skipping BEFORE any rent is paid`
+        );
+        logWarn('legacy_bot_log', {
+          level: 'warn',
+          event: 'open_position_skipped_insufficient_position_rent',
+          payload: {
+            symbol: metrics.symbol,
+            balanceSol: balPreRentSol,
+            requiredSol: requiredPreRentSol,
+            solAmount,
+            positionRentSol,
+            numBins,
+            positionAccountSize,
+            ataRentSol: ATA_RENT_SOL,
+            feeHeadroomSol: OPEN_FEE_HEADROOM_SOL,
+          },
+        });
+        return null;
+      }
 
       // CRITICAL: bundle createAccount + initializePosition into a SINGLE atomic transaction
       // when both are needed. This prevents the previous failure mode where create landed
@@ -744,6 +796,11 @@ async function validateOpenEligibility(
   const balanceSol = balanceLamports / 1e9;
   console.log(`${label} wallet balance: ${balanceSol.toFixed(4)} SOL`);
 
+  // Pre-flight floor (finding M1): the bin range (and thus the exact position
+  // size/rent) is not known yet — it is computed after this eligibility check.
+  // METEORA_RENT_RESERVE_SOL is the 220-bin worst case (>= 0.199) + ATA rent +
+  // fee headroom, so this early gate can never under-estimate the requirement.
+  // The exact figure is enforced by the pre-rent gate before any rent is paid.
   const requiredSol = solAmount + METEORA_RENT_RESERVE_SOL + WALLET_MIN_SOL_RESERVE;
 
   if (balanceSol < requiredSol) {
@@ -896,10 +953,36 @@ async function openPositionDirect(
 
     const lowerBinId = minBinId;
     const width = maxBinId - minBinId;
-    const POSITION_HEADER = 256;
-    const BYTES_PER_BIN = 128; // NOTE: must match current Meteora DLMM Position layout; re-validate if SDK upgrades (was source of realloc issues)
-    const positionAccountSize = Math.max(POSITION_HEADER + numBins * BYTES_PER_BIN, 8192);
+    // Size via the single-source helper (finding M1); must match the Position
+    // layout — re-validate on SDK upgrades (was the source of realloc issues).
+    const positionAccountSize = computePositionAccountSize(numBins);
     const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
+
+    // ── Exact final pre-rent gate (finding M1) ──────────────────────────────
+    // The ACTUAL rent for this position is now known; require
+    // solAmount + rent + ataCount*ATA + fee headroom before any createAccount
+    // can pay non-refundable rent.
+    const requiredDirectSol = computeOpenSolRequirement({
+      solAmount: _solAmount,
+      positionRentSol: positionRentLamports / 1e9,
+    });
+    let balDirectSol = Infinity;
+    try {
+      balDirectSol = (await connection.getBalance(wallet.publicKey)) / 1e9;
+    } catch (balGateErr) {
+      console.warn(`${label} direct pre-rent balance read failed (proceeding with caution): ${balGateErr}`);
+    }
+    console.log(
+      `${label} [TRACE] [DIRECT-PRE-RENT-GATE] ${numBins} bins → account ${positionAccountSize}B, ` +
+      `rent ${(positionRentLamports / 1e9).toFixed(4)} SOL; have ${balDirectSol.toFixed(4)}, need ${requiredDirectSol.toFixed(4)}`
+    );
+    if (balDirectSol < requiredDirectSol) {
+      console.warn(
+        `${label} insufficient balance for direct position rent — need ${requiredDirectSol.toFixed(4)} SOL, ` +
+        `have ${balDirectSol.toFixed(4)} — skipping before createAccount`
+      );
+      return null;
+    }
 
     console.log(`${label} [TRACE] [DIRECT-SCAFFOLD-CHECK] isDlmmOwned=${isDlmmOwned} looksInitialized=${looksInitialized} skipScaffold=${skipScaffold}`);
 

@@ -35,8 +35,46 @@ import {
 // Constants
 // ─────────────────────────────────────────────────────────────
 export const NATIVE_MINT_STR = 'So11111111111111111111111111111111111111112';
-export const METEORA_RENT_RESERVE_SOL = 0.07;
 export const ADD_LIQUIDITY_FALLBACK_CU = 1_400_000;
+
+// ─────────────────────────────────────────────────────────────
+// Open-path SOL / rent reserve (finding M1)
+//
+// Solana charges rent-exemption up front for every account. For the DLMM
+// Position account this bot creates the size is
+//     max(POSITION_HEADER_BYTES + numBins * BYTES_PER_BIN, MIN_POSITION_ACCOUNT_SIZE)
+// and the real figures (audit M1 rent table, verified against the live
+// `getMinimumBalanceForRentExemption`) are:
+//     minimum account (8,192 B)                         0.0579 SOL
+//     140 bins         (18,176 B)                       0.1274 SOL
+//     220 bins         (28,416 B — MAX_SAFE_NUM_BINS)   0.1987 SOL
+// The 0.07 the code used before this fix understated the 220-bin case by ~2x,
+// before ATA rent and tx fees, so an open could pass the balance gate and then
+// run out of SOL mid-scaffold (the exact failure mode the codebase defends
+// against). The requirement is now derived from the ACTUAL account size.
+// ─────────────────────────────────────────────────────────────
+export const POSITION_HEADER_BYTES = 256;
+export const BYTES_PER_BIN = 128; // must match the current Meteora DLMM Position layout
+export const MIN_POSITION_ACCOUNT_SIZE = 8192;
+
+/** Rent-exemption of one SPL associated token account (~165 B). Env-overridable. */
+export const ATA_RENT_SOL = parseFloat(process.env.ATA_RENT_SOL ?? '0.00204');
+
+/** Conservative headroom for tx/priority fees and rent-exemption drift. Env-overridable. */
+export const OPEN_FEE_HEADROOM_SOL = parseFloat(process.env.OPEN_FEE_HEADROOM_SOL ?? '0.01');
+
+/**
+ * Conservative PRE-FLIGHT floor for the open balance gate, used where the exact
+ * position size is not yet known (the early eligibility check — the bin range is
+ * computed later).
+ *
+ * Worst case this code can create is MAX_SAFE_NUM_BINS = 220 bins -> 28,416 B
+ * -> 0.1987 SOL rent, plus one ATA (0.00204) plus fee headroom (0.01) = 0.21074,
+ * rounded up to 0.215. It therefore can never under-estimate the 220-bin worst
+ * case. Once the range is known the caller uses computeOpenSolRequirement() with
+ * the ACTUAL rent instead. (Was 0.07 — ~2x too low.)
+ */
+export const METEORA_RENT_RESERVE_SOL = 0.215;
 
 // Consolidated: imported from strategy-config.ts (single source of env parsing with safe defaults)
 export { MARKET_LP_SOL_PER_POSITION, MAX_CONCURRENT_MARKET_LP_POSITIONS, MAX_MARKET_LP_SOL_DEPLOYED, SWAP_BUY_SOL_AMOUNT } from '@/lib/strategy-config';
@@ -46,6 +84,65 @@ export const WALLET_MIN_SOL_RESERVE = parseFloat(process.env.WALLET_MIN_SOL_RESE
 // ─────────────────────────────────────────────────────────────
 // Helper Functions
 // ─────────────────────────────────────────────────────────────
+
+/**
+ * On-chain size (bytes) of a DLMM Position account holding `numBins` bin
+ * entries. Single source for the size used by both the scaffold and the rent
+ * requirement. Must stay identical to the layout the executor has always used.
+ */
+export function computePositionAccountSize(numBins: number): number {
+  return Math.max(POSITION_HEADER_BYTES + numBins * BYTES_PER_BIN, MIN_POSITION_ACCOUNT_SIZE);
+}
+
+export interface OpenSolRequirementInput {
+  /** SOL leg that will be deposited into the position. */
+  solAmount: number;
+  /** ACTUAL rent-exemption (SOL) of the position account being created. */
+  positionRentSol: number;
+  /** Number of associated token accounts created for the open (default 1). */
+  ataCount?: number;
+  /** Fee/priority-fee headroom in SOL (default OPEN_FEE_HEADROOM_SOL). */
+  feeHeadroomSol?: number;
+}
+
+/**
+ * Exact SOL the wallet must hold to open a position, given the real position
+ * rent for the account it will create:
+ *   solAmount + positionRentSol + ataCount * ATA_RENT_SOL + feeHeadroomSol
+ *
+ * Pure — no RPC, no env beyond the defaults — so it is unit-testable and used
+ * by the final pre-rent gates.
+ */
+export function computeOpenSolRequirement({
+  solAmount,
+  positionRentSol,
+  ataCount = 1,
+  feeHeadroomSol = OPEN_FEE_HEADROOM_SOL,
+}: OpenSolRequirementInput): number {
+  return solAmount + positionRentSol + ataCount * ATA_RENT_SOL + feeHeadroomSol;
+}
+
+/**
+ * Exact pre-rent requirement for an open of `numBins` bins, using the ACTUAL
+ * rent-exemption returned by the connection for the position account size.
+ * Returns the derived figures so callers can log them.
+ */
+export async function computeOpenSolRequirementForBins(
+  connection: { getMinimumBalanceForRentExemption(size: number): Promise<number> },
+  { solAmount, numBins, ataCount, feeHeadroomSol }: {
+    solAmount: number;
+    numBins: number;
+    ataCount?: number;
+    feeHeadroomSol?: number;
+  },
+): Promise<{ requiredSol: number; positionRentSol: number; positionRentLamports: number; positionAccountSize: number }> {
+  const positionAccountSize = computePositionAccountSize(numBins);
+  const positionRentLamports = await connection.getMinimumBalanceForRentExemption(positionAccountSize);
+  const positionRentSol = positionRentLamports / 1e9;
+  const requiredSol = computeOpenSolRequirement({ solAmount, positionRentSol, ataCount, feeHeadroomSol });
+  return { requiredSol, positionRentSol, positionRentLamports, positionAccountSize };
+}
+
 export function strategyTypeForDistribution(
   strategyTypeEnum: typeof import('@meteora-ag/dlmm').StrategyType,
   distributionType: Strategy['position']['distributionType'],
