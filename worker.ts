@@ -3,7 +3,18 @@
  *
  * Runs as a persistent process (not a cron).
  * Monitor ticks every 60 seconds, scanner every 15 minutes.
- * Set BOT_ENABLED=true and BOT_DRY_RUN=true to start safely.
+ *
+ * GATING (audit §M2 — single source of truth):
+ *   - `BOT_ENABLED` / `BOT_DRY_RUN` are STARTUP SEEDS ONLY, folded into the
+ *     persisted `botState` once at boot by lib/botState.ts.  They are NOT read
+ *     here and NOT read per tick: a stale `BOT_ENABLED=false` cannot disable a
+ *     bot the operator started with `/start`, and `BOT_ENABLED=true` cannot
+ *     resurrect one the operator stopped with `/stop`.
+ *   - Enable / pause are resolved on EVERY tick from `getBotState()` via the
+ *     pure `resolveEffectiveGates` (lib/gates.ts).
+ *   - `LP_MONITOR_ENABLED` / `LP_SCANNER_ENABLED` (and legacy `SCANNER_ENABLED`)
+ *     remain operator HARD-KILLS, resolved per stream so a monitor kill cannot
+ *     suppress the scanner.
  */
 import * as dotenvLocal from 'dotenv'
 import * as path from 'path'
@@ -12,6 +23,7 @@ dotenvLocal.config({ path: path.resolve(process.cwd(), '.env.local'), override: 
 import { monitorPositions } from './bot/monitor'
 import { runScanner } from './bot/scanner'
 import { getBotState } from './lib/botState'
+import { resolveEffectiveGates } from './lib/gates'
 import { validateStartup } from './lib/startup-validation'
 import { retryStrandedSells } from './lib/swap'
 import { getConnection } from './lib/solana'
@@ -21,8 +33,8 @@ import { flushStateWrites } from './lib/local-state'
 const MONITOR_INTERVAL_MS = (parseInt(process.env.LP_MONITOR_INTERVAL_SEC ?? '60') || 60) * 1_000
 const SCANNER_INTERVAL_MS = (parseInt(process.env.LP_SCAN_INTERVAL_SEC ?? '900') || 900) * 1_000
 
-const BOT_ENABLED = process.env.BOT_ENABLED === 'true'
-const DRY_RUN     = process.env.BOT_DRY_RUN === 'true'
+// Operator HARD-KILLS, parsed once at boot. A `false` value blocks work for
+// that stream regardless of botState (see lib/gates.ts `GateFlags`).
 const LP_MONITOR_ENABLED = process.env.LP_MONITOR_ENABLED !== 'false'
 const LP_SCANNER_ENABLED = process.env.LP_SCANNER_ENABLED !== 'false' &&
   process.env.SCANNER_ENABLED !== 'false'
@@ -31,9 +43,36 @@ function log(msg: string) {
   console.log(`[worker][${new Date().toISOString()}] ${msg}`)
 }
 
-async function tickMonitor() {
-  if (!BOT_ENABLED) { log('monitor skipped — BOT_ENABLED=false'); return }
-  if (!LP_MONITOR_ENABLED) { log('monitor skipped — LP_MONITOR_ENABLED=false'); return }
+/**
+ * Read the persisted bot state for this tick.
+ *
+ * Fail CLOSED: if the state file cannot be read we return `null` and the caller
+ * skips the tick.  Trading work must never be enabled by an unreadable state
+ * file (the persisted default in lib/botState.ts is `enabled: false` too).
+ */
+async function readBotState(label: string) {
+  try {
+    return await getBotState()
+  } catch (err) {
+    log(`${label} skipped — botState unreadable (${summarizeError(err)})`)
+    return null
+  }
+}
+
+export async function tickMonitor() {
+  const bs = await readBotState('monitor')
+  if (!bs) return
+
+  // botState is the single source of truth; LP_MONITOR_ENABLED is a hard-kill.
+  const gates = resolveEffectiveGates(bs, process.env, { monitorEnabled: LP_MONITOR_ENABLED })
+  if (!gates.enabled) {
+    const why = !LP_MONITOR_ENABLED
+      ? 'LP_MONITOR_ENABLED=false'
+      : `botState enabled=${bs.enabled} paused=${gates.paused}`
+    log(`monitor skipped — gate closed (${why})`)
+    return
+  }
+
   if (inFlightMonitor) {
     log('monitor tick skipped — previous tick still in flight (overlap protection)')
     return
@@ -55,13 +94,17 @@ async function tickMonitor() {
   }
 }
 
-async function tickScanner() {
-  if (!BOT_ENABLED) { log('scanner skipped — BOT_ENABLED=false'); return }
-  if (!LP_SCANNER_ENABLED) { log('scanner skipped — LP_SCANNER_ENABLED=false'); return }
+export async function tickScanner() {
+  const bs = await readBotState('scanner')
+  if (!bs) return
 
-  const bs = await getBotState().catch(() => ({ enabled: true, paused: false }))
-  if (bs.paused || bs.enabled === false) {
-    log('scanner skipped — bot paused or disabled via state')
+  // botState is the single source of truth; LP_SCANNER_ENABLED is a hard-kill.
+  const gates = resolveEffectiveGates(bs, process.env, { scannerEnabled: LP_SCANNER_ENABLED })
+  if (!gates.enabled) {
+    const why = !LP_SCANNER_ENABLED
+      ? 'LP_SCANNER_ENABLED=false'
+      : `botState enabled=${bs.enabled} paused=${gates.paused}`
+    log(`scanner skipped — gate closed (${why})`)
     return
   }
 
@@ -97,16 +140,19 @@ async function tickScanner() {
 async function main() {
   log(`────────────────────────────────────────`)
   log(`Meteoracle worker starting`)
-  log(`BOT_ENABLED : ${BOT_ENABLED}`)
-  log(`BOT_DRY_RUN : ${DRY_RUN}`)
   log(`LP_MONITOR  : ${LP_MONITOR_ENABLED}`)
   log(`LP_SCANNER  : ${LP_SCANNER_ENABLED}`)
   log(`Monitor     : every ${MONITOR_INTERVAL_MS / 60_000} min`)
   log(`Scanner     : every ${SCANNER_INTERVAL_MS / 60_000} min`)
   try {
+    // BOT_ENABLED / BOT_DRY_RUN are seeds only: report the EFFECTIVE gates.
     const bs = await getBotState()
-    const effectiveDry = DRY_RUN || (bs.dry_run ?? false)
-    log(`botState    : enabled=${bs.enabled} dry_run=${bs.dry_run} (effective=${effectiveDry}) paused=${bs.paused ?? false}`)
+    const gates = resolveEffectiveGates(bs, process.env, {
+      monitorEnabled: LP_MONITOR_ENABLED,
+      scannerEnabled: LP_SCANNER_ENABLED,
+    })
+    log(`botState    : enabled=${bs.enabled} dry_run=${bs.dry_run} paused=${bs.paused ?? false}`)
+    log(`effective   : enabled=${gates.enabled} dryRun=${gates.dryRun} dryRunPinnedByEnv=${gates.dryRunPinnedByEnv}`)
   } catch {
     log(`botState    : (unreadable, will default disabled)`)
   }
@@ -225,7 +271,15 @@ function gracefulShutdown(signal: string) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
 process.on('SIGINT', () => gracefulShutdown('SIGINT'))
 
-main().catch((err) => {
-  console.error('[worker] fatal error:', err)
-  process.exit(1)
-})
+// Start the loop only when this module is NOT being imported by the test suite.
+// Unit tests (tests/worker-gates.test.ts) import `tickMonitor`/`tickScanner` and
+// must not boot the scheduler, hit the network, or create a `state/` dir.
+// Every real runtime — `tsx worker.ts`, `node dist/worker.js`, pm2 — leaves both
+// flags unset and starts exactly as before.
+const underTest = process.env.VITEST === 'true' || process.env.NODE_ENV === 'test'
+if (!underTest) {
+  main().catch((err) => {
+    console.error('[worker] fatal error:', err)
+    process.exit(1)
+  })
+}
