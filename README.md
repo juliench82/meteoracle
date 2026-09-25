@@ -88,7 +88,7 @@ Key environment variables (see `.env.local.example` for full list and comments):
 | `EVIL_PANDA_ENABLED`           | true    | Enable the core LP strategy |
 | `MIN_TVL_USD`                  | 500     | Server-side tvl >= filter |
 | `MIN_FEE_24H`                  | 5       | Server-side fee_24h >= filter |
-| `MIN_FEE_TVL_RATIO_24H`        | 0.005   | fee_tvl_ratio_24h >= 0.5% |
+| `MIN_FEE_TVL_RATIO_24H`        | 0.0942  | entry floor: fee_tvl_ratio_24h >= 9.42% (p25); must stay above the 5.54% exit threshold |
 | `MIN_IMPLIED_ACTIVE_TVL`       | 330     | volume_1h / fee_pct >= |
 | `MAX_IMPLIED_ACTIVE_TVL`       | 750000  | volume_1h / fee_pct <= |
 | `MIN_LP_COUNT`                 | 3       | lp count on survivors only |
@@ -121,9 +121,13 @@ scanner would even consider opening — a genuine yield collapse rather than noi
 recording query, the real code path used, and the anonymisation rules are recorded in the fixture's
 `provenance` block. Override with `LP_FEE_TVL_EXIT_THRESHOLD` (percent).
 
-Note this exit threshold now sits **above** the historical entry floor (`MIN_FEE_TVL_RATIO_24H * 100`
-= 0.5%), so the entry floor has to be raised to keep the entry-vs-exit invariant
-(`lib/config-invariants.ts`) satisfied.
+The **entry floor** was raised in the same batch, from `0.005` (0.5%) to **`0.0942` (9.42%)** — the
+**25th percentile (p25 = 9.4189)** of the same recorded distribution. Exit p10 and entry p25 come from
+one dataset and form a documented hysteresis band: the bot opens only pools in the top three quarters of
+what the scanner selects (>= 9.42%) and exits once a held pool's 24h Fee/TVL decays into the bottom
+decile (< 5.54%). This makes the repo's own entry-vs-exit invariant
+(`lib/config-invariants.ts`: `checkFeeTvlExitVsEntry(5.54, 9.42) === true`) hold out of the box; the
+previous pair (exit 0.75 / entry 0.5) failed it. See `lib/strategy-config.ts` for the full derivation.
 
 Runtime state and logs live under `state/`.
 

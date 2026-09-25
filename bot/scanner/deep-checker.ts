@@ -41,6 +41,7 @@ import {
 import type { TokenMetrics } from '@/lib/types'
 import { OPEN_LP_STATUSES, getOpenLpLimitState, type OpenLpLimitState } from '@/lib/position-limits'
 import { getHeliusRpcEndpoint } from '@/lib/solana'
+import { enforceConfigInvariantOpenGate } from '@/lib/config-invariant-gate'
 import { refreshRpcProviderCooldown } from '@/lib/rpc-rate-limit'
 import { isDailyLossLimitHit } from '@/lib/circuit-breaker'
 import { logInfo } from '@/lib/log'
@@ -341,6 +342,19 @@ async function runScannerOnce(opts: RunScannerOptions = {}): Promise<ScannerResu
   if (!state.enabled) {
     console.log('[scanner] bot is stopped — skipping tick')
     return finish({ openBlockedReason: 'bot_stopped' })
+  }
+
+  // H3: fail-closed config-invariant OPEN gate. While the fee/TVL exit-vs-entry
+  // invariant is breached and ALLOW_CONFIG_INVARIANT_BREACH is not 'true', refuse
+  // NEW opens and return the invariant-blocked reason. Closes/exits are untouched
+  // (they run in the monitor, which never consults this gate).
+  const { gate } = await enforceConfigInvariantOpenGate()
+  if (!gate.openAllowed) {
+    console.warn(
+      `[scanner] OPEN REFUSED — config invariant breach ` +
+      `(exit ${gate.exitPct}% >= entry ${gate.entryPct}%); existing exits unaffected`,
+    )
+    return finish({ openBlockedReason: gate.reason })
   }
 
   await refreshRpcProviderCooldown('helius')

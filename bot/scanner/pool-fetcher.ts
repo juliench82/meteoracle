@@ -310,9 +310,11 @@ async function fetchMeteoraPoolsPage(
   // fee_24h >= 5 (real activity floor, cheap server-side filter)
   filters.push(`fee_24h>=${MIN_FEE_24H}`)
 
-  // fee_tvl_ratio_24h >= 0.005 (0.5%) — pushed server-side for activity path per spec
-  // (fee_tvl_ratio_* is an allowed filter_by field). Relaxed paths (monitor) omit this
-  // so we can still observe yield on older/decayed positions.
+  // fee_tvl_ratio_24h >= the entry floor (MIN_FEE_TVL_RATIO_24H, default 0.0942 = 9.42%; batch B5)
+  // — pushed server-side for the activity path per spec (fee_tvl_ratio_* is an allowed filter_by
+  // field; note the field is a percent, so this server-side bound is looser than the client-side
+  // gate in applyJsPreFilter, which enforces MIN_FEE_TVL_RATIO_24H * 100 = 9.42%).
+  // Relaxed paths (monitor) omit this so we can still observe yield on older/decayed positions.
   if (config.strictFeeTvlRatioFilter) {
     filters.push(`fee_tvl_ratio_24h>=${MIN_FEE_TVL_RATIO_24H}`)
   }
