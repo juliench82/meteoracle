@@ -36,11 +36,6 @@ export async function validateStartup(label = 'worker'): Promise<boolean> {
       console.warn(`${logPfx} balance check failed (non-fatal):`, e instanceof Error ? e.message : e)
     }
 
-    // Jupiter public endpoint warning (can cause stranded sells under load)
-    if (!process.env.JUPITER_QUOTE_API_URL) {
-      console.warn(`${logPfx} JUPITER_QUOTE_API_URL not set — using public endpoint (rate limits may cause stranded sells on close cascades). Consider a private Jupiter RPC.`)
-    }
-
     // Fee/TVL exit vs entry sanity: exit threshold must be *below* entry to avoid open→close churn on fresh positions.
     // Pure predicate extracted to lib/config-invariants.ts (behavior byte-identical).
     const entryPct = MIN_FEE_TVL_RATIO_24H * 100
