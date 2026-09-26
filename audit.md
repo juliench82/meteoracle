@@ -34,7 +34,7 @@ The system runs as a **long-lived worker process** (PM2-managed, `dist/worker.js
 | `worker.ts` | Entry point. Loads `.env.local`, runs light startup validation, then runs independent recursive-timeout schedules for monitor (60s), scanner (900s), and stranded-sell recovery (90s). Handles graceful shutdown (SIGTERM/SIGINT) — waits up to 90s for in-flight opens, flushes pending state writes, then exits. |
 | `bot/scanner.ts` | Thin orchestrator that calls into `bot/scanner/deep-checker.ts`'s `runScanner()`. |
 | `bot/scanner/pool-fetcher.ts` | Fetches pool lists from `https://dlmm.datapi.meteora.ag` (the `dlmm-api.meteora.ag` endpoint is deprecated/404). In-process cache (`METEORA_POOLS_CACHE_TTL_MS`, default 300s) to avoid hammering the API. Defines `MeteoraPool`/`MeteoraToken` types and quote-asset set (WSOL/USDC/USDT). |
-| `bot/scanner/pool-metrics.ts` | Derives per-pool metrics: TVL, fee/TVL ratio, implied active TVL (`volume_1h / fee_pct`), fee acceleration (`fee_1h > fee_2h/2`), pool age. |
+| `bot/scanner/pool-metrics.ts` | Derives per-pool metrics: TVL, fee/TVL ratio, implied active TVL (`fees_1h / fee_tvl_ratio_1h * 100`), fee acceleration (`fee_1h > fee_2h/2`), pool age. |
 | `bot/scanner/activity-candidate-filter.ts` | Applies the client-side proxy filters (age > 2h, implied active TVL bounds, fee acceleration, SOL-paired) to the server-filtered pool list. |
 | `bot/scanner/deep-checker.ts` | The heart of the scanner (`runScanner()`). Orchestrates: targeted fetch → client filtering → expensive `lp_count` enrichment (via `getProgramAccounts`, only on ~top-5 survivors) → deep gates (price deviation, rugcheck/holders, SOL-paired, range feasibility, dedup, circuit breaker) → scoring → opens the single top-ranked candidate per tick. |
 | `bot/rugcheck-cache.ts` | Thin re-export/wrapper over `lib/rugcheck.ts`'s `checkRugscore`; failure sentinel returns `0` (treated as reject) rather than a permissive default. |
@@ -55,7 +55,7 @@ The system runs as a **long-lived worker process** (PM2-managed, `dist/worker.js
 | `lib/atomic-write.ts` | `atomicWriteJson()` — writes to a temp file then renames, avoiding partial/corrupt JSON on crash. |
 | `lib/circuit-breaker.ts` | Tracks consecutive failures/losses; can flag `dailyLossLimitHit` to pause new opens. |
 | `lib/position-limits.ts` | `getOpenLpLimitState()` — derives open position count from local state (not live on-chain) to enforce `MAX_CONCURRENT_MARKET_LP_POSITIONS`. `assertCanOpenLpPosition()` is now a documented no-op — real concurrency/exposure caps live in `open.ts`'s `validateOpenEligibility()` and the scanner's slot check. |
-| `lib/startup-validation.ts` | `validateStartup()` — non-fatal pre-flight checks: RPC reachability (`getLatestBlockhash`), wallet SOL balance (>0.25 reserve warning), Jupiter public-endpoint warning, and the **critical config invariant**: `LP_FEE_TVL_EXIT_THRESHOLD` must be strictly less than `MIN_FEE_TVL_RATIO_24H * 100`, else logs `CONFIG WARNING` and returns `false` (open→close churn / fee-burn protection). |
+| `lib/startup-validation.ts` | `validateStartup()` — non-fatal pre-flight checks: RPC reachability (`getLatestBlockhash`), wallet SOL balance (>0.25 reserve warning), and the **critical config invariant**: `LP_FEE_TVL_EXIT_THRESHOLD` must be strictly less than `MIN_FEE_TVL_RATIO_24H * 100`, else logs `CONFIG WARNING` and returns `false` (open→close churn / fee-burn protection). |
 | `lib/telegram-auth.ts` | `isTelegramCommandAllowed()` — authorizes only the **sender's** user ID against `TELEGRAM_ALLOWED_USERS`/`TELEGRAM_CHAT_ID`; deliberately does not fall back to chat ID, to prevent any member of an allowed group chat from issuing privileged commands. |
 | `lib/solana.ts` | `getConnection()`/`getWallet()` singletons. RPC endpoint candidates aggregated from Helius (API key or URL alias), `RPC_URL` + `SOLANA_RPC_FALLBACK_URLS`, and optional public fallback (`api.mainnet-beta.solana.com`), deduplicated, first candidate used. Wallet loaded from `WALLET_PRIVATE_KEY` (base58 or JSON array). Priority fee helper caps at `MAX_PRIORITY = 2_000_000` micro-lamports. |
 | `lib/swap.ts` | Only remaining swap helpers: `retryStrandedSells()` (background recovery for `sell_failed`/orphaned token balances, using direct DLMM swaps — no Jupiter) and `getWalletTokenBalance()`. Persists a backoff map (`stranded-sell-backoff.json`, 5-min cooldown on liquidity-related failures) and a permanent skip list (`stranded-skip.json`, pruned after 7 days; positions older than 2 days are abandoned as illiquid). |
@@ -70,7 +70,7 @@ The system runs as a **long-lived worker process** (PM2-managed, `dist/worker.js
 | `strategies/index.ts` | Re-exports the active strategy (`evilPandaStrategy`) — single-strategy system by design. |
 | `scripts/patch-dlmm-esm.js` | `postinstall` script patching `@meteora-ag/dlmm`'s package exports to force CJS resolution (see `package.json` `overrides`) — works around ESM/CJS interop issues in the SDK. |
 | `scripts/recover-stranded-accounts.ts` / `scripts/recover-stranded-dlmm-rent.ts` | Standalone maintenance scripts for manually recovering rent from orphaned/ghost position accounts outside the normal monitor loop. |
-| `scripts/test-direct-dlmm-swap.ts` / `scripts/test-jupiter-buy.ts` | Manual dev/test scripts for exercising the DLMM swap path and a legacy Jupiter buy path respectively; not part of the production pipeline. |
+| `scripts/test-direct-dlmm-swap.ts` | Manual dev/test script for exercising the DLMM swap path; not part of the production pipeline. |
 | `package.json` | Dependencies: `@meteora-ag/dlmm`, `@solana/web3.js`, `@solana/spl-token`, `axios`, `bn.js`, `bs58`, `dotenv`. **No Jupiter SDK** — confirms direct-DLMM-only swap architecture. `overrides` forces the DLMM package to resolve its CJS build. |
 | `ecosystem.config.cjs` | PM2 config for two apps: `meteoracle-worker` (main loop, 1G memory cap, up to 20 restarts) and `meteoracle-telegram` (control bot, 512M cap, up to 10 restarts). |
 | `.env.local.example` | Fully documents all environment variables, organized by category (infra, wallet, Telegram, safety, recovery, sizing, strategy, scanner/monitor tuning, RPC/execution). |
@@ -79,7 +79,7 @@ The system runs as a **long-lived worker process** (PM2-managed, `dist/worker.js
 ## 3. Scanner Pipeline
 
 1. **`pool-fetcher.ts`** retrieves a bounded pool list from `dlmm.datapi.meteora.ag` using **server-side filtering**: `tvl >= 500 && fee_24h >= 5 && fee_tvl_ratio_24h >= 0.005 && is_blacklisted=false`, sorted by `sort_by=fee_tvl_ratio_1h:desc`. Cached in-process for 5 minutes (`METEORA_POOLS_CACHE_TTL_MS`).
-2. **`pool-metrics.ts`** computes derived proxies on the small result set: implied active TVL (`volume_1h / fee_pct`, bounded 330–750,000), fee acceleration (`fee_1h > fee_2h / 2`), pool age (must be > 2h).
+2. **`pool-metrics.ts`** computes derived proxies on the small result set: implied active TVL (`fees_1h / fee_tvl_ratio_1h * 100`, bounded 505–1,614,888), fee acceleration (`fee_1h > fee_2h / 2`), pool age (must be > 2h).
 3. **`activity-candidate-filter.ts`** applies these client-side derived filters plus a SOL-paired requirement (the strategy is one-sided SOL LP only).
 4. Only on the **final ~top-5 survivors**, `deep-checker.ts` fetches the expensive `lp_count` via `getProgramAccounts` and rejects any with `lp_count < MIN_LP_COUNT` (default 3).
 5. **Deep gates** (`deep-checker.ts`), each with rich rejection logging:
@@ -160,7 +160,7 @@ This design gives full durability across restarts for anything capital-relevant 
 **Scanner/monitor timing & activity model:**
 - `LP_SCAN_INTERVAL_SEC` (900), `LP_MONITOR_INTERVAL_SEC` (60), `LP_SCANNER_TICK_TIMEOUT_MS` (570000)
 - `LP_SCANNER_ENABLED`, `LP_MONITOR_ENABLED`, `SCANNER_ENABLED`, `EVIL_PANDA_ENABLED`, `HELIUS_ENABLED`
-- `MIN_TVL_USD` (500), `MIN_FEE_24H` (5), `MIN_FEE_TVL_RATIO_24H` (0.005), `MIN_IMPLIED_ACTIVE_TVL` (330), `MAX_IMPLIED_ACTIVE_TVL` (750000), `MIN_LP_COUNT` (3), `MIN_POOL_AGE_HOURS` (2), `ACTIVITY_MAX_POOL_AGE_MINUTES` (4320)
+- `MIN_TVL_USD` (500), `MIN_FEE_24H` (5), `MIN_FEE_TVL_RATIO_24H` (0.005), `MIN_IMPLIED_ACTIVE_TVL` (505), `MAX_IMPLIED_ACTIVE_TVL` (1614888), `MIN_LP_COUNT` (3), `MIN_POOL_AGE_HOURS` (2), `ACTIVITY_MAX_POOL_AGE_MINUTES` (4320)
 - `METEORA_POOL_FETCH_LIMIT`, `MAX_FRESH_DEEP_CHECKS` (12), `DEEP_CHECK_DELAY_MS` (800), `CANDIDATE_DEDUP_HOURS` (1), `OOR_RECHECK_HOURS` (24), `METEORA_POOLS_CACHE_TTL_MS` (300000)
 
 **LP exit rules:**
@@ -170,7 +170,7 @@ This design gives full durability across restarts for anything capital-relevant 
 **RPC / execution (advanced):**
 - `RPC_URL`, `SOLANA_RPC_FALLBACK_URLS`, `ENABLE_RPC_URL_FALLBACKS`, `ENABLE_PUBLIC_RPC_FALLBACK`, `ENABLE_HELIUS_RPC_URL_ALIAS`
 - `SOL_PRICE_USD` (optional override, otherwise DexScreener-derived, fallback 150)
-- `JUPITER_QUOTE_API_URL` — legacy/vestigial; unused by current direct-DLMM swap paths, but `startup-validation.ts` still warns if unset (stale warning, see Risks)
+- `JUPITER_QUOTE_API_URL` — legacy/vestigial; unused by current direct-DLMM swap paths, no startup warning (see Risks)
 
 ## 8. Integrations
 
@@ -183,7 +183,7 @@ This design gives full durability across restarts for anything capital-relevant 
 
 - **Operational**: The hard-abort bin-array gate (`assertNoNewBinArraysForRange`) is a strong safety feature but also a hard availability constraint — it silently excludes otherwise-attractive thin/new pools, which may reduce the strategy's addressable opportunity set as pools mature.
 - **State integrity**: All capital-relevant state (`open-lp-positions.json`, `bot-state.json`) is local JSON, not a database. The write-queue + atomic writes mitigate corruption/lost-update risk significantly, but the files are still a single point of failure if the host disk/filesystem fails or the `state/` directory is lost without backup.
-- **Stale documentation drift**: `startup-validation.ts` still warns about the public Jupiter endpoint causing "stranded sells," but the current swap path no longer uses Jupiter at all (direct DLMM swaps). This is a leftover from a prior architecture and could mislead operators into chasing the wrong root cause if stranded sells do occur (the real cause would now be DLMM pool liquidity/quote issues, not Jupiter rate limits).
+- **Stale documentation drift**: RESOLVED — the Jupiter public-endpoint warning in `startup-validation.ts` has been removed; the swap path uses direct DLMM swaps and no longer references `JUPITER_QUOTE_API_URL`.
 - **Financial**: Net-PnL stop-loss and Fee/TVL exit both depend on sampled data (rolling averages, minimum sample counts) — a position could exceed intended loss bounds during the sampling warm-up period (first ~5–10 monitor ticks). The 1-hour hard max-duration cap bounds worst-case exposure time but not worst-case price-move loss within that hour.
 - **Config-misconfiguration**: `startup-validation.ts` guards against `LP_FEE_TVL_EXIT_THRESHOLD >= MIN_FEE_TVL_RATIO_24H * 100` (open→close churn), but this check is non-fatal (logs a warning and returns `false`, doesn't stop the process) — a misconfigured deployment can still run and burn fees on rapid open/close cycles.
 - **Single-strategy concentration**: The entire system is hard-wired to one strategy (`evil-panda`) and one venue (Meteora DLMM). Any systemic issue with Meteora's API (`dlmm.datapi.meteora.ag`) or SDK halts the whole pipeline with no fallback venue.
@@ -192,7 +192,7 @@ This design gives full durability across restarts for anything capital-relevant 
 
 ## 10. Improvement Opportunities
 
-- **Fix stale Jupiter warning**: Update or remove the `JUPITER_QUOTE_API_URL` warning in `startup-validation.ts` to reflect the direct-DLMM swap architecture, replacing it with a more relevant DLMM-liquidity/quote-health check.
+- **Fix stale Jupiter warning**: DONE — removed the `JUPITER_QUOTE_API_URL` warning in `startup-validation.ts` (no replacement health check added, per slice scope).
 - **Make the exit-threshold config check fatal-by-default**: Consider having `validateStartup()` optionally hard-exit (env-gated) on the `LP_FEE_TVL_EXIT_THRESHOLD` vs. `MIN_FEE_TVL_RATIO_24H` misconfiguration, rather than only warning, to fully prevent the documented churn/fee-burn scenario.
 - **State backup**: Add a periodic off-host backup/snapshot of the `state/` directory (e.g., to S3 or a git-ignored backup path) given it's the sole source of truth for open positions and bot control state.
 - **Sampling warm-up guard**: Consider a conservative interim stop-loss (tighter than the steady-state `LP_NET_LOSS_SL_PCT`) during the Fee/TVL exit rule's minimum-sample warm-up window, to reduce tail-risk on very fresh positions.
