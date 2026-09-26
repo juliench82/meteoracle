@@ -40,12 +40,13 @@ export const evilPandaStrategy: Strategy = {
   },
   exits: {
     // Snapshot fields required by the ExitRules type.
-    // Real LP exits use the LP_* constants in strategy-config.ts.
+    // Real LP exits use the LP_* constants in strategy-config.ts (4-rule engine
+    // in bot/monitor.ts). These snapshot values are vestigial and hardcoded.
     stopLossPct: 0,
     takeProfitPct: 0,
-    outOfRangeMinutes: envNumber('EVIL_PANDA_OOR_MINUTES', 30),
-    maxDurationHours: envNumber('EVIL_PANDA_MAX_DURATION_HOURS', 1),
+    outOfRangeMinutes: 30,
+    maxDurationHours: 1,
     claimFeesBeforeClose: true,
-    minFeesToClaim: envNumber('EVIL_PANDA_MIN_FEES_TO_CLAIM', 0.001),
+    minFeesToClaim: 0.001,
   },
 }
